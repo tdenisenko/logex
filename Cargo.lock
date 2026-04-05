@@ -1653,6 +1653,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "logex-ingestion"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "logex-index",
+ "logex-storage",
+ "logex-types",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "logex-node"
 version = "0.1.0"
 dependencies = [

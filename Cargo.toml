@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-node"]
+members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-node"]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +11,7 @@ repository = "https://github.com/tdenisenko/logex"
 [workspace.dependencies]
 # Ethereum primitives
 alloy-primitives = "1.5"
+alloy-consensus = "1.8"
 alloy-rpc-types = "1.8"
 
 # Serialization
@@ -31,4 +32,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 logex-types = { path = "crates/logex-types" }
 logex-storage = { path = "crates/logex-storage" }
 logex-index = { path = "crates/logex-index" }
+logex-ingestion = { path = "crates/logex-ingestion" }
 logex-node = { path = "crates/logex-node" }

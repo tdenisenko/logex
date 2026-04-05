@@ -1,0 +1,15 @@
+[package]
+name = "logex-ingestion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+logex-types = { workspace = true }
+logex-storage = { workspace = true }
+logex-index = { workspace = true }
+alloy-primitives = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
