@@ -28,9 +28,11 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Async runtime / HTTP
+# Async runtime / HTTP / gRPC
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
+tonic = "0.13"
+prost = "0.13"
 
 # Internal crates
 logex-types = { path = "crates/logex-types" }
