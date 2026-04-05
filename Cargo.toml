@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-node"]
+members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-node"]
 resolver = "2"
 
 [workspace.package]
@@ -30,4 +30,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Internal crates
 logex-types = { path = "crates/logex-types" }
 logex-storage = { path = "crates/logex-storage" }
+logex-index = { path = "crates/logex-index" }
 logex-node = { path = "crates/logex-node" }
