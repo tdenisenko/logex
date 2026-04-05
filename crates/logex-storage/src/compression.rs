@@ -86,8 +86,16 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
         return Err(io::Error::new(io::ErrorKind::InvalidData, "dict too short"));
     }
 
-    let dict_size = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-    let stored_item_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let dict_size = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dict header truncated"))?,
+    ) as usize;
+    let stored_item_size = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dict header truncated"))?,
+    ) as usize;
     if stored_item_size != item_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -163,7 +171,11 @@ pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
         ));
     }
 
-    let base = u64::from_le_bytes(data[0..8].try_into().unwrap());
+    let base = u64::from_le_bytes(
+        data[0..8]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "delta header truncated"))?,
+    );
     let bits = data[8];
 
     let deltas = bitunpack_u64(&data[9..], row_count - 1, bits)?;
@@ -233,7 +245,11 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
         ));
     }
 
-    let base = u64::from_le_bytes(data[0..8].try_into().unwrap());
+    let base = u64::from_le_bytes(
+        data[0..8]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dod header truncated"))?,
+    );
     if row_count == 1 {
         return Ok(vec![base]);
     }
@@ -245,7 +261,11 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
         ));
     }
 
-    let first_delta = i64::from_le_bytes(data[8..16].try_into().unwrap());
+    let first_delta = i64::from_le_bytes(
+        data[8..16]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dod header truncated"))?,
+    );
     let bits = data[16];
 
     let zigzag = bitunpack_u64(&data[17..], row_count - 2, bits)?;
@@ -253,13 +273,14 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
 
     let mut result = Vec::with_capacity(row_count);
     result.push(base);
-    result.push((base as i64 + first_delta) as u64);
+    let mut prev_val = (base as i64 + first_delta) as u64;
+    result.push(prev_val);
 
     let mut prev_delta = first_delta;
     for &dd in &dds {
         let delta = prev_delta + dd;
-        let prev_val = *result.last().unwrap();
-        result.push((prev_val as i64 + delta) as u64);
+        prev_val = (prev_val as i64 + delta) as u64;
+        result.push(prev_val);
         prev_delta = delta;
     }
 

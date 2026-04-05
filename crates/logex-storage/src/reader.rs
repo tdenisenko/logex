@@ -1,9 +1,32 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, Bytes};
 
 use crate::column::{ColumnFileHeader, NullBitmap};
+
+/// Read a little-endian u64 from a byte slice at the given offset.
+fn read_le_u64(data: &[u8], offset: usize) -> io::Result<u64> {
+    let end = offset + 8;
+    let bytes: [u8; 8] = data
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "read out of bounds"))?
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slice conversion failed"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Read a little-endian u32 from a byte slice at the given offset.
+fn read_le_u32(data: &[u8], offset: usize) -> io::Result<u32> {
+    let end = offset + 4;
+    let bytes: [u8; 4] = data
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "read out of bounds"))?
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slice conversion failed"))?;
+    Ok(u32::from_le_bytes(bytes))
+}
 
 /// Typed column data returned from reads.
 #[derive(Debug, Clone)]
@@ -161,70 +184,38 @@ impl ColumnReader {
     /// Read a u64 column (block_number, timestamp).
     pub fn read_u64(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> std::io::Result<Vec<u64>> {
         let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
+        let header = ColumnFileHeader::read_from(&data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt header"))?;
 
         let body = &data[ColumnFileHeader::SIZE..];
-        let item_size = 8;
 
         match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let offset = id as usize * item_size;
-                    result.push(u64::from_le_bytes(
-                        body[offset..offset + item_size].try_into().unwrap(),
-                    ));
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * item_size;
-                    result.push(u64::from_le_bytes(
-                        body[offset..offset + item_size].try_into().unwrap(),
-                    ));
-                }
-                Ok(result)
-            }
+            Some(ids) => ids
+                .iter()
+                .map(|&id| read_le_u64(body, id as usize * 8))
+                .collect(),
+            None => (0..header.row_count as usize)
+                .map(|i| read_le_u64(body, i * 8))
+                .collect(),
         }
     }
 
     /// Read a u32 column (tx_index, log_index, data_len).
     pub fn read_u32(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> std::io::Result<Vec<u32>> {
         let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
+        let header = ColumnFileHeader::read_from(&data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt header"))?;
 
         let body = &data[ColumnFileHeader::SIZE..];
-        let item_size = 4;
 
         match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let offset = id as usize * item_size;
-                    result.push(u32::from_le_bytes(
-                        body[offset..offset + item_size].try_into().unwrap(),
-                    ));
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * item_size;
-                    result.push(u32::from_le_bytes(
-                        body[offset..offset + item_size].try_into().unwrap(),
-                    ));
-                }
-                Ok(result)
-            }
+            Some(ids) => ids
+                .iter()
+                .map(|&id| read_le_u32(body, id as usize * 4))
+                .collect(),
+            None => (0..header.row_count as usize)
+                .map(|i| read_le_u32(body, i * 4))
+                .collect(),
         }
     }
 
@@ -271,8 +262,7 @@ impl ColumnReader {
         // Parse offset array
         let mut offsets = Vec::with_capacity(row_count + 1);
         for i in 0..=row_count {
-            let pos = offsets_start + i * 8;
-            offsets.push(u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
+            offsets.push(read_le_u64(&data, offsets_start + i * 8)?);
         }
 
         let blob = &data[blob_start..];
@@ -358,8 +348,12 @@ impl ColumnReader {
                 topic3: topic3s[i],
                 data: datas[i].clone(),
                 data_len: data_lens[i],
-                source: logex_types::Source::from_u8(sources[i])
-                    .unwrap_or(logex_types::Source::Receipt),
+                source: logex_types::Source::from_u8(sources[i]).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid source byte: {}", sources[i]),
+                    )
+                })?,
             });
         }
 

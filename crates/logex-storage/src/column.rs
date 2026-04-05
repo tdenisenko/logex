@@ -425,11 +425,19 @@ impl ColumnFile {
         let mut old_offsets = Vec::with_capacity(old_count + 1);
         for i in 0..=old_count {
             let pos = offset_start + i * 8;
-            let o = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            let end = pos + 8;
+            let o = u64::from_le_bytes(
+                data.get(pos..end)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "truncated offset array")
+                    })?
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid offset"))?,
+            );
             old_offsets.push(o);
         }
         let existing_data = &data[data_start..];
-        let existing_data_len = *old_offsets.last().unwrap();
+        let existing_data_len = old_offsets.last().copied().unwrap_or(0);
 
         // Compute new offsets
         let mut new_offsets = Vec::with_capacity(rows.len() + 1);

@@ -109,9 +109,22 @@ impl BTreeIndexReader {
             ));
         }
 
-        let _version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        let key_size = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
-        let entry_count = u64::from_le_bytes(data[12..20].try_into().unwrap()) as usize;
+        let parse_err = |msg| io::Error::new(io::ErrorKind::InvalidData, msg);
+        let _version = u32::from_le_bytes(
+            data[4..8]
+                .try_into()
+                .map_err(|_| parse_err("bad version"))?,
+        );
+        let key_size = u32::from_le_bytes(
+            data[8..12]
+                .try_into()
+                .map_err(|_| parse_err("bad key_size"))?,
+        ) as usize;
+        let entry_count = u64::from_le_bytes(
+            data[12..20]
+                .try_into()
+                .map_err(|_| parse_err("bad entry_count"))?,
+        ) as usize;
 
         let mut reader = BufReader::new(&data[20..]);
         let mut entries = Vec::with_capacity(entry_count);

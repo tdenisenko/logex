@@ -214,11 +214,13 @@ impl PartitionManager {
         self.next_partition_id += 1;
         self.sealed_partitions.push(sealed);
 
-        tracing::info!(
-            partition_id = self.sealed_partitions.last().unwrap().meta.id,
-            row_count = self.sealed_partitions.last().unwrap().meta.row_count,
-            "sealed partition"
-        );
+        if let Some(last) = self.sealed_partitions.last() {
+            tracing::info!(
+                partition_id = last.meta.id,
+                row_count = last.meta.row_count,
+                "sealed partition"
+            );
+        }
 
         Ok(())
     }
