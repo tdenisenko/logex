@@ -1675,6 +1675,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "logex-query"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "hex",
+ "logex-types",
+ "thiserror",
+]
+
+[[package]]
 name = "logex-storage"
 version = "0.1.0"
 dependencies = [

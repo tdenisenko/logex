@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-node"]
+members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-query", "crates/logex-node"]
 resolver = "2"
 
 [workspace.package]
@@ -33,4 +33,5 @@ logex-types = { path = "crates/logex-types" }
 logex-storage = { path = "crates/logex-storage" }
 logex-index = { path = "crates/logex-index" }
 logex-ingestion = { path = "crates/logex-ingestion" }
+logex-query = { path = "crates/logex-query" }
 logex-node = { path = "crates/logex-node" }
