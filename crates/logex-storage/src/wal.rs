@@ -74,8 +74,11 @@ impl WriteAheadLog {
                 Err(e) => return Err(e),
             }
 
-            let _row_count = u32::from_le_bytes(header_buf[0..4].try_into().unwrap());
-            let data_len = u32::from_le_bytes(header_buf[4..8].try_into().unwrap()) as usize;
+            let _row_count =
+                u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
+            let data_len =
+                u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]])
+                    as usize;
 
             // Read serialized data
             let mut data = vec![0u8; data_len];
