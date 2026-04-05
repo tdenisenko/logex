@@ -21,3 +21,4 @@ hex = "0.4"
 logex-index = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }
+tower = "0.5"
