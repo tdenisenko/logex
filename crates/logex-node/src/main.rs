@@ -1,5 +1,11 @@
-use clap::Parser;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use clap::Parser;
+
+use logex_server::AppState;
+use logex_storage::{PartitionManager, PartitionManagerConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -13,7 +19,7 @@ struct Cli {
 
     /// HTTP server bind address.
     #[arg(long, default_value = "127.0.0.1:8545")]
-    http_addr: String,
+    http_addr: SocketAddr,
 
     /// gRPC server bind address.
     #[arg(long, default_value = "127.0.0.1:8546")]
@@ -24,7 +30,8 @@ struct Cli {
     log_level: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -35,5 +42,30 @@ fn main() {
         .init();
 
     tracing::info!(data_dir = %cli.data_dir.display(), "starting logex");
-    tracing::info!("logex is not yet fully implemented — scaffold only");
+
+    let config = PartitionManagerConfig {
+        data_dir: cli.data_dir.clone(),
+        ..Default::default()
+    };
+
+    let storage = match PartitionManager::open(config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open storage");
+            std::process::exit(1);
+        }
+    };
+
+    tracing::info!(
+        total_rows = storage.total_rows(),
+        sealed_partitions = storage.sealed_count(),
+        "storage ready"
+    );
+
+    let state = Arc::new(AppState { storage });
+
+    if let Err(e) = logex_server::serve(state, cli.http_addr).await {
+        tracing::error!(error = %e, "server error");
+        std::process::exit(1);
+    }
 }

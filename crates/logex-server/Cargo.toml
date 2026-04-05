@@ -1,0 +1,23 @@
+[package]
+name = "logex-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+logex-types = { workspace = true }
+logex-storage = { workspace = true }
+logex-query = { workspace = true }
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+logex-index = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true }
