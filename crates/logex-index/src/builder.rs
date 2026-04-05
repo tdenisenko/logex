@@ -4,11 +4,19 @@ use std::path::Path;
 use logex_storage::ColumnReader;
 
 use crate::btree::BTreeIndex;
+use crate::composite::CompositeIndexBuilder;
 
 /// Builds per-partition indexes from column data.
 pub struct IndexBuilder;
 
 impl IndexBuilder {
+    /// Build all indexes (primary + composite) for a partition.
+    pub fn build_all_indexes(partition_dir: &Path) -> std::io::Result<()> {
+        Self::build_primary_indexes(partition_dir)?;
+        CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
+        Ok(())
+    }
+
     /// Build all primary indexes for a partition and write them to the indexes/ subdirectory.
     pub fn build_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
         let index_dir = partition_dir.join("indexes");
