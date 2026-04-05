@@ -1,11 +1,12 @@
 pub mod eth_filter;
 pub mod handler;
 pub mod jsonrpc;
+pub mod rest;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{Router, routing::post};
+use axum::{Router, routing::{get, post}};
 
 pub use handler::AppState;
 
@@ -13,6 +14,8 @@ pub use handler::AppState;
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", post(handler::handle_jsonrpc))
+        .route("/query", post(rest::handle_query))
+        .route("/health", get(rest::handle_health))
         .with_state(state)
 }
 
