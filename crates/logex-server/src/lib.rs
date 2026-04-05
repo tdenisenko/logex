@@ -1,4 +1,5 @@
 pub mod eth_filter;
+pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
 pub mod rest;

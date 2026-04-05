@@ -23,7 +23,7 @@ struct Cli {
 
     /// gRPC server bind address.
     #[arg(long, default_value = "127.0.0.1:8546")]
-    grpc_addr: String,
+    grpc_addr: SocketAddr,
 
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info")]
@@ -64,8 +64,18 @@ async fn main() {
 
     let state = Arc::new(AppState { storage });
 
+    // Start gRPC server in background
+    let grpc_state = Arc::clone(&state);
+    let grpc_addr = cli.grpc_addr;
+    tokio::spawn(async move {
+        if let Err(e) = logex_server::grpc::serve_grpc(grpc_state, grpc_addr).await {
+            tracing::error!(error = %e, "gRPC server error");
+        }
+    });
+
+    // Start HTTP server (JSON-RPC + REST) — blocks until shutdown
     if let Err(e) = logex_server::serve(state, cli.http_addr).await {
-        tracing::error!(error = %e, "server error");
+        tracing::error!(error = %e, "HTTP server error");
         std::process::exit(1);
     }
 }

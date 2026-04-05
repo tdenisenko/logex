@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package logex;
+
+service LogExService {
+  // Execute a LogSQL query and stream results back.
+  rpc Query(QueryRequest) returns (stream LogEntry);
+
+  // Get the current head block number.
+  rpc GetHeadBlock(Empty) returns (HeadBlockResponse);
+}
+
+message Empty {}
+
+message QueryRequest {
+  string sql = 1;
+}
+
+message HeadBlockResponse {
+  uint64 block_number = 1;
+}
+
+message LogEntry {
+  uint64 block_number = 1;
+  bytes block_hash = 2;
+  uint64 timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 tx_index = 5;
+  uint32 log_index = 6;
+  bytes address = 7;
+  repeated bytes topics = 8;
+  bytes data = 9;
+}
