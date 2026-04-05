@@ -1,4 +1,5 @@
 mod column;
+pub mod compression;
 mod partition;
 mod reader;
 mod wal;
