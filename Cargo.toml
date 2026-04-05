@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-query", "crates/logex-node"]
+members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-query", "crates/logex-server", "crates/logex-node"]
 resolver = "2"
 
 [workspace.package]
@@ -28,10 +28,15 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async runtime / HTTP
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+
 # Internal crates
 logex-types = { path = "crates/logex-types" }
 logex-storage = { path = "crates/logex-storage" }
 logex-index = { path = "crates/logex-index" }
 logex-ingestion = { path = "crates/logex-ingestion" }
 logex-query = { path = "crates/logex-query" }
+logex-server = { path = "crates/logex-server" }
 logex-node = { path = "crates/logex-node" }

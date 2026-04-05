@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 logex-types = { workspace = true }
+logex-storage = { workspace = true }
+logex-server = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
