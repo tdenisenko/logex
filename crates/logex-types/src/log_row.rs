@@ -73,7 +73,22 @@ impl LogRow {
         tx_index: u32,
         log_index: u32,
     ) -> Self {
-        let topics = &log.inner.data.topics();
+        Self::from_primitives_log(&log.inner, ctx, tx_hash, tx_index, log_index)
+    }
+
+    /// Convert a primitive log (as found in receipts) into a `LogRow`.
+    ///
+    /// This is the lower-level constructor used during ExEx ingestion where
+    /// we get `alloy_primitives::Log` directly from receipts rather than
+    /// the RPC-wrapped `alloy_rpc_types::Log`.
+    pub fn from_primitives_log(
+        log: &alloy_primitives::Log,
+        ctx: &BlockContext,
+        tx_hash: B256,
+        tx_index: u32,
+        log_index: u32,
+    ) -> Self {
+        let topics = log.data.topics();
         Self {
             block_number: ctx.block_number,
             block_hash: ctx.block_hash,
@@ -81,13 +96,13 @@ impl LogRow {
             tx_hash,
             tx_index,
             log_index,
-            address: log.inner.address,
+            address: log.address,
             topic0: topics.first().copied(),
             topic1: topics.get(1).copied(),
             topic2: topics.get(2).copied(),
             topic3: topics.get(3).copied(),
-            data_len: log.inner.data.data.len() as u32,
-            data: log.inner.data.data.clone(),
+            data_len: log.data.data.len() as u32,
+            data: log.data.data.clone(),
             source: Source::Receipt,
         }
     }

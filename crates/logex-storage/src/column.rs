@@ -75,6 +75,19 @@ impl NullBitmap {
         self.len += 1;
     }
 
+    /// Set the value at position `row`.
+    pub fn set(&mut self, row: u64, present: bool) {
+        let byte_idx = (row / 8) as usize;
+        let bit_idx = (row % 8) as u32;
+        if byte_idx < self.bits.len() {
+            if present {
+                self.bits[byte_idx] |= 1 << bit_idx;
+            } else {
+                self.bits[byte_idx] &= !(1 << bit_idx);
+            }
+        }
+    }
+
     pub fn is_present(&self, row: u64) -> bool {
         let byte_idx = (row / 8) as usize;
         let bit_idx = (row % 8) as u32;

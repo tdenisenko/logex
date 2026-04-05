@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use logex_types::{LogRow, PartitionMeta};
 
 use crate::column::ColumnFile;
+use crate::reader::ColumnReader;
 use crate::wal::WriteAheadLog;
 
 /// A single partition — either the writable hot partition or a sealed immutable one.
@@ -237,11 +238,53 @@ impl PartitionManager {
         Ok(())
     }
 
-    /// Mark rows in a block as non-canonical (during reorg).
-    pub fn mark_non_canonical(&self, _block_hash: alloy_primitives::B256) -> std::io::Result<()> {
-        // TODO: scan partitions for matching block_hash, flip canonical bits
-        tracing::warn!("mark_non_canonical not yet implemented");
-        Ok(())
+    /// Mark rows in a given block as non-canonical (during reorg).
+    ///
+    /// Scans all partitions (sealed + hot) whose block range could contain the
+    /// given block hash. For each matching row, flips the canonical bit to 0.
+    /// Returns the number of rows marked non-canonical.
+    pub fn mark_non_canonical(&self, block_hash: alloy_primitives::B256) -> std::io::Result<u64> {
+        let mut total_marked = 0u64;
+
+        let all_partitions = self
+            .sealed_partitions
+            .iter()
+            .chain(std::iter::once(&self.hot_partition));
+
+        for partition in all_partitions {
+            if partition.meta.row_count == 0 {
+                continue;
+            }
+
+            let dir = &partition.meta.path;
+            let hashes = ColumnReader::read_b256(dir, "block_hash.col", None)?;
+            let mut canonical = ColumnReader::read_canonical(dir)?;
+            let mut modified = false;
+
+            for (row_id, hash) in hashes.iter().enumerate() {
+                if *hash == block_hash && canonical.is_present(row_id as u64) {
+                    canonical.set(row_id as u64, false);
+                    modified = true;
+                    total_marked += 1;
+                }
+            }
+
+            if modified {
+                let path = dir.join("canonical.bitmap");
+                let file = std::fs::File::create(&path)?;
+                let mut w = std::io::BufWriter::new(file);
+                canonical.write_to(&mut w)?;
+                std::io::Write::flush(&mut w)?;
+                tracing::debug!(
+                    partition_id = partition.meta.id,
+                    marked = total_marked,
+                    block_hash = %block_hash,
+                    "marked rows non-canonical"
+                );
+            }
+        }
+
+        Ok(total_marked)
     }
 
     /// Get the current head block number (highest block in hot partition).
