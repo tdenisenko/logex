@@ -1,0 +1,13 @@
+[package]
+name = "logex-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+logex-types = { workspace = true }
+alloy-primitives = { workspace = true }
+hex = "0.4"
+thiserror = { workspace = true }
+
+[dev-dependencies]
