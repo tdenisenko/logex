@@ -4,3 +4,9 @@
 # Markdown files (except README.md)
 *.md
 !README.md
+
+# Claude Code local settings
+.claude/
+
+# Local data
+/logex-data

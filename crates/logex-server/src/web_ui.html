@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogEx Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
+  code, .mono { font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
+  a { color: #58a6ff; }
+
+  header { display: flex; justify-content: space-between; align-items: flex-start; padding: 20px 24px 16px; border-bottom: 1px solid #21262d; flex-wrap: wrap; gap: 16px; }
+  .title h1 { font-size: 24px; color: #f0f6fc; letter-spacing: 1px; }
+  .title p { font-size: 13px; color: #8b949e; margin-top: 2px; }
+
+  .status-panel { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; font-size: 13px; }
+  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .badge-synced { background: #0d3321; color: #3fb950; }
+  .badge-synced .dot { background: #3fb950; }
+  .badge-syncing { background: #3d2e00; color: #d29922; }
+  .badge-syncing .dot { background: #d29922; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  .stat { color: #8b949e; }
+  .stat b { color: #c9d1d9; }
+
+  main { flex: 1; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  .query-panel { display: flex; flex-direction: column; gap: 10px; }
+  textarea { width: 100%; height: 90px; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; resize: vertical; outline: none; }
+  textarea:focus { border-color: #58a6ff; }
+  textarea::placeholder { color: #484f58; }
+
+  .query-bar { display: flex; align-items: center; gap: 12px; }
+  button { background: #238636; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:hover { background: #2ea043; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .result-count { font-size: 13px; color: #8b949e; }
+  .error-msg { color: #f85149; font-size: 13px; background: #1c0a0a; border: 1px solid #3d1212; padding: 8px 12px; border-radius: 6px; display: none; }
+
+  .results-wrap { flex: 1; overflow: auto; border: 1px solid #21262d; border-radius: 6px; min-height: 120px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
+  th { position: sticky; top: 0; background: #161b22; text-align: left; padding: 8px 12px; color: #8b949e; border-bottom: 1px solid #30363d; font-weight: 600; white-space: nowrap; }
+  td { padding: 6px 12px; border-bottom: 1px solid #161b22; white-space: nowrap; }
+  tr:hover td { background: #161b22; }
+  .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; font-size: 14px; padding: 40px; }
+
+  footer { padding: 12px 24px; border-top: 1px solid #21262d; font-size: 12px; color: #484f58; text-align: center; }
+  footer span { margin: 0 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">
+    <h1>LogEx</h1>
+    <p>Ethereum Log Query Engine</p>
+  </div>
+  <div class="status-panel" id="statusPanel">
+    <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
+    <span class="stat">Block: <b id="stBlock">--</b></span>
+    <span class="stat">Target: <b id="stTarget">--</b></span>
+    <span class="stat">Speed: <b id="stSpeed">--</b> blk/s</span>
+    <span class="stat">ETA: <b id="stEta">--</b></span>
+    <span class="stat">Rows: <b id="stRows">--</b></span>
+    <span class="stat">Head: <b id="stHead">--</b></span>
+  </div>
+</header>
+
+<main>
+  <div class="query-panel">
+    <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
+    <div class="query-bar">
+      <button id="runBtn" onclick="runQuery()">Run Query</button>
+      <span class="result-count" id="resultCount"></span>
+    </div>
+    <div class="error-msg" id="errorMsg"></div>
+  </div>
+  <div class="results-wrap" id="resultsWrap">
+    <div class="empty-state" id="emptyState">Run a LogSQL query to see results</div>
+    <table id="resultsTable" style="display:none">
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</main>
+
+<footer>
+  <span>JSON-RPC: POST /</span> | <span>REST: POST /query</span> | <span>gRPC: port 50051</span> | <span>WebSocket: /ws</span>
+</footer>
+
+<script>
+function fmt(n) {
+  if (n == null) return '--';
+  return Number(n).toLocaleString();
+}
+
+function truncHash(h) {
+  if (!h || h.length < 16) return h || '';
+  return h.slice(0, 10) + '\u2026' + h.slice(-6);
+}
+
+function fmtEta(seconds) {
+  if (seconds == null || seconds <= 0) return '--';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  var s = Math.floor(seconds % 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+function updateStatus(data) {
+  var synced = data.synced || (data.current_block && data.target_block && data.current_block >= data.target_block);
+  var badge = document.getElementById('badge');
+  var badgeText = document.getElementById('badgeText');
+  if (synced) {
+    badge.className = 'status-badge badge-synced';
+    badgeText.textContent = 'Synced';
+  } else {
+    badge.className = 'status-badge badge-syncing';
+    badgeText.textContent = 'Syncing';
+  }
+  document.getElementById('stBlock').textContent = fmt(data.current_block);
+  document.getElementById('stTarget').textContent = fmt(data.target_block);
+  document.getElementById('stSpeed').textContent = data.blocks_per_sec != null ? data.blocks_per_sec.toFixed(1) : '--';
+  document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
+  document.getElementById('stRows').textContent = fmt(data.total_rows);
+  document.getElementById('stHead').textContent = fmt(data.head_block);
+}
+
+function fetchStatus() {
+  fetch('/status').then(function(r) { return r.json(); }).then(updateStatus).catch(function() {});
+}
+
+var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
+
+function renderTable(rows) {
+  var thead = document.getElementById('thead');
+  var tbody = document.getElementById('tbody');
+  var table = document.getElementById('resultsTable');
+  var empty = document.getElementById('emptyState');
+
+  if (!rows || rows.length === 0) {
+    table.style.display = 'none';
+    empty.style.display = 'flex';
+    empty.textContent = 'Query returned no results';
+    return;
+  }
+
+  var keys = Object.keys(rows[0]);
+  var cols = COLUMNS.filter(function(c) { return keys.indexOf(c) !== -1; });
+  keys.forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
+
+  thead.innerHTML = '<tr>' + cols.map(function(c) { return '<th>' + c + '</th>'; }).join('') + '</tr>';
+
+  tbody.innerHTML = rows.map(function(row) {
+    return '<tr>' + cols.map(function(c) {
+      var v = row[c];
+      if (c === 'tx_hash') return '<td title="' + (v || '') + '">' + truncHash(v) + '</td>';
+      if (c === 'block_number') return '<td>' + fmt(v) + '</td>';
+      if (c === 'topics') return '<td>' + (Array.isArray(v) ? v.length : (v != null ? v : '')) + '</td>';
+      if (c === 'data_len' && typeof v === 'number') return '<td>' + fmt(v) + '</td>';
+      if (typeof v === 'number') return '<td>' + fmt(v) + '</td>';
+      if (typeof v === 'string' && v.length > 30) return '<td title="' + v + '">' + v.slice(0, 30) + '\u2026</td>';
+      return '<td>' + (v != null ? v : '') + '</td>';
+    }).join('') + '</tr>';
+  }).join('');
+
+  empty.style.display = 'none';
+  table.style.display = '';
+}
+
+function runQuery() {
+  var sql = document.getElementById('sql').value.trim();
+  if (!sql) return;
+
+  var btn = document.getElementById('runBtn');
+  var errEl = document.getElementById('errorMsg');
+  var countEl = document.getElementById('resultCount');
+
+  btn.disabled = true;
+  btn.textContent = 'Running\u2026';
+  errEl.style.display = 'none';
+  countEl.textContent = '';
+
+  fetch('/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql: sql })
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+  .then(function(res) {
+    if (!res.ok || res.data.error) {
+      errEl.textContent = res.data.error || res.data.message || 'Unknown error';
+      errEl.style.display = 'block';
+      renderTable([]);
+      return;
+    }
+    var rows = res.data.rows || res.data.results || res.data;
+    if (!Array.isArray(rows)) rows = [rows];
+    countEl.textContent = fmt(rows.length) + ' row' + (rows.length !== 1 ? 's' : '');
+    renderTable(rows);
+  })
+  .catch(function(e) {
+    errEl.textContent = 'Request failed: ' + e.message;
+    errEl.style.display = 'block';
+  })
+  .finally(function() {
+    btn.disabled = false;
+    btn.textContent = 'Run Query';
+  });
+}
+
+document.getElementById('sql').addEventListener('keydown', function(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+});
+
+fetchStatus();
+setInterval(fetchStatus, 2000);
+</script>
+</body>
+</html>

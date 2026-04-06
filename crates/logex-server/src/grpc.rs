@@ -50,8 +50,9 @@ impl LogExService for LogExGrpcService {
             ));
         }
 
-        let head_block = self.state.storage.head_block();
-        let result = logex_query::execute(&query, &self.state.storage, head_block)
+        let storage = self.state.storage.read().await;
+        let head_block = storage.head_block();
+        let result = logex_query::execute(&query, &storage, head_block)
             .map_err(|e| Status::internal(format!("execution error: {e}")))?;
 
         let entries: Vec<LogEntry> = result.rows.iter().map(log_row_to_entry).collect();
@@ -64,7 +65,8 @@ impl LogExService for LogExGrpcService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<HeadBlockResponse>, Status> {
-        let block_number = self.state.storage.head_block().unwrap_or(0);
+        let storage = self.state.storage.read().await;
+        let block_number = storage.head_block().unwrap_or(0);
         Ok(Response::new(HeadBlockResponse { block_number }))
     }
 }
@@ -117,7 +119,7 @@ mod tests {
     use alloy_primitives::{Address, B256, bytes};
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::Source;
+    use logex_types::{Source, SyncStatus};
     use tempfile::TempDir;
     use tokio_stream::StreamExt;
 
@@ -174,8 +176,9 @@ mod tests {
     async fn test_grpc_query() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let service = LogExGrpcService::new(state);
 
@@ -200,8 +203,9 @@ mod tests {
     async fn test_grpc_query_with_filter() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let service = LogExGrpcService::new(state);
 
@@ -226,8 +230,9 @@ mod tests {
     async fn test_grpc_head_block() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let service = LogExGrpcService::new(state);
 
@@ -242,8 +247,9 @@ mod tests {
     async fn test_grpc_invalid_sql() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let service = LogExGrpcService::new(state);
 

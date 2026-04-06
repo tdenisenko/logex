@@ -5,6 +5,7 @@ use axum::response::Json;
 
 use logex_query::{self, QueryResult};
 use logex_storage::PartitionManager;
+use logex_types::SyncStatus;
 
 use crate::eth_filter::{AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter, matches_filter};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
@@ -13,9 +14,11 @@ use crate::ws::SubscriptionManager;
 
 /// Shared application state.
 pub struct AppState {
-    pub storage: PartitionManager,
+    pub storage: Arc<tokio::sync::RwLock<PartitionManager>>,
     /// WebSocket subscription manager. None if subscriptions are disabled.
     pub subscriptions: Option<SubscriptionManager>,
+    /// Live sync progress, updated by the sync task.
+    pub sync_status: Arc<std::sync::Mutex<SyncStatus>>,
 }
 
 /// Handle a JSON-RPC request.
@@ -24,10 +27,11 @@ pub async fn handle_jsonrpc(
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = request.id.clone();
+    let storage = state.storage.read().await;
 
     let response = match request.method.as_str() {
-        "eth_getLogs" => handle_eth_get_logs(&state, &request),
-        "eth_blockNumber" => handle_eth_block_number(&state, &request),
+        "eth_getLogs" => handle_eth_get_logs(&storage, &request),
+        "eth_blockNumber" => handle_eth_block_number(&storage, &request),
         "web3_clientVersion" => Ok(JsonRpcResponse::success(
             id.clone(),
             serde_json::Value::String("LogEx/0.1.0".into()),
@@ -42,7 +46,10 @@ pub async fn handle_jsonrpc(
     Json(response.unwrap_or_else(|e: String| JsonRpcResponse::internal_error(id, e)))
 }
 
-fn handle_eth_get_logs(state: &AppState, req: &JsonRpcRequest) -> Result<JsonRpcResponse, String> {
+fn handle_eth_get_logs(
+    storage: &PartitionManager,
+    req: &JsonRpcRequest,
+) -> Result<JsonRpcResponse, String> {
     let id = req.id.clone();
     let params = req
         .params
@@ -58,14 +65,14 @@ fn handle_eth_get_logs(state: &AppState, req: &JsonRpcRequest) -> Result<JsonRpc
         serde_json::from_value(params[0].clone()).map_err(|e| format!("invalid filter: {e}"))?;
 
     // Convert eth_getLogs filter to a LogSQL query
-    let sql = filter_to_logsql(&filter, &state.storage);
+    let sql = filter_to_logsql(&filter, storage);
     tracing::debug!(sql = %sql, "eth_getLogs query");
 
     let query = logex_query::parse(&sql).map_err(|e| format!("query parse error: {e}"))?;
 
-    let head_block = state.storage.head_block();
+    let head_block = storage.head_block();
     let result: QueryResult =
-        logex_query::execute(&query, &state.storage, head_block).map_err(|e| e.to_string())?;
+        logex_query::execute(&query, storage, head_block).map_err(|e| e.to_string())?;
 
     // Apply eth_getLogs topic/address filters that go beyond what the index supports
     // (e.g., multi-address, topic1-3 filters)
@@ -81,10 +88,10 @@ fn handle_eth_get_logs(state: &AppState, req: &JsonRpcRequest) -> Result<JsonRpc
 }
 
 fn handle_eth_block_number(
-    state: &AppState,
+    storage: &PartitionManager,
     req: &JsonRpcRequest,
 ) -> Result<JsonRpcResponse, String> {
-    let block = state.storage.head_block().unwrap_or(0);
+    let block = storage.head_block().unwrap_or(0);
     Ok(JsonRpcResponse::success(
         req.id.clone(),
         serde_json::Value::String(format!("0x{block:x}")),
@@ -233,8 +240,9 @@ mod tests {
     async fn test_eth_get_logs_full() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -263,8 +271,9 @@ mod tests {
     async fn test_eth_block_number() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
 
         let req_json = serde_json::json!({

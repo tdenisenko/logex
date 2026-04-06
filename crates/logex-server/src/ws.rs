@@ -15,6 +15,7 @@ use crate::handler::AppState;
 const BROADCAST_CAPACITY: usize = 4096;
 
 /// Manages WebSocket subscriptions for live log streaming.
+#[derive(Clone)]
 pub struct SubscriptionManager {
     sender: broadcast::Sender<Arc<Vec<LogRow>>>,
 }

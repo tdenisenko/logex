@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-query", "crates/logex-server", "crates/logex-node"]
+members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-ingestion", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
 resolver = "2"
 
 [workspace.package]
@@ -23,6 +23,8 @@ thiserror = "2"
 
 # Async utilities
 futures = "0.3"
+futures-util = "0.3"
+eyre = "0.6"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -38,10 +40,15 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.13"
 prost = "0.13"
 
-# Ethereum RPC
-alloy-provider = { version = "1.8", default-features = false, features = ["reqwest"] }
-alloy-eips = "1.8"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Reth networking (lightweight, no EVM dependency)
+reth-eth-wire = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-ecies = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-discv4 = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-network-peers = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3", features = ["secp256k1"] }
+reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 
 # Internal crates
 logex-types = { path = "crates/logex-types" }
@@ -50,4 +57,5 @@ logex-index = { path = "crates/logex-index" }
 logex-ingestion = { path = "crates/logex-ingestion" }
 logex-query = { path = "crates/logex-query" }
 logex-server = { path = "crates/logex-server" }
+logex-sync = { path = "crates/logex-sync" }
 logex-node = { path = "crates/logex-node" }

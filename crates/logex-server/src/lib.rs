@@ -19,7 +19,8 @@ pub use ws::SubscriptionManager;
 /// Build the axum router with all endpoints.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", post(handler::handle_jsonrpc))
+        .route("/", get(rest::handle_web_ui).post(handler::handle_jsonrpc))
+        .route("/status", get(rest::handle_status))
         .route("/query", post(rest::handle_query))
         .route("/health", get(rest::handle_health))
         .route("/ws", get(ws::handle_ws_upgrade))

@@ -5,8 +5,14 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
+use logex_index::IndexBuilder;
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
+use logex_sync::SyncConfig;
+use logex_sync::engine::SyncEngine;
+use logex_sync::p2p::{discovery, peer_manager::PeerManager};
+use logex_types::SyncStatus;
+use reth_ethereum_forks::Head;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -14,11 +20,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(
     name = "logex",
     version = VERSION,
-    about = "Fast, self-hosted Ethereum node for querying logs and token transfers with SQL"
+    about = "LogEx — standalone Ethereum light node for fast event log queries"
 )]
 struct Cli {
     /// Path to the LogEx data directory.
-    #[arg(long, default_value = "./data", global = true)]
+    #[arg(long, default_value = "./logex-data", global = true)]
     data_dir: PathBuf,
 
     /// Log level (trace, debug, info, warn, error).
@@ -34,39 +40,28 @@ struct Cli {
     config: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Start the query server (JSON-RPC + REST + gRPC + WebSocket).
-    Serve {
-        /// HTTP server bind address.
-        #[arg(long, default_value = "127.0.0.1:8545")]
-        http_addr: SocketAddr,
+    /// Start the node: sync blocks from the P2P network and serve queries.
+    Sync {
+        /// HTTP server port (Web UI + LogSQL + JSON-RPC).
+        #[arg(long, default_value = "8577")]
+        http_port: u16,
 
-        /// gRPC server bind address.
-        #[arg(long, default_value = "127.0.0.1:8546")]
-        grpc_addr: SocketAddr,
-    },
+        /// gRPC server port.
+        #[arg(long, default_value = "8578")]
+        grpc_port: u16,
 
-    /// Ingest blocks from an Ethereum JSON-RPC endpoint.
-    Ingest {
-        /// Ethereum JSON-RPC URL.
-        #[arg(long)]
-        rpc_url: String,
+        /// P2P discovery port (UDP).
+        #[arg(long, default_value = "30303")]
+        discovery_port: u16,
 
-        /// First block to ingest (inclusive).
-        #[arg(long)]
-        from_block: u64,
-
-        /// Last block to ingest (inclusive). Defaults to latest.
-        #[arg(long)]
-        to_block: Option<u64>,
-
-        /// Build indexes on the hot partition after ingestion.
-        #[arg(long, default_value = "true")]
-        build_indexes: bool,
+        /// Maximum peer connections.
+        #[arg(long, default_value = "50")]
+        max_peers: usize,
     },
 
     /// Build or rebuild indexes on the hot partition.
@@ -95,8 +90,7 @@ impl Config {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     let file_config = cli.config.as_ref().map(Config::load);
@@ -127,39 +121,40 @@ async fn main() {
         .unwrap_or(cli.partition_target_rows);
 
     let pm_config = PartitionManagerConfig {
-        data_dir: data_dir.clone(),
+        data_dir,
         partition_target_rows,
     };
 
-    match cli.command.unwrap_or(Command::Serve {
-        http_addr: "127.0.0.1:8545".parse().unwrap(),
-        grpc_addr: "127.0.0.1:8546".parse().unwrap(),
-    }) {
-        Command::Serve {
-            http_addr,
-            grpc_addr,
-        } => run_server(pm_config, http_addr, grpc_addr).await,
-        Command::Ingest {
-            rpc_url,
-            from_block,
-            to_block,
-            build_indexes,
-        } => run_ingest(pm_config, &rpc_url, from_block, to_block, build_indexes).await,
+    match cli.command {
+        Command::Sync {
+            http_port,
+            grpc_port,
+            discovery_port,
+            max_peers,
+        } => {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(run_sync(
+                pm_config,
+                http_port,
+                grpc_port,
+                discovery_port,
+                max_peers,
+            ));
+        }
         Command::BuildIndexes => run_build_indexes(pm_config),
         Command::Info => run_info(pm_config),
     }
 }
 
-async fn run_server(config: PartitionManagerConfig, http_addr: SocketAddr, grpc_addr: SocketAddr) {
-    tracing::info!(
-        version = VERSION,
-        data_dir = %config.data_dir.display(),
-        %http_addr,
-        %grpc_addr,
-        "starting logex server"
-    );
-
-    let storage = match PartitionManager::open(config) {
+async fn run_sync(
+    pm_config: PartitionManagerConfig,
+    http_port: u16,
+    grpc_port: u16,
+    discovery_port: u16,
+    max_peers: usize,
+) {
+    // Open storage
+    let storage = match PartitionManager::open(pm_config) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to open storage");
@@ -167,108 +162,124 @@ async fn run_server(config: PartitionManagerConfig, http_addr: SocketAddr, grpc_
         }
     };
 
+    let head_block = storage.head_block().unwrap_or(0);
     tracing::info!(
         total_rows = storage.total_rows(),
-        sealed_partitions = storage.sealed_count(),
-        head_block = ?storage.head_block(),
+        head_block,
         "storage ready"
     );
 
+    // Shared state
     let state = Arc::new(AppState {
-        storage,
+        storage: Arc::new(tokio::sync::RwLock::new(storage)),
         subscriptions: Some(SubscriptionManager::new()),
+        sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
     });
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-
-    let grpc_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        if let Err(e) = logex_server::grpc::serve_grpc(grpc_state, grpc_addr).await {
-            tracing::error!(error = %e, "gRPC server error");
-        }
-    });
-
+    // Spawn HTTP server
+    let http_addr: SocketAddr = ([0, 0, 0, 0], http_port).into();
     let http_state = Arc::clone(&state);
-    let http_handle = tokio::spawn(async move {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        tracing::info!(%http_addr, "HTTP server starting");
         if let Err(e) = logex_server::serve(http_state, http_addr, shutdown_rx).await {
             tracing::error!(error = %e, "HTTP server error");
         }
     });
 
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => tracing::info!("received shutdown signal"),
-        Err(e) => tracing::error!(error = %e, "failed to listen for shutdown signal"),
+    // Spawn gRPC server
+    let grpc_addr: SocketAddr = ([0, 0, 0, 0], grpc_port).into();
+    let grpc_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        tracing::info!(%grpc_addr, "gRPC server starting");
+        if let Err(e) = logex_server::grpc::serve_grpc(grpc_state, grpc_addr).await {
+            tracing::error!(error = %e, "gRPC server error");
+        }
+    });
+
+    // Spawn background indexer
+    let index_state = Arc::clone(&state);
+    tokio::spawn(run_background_indexer(index_state));
+
+    tracing::info!(
+        http = %format!("http://{http_addr}"),
+        grpc = %format!("http://{grpc_addr}"),
+        "query endpoints ready"
+    );
+
+    // Generate node identity
+    let secret_key = secp256k1::SecretKey::new(&mut rand::thread_rng());
+
+    // Start peer discovery
+    let disc = match discovery::start_discovery(secret_key, discovery_port).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start peer discovery");
+            std::process::exit(1);
+        }
+    };
+
+    // Create peer manager and sync engine
+    let our_head = Head {
+        number: head_block,
+        hash: alloy_primitives::B256::ZERO,
+        ..Default::default()
+    };
+    let peers = PeerManager::new(secret_key, disc, our_head);
+
+    let sync_config = SyncConfig {
+        max_peers,
+        ..Default::default()
+    };
+
+    let mut engine = SyncEngine::new(
+        sync_config,
+        peers,
+        Arc::clone(&state.storage),
+        state.subscriptions.clone(),
+        Arc::clone(&state.sync_status),
+    );
+
+    // Run sync (blocks until error or shutdown)
+    if let Err(e) = engine.run().await {
+        tracing::error!(error = %e, "sync engine error");
     }
 
     let _ = shutdown_tx.send(());
-    let _ = http_handle.await;
-    tracing::info!("logex stopped");
+    tracing::info!("shutting down");
 }
 
-async fn run_ingest(
-    config: PartitionManagerConfig,
-    rpc_url: &str,
-    from_block: u64,
-    to_block: Option<u64>,
-    build_indexes: bool,
-) {
-    let to_block = match to_block {
-        Some(b) => b,
-        None => {
-            tracing::info!("fetching latest block number");
-            match logex_ingestion::rpc::get_latest_block(rpc_url).await {
-                Ok(n) => {
-                    tracing::info!(latest = n, "resolved latest block");
-                    n
+/// Background task that periodically rebuilds indexes on the hot partition.
+async fn run_background_indexer(state: Arc<AppState>) {
+    let mut last_indexed_rows = 0u64;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        let (hot_path, hot_rows) = {
+            let storage = state.storage.read().await;
+            let hp = storage.hot_partition().meta.path.clone();
+            let rows = storage.hot_partition().meta.row_count;
+            (hp, rows)
+        };
+
+        if hot_rows > last_indexed_rows && hot_rows > 0 {
+            let path = hot_path.clone();
+            match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
+            {
+                Ok(Ok(())) => {
+                    tracing::debug!(rows = hot_rows, "indexes rebuilt");
+                    last_indexed_rows = hot_rows;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to build indexes");
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to get latest block");
-                    std::process::exit(1);
+                    tracing::warn!(error = %e, "index build task panicked");
                 }
             }
         }
-    };
-
-    let mut pipeline = match logex_ingestion::Pipeline::open_with_config(config) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open pipeline");
-            std::process::exit(1);
-        }
-    };
-
-    match logex_ingestion::rpc::ingest_range(&mut pipeline, rpc_url, from_block, to_block).await {
-        Ok(stats) => {
-            tracing::info!(
-                blocks = stats.blocks_ingested,
-                logs = stats.logs_ingested,
-                elapsed = ?stats.elapsed,
-                "ingestion complete"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "ingestion failed");
-            std::process::exit(1);
-        }
     }
-
-    if build_indexes {
-        tracing::info!("building indexes on hot partition");
-        let hot_path = &pipeline.storage().hot_partition().meta.path;
-        if pipeline.storage().hot_partition().meta.row_count > 0 {
-            if let Err(e) = logex_index::IndexBuilder::build_all_indexes(hot_path) {
-                tracing::error!(error = %e, "failed to build indexes");
-                std::process::exit(1);
-            }
-            tracing::info!("indexes built successfully");
-        }
-    }
-
-    tracing::info!(
-        total_rows = pipeline.storage().total_rows(),
-        head_block = ?pipeline.storage().head_block(),
-        "storage summary"
-    );
 }
 
 fn run_build_indexes(config: PartitionManagerConfig) {
@@ -290,7 +301,7 @@ fn run_build_indexes(config: PartitionManagerConfig) {
         rows = storage.hot_partition().meta.row_count,
         "building indexes on hot partition"
     );
-    if let Err(e) = logex_index::IndexBuilder::build_all_indexes(hot_path) {
+    if let Err(e) = IndexBuilder::build_all_indexes(hot_path) {
         tracing::error!(error = %e, "failed to build indexes");
         std::process::exit(1);
     }
