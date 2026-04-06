@@ -276,6 +276,47 @@ mod tests {
     }
 
     #[test]
+    fn test_btree_reader_range_large_block_numbers() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bptree");
+
+        // Simulate real Ethereum block numbers (~22M)
+        let mut idx = BTreeIndex::new(8);
+        for block in 22_100_000u64..22_100_100 {
+            // Multiple rows per block (like real data)
+            for row in 0..10u32 {
+                let row_id = ((block - 22_100_000) as u32) * 10 + row;
+                idx.insert(&block.to_be_bytes(), row_id);
+            }
+        }
+        idx.write_to_file(&path).unwrap();
+
+        let reader = BTreeIndexReader::open(&path).unwrap();
+        assert_eq!(reader.key_count(), 100);
+
+        // Range [22100050, u64::MAX) — simulates `block_number >= 22100050`
+        let result = reader.range(&22_100_050u64.to_be_bytes(), &u64::MAX.to_be_bytes());
+        // Should contain rows for blocks 22100050..22100099 = 50 blocks * 10 rows = 500 rows
+        assert_eq!(
+            result.len(),
+            500,
+            "range [22100050, MAX) should return 500 rows"
+        );
+
+        // Point lookup
+        let exact = reader.get(&22_100_050u64.to_be_bytes()).unwrap();
+        assert_eq!(exact.len(), 10);
+
+        // Range [22100050, 22100061) — simulates BETWEEN 22100050 AND 22100060
+        let result = reader.range(&22_100_050u64.to_be_bytes(), &22_100_061u64.to_be_bytes());
+        assert_eq!(
+            result.len(),
+            110,
+            "range [22100050, 22100061) should return 110 rows"
+        );
+    }
+
+    #[test]
     fn test_btree_large_bitmap() {
         let mut idx = BTreeIndex::new(4);
         let key = [0u8; 4];
