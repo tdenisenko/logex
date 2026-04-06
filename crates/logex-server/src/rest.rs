@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 
 use logex_query::{self, is_simple_select};
 use logex_types::LogRow;
@@ -60,8 +60,9 @@ pub async fn handle_query(
         .into_response();
     }
 
-    let head_block = state.storage.head_block();
-    let result = match logex_query::execute(&query, &state.storage, head_block) {
+    let storage = state.storage.read().await;
+    let head_block = storage.head_block();
+    let result = match logex_query::execute(&query, &storage, head_block) {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -137,12 +138,35 @@ fn log_row_to_json(row: &LogRow) -> serde_json::Value {
 
 /// Handle GET /health.
 pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let storage = state.storage.read().await;
     Json(serde_json::json!({
         "status": "ok",
-        "total_rows": state.storage.total_rows(),
-        "sealed_partitions": state.storage.sealed_count(),
-        "head_block": state.storage.head_block(),
+        "total_rows": storage.total_rows(),
+        "sealed_partitions": storage.sealed_count(),
+        "head_block": storage.head_block(),
     }))
+}
+
+/// Handle GET /status — return detailed sync and storage status.
+pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sync = state.sync_status.lock().unwrap().clone();
+    let storage = state.storage.read().await;
+    Json(serde_json::json!({
+        "syncing": sync.syncing,
+        "current_block": sync.current_block,
+        "target_block": sync.target_block,
+        "blocks_per_sec": sync.blocks_per_sec,
+        "logs_ingested": sync.logs_ingested,
+        "total_rows": storage.total_rows(),
+        "sealed_partitions": storage.sealed_count(),
+        "head_block": storage.head_block(),
+        "eta_seconds": sync.eta_seconds,
+    }))
+}
+
+/// Handle GET / — serve the embedded web UI.
+pub async fn handle_web_ui() -> Html<&'static str> {
+    Html(include_str!("web_ui.html"))
 }
 
 #[cfg(test)]
@@ -153,7 +177,7 @@ mod tests {
     use axum::http::Request;
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::{LogRow, Source};
+    use logex_types::{LogRow, Source, SyncStatus};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -210,8 +234,9 @@ mod tests {
     async fn test_post_query() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let app = crate::build_router(state);
 
@@ -238,8 +263,9 @@ mod tests {
     async fn test_post_query_with_filter() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let app = crate::build_router(state);
 
@@ -268,8 +294,9 @@ mod tests {
     async fn test_post_query_parse_error() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let app = crate::build_router(state);
 
@@ -289,8 +316,9 @@ mod tests {
     async fn test_health_endpoint() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState {
-            storage,
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
         });
         let app = crate::build_router(state);
 

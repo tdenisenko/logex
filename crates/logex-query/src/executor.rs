@@ -317,7 +317,7 @@ mod tests {
     use crate::parse;
     use alloy_primitives::{Address, B256, bytes};
     use logex_index::IndexBuilder;
-    use logex_storage::{ColumnFile, PartitionManagerConfig};
+    use logex_storage::PartitionManagerConfig;
     use logex_types::Source;
     use tempfile::TempDir;
 

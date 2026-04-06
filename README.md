@@ -1,4 +1,4 @@
-# LogEx: A Purpose-Built Ethereum Execution Client for Event Log Queries
+# LogEx: A Purpose-Built Ethereum Light Node for Event Log Queries
 
 ## Problem Statement
 
@@ -16,9 +16,9 @@ However, even with these improvements, fundamental limitations remain:
 
 **EIP-7708** (currently Considered for Inclusion in the Glamsterdam hard fork, expected mid-2026) proposes that all ETH transfers and burns automatically emit a Transfer log — the same event signature ERC-20 tokens use. If adopted, every value movement on Ethereum, whether ETH or any token, becomes a log entry.
 
-**LogEx** is designed to capitalize on this moment. It is a stripped-down execution client whose sole mission is answering event log queries as fast as a database answers SQL. It does not maintain world state, does not execute transactions, and does not serve as a block producer. It ingests blocks, extracts logs, stores them in a columnar indexed format, and serves queries — including SQL-like aggregations and joins that `eth_getLogs` cannot express.
+**LogEx** is designed to capitalize on this moment. It is a standalone Ethereum light node whose sole mission is answering event log queries as fast as a database answers SQL. It syncs block headers and receipts directly over DevP2P with no external dependencies — no full node, no RPC endpoint, no third-party data provider. It does not maintain world state, does not execute transactions, and does not serve as a block producer. It ingests blocks, extracts logs, stores them in a columnar indexed format, and serves queries — including SQL-like aggregations and joins that `eth_getLogs` cannot express.
 
-Post-EIP-7708, LogEx becomes a **complete, self-hosted transfer tracking system**: one lightweight node, one SQL query, all transfers (ETH + tokens), sub-100ms latency.
+Post-EIP-7708, LogEx becomes a **complete, self-hosted transfer tracking system**: one lightweight node with zero external dependencies, one SQL query, all transfers (ETH + tokens), sub-100ms latency.
 
 ---
 
@@ -68,25 +68,25 @@ Post-EIP-7708, LogEx becomes a **complete, self-hosted transfer tracking system*
 │  Block Sync ─▸ Receipt Extractor ─▸ Log Decomposer ─▸ Writer│
 │                                                             │
 │  Sources:                                                   │
-│    • DevP2P (eth/68+) — direct p2p receipt sync             │
-│    • Trusted peer RPC — pull receipts from a full node      │
-│    • Consensus layer beacon API — follow chain head         │
-│    • Reth ExEx — embedded mode, zero-copy from Reth's       │
-│      execution pipeline (alternative build path)            │
+│    • DevP2P (eth/68+) — direct P2P header & receipt sync    │
+│    • Consensus layer beacon API — follow chain head via CL  │
+│                                                             │
+│  No external RPC, no full node dependency.                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Build Path: Standalone vs. Reth ExEx
+## Architecture: Standalone Light Node
 
-There are two viable approaches to building LogEx, with different tradeoffs:
+LogEx is a standalone Ethereum light node. It connects directly to the Ethereum P2P network via DevP2P (eth/68+), syncs block headers and transaction receipts, and validates receipt roots against header commitments — all without requiring a full node, an external RPC endpoint, or any third-party data provider.
 
-**Standalone client (the architecture described in this document):** LogEx runs as its own process, syncs headers and receipts independently, and manages its own storage. Maximum independence, minimum system requirements, but requires implementing P2P header sync, receipt validation, and reorg handling from scratch.
+This is a deliberate choice over two alternatives that were considered and rejected:
 
-**Reth Execution Extension (ExEx):** LogEx runs as a plugin inside a Reth node, receiving block notifications with full receipt data directly from Reth's execution pipeline. P2P sync, receipt validation, and reorg handling come for free. The tradeoff is that you need to run a full Reth node underneath, which adds ~1–2 TB of storage and the overhead of EVM execution. However, the engineering scope is reduced by roughly 60%, and you inherit Reth's battle-tested networking and consensus code.
+- **Reth Execution Extension (ExEx):** Running as a plugin inside a Reth node would inherit Reth's P2P sync and receipt validation for free, but would require operators to run a full execution client (~1–2 TB storage, EVM execution overhead) just to get log data. This defeats the purpose of a lightweight log-only node.
+- **Trusted RPC:** Pointing at an existing full node's RPC endpoint (`eth_getBlockReceipts`) would be the simplest approach, but introduces an external dependency, makes LogEx useless without a separate node running, and caps throughput at what the RPC can serve.
 
-**Recommendation:** Start with the Reth ExEx path for the initial release — it lets you focus engineering effort on the storage engine and query layer, which are the actual differentiators. Offer the standalone client as a future lightweight option once the core engine is proven.
+The standalone approach means LogEx has **zero external dependencies** for block data. An operator runs a single binary, it joins the P2P network, and it starts syncing. The tradeoff is that LogEx must implement its own header chain validation, receipt trie verification, and reorg handling — but the result is a self-contained system with minimal storage requirements (~100–170 GB vs 2+ TB for a full node).
 
 ---
 
@@ -96,23 +96,24 @@ There are two viable approaches to building LogEx, with different tradeoffs:
 
 LogEx does not execute transactions. It only needs two things from the network: **block headers** (for block metadata, timestamps, and the receipts root) and **transaction receipts** (which contain the actual logs).
 
-#### 1.1 Block Sync Modes
+#### 1.1 Block Sync
 
-| Mode | How it works | Tradeoffs |
-|---|---|---|
-| **Reth ExEx (recommended)** | Run as a Reth execution extension. Receive `ChainCommitted` notifications with full block + receipt data. | Zero-copy access. Requires running a Reth node. |
-| **Trusted Peer RPC** | Point at an existing Geth/Erigon/Reth node. Call `eth_getBlockReceipts` per block. | Simple. Throughput limited by RPC (~500–2K blocks/s). |
-| **P2P Receipt Sync** | Connect via DevP2P, request `GetReceipts` by block hash. Validate receipt root against header. | Trustless. Slow — peers rate-limit receipt requests. Realistic throughput: ~200–500 blocks/s. |
-| **Hybrid** | Use trusted RPC for historical backfill, switch to beacon API + P2P for live following. | Pragmatic for standalone mode. |
+LogEx syncs directly over DevP2P (eth/68+). It connects to Ethereum execution-layer peers, downloads block headers and transaction receipts, and validates receipt trie roots against the header's `receiptsRoot` commitment.
 
-Note: P2P header sync requires implementing header chain validation (PoS finality verification via beacon API, or trusting a checkpoint). This is non-trivial and is a significant argument in favor of the Reth ExEx path for the initial implementation.
+| Phase | How it works |
+|---|---|
+| **Header sync** | Download and validate the header chain. Use a checkpoint sync (trusted block hash) or beacon API to anchor the chain, then verify the full header sequence back to genesis or the checkpoint. |
+| **Receipt sync** | Request receipts by block hash via `GetReceipts` (eth/68). Validate the receipt trie root against the header. Realistic throughput: ~200–500 blocks/s from peers. |
+| **Live following** | Subscribe to new block announcements via DevP2P. Fetch headers and receipts as new blocks are produced. Consensus layer beacon API provides finality information. |
+
+Header chain validation, receipt trie verification, and reorg detection are all handled internally — no external node is involved.
 
 #### 1.2 Receipt Extractor
 
 For each block, the extractor:
 
 1. Receives the list of transaction receipts.
-2. In standalone mode: validates the receipt trie root against the block header's `receiptsRoot` (trustless verification). In ExEx mode: receipts are already validated by Reth.
+2. Validates the receipt trie root against the block header's `receiptsRoot` (trustless verification).
 3. Iterates each receipt, extracts the `logs[]` array.
 4. Passes each log to the decomposer.
 
@@ -649,9 +650,7 @@ The matcher uses a **compiled filter trie**: all active subscription filters are
 |---|---|---|
 | Total logs on mainnet | ~3–4 billion | Rough estimate, growing ~500M/year |
 | Receipt data to download | ~700 GB (compressed) | |
-| Sync time (Reth ExEx, from existing node) | Near-instant for new blocks, backfill depends on Reth's own sync | ExEx sees blocks as Reth processes them |
-| Sync time (trusted RPC, ~1K blocks/s) | ~6 hours | Realistic for `eth_getBlockReceipts` over LAN |
-| Sync time (P2P only) | 1–3 days | P2P peers rate-limit receipt requests heavily |
+| Sync time (P2P, ~200–500 blocks/s) | 1–3 days | P2P peers rate-limit receipt requests; varies with peer quality |
 | Final indexed storage (receipts only) | ~100–150 GB | Needs validation with real data |
 | ETH transfer backfill time | 4–24 hours | Depends on archive node; see section 1.4.7 |
 | ETH transfer backfill additional storage | ~10–20 GB | ~800M synthetic log rows, highly compressible |
@@ -682,7 +681,7 @@ These estimates are based on back-of-envelope calculations and need to be valida
 | B+ Tree implementation | Custom on-disk B+ tree or adapt `redb` | Need crash-safe, memory-mapped, concurrent-read indexes. |
 | Bitmap library | `roaring-rs` | Industry standard for compressed bitmap operations. |
 | Compression | `zstd` (cold partitions), `lz4` (hot partition) | Best ratio for cold data, best speed for hot data. |
-| P2P networking | From `reth` networking crate (standalone) or N/A (ExEx) | Battle-tested DevP2P implementation, avoid reinventing. |
+| P2P networking | `reth-eth-wire`, `reth-network` crates | Battle-tested DevP2P (eth/68+) implementation from Reth, used as a library. |
 | RPC framework | `tonic` (gRPC) + `axum` (HTTP) | Async, fast, mature Rust ecosystem. |
 | Serialization | Flat binary (no protobuf overhead in storage) | Protobuf only at the API boundary, not in the storage path. |
 
@@ -697,12 +696,12 @@ These estimates are based on back-of-envelope calculations and need to be valida
 | Reth (current) | No dedicated log index (open issue #16999) | Slowest `eth_getLogs` of the three major clients. |
 | Envio HyperSync | Purpose-built data node, 2000x faster than RPC, field selection | Proprietary hosted service. Not self-hostable. Requires API token. No SQL. |
 | Paradigm Cryo | Extract logs to Parquet, query with DuckDB/Polars | Batch-only, no real-time. Requires existing full node. Not a server. |
-| Reth ExEx + Postgres | Pipe logs to Postgres via ExEx | Postgres indexes are not optimized for this workload. Requires full Reth node. |
+| Reth ExEx + Postgres | Pipe logs to Postgres via ExEx plugin | Postgres indexes are not optimized for this workload. Requires full Reth node (~2 TB). |
 | The Graph | Subgraph-based, GraphQL | Slow. Requires pre-defined schema per use case. Not general-purpose. |
 | Dune Analytics | Full SQL over warehouse | Centralized, rate-limited, expensive. Not self-hostable. |
-| **LogEx** | Columnar storage + bitmap indexes + SQL, self-hosted | Requires building and maintaining new infrastructure. |
+| **LogEx** | Standalone light node, columnar storage + bitmap indexes + SQL, self-hosted | Requires building and maintaining new infrastructure. |
 
-LogEx's unique position: **self-hosted, trustless, SQL-capable log queries without running a full node** (in standalone mode), or **maximum-performance SQL log queries as a Reth plugin** (in ExEx mode). No existing tool combines all three of: self-hosted sovereignty, SQL expressiveness, and columnar storage performance.
+LogEx's unique position: **self-hosted, trustless, SQL-capable log queries without running a full node.** A single binary joins the P2P network, syncs only what it needs (headers + receipts), and serves queries. No existing tool combines all three of: self-hosted sovereignty, SQL expressiveness, and columnar storage performance — with zero external dependencies.
 
 ---
 
@@ -749,7 +748,7 @@ All logs extracted from transaction receipts carry the strongest possible trust 
 
 1. Block headers are attested by Ethereum's proof-of-stake consensus. At least two-thirds of all staked validators have signed off on each block header, including its `receiptsRoot` field.
 2. The `receiptsRoot` is the Merkle Patricia Trie root of all transaction receipts in the block. It is a cryptographic commitment: any modification to any receipt (including adding, removing, or altering any log entry) would produce a different root hash.
-3. During ingestion, LogEx (or the underlying Reth node in ExEx mode) reconstructs the receipt trie from the downloaded receipts and verifies that the computed root matches the `receiptsRoot` in the block header. If they do not match, the receipts are rejected.
+3. During ingestion, LogEx reconstructs the receipt trie from the downloaded receipts and verifies that the computed root matches the `receiptsRoot` in the block header. If they do not match, the receipts are rejected.
 4. Once verified, the logs are decomposed and stored. The fact that LogEx discards the trie structure afterward does not weaken this guarantee — the verification already happened. The data is correct because it was validated at write time.
 
 This trust model is identical to querying `eth_getLogs` on Geth, Erigon, or any other execution client. When you call `eth_getLogs` on Geth, Geth does not re-verify the receipt trie for every query. You are trusting that Geth validated the data when it ingested it, and that its database has not been corrupted since. LogEx works the same way.
@@ -804,15 +803,16 @@ For operators who want the strongest possible trust guarantee for their ETH tran
 
 ## Summary
 
-LogEx is not a general-purpose Ethereum client. It is a **log-first, index-first, query-first** system that:
+LogEx is not a general-purpose Ethereum client. It is a **standalone light node** and a **log-first, index-first, query-first** system that:
 
-1. Syncs only headers and receipts (~100–170 GB vs 2+ TB for a full node).
-2. Decomposes logs into columnar storage with bitmap indexes at write time.
-3. Serves SQL-like queries via index seeks, never block scans.
-4. Targets sub-100ms latency for queries that take seconds even on clients with modern log indexes.
-5. Optionally backfills historical ETH transfers from an archive node's trace data, so operators can track every value movement (ETH + tokens) from genesis without running their own archive node permanently.
-6. Post-EIP-7708: captures all ETH transfers from receipts natively, eliminating the need for trace data entirely. The backfill is a one-time cost for historical coverage.
+1. Runs as a single binary with zero external dependencies — joins the P2P network directly via DevP2P.
+2. Syncs only headers and receipts (~100–170 GB vs 2+ TB for a full node).
+3. Decomposes logs into columnar storage with bitmap indexes at write time.
+4. Serves SQL-like queries via index seeks, never block scans.
+5. Targets sub-100ms latency for queries that take seconds even on clients with modern log indexes.
+6. Optionally backfills historical ETH transfers from an archive node's trace data, so operators can track every value movement (ETH + tokens) from genesis without running their own archive node permanently.
+7. Post-EIP-7708: captures all ETH transfers from receipts natively, eliminating the need for trace data entirely. The backfill is a one-time cost for historical coverage.
 
-LogEx is designed to be self-contained and trustless. The core software has no external dependencies beyond the Ethereum network itself. The ETH transfer backfill is opt-in, requires the operator to provide their own archive node endpoint, and records the provenance of every data point so operators always know whether a given log was consensus-verified (from receipts) or EVM-verified (from traces).
+LogEx is designed to be self-contained and trustless. It has no external dependencies beyond the Ethereum P2P network itself — no full node, no RPC endpoint, no third-party data provider. The ETH transfer backfill is opt-in, requires the operator to provide their own archive node endpoint, and records the provenance of every data point so operators always know whether a given log was consensus-verified (from receipts) or EVM-verified (from traces).
 
 It trades generality (no state, no EVM, no block production) for extreme specialization at the one thing wallets, exchanges, block explorers, and data pipelines need most: fast, flexible, self-hosted access to event logs and transfer data.

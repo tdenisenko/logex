@@ -4,15 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "logex"
+path = "src/main.rs"
+
 [dependencies]
 logex-types = { workspace = true }
 logex-storage = { workspace = true }
-logex-server = { workspace = true }
-logex-ingestion = { workspace = true }
 logex-index = { workspace = true }
+logex-ingestion = { workspace = true }
+logex-server = { workspace = true }
+logex-sync = { workspace = true }
+alloy-primitives = { workspace = true }
+reth-ethereum-forks = { workspace = true }
+secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 clap = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tokio = { workspace = true }
+eyre = { workspace = true }
+rand = "0.8"

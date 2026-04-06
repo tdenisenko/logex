@@ -64,7 +64,7 @@ impl LogRow {
     /// Convert an alloy RPC log into a `LogRow`.
     ///
     /// The alloy `Log` type already carries block/tx metadata when returned
-    /// from an RPC response, but during ExEx ingestion we have the block
+    /// from an RPC response, but during P2P sync we have the block
     /// context separately, so this constructor accepts both.
     pub fn from_alloy_log(
         log: &alloy_rpc_types::Log,
@@ -78,7 +78,7 @@ impl LogRow {
 
     /// Convert a primitive log (as found in receipts) into a `LogRow`.
     ///
-    /// This is the lower-level constructor used during ExEx ingestion where
+    /// This is the lower-level constructor used during P2P sync where
     /// we get `alloy_primitives::Log` directly from receipts rather than
     /// the RPC-wrapped `alloy_rpc_types::Log`.
     pub fn from_primitives_log(

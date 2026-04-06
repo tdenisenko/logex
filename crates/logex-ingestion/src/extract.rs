@@ -29,7 +29,7 @@ pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Vec<LogRow>
 /// Convenience: extract logs from a pre-flattened receipt list where each
 /// receipt is represented as (tx_hash, logs_vec).
 ///
-/// This is the primary extraction path for ExEx ingestion where we iterate
+/// This is the primary extraction path used by the sync engine where we iterate
 /// block bodies and their corresponding receipts.
 pub fn extract_from_block(
     block_number: u64,
