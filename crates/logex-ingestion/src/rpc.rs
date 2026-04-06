@@ -6,7 +6,11 @@ use alloy_provider::{Provider, ProviderBuilder};
 
 use crate::pipeline::Pipeline;
 
+/// Number of blocks to fetch concurrently in each batch.
+const BATCH_SIZE: u64 = 10;
+
 /// Fetch and ingest a range of blocks from an Ethereum JSON-RPC endpoint.
+/// Uses batched parallel RPC fetching for throughput.
 pub async fn ingest_range(
     pipeline: &mut Pipeline,
     rpc_url: &str,
@@ -24,47 +28,47 @@ pub async fn ingest_range(
 
     tracing::info!(from = from_block, to = to_block, "starting RPC ingestion");
 
-    for block_num in from_block..=to_block {
-        let block_start = Instant::now();
+    let mut current = from_block;
+    while current <= to_block {
+        let batch_end = (current + BATCH_SIZE - 1).min(to_block);
+        let batch_start_time = Instant::now();
 
-        match ingest_single_block(pipeline, &provider, block_num).await {
-            Ok(log_count) => {
-                stats.blocks_ingested += 1;
-                stats.logs_ingested += log_count;
+        // Fetch all blocks in this batch concurrently
+        let block_nums: Vec<u64> = (current..=batch_end).collect();
+        let fetched = fetch_blocks_parallel(&provider, &block_nums).await?;
 
-                if stats.blocks_ingested % 10 == 0 || block_num == to_block {
-                    let elapsed = start.elapsed();
-                    let bps = stats.blocks_ingested as f64 / elapsed.as_secs_f64();
-                    tracing::info!(
-                        block = block_num,
-                        logs = log_count,
-                        total_blocks = stats.blocks_ingested,
-                        total_logs = stats.logs_ingested,
-                        blocks_per_sec = format!("{bps:.1}"),
-                        "ingested block"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(block = block_num, error = %e, "failed to ingest block, retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match ingest_single_block(pipeline, &provider, block_num).await {
-                    Ok(log_count) => {
-                        stats.blocks_ingested += 1;
-                        stats.logs_ingested += log_count;
-                    }
-                    Err(e) => {
-                        tracing::error!(block = block_num, error = %e, "block ingestion failed");
-                        return Err(e);
-                    }
-                }
-            }
+        // Ingest in order (storage writes are sequential)
+        for block_data in fetched {
+            let log_count = pipeline
+                .ingest_block(
+                    block_data.block_num,
+                    block_data.block_hash,
+                    block_data.timestamp,
+                    &block_data.txs,
+                )
+                .map_err(|e| IngestError::Storage(format!("{e}")))?;
+
+            stats.blocks_ingested += 1;
+            stats.logs_ingested += log_count;
         }
 
-        // Adaptive rate limiting: stay under typical free-tier RPC limits
-        let elapsed = block_start.elapsed();
-        if elapsed.as_millis() < 100 {
-            tokio::time::sleep(std::time::Duration::from_millis(100) - elapsed).await;
+        let elapsed = start.elapsed();
+        let bps = stats.blocks_ingested as f64 / elapsed.as_secs_f64();
+        tracing::info!(
+            block = batch_end,
+            total_blocks = stats.blocks_ingested,
+            total_logs = stats.logs_ingested,
+            blocks_per_sec = format!("{bps:.1}"),
+            "ingested batch"
+        );
+
+        current = batch_end + 1;
+
+        // Rate limit between batches to stay under free-tier RPC limits
+        let batch_elapsed = batch_start_time.elapsed();
+        let min_batch_time = std::time::Duration::from_millis(500);
+        if batch_elapsed < min_batch_time {
+            tokio::time::sleep(min_batch_time - batch_elapsed).await;
         }
     }
 
@@ -79,29 +83,62 @@ pub async fn ingest_range(
     Ok(stats)
 }
 
-async fn ingest_single_block(
-    pipeline: &mut Pipeline,
+/// Data fetched from RPC for a single block.
+struct FetchedBlock {
+    block_num: u64,
+    block_hash: B256,
+    timestamp: u64,
+    txs: Vec<(B256, Vec<Log>)>,
+}
+
+/// Fetch multiple blocks in parallel. Returns results in block number order.
+async fn fetch_blocks_parallel(
+    provider: &impl Provider,
+    block_nums: &[u64],
+) -> Result<Vec<FetchedBlock>, IngestError> {
+    let futures: Vec<_> = block_nums
+        .iter()
+        .map(|&num| fetch_single_block(provider, num))
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    let mut blocks = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
+            Ok(block) => blocks.push(block),
+            Err(e) => {
+                // Retry the failed block once
+                tracing::warn!(error = %e, "batch fetch failed, retrying individually");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let block_num = blocks.len() as u64 + block_nums[0];
+                let block = fetch_single_block(provider, block_num).await?;
+                blocks.push(block);
+            }
+        }
+    }
+
+    Ok(blocks)
+}
+
+async fn fetch_single_block(
     provider: &impl Provider,
     block_num: u64,
-) -> Result<u64, IngestError> {
-    // Fetch block header
-    let block = provider
-        .get_block_by_number(BlockNumberOrTag::Number(block_num))
-        .await
+) -> Result<FetchedBlock, IngestError> {
+    // Fetch block header and receipts concurrently
+    let (block_result, receipts_result) = tokio::join!(
+        provider.get_block_by_number(BlockNumberOrTag::Number(block_num)),
+        provider.get_block_receipts(BlockId::Number(BlockNumberOrTag::Number(block_num))),
+    );
+
+    let block = block_result
         .map_err(|e| IngestError::Rpc(format!("get_block {block_num}: {e}")))?
         .ok_or_else(|| IngestError::Rpc(format!("block {block_num} not found")))?;
 
-    let block_hash = block.header.hash;
-    let timestamp = block.header.timestamp;
-
-    // Fetch receipts
-    let receipts = provider
-        .get_block_receipts(BlockId::Number(BlockNumberOrTag::Number(block_num)))
-        .await
+    let receipts = receipts_result
         .map_err(|e| IngestError::Rpc(format!("get_receipts {block_num}: {e}")))?
         .ok_or_else(|| IngestError::Rpc(format!("receipts for block {block_num} not found")))?;
 
-    // Convert receipts to (tx_hash, Vec<Log>) pairs
     let txs: Vec<(B256, Vec<Log>)> = receipts
         .into_iter()
         .map(|receipt| {
@@ -122,11 +159,12 @@ async fn ingest_single_block(
         })
         .collect();
 
-    let log_count = pipeline
-        .ingest_block(block_num, block_hash, timestamp, &txs)
-        .map_err(|e| IngestError::Storage(format!("{e}")))?;
-
-    Ok(log_count)
+    Ok(FetchedBlock {
+        block_num,
+        block_hash: block.header.hash,
+        timestamp: block.header.timestamp,
+        txs,
+    })
 }
 
 /// Fetch the latest block number from the RPC endpoint.

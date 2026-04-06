@@ -2476,6 +2476,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types",
+ "futures",
  "logex-index",
  "logex-storage",
  "logex-types",
