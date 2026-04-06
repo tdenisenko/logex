@@ -216,12 +216,10 @@ pub fn matches_filter(row: &LogRow, filter: &EthFilter) -> bool {
                         return false;
                     }
                 }
-                TopicFilter::Multiple(expected) => {
-                    match row_topics[i] {
-                        Some(actual) if expected.contains(actual) => {}
-                        _ => return false,
-                    }
-                }
+                TopicFilter::Multiple(expected) => match row_topics[i] {
+                    Some(actual) if expected.contains(actual) => {}
+                    _ => return false,
+                },
             }
         }
     }
@@ -312,10 +310,7 @@ mod tests {
     fn test_filter_topic_skip_wildcard() {
         // null in position 0 = wildcard, match on topic1
         let filter = EthFilter {
-            topics: vec![
-                None,
-                Some(TopicFilter::Single(B256::repeat_byte(0xEE))),
-            ],
+            topics: vec![None, Some(TopicFilter::Single(B256::repeat_byte(0xEE)))],
             ..Default::default()
         };
         assert!(matches_filter(&test_row(), &filter));

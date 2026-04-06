@@ -8,7 +8,10 @@ pub mod ws;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub use handler::AppState;
 pub use ws::SubscriptionManager;

@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use logex_types::LogRow;
 
-use crate::eth_filter::{matches_filter, EthFilter, RpcLog};
+use crate::eth_filter::{EthFilter, RpcLog, matches_filter};
 use crate::handler::AppState;
 
 /// Capacity of the broadcast channel for new logs.
@@ -75,9 +75,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     let subs = match &state.subscriptions {
         Some(s) => s,
         None => {
-            let _ = socket
-                .send(Message::Close(None))
-                .await;
+            let _ = socket.send(Message::Close(None)).await;
             return;
         }
     };
@@ -155,9 +153,7 @@ async fn receive_filter(socket: &mut WebSocket) -> Option<EthFilter> {
                 Ok(req) => Some(req.filter),
                 Err(e) => {
                     let err = serde_json::json!({"error": format!("invalid filter: {e}")});
-                    let _ = socket
-                        .send(Message::Text(err.to_string().into()))
-                        .await;
+                    let _ = socket.send(Message::Text(err.to_string().into())).await;
                     None
                 }
             }
@@ -244,6 +240,10 @@ mod tests {
             .collect();
 
         assert_eq!(matching.len(), 1);
-        assert!(matching[0].address.contains(&hex::encode(Address::repeat_byte(0xAA))));
+        assert!(
+            matching[0]
+                .address
+                .contains(&hex::encode(Address::repeat_byte(0xAA)))
+        );
     }
 }

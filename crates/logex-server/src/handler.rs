@@ -6,7 +6,7 @@ use axum::response::Json;
 use logex_query::{self, QueryResult};
 use logex_storage::PartitionManager;
 
-use crate::eth_filter::{matches_filter, AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter};
+use crate::eth_filter::{AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter, matches_filter};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 
 use crate::ws::SubscriptionManager;
@@ -100,9 +100,7 @@ fn filter_to_logsql(filter: &EthFilter, storage: &PartitionManager) -> String {
         (Some(from), Some(to)) => {
             let from_num = resolve_block_id(from, storage);
             let to_num = resolve_block_id(to, storage);
-            conditions.push(format!(
-                "block_number BETWEEN {from_num} AND {to_num}"
-            ));
+            conditions.push(format!("block_number BETWEEN {from_num} AND {to_num}"));
         }
         (Some(from), None) => {
             let from_num = resolve_block_id(from, storage);
@@ -128,10 +126,11 @@ fn filter_to_logsql(filter: &EthFilter, storage: &PartitionManager) -> String {
 
     // Topic0 — push single value to index
     if let Some(Some(tf)) = filter.topics.first()
-        && let TopicFilter::Single(hash) = tf {
-            conditions.push(format!("topic0 = '0x{}'", hex::encode(hash)));
-        }
-        // Multi-topic0 handled via matches_filter
+        && let TopicFilter::Single(hash) = tf
+    {
+        conditions.push(format!("topic0 = '0x{}'", hex::encode(hash)));
+    }
+    // Multi-topic0 handled via matches_filter
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -233,7 +232,10 @@ mod tests {
     #[tokio::test]
     async fn test_eth_get_logs_full() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage, subscriptions: None });
+        let state = Arc::new(AppState {
+            storage,
+            subscriptions: None,
+        });
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
         let req_json = serde_json::json!({
@@ -254,16 +256,16 @@ mod tests {
         let logs: Vec<serde_json::Value> =
             serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(logs.len(), 1);
-        assert!(logs[0]["address"]
-            .as_str()
-            .unwrap()
-            .contains(&addr));
+        assert!(logs[0]["address"].as_str().unwrap().contains(&addr));
     }
 
     #[tokio::test]
     async fn test_eth_block_number() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage, subscriptions: None });
+        let state = Arc::new(AppState {
+            storage,
+            subscriptions: None,
+        });
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",

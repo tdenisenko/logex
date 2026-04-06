@@ -134,11 +134,12 @@ fn extract_filters(expr: &Expr, plan: &mut QueryPlan) {
         } => {
             if let Expr::Column(name) = between_expr.as_ref()
                 && name == "block_number"
-                    && let (Some(lo), Some(hi)) = (resolve_number(low), resolve_number(high)) {
-                        plan.block_from = Some(lo as u64);
-                        plan.block_to = Some(hi as u64 + 1); // BETWEEN is inclusive
-                        return;
-                    }
+                && let (Some(lo), Some(hi)) = (resolve_number(low), resolve_number(high))
+            {
+                plan.block_from = Some(lo as u64);
+                plan.block_to = Some(hi as u64 + 1); // BETWEEN is inclusive
+                return;
+            }
             plan.residual_filters.push(expr.clone());
         }
         _ => {
@@ -291,9 +292,10 @@ fn try_resolve_block_range(expr: &Expr, head: u64) -> Option<(Option<u64>, Optio
         } => {
             if let Expr::Column(name) = left.as_ref()
                 && name == "block_number"
-                    && let Some(n) = resolve_with_latest(right, head) {
-                        return Some((Some(n), None));
-                    }
+                && let Some(n) = resolve_with_latest(right, head)
+            {
+                return Some((Some(n), None));
+            }
             None
         }
         _ => None,
