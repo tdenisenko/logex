@@ -35,6 +35,11 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.13"
 prost = "0.13"
 
+# Ethereum RPC
+alloy-provider = { version = "1.8", default-features = false, features = ["reqwest"] }
+alloy-eips = "1.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
 # Internal crates
 logex-types = { path = "crates/logex-types" }
 logex-storage = { path = "crates/logex-storage" }

@@ -78,13 +78,15 @@ pub fn execute(
 /// Check if a partition's block range overlaps with the plan's range.
 fn partition_matches_range(meta: &logex_types::PartitionMeta, plan: &QueryPlan) -> bool {
     if let Some(from) = plan.block_from
-        && meta.max_block < from {
-            return false;
-        }
+        && meta.max_block < from
+    {
+        return false;
+    }
     if let Some(to) = plan.block_to
-        && meta.min_block >= to {
-            return false;
-        }
+        && meta.min_block >= to
+    {
+        return false;
+    }
     true
 }
 
@@ -429,6 +431,77 @@ mod tests {
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0].block_number, 300);
         assert_eq!(result.rows[1].block_number, 200);
+    }
+
+    /// Reproduce the block range query bug with large (real Ethereum) block numbers.
+    fn make_large_block_rows() -> Vec<LogRow> {
+        (0..100)
+            .map(|i| LogRow {
+                block_number: 22_100_000 + i,
+                block_hash: B256::repeat_byte((i % 256) as u8),
+                timestamp: 1_700_000_000 + i * 12,
+                tx_hash: B256::repeat_byte(((i + 1) % 256) as u8),
+                tx_index: 0,
+                log_index: 0,
+                address: Address::repeat_byte(0xAA),
+                topic0: Some(B256::repeat_byte(0xDD)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: bytes!(""),
+                data_len: 0,
+                source: Source::Receipt,
+            })
+            .collect()
+    }
+
+    fn setup_large_block_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let config = PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+        };
+        let mut mgr = PartitionManager::open(config).unwrap();
+        mgr.write_batch(&make_large_block_rows()).unwrap();
+        IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
+        (tmp, mgr)
+    }
+
+    #[test]
+    fn test_block_range_large_numbers_ge() {
+        let (_tmp, storage) = setup_large_block_storage();
+        let q = parse("SELECT * FROM logs WHERE block_number >= 22100050").unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+        assert_eq!(
+            result.rows.len(),
+            50,
+            "block_number >= 22100050 should return 50 rows"
+        );
+    }
+
+    #[test]
+    fn test_block_range_large_numbers_between() {
+        let (_tmp, storage) = setup_large_block_storage();
+        let q =
+            parse("SELECT * FROM logs WHERE block_number BETWEEN 22100000 AND 22100009").unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+        assert_eq!(
+            result.rows.len(),
+            10,
+            "BETWEEN 22100000 AND 22100009 should return 10 rows"
+        );
+    }
+
+    #[test]
+    fn test_block_range_large_numbers_eq() {
+        let (_tmp, storage) = setup_large_block_storage();
+        let q = parse("SELECT * FROM logs WHERE block_number = 22100050").unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "block_number = 22100050 should return 1 row"
+        );
     }
 
     #[test]

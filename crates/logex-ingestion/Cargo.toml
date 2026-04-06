@@ -9,6 +9,12 @@ logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-rpc-types = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
