@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {
@@ -193,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query_with_filter() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let service = LogExGrpcService::new(state);
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_head_block() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let service = LogExGrpcService::new(state);
 
         let response = service
@@ -229,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_invalid_sql() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {

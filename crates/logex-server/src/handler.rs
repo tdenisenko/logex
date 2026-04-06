@@ -9,9 +9,13 @@ use logex_storage::PartitionManager;
 use crate::eth_filter::{matches_filter, AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 
+use crate::ws::SubscriptionManager;
+
 /// Shared application state.
 pub struct AppState {
     pub storage: PartitionManager,
+    /// WebSocket subscription manager. None if subscriptions are disabled.
+    pub subscriptions: Option<SubscriptionManager>,
 }
 
 /// Handle a JSON-RPC request.
@@ -229,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_eth_get_logs_full() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
         let req_json = serde_json::json!({
@@ -259,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn test_eth_block_number() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",

@@ -209,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "SELECT * FROM logs" });
@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_with_filter() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let app = crate::build_router(state);
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_parse_error() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "NOT A QUERY" });
@@ -279,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_endpoint() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState { storage });
+        let state = Arc::new(AppState { storage, subscriptions: None });
         let app = crate::build_router(state);
 
         let req = Request::builder()
