@@ -23,12 +23,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Start the HTTP server on the given address.
-pub async fn serve(state: Arc<AppState>, addr: SocketAddr) -> std::io::Result<()> {
+/// Start the HTTP server on the given address with graceful shutdown support.
+pub async fn serve(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    shutdown: tokio::sync::watch::Receiver<()>,
+) -> std::io::Result<()> {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "JSON-RPC server listening");
+    tracing::info!(%addr, "HTTP server listening");
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .map_err(std::io::Error::other)
+}
+
+async fn shutdown_signal(mut rx: tokio::sync::watch::Receiver<()>) {
+    let _ = rx.changed().await;
+    tracing::info!("HTTP server shutting down");
 }
