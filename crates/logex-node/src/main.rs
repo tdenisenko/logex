@@ -69,6 +69,9 @@ enum Command {
         build_indexes: bool,
     },
 
+    /// Build or rebuild indexes on the hot partition.
+    BuildIndexes,
+
     /// Show storage statistics.
     Info,
 }
@@ -142,6 +145,7 @@ async fn main() {
             to_block,
             build_indexes,
         } => run_ingest(pm_config, &rpc_url, from_block, to_block, build_indexes).await,
+        Command::BuildIndexes => run_build_indexes(pm_config),
         Command::Info => run_info(pm_config),
     }
 }
@@ -265,6 +269,32 @@ async fn run_ingest(
         head_block = ?pipeline.storage().head_block(),
         "storage summary"
     );
+}
+
+fn run_build_indexes(config: PartitionManagerConfig) {
+    let storage = match PartitionManager::open(config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open storage");
+            std::process::exit(1);
+        }
+    };
+
+    let hot_path = &storage.hot_partition().meta.path;
+    if storage.hot_partition().meta.row_count == 0 {
+        println!("Hot partition is empty, nothing to index");
+        return;
+    }
+
+    tracing::info!(
+        rows = storage.hot_partition().meta.row_count,
+        "building indexes on hot partition"
+    );
+    if let Err(e) = logex_index::IndexBuilder::build_all_indexes(hot_path) {
+        tracing::error!(error = %e, "failed to build indexes");
+        std::process::exit(1);
+    }
+    tracing::info!("indexes built successfully");
 }
 
 fn run_info(config: PartitionManagerConfig) {
