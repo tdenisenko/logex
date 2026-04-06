@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use logex_server::AppState;
+use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 
 #[derive(Parser, Debug)]
@@ -62,7 +62,10 @@ async fn main() {
         "storage ready"
     );
 
-    let state = Arc::new(AppState { storage });
+    let state = Arc::new(AppState {
+        storage,
+        subscriptions: Some(SubscriptionManager::new()),
+    });
 
     // Start gRPC server in background
     let grpc_state = Arc::clone(&state);
