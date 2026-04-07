@@ -3,6 +3,7 @@
 ## Direction
 
 - Keep the current Reth networking crates for now.
+- Expand the Reth networking surface selectively where it materially improves bootstrap or protocol correctness.
 - Rewriting DevP2P, ECIES, `eth` wire, and discovery from scratch before sync reliability is fully hardened would slow the project down and likely reintroduce bugs that mature clients have already solved.
 - The better near-term path is:
   - keep using the narrow Reth networking surface already in `logex-sync`
@@ -30,13 +31,19 @@
   - discv4 now uses tighter startup-oriented lookup/ping timing
   - active lookup now includes self lookups plus random lookups
   - persisted productive peers are also seeded into discv4, not just the TCP dial queue
+- Reth DNS discovery is now part of bootstrap:
+  - DNS ENR candidates are merged into the same dial queue as discv4 candidates
+  - DNS candidates are prioritized ahead of generic discv4 candidates
+  - startup now eagerly waits for an initial DNS batch before falling back to background-only discovery
+- Recently failed dial targets are now cooled down briefly so discovery can move on to fresh candidates instead of redialing the same weak peers immediately.
 - Latest live validation:
-  - warm restart on `/tmp/logex-live-persist-test5` quickly reached serving peers and advanced the persisted sync head to block `14847`
-  - fresh-dir cold start is still honest but still not reliably reaching a useful peer in this environment
+  - warm restart on `/tmp/logex-live-persist-test5` quickly reached `connected_peers=2`, `serving_peers=1`, resumed from block `14847`, and advanced the persisted sync head to block `18943`
+  - fresh-dir cold start on `/tmp/logex-dns-cold2` reached a non-empty pending queue faster (`pending_peers=136` after ~15s, `269` after ~45s) while staying honest about not yet being synced
+  - fresh-dir cold start is still the main open gap: candidate discovery is better, but this environment still does not consistently turn that into a serving peer quickly
 
 ## Next TODO
 
-1. Improve cold-start discovery further until blank data dirs reach a useful serving peer more consistently.
+1. Improve blank-dir candidate-to-serving-peer conversion until fresh data dirs reach a useful peer more consistently.
 2. Add end-to-end network integration tests for:
    - cold start
    - warm restart
@@ -44,7 +51,7 @@
    - resume from persisted head
 3. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
 4. Keep tightening peer scoring and request routing so weak peers are deprioritized faster.
-5. Decide whether to add discv5 and/or DNS discovery if discv4-only cold starts remain behind geth/reth.
+5. Decide whether to add discv5 if discv4 + DNS cold starts still remain behind geth/reth.
 6. Reconcile the public README with what the code actually implements.
 7. Decide later whether to internalize selected Reth-derived networking pieces after v1 sync behavior is stable.
 

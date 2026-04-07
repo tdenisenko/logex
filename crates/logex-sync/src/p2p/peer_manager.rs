@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ use eyre::{Result, bail};
 use futures::FutureExt;
 use futures::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
-use reth_discv4::{DiscoveryUpdate, Discv4};
+use reth_discv4::Discv4;
 use reth_eth_wire::{
     EthMessage, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders, GetReceipts,
     GetReceipts70, HeadersDirection, message::RequestPair,
@@ -21,7 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use super::connection::{self, PeerConnection};
-use super::discovery::Discovery;
+use super::discovery::{Discovery, DiscoveryCandidate, DiscoveryCandidateSource};
 
 /// Timeout for individual request/response roundtrips.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,9 +39,10 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 /// fetching headers (any peers > 0) or wait and retry.
 const FILL_BUDGET: Duration = Duration::from_secs(12);
 const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-const ACTIVE_RANDOM_LOOKUP_FANOUT: usize = 1;
+const ACTIVE_RANDOM_LOOKUP_FANOUT: usize = 3;
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
+const FAILED_DIAL_BACKOFF: Duration = Duration::from_secs(90);
 static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<B512>> =
     LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
 
@@ -50,7 +51,7 @@ pub struct PeerManager {
     secret_key: SecretKey,
     peers: Vec<PeerConnection>,
     discovery: Discv4,
-    discovery_updates: ReceiverStream<DiscoveryUpdate>,
+    discovery_candidates: ReceiverStream<DiscoveryCandidate>,
     /// Buffered candidates we haven't tried to connect to yet. The discovery
     /// stream emits records continuously, and we want to drain everything
     /// available before sleeping.
@@ -58,6 +59,10 @@ pub struct PeerManager {
     /// Peers that have already proved useful for sync and are worth
     /// persisting across restarts.
     productive: VecDeque<NodeRecord>,
+    /// Nodes that recently failed a dial or became unresponsive. Keeping a
+    /// short backoff here avoids redialing the same weak candidate over and
+    /// over while discovery keeps surfacing fresh options.
+    failed_dials: HashMap<B512, Instant>,
     our_head: Head,
     next_request_id: u64,
     last_responder: Option<B512>,
@@ -75,9 +80,10 @@ impl PeerManager {
             secret_key,
             peers: Vec::new(),
             discovery: discovery.handle,
-            discovery_updates: discovery.updates,
+            discovery_candidates: discovery.candidates,
             pending: VecDeque::new(),
             productive: VecDeque::new(),
+            failed_dials: HashMap::new(),
             our_head,
             next_request_id: 1,
             last_responder: None,
@@ -141,8 +147,8 @@ impl PeerManager {
     /// pending queue. Non-blocking — returns the number of new candidates added.
     fn drain_discovery(&mut self) -> usize {
         let mut added = 0;
-        while let Some(update) = self.discovery_updates.next().now_or_never().flatten() {
-            self.handle_update(update, &mut added);
+        while let Some(candidate) = self.discovery_candidates.next().now_or_never().flatten() {
+            self.handle_candidate(candidate, &mut added);
         }
         added
     }
@@ -151,17 +157,17 @@ impl PeerManager {
     /// then drain anything else that's immediately ready.
     async fn wait_for_discovery(&mut self) -> usize {
         let mut added = 0;
-        match timeout(DISCOVERY_WAIT, self.discovery_updates.next()).await {
-            Ok(Some(update)) => self.handle_update(update, &mut added),
+        match timeout(DISCOVERY_WAIT, self.discovery_candidates.next()).await {
+            Ok(Some(candidate)) => self.handle_candidate(candidate, &mut added),
             Ok(None) => {
                 // Stream closed - discovery service died.
-                warn!("discovery update stream closed");
+                warn!("discovery candidate stream closed");
             }
             Err(_) => {} // timeout, no events yet
         }
         // Pick up anything else that arrived during the same poll window.
-        while let Some(update) = self.discovery_updates.next().now_or_never().flatten() {
-            self.handle_update(update, &mut added);
+        while let Some(candidate) = self.discovery_candidates.next().now_or_never().flatten() {
+            self.handle_candidate(candidate, &mut added);
         }
         added
     }
@@ -211,19 +217,10 @@ impl PeerManager {
         added
     }
 
-    fn handle_update(&mut self, update: DiscoveryUpdate, added: &mut usize) {
-        match update {
-            DiscoveryUpdate::Added(record) | DiscoveryUpdate::DiscoveredAtCapacity(record) => {
-                if self.enqueue_candidate(record) {
-                    *added += 1;
-                }
-            }
-            DiscoveryUpdate::Batch(updates) => {
-                for u in updates {
-                    self.handle_update(u, added);
-                }
-            }
-            DiscoveryUpdate::EnrForkId(_, _) | DiscoveryUpdate::Removed(_) => {}
+    fn handle_candidate(&mut self, candidate: DiscoveryCandidate, added: &mut usize) {
+        let prioritize = matches!(candidate.source, DiscoveryCandidateSource::Dns);
+        if self.enqueue_candidate_with_priority(candidate.node, prioritize) {
+            *added += 1;
         }
     }
 
@@ -231,10 +228,10 @@ impl PeerManager {
     /// connected (or `target` if `min` is already met). Bounded by
     /// [`FILL_BUDGET`].
     ///
-    /// Pulls candidates from the discv4 update stream (populated by the
-    /// background DHT walk) and dials them in parallel because most are
-    /// firewalled, saturated, or speak a different protocol — serial dialing
-    /// would burn the startup budget on dead nodes.
+    /// Pulls candidates from the discovery candidate stream (discv4 + DNS
+    /// bootstrap) and dials them in parallel because most are firewalled,
+    /// saturated, or speak a different protocol — serial dialing would burn
+    /// the startup budget on dead nodes.
     ///
     /// **Why two thresholds?** Mainnet peers drop connections that go idle
     /// during the eth handshake / first request, so the wall-clock window
@@ -340,6 +337,7 @@ impl PeerManager {
             while let Some((id, result)) = tasks.next().await {
                 match result {
                     Ok(conn) => {
+                        self.clear_failed_dial(conn.remote_id);
                         debug!(peer = %conn.remote_id, "new peer connected");
                         self.peers.push(conn);
                         if self.peers.len() >= min {
@@ -357,6 +355,7 @@ impl PeerManager {
                     }
                     Err(e) => {
                         failed += 1;
+                        self.record_failed_dial(id);
                         debug!(peer = %id, error = %e, "failed to connect to peer");
                     }
                 }
@@ -407,18 +406,31 @@ impl PeerManager {
         }
         self.discovery.add_node(node);
         self.remember_productive_with_priority(node, false);
-        self.enqueue_candidate(node);
+        self.enqueue_candidate_with_priority(node, true);
     }
 
     fn enqueue_candidate(&mut self, node: NodeRecord) -> bool {
-        if is_bootstrap_node(node.id) {
+        self.enqueue_candidate_with_priority(node, false)
+    }
+
+    fn enqueue_candidate_with_priority(&mut self, node: NodeRecord, prioritize: bool) -> bool {
+        self.prune_failed_dials();
+
+        if is_bootstrap_node(node.id) || node.tcp_port == 0 {
             return false;
         }
         if self.knows_node(node.id) {
             return false;
         }
+        if self.failed_dials.contains_key(&node.id) {
+            return false;
+        }
 
-        self.pending.push_back(node);
+        if prioritize {
+            self.pending.push_front(node);
+        } else {
+            self.pending.push_back(node);
+        }
         true
     }
 
@@ -450,6 +462,19 @@ impl PeerManager {
         let id = self.next_request_id;
         self.next_request_id += 1;
         id
+    }
+
+    fn record_failed_dial(&mut self, id: B512) {
+        self.failed_dials.insert(id, Instant::now());
+    }
+
+    fn clear_failed_dial(&mut self, id: B512) {
+        self.failed_dials.remove(&id);
+    }
+
+    fn prune_failed_dials(&mut self) {
+        self.failed_dials
+            .retain(|_, attempted_at| attempted_at.elapsed() < FAILED_DIAL_BACKOFF);
     }
 
     /// Request block headers starting at `start_block` for `count` blocks.
@@ -719,6 +744,9 @@ impl PeerManager {
     fn remove_dead_peers(&mut self, dead_peers: &HashSet<B512>) {
         if dead_peers.is_empty() {
             return;
+        }
+        for remote_id in dead_peers {
+            self.record_failed_dial(*remote_id);
         }
         self.peers
             .retain(|peer| !dead_peers.contains(&peer.remote_id));
