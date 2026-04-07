@@ -21,6 +21,12 @@
   .badge-synced .dot { background: #3fb950; }
   .badge-syncing { background: #3d2e00; color: #d29922; }
   .badge-syncing .dot { background: #d29922; animation: pulse 1.2s infinite; }
+  .badge-discovering, .badge-connecting { background: #10213a; color: #58a6ff; }
+  .badge-discovering .dot, .badge-connecting .dot { background: #58a6ff; animation: pulse 1.2s infinite; }
+  .badge-reconnecting { background: #3d2e00; color: #d29922; }
+  .badge-reconnecting .dot { background: #d29922; animation: pulse 1.2s infinite; }
+  .badge-disconnected { background: #3b1114; color: #f85149; }
+  .badge-disconnected .dot { background: #f85149; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
   .stat { color: #8b949e; }
   .stat b { color: #c9d1d9; }
@@ -65,9 +71,11 @@
   </div>
   <div class="status-panel" id="statusPanel">
     <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
-    <span class="stat">Synced: <b id="stBlock">--</b></span>
+    <span class="stat">Current: <b id="stBlock">--</b></span>
     <span class="stat">Target: <b id="stTarget">--</b></span>
     <span class="stat">Indexed: <b id="stIndexed">--</b></span>
+    <span class="stat">Peers: <b id="stPeers">--</b></span>
+    <span class="stat">Candidates: <b id="stPending">--</b></span>
     <span class="stat">Rate: <b id="stSpeed">--</b> blk/min</span>
     <span class="stat">ETA: <b id="stEta">--</b></span>
     <span class="stat">Rows: <b id="stRows">--</b></span>
@@ -128,32 +136,53 @@ function fmtEta(seconds) {
   return s + 's';
 }
 
+function stateToBadge(state) {
+  switch (state) {
+    case 'synced':
+      return { className: 'status-badge badge-synced', label: 'Synced' };
+    case 'syncing':
+      return { className: 'status-badge badge-syncing', label: 'Syncing' };
+    case 'discovering':
+      return { className: 'status-badge badge-discovering', label: 'Discovering' };
+    case 'connecting':
+      return { className: 'status-badge badge-connecting', label: 'Connecting' };
+    case 'reconnecting':
+      return { className: 'status-badge badge-reconnecting', label: 'Reconnecting' };
+    case 'disconnected':
+      return { className: 'status-badge badge-disconnected', label: 'Disconnected' };
+    default:
+      return { className: 'status-badge badge-syncing', label: 'Starting' };
+  }
+}
+
 function updateStatus(data) {
   var current = Number(data.current_block || 0);
   var target = Number(data.target_block || 0);
-  var synced = data.synced === true || (target > 0 && current >= target);
+  var nodeState = data.node_state || 'starting';
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
-  if (synced) {
-    badge.className = 'status-badge badge-synced';
-    badgeText.textContent = 'Synced';
-  } else {
-    badge.className = 'status-badge badge-syncing';
-    badgeText.textContent = 'Syncing';
-  }
+  var badgeData = stateToBadge(nodeState);
+  badge.className = badgeData.className;
+  badgeText.textContent = data.node_state_label || badgeData.label;
   var remaining = target > current ? target - current : 0;
   var pct = target > 0 ? Math.min((current / target) * 100, 100) : 0;
 
   document.getElementById('stBlock').textContent = fmt(current);
   document.getElementById('stTarget').textContent = fmt(target);
   document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
+  document.getElementById('stPeers').textContent = fmt(data.connected_peers);
+  document.getElementById('stPending').textContent = fmt(data.pending_peers);
   document.getElementById('stSpeed').textContent = data.blocks_per_minute != null ? data.blocks_per_minute.toFixed(1) : '--';
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
   document.getElementById('stRows').textContent = fmt(data.total_rows);
   document.getElementById('stLogs').textContent = fmt(data.logs_ingested);
   document.getElementById('stHead').textContent = fmt(data.head_block);
   document.getElementById('stRemaining').textContent = fmt(remaining);
-  document.getElementById('stProgressPct').textContent = target > 0 ? pct.toFixed(1) + '% synced' : '--';
+  if (nodeState === 'syncing' || nodeState === 'synced') {
+    document.getElementById('stProgressPct').textContent = target > 0 ? pct.toFixed(1) + '% synced' : badgeText.textContent;
+  } else {
+    document.getElementById('stProgressPct').textContent = badgeText.textContent;
+  }
   document.getElementById('stProgressFill').style.width = pct.toFixed(1) + '%';
 }
 

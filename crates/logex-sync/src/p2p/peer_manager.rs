@@ -13,11 +13,11 @@ use reth_eth_wire::{
 };
 use reth_eth_wire_types::NetworkPrimitives;
 use reth_ethereum_forks::Head;
-use reth_network_peers::NodeRecord;
+use reth_network_peers::{NodeRecord, mainnet_nodes};
 use secp256k1::SecretKey;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::connection::{self, PeerConnection};
 use super::discovery::Discovery;
@@ -60,7 +60,10 @@ impl PeerManager {
             peers: Vec::new(),
             discovery: discovery.handle,
             discovery_updates: discovery.updates,
-            pending: VecDeque::new(),
+            // Seed the queue with hardcoded mainnet bootnodes so startup can
+            // dial immediately instead of waiting on the discovery stream to
+            // produce its first records.
+            pending: mainnet_nodes().into_iter().collect(),
             our_head,
             next_request_id: 1,
         }
@@ -82,6 +85,11 @@ impl PeerManager {
             .iter()
             .filter_map(|peer| peer.remote_status.latest_block)
             .max()
+    }
+
+    /// Number of queued peer candidates awaiting connection attempts.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
     /// Drain whatever discovery events are immediately available into the
@@ -113,10 +121,33 @@ impl PeerManager {
         added
     }
 
+    /// Actively query the DHT for nodes when passive discovery has not yet
+    /// produced any candidates.
+    async fn lookup_candidates(&mut self) -> usize {
+        let mut added = 0;
+        match timeout(FILL_BUDGET / 2, self.discovery.lookup_self()).await {
+            Ok(Ok(records)) => {
+                for record in records {
+                    if !self.knows_node(record.id) {
+                        self.pending.push_back(record);
+                        added += 1;
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                debug!(error = %err, "discovery lookup failed");
+            }
+            Err(_) => {
+                debug!("discovery lookup timed out");
+            }
+        }
+        added
+    }
+
     fn handle_update(&mut self, update: DiscoveryUpdate, added: &mut usize) {
         match update {
             DiscoveryUpdate::Added(record) | DiscoveryUpdate::DiscoveredAtCapacity(record) => {
-                if !self.is_connected(record.id) {
+                if !self.knows_node(record.id) {
                     self.pending.push_back(record);
                     *added += 1;
                 }
@@ -189,6 +220,13 @@ impl PeerManager {
             self.drain_discovery();
 
             if self.pending.is_empty() {
+                let added = self.lookup_candidates().await;
+                if added > 0 {
+                    info!(added, "seeded dial queue from active discovery lookup");
+                }
+            }
+
+            if self.pending.is_empty() {
                 let added = self.wait_for_discovery().await;
                 if added == 0 {
                     // No new candidates within the wait window — let the
@@ -214,8 +252,13 @@ impl PeerManager {
                 "dialing peer batch"
             );
 
+            if batch.is_empty() {
+                return;
+            }
+
             let secret_key = self.secret_key;
             let our_head = self.our_head;
+            let mut failed = 0usize;
             let mut tasks: FuturesUnordered<_> = batch
                 .into_iter()
                 .map(|node| async move {
@@ -235,6 +278,7 @@ impl PeerManager {
                         }
                     }
                     Err(e) => {
+                        failed += 1;
                         debug!(peer = %id, error = %e, "failed to connect to peer");
                     }
                 }
@@ -247,6 +291,14 @@ impl PeerManager {
                     );
                     return;
                 }
+            }
+
+            if failed > 0 && self.peers.is_empty() {
+                info!(
+                    failed,
+                    pending = self.pending.len(),
+                    "peer dial batch finished without a connection"
+                );
             }
 
             // Return as soon as we have `min` peers — letting the caller
@@ -265,6 +317,10 @@ impl PeerManager {
 
     fn is_connected(&self, id: B512) -> bool {
         self.peers.iter().any(|p| p.remote_id == id)
+    }
+
+    fn knows_node(&self, id: B512) -> bool {
+        self.is_connected(id) || self.pending.iter().any(|node| node.id == id)
     }
 
     fn next_id(&mut self) -> u64 {

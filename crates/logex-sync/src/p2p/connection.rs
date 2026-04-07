@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use alloy_primitives::{B512, U256};
+use alloy_primitives::B512;
 use eyre::{Result, eyre};
 use reth_ecies::stream::ECIESStream;
 use reth_eth_wire::{
@@ -98,7 +98,8 @@ async fn connect_inner(
         .eth_version()
         .map_err(|e| eyre!("eth capability not negotiated: {e}"))?;
 
-    let fork_filter = mainnet::mainnet_fork_filter(our_head);
+    let handshake_head = mainnet::handshake_head(our_head);
+    let fork_filter = mainnet::mainnet_fork_filter(handshake_head);
     let fork_id = fork_filter.current();
 
     // eth/69 dropped total_difficulty and added earliest/latest block fields.
@@ -108,7 +109,7 @@ async fn connect_inner(
         if negotiated_version >= EthVersion::Eth69 {
             (None, Some(0), Some(our_head.number))
         } else {
-            (Some(U256::ZERO), None, None)
+            (Some(handshake_head.total_difficulty), None, None)
         };
 
     let status = UnifiedStatus {
@@ -119,7 +120,11 @@ async fn connect_inner(
             hash: fork_id.hash,
             next: fork_id.next,
         },
-        blockhash: our_head.hash,
+        blockhash: if our_head.hash.is_zero() {
+            MAINNET_GENESIS
+        } else {
+            our_head.hash
+        },
         total_difficulty,
         earliest_block,
         latest_block,
