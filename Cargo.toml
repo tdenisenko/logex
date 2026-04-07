@@ -45,6 +45,7 @@ reth-eth-wire = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.
 reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-ecies = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-discv4 = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-dns-discovery = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3", features = ["secp256k1"] }
 reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
