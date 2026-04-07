@@ -21,6 +21,10 @@ use crate::p2p::peer_manager::PeerManager;
 use crate::progress::ProgressTracker;
 use crate::validation::validate_receipt_root;
 
+const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
+const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
+const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
+
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {
     config: SyncConfig,
@@ -123,13 +127,6 @@ impl SyncEngine {
         // Bailing on the first failure (the previous behavior) was fatal at
         // startup when we typically have only one or two peers.
         let mut current = start_block;
-        // Number of consecutive empty header responses we've gotten. A single
-        // empty response doesn't mean we're caught up — peers routinely return
-        // empty bodies when they're load-shedding, syncing, or just being
-        // uncooperative. Only treat the chain as caught up after several
-        // consecutive empty responses, ideally from different peers (the
-        // peer rotation in send_request_and_receive gives us this naturally).
-        const EMPTY_THRESHOLD: u32 = 5;
         let mut consecutive_empty: u32 = 0;
         loop {
             if self.shutdown_requested() {
@@ -191,20 +188,55 @@ impl SyncEngine {
             self.refresh_connectivity_state();
             if headers.is_empty() {
                 consecutive_empty += 1;
-                if consecutive_empty >= EMPTY_THRESHOLD {
+                let target_block = self.known_target_block();
+                if let Some(target_block) =
+                    should_mark_historical_complete(current, target_block, consecutive_empty)
+                {
                     tracing::info!(
-                        block = current.saturating_sub(1),
+                        current_block = current.saturating_sub(1),
+                        target_block,
                         consecutive_empty,
-                        "historical sync complete"
+                        "historical catch-up reached advertised peer tip"
                     );
                     self.progress.mark_synced();
+                    self.sync_status_peers();
                     break;
                 }
-                tracing::debug!(
-                    current,
-                    consecutive_empty,
-                    "peer returned empty headers, retrying"
-                );
+
+                if should_switch_to_live_without_target(current, target_block, consecutive_empty) {
+                    tracing::info!(
+                        current_block = current.saturating_sub(1),
+                        consecutive_empty,
+                        "no higher historical batches available from current serving peers, switching to head polling"
+                    );
+                    break;
+                }
+
+                if let Some(target_block) = target_block {
+                    tracing::debug!(
+                        next_block = current,
+                        target_block,
+                        consecutive_empty,
+                        "peer returned empty headers before the advertised historical target was confirmed"
+                    );
+                } else if consecutive_empty == 1
+                    || consecutive_empty.is_multiple_of(HISTORICAL_EMPTY_THRESHOLD)
+                {
+                    tracing::info!(
+                        next_block = current,
+                        consecutive_empty,
+                        connected_peers = self.peers.peer_count(),
+                        serving_peers = self.peers.serving_peer_count(),
+                        pending_peers = self.peers.pending_count(),
+                        "waiting for a serving peer to provide a credible sync target"
+                    );
+                } else {
+                    tracing::debug!(
+                        next_block = current,
+                        consecutive_empty,
+                        "peer returned empty headers while the sync target is still unknown"
+                    );
+                }
                 continue;
             }
             consecutive_empty = 0;
@@ -317,7 +349,11 @@ impl SyncEngine {
             }
         }
 
-        tracing::info!("entering live sync mode");
+        tracing::info!(
+            current_block = self.current_block(),
+            target_block = self.known_target_block(),
+            "polling peers for new canonical blocks"
+        );
         self.run_live_sync().await
     }
 
@@ -326,7 +362,7 @@ impl SyncEngine {
         loop {
             if cancelable(
                 &mut self.shutdown,
-                tokio::time::sleep(Duration::from_secs(12)),
+                tokio::time::sleep(LIVE_SYNC_POLL_INTERVAL),
             )
             .await
             .is_none()
@@ -361,25 +397,36 @@ impl SyncEngine {
                 status.current_block
             };
 
-            let headers =
-                match cancelable(&mut self.shutdown, self.peers.get_headers(current + 1, 16)).await
-                {
-                    Some(Ok(h)) if !h.is_empty() => {
-                        self.refresh_connectivity_state();
-                        h
-                    }
-                    Some(Ok(_)) => {
-                        self.progress.mark_synced();
+            let headers = match cancelable(
+                &mut self.shutdown,
+                self.peers.get_headers(current + 1, 16),
+            )
+            .await
+            {
+                Some(Ok(h)) if !h.is_empty() => {
+                    self.refresh_connectivity_state();
+                    h
+                }
+                Some(Ok(_)) => {
+                    if self.try_mark_synced("caught up to advertised peer tip") {
                         self.sync_status_peers();
-                        continue;
-                    }
-                    Some(Err(e)) => {
+                    } else {
                         self.refresh_connectivity_state();
-                        tracing::debug!(error = %e, current, "live header request failed");
-                        continue;
+                        tracing::debug!(
+                            current_block = current,
+                            target_block = self.known_target_block(),
+                            "live head poll returned no headers while waiting for a better peer response"
+                        );
                     }
-                    None => return self.finish_shutdown(),
-                };
+                    continue;
+                }
+                Some(Err(e)) => {
+                    self.refresh_connectivity_state();
+                    tracing::debug!(error = %e, current, "live header request failed");
+                    continue;
+                }
+                None => return self.finish_shutdown(),
+            };
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
 
@@ -440,8 +487,11 @@ impl SyncEngine {
                 continue;
             }
 
-            self.progress.mark_synced();
-            self.sync_status_peers();
+            if self.try_mark_synced("caught up to advertised peer tip") {
+                self.sync_status_peers();
+            } else {
+                self.refresh_connectivity_state();
+            }
         }
     }
 
@@ -531,25 +581,49 @@ impl SyncEngine {
     }
 
     fn refresh_connectivity_state(&self) {
-        let state = if self.peers.serving_peer_count() > 0 {
-            NodeState::Syncing
-        } else if self.peers.peer_count() > 0 {
-            NodeState::Connecting
-        } else if self.connected_once {
-            if self.peers.pending_count() > 0 {
-                NodeState::Reconnecting
-            } else {
-                NodeState::Disconnected
-            }
-        } else {
-            if self.peers.pending_count() > 0 {
-                NodeState::Connecting
-            } else {
-                NodeState::Discovering
-            }
-        };
+        let (current_block, target_block) = self.sync_cursor();
+        let state = runtime_state_for_connectivity(
+            self.connected_once,
+            self.peers.peer_count(),
+            self.peers.serving_peer_count(),
+            self.peers.pending_count(),
+            current_block,
+            target_block,
+        );
 
         self.set_runtime_state(state);
+    }
+
+    fn sync_cursor(&self) -> (u64, u64) {
+        let status = self.sync_status.lock().unwrap();
+        (status.current_block, status.target_block)
+    }
+
+    fn current_block(&self) -> u64 {
+        self.sync_cursor().0
+    }
+
+    fn known_target_block(&self) -> Option<u64> {
+        let (_, target_block) = self.sync_cursor();
+        (target_block > 0).then_some(target_block)
+    }
+
+    fn try_mark_synced(&self, reason: &'static str) -> bool {
+        let (current_block, target_block) = self.sync_cursor();
+        if target_block == 0 || current_block < target_block {
+            return false;
+        }
+
+        let already_synced = {
+            let status = self.sync_status.lock().unwrap();
+            status.node_state == NodeState::Synced
+        };
+
+        self.progress.mark_synced();
+        if !already_synced {
+            tracing::info!(current_block, target_block, reason, "sync caught up");
+        }
+        true
     }
 
     fn shutdown_requested(&self) -> bool {
@@ -566,6 +640,53 @@ impl SyncEngine {
 
     pub fn known_peers(&self) -> Vec<NodeRecord> {
         self.peers.known_peers()
+    }
+}
+
+fn should_mark_historical_complete(
+    next_block: u64,
+    target_block: Option<u64>,
+    consecutive_empty: u32,
+) -> Option<u64> {
+    let target_block = target_block?;
+    (next_block > target_block && consecutive_empty >= HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES)
+        .then_some(target_block)
+}
+
+fn should_switch_to_live_without_target(
+    next_block: u64,
+    target_block: Option<u64>,
+    consecutive_empty: u32,
+) -> bool {
+    target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
+}
+
+fn runtime_state_for_connectivity(
+    connected_once: bool,
+    connected_peers: usize,
+    serving_peers: usize,
+    pending_peers: usize,
+    current_block: u64,
+    target_block: u64,
+) -> NodeState {
+    if serving_peers > 0 {
+        if target_block > 0 && current_block >= target_block {
+            NodeState::Synced
+        } else {
+            NodeState::Syncing
+        }
+    } else if connected_peers > 0 {
+        NodeState::Connecting
+    } else if connected_once {
+        if pending_peers > 0 {
+            NodeState::Reconnecting
+        } else {
+            NodeState::Disconnected
+        }
+    } else if pending_peers > 0 {
+        NodeState::Connecting
+    } else {
+        NodeState::Discovering
     }
 }
 
@@ -599,4 +720,68 @@ where
             (tx_hash, logs)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn historical_completion_requires_known_target_and_confirmed_empty_responses() {
+        assert_eq!(
+            should_mark_historical_complete(101, Some(100), HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
+            Some(100)
+        );
+        assert_eq!(
+            should_mark_historical_complete(100, Some(100), HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
+            None
+        );
+        assert_eq!(
+            should_mark_historical_complete(101, None, HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
+            None
+        );
+    }
+
+    #[test]
+    fn historical_fallback_to_live_requires_real_progress_without_target() {
+        assert!(should_switch_to_live_without_target(
+            2,
+            None,
+            HISTORICAL_EMPTY_THRESHOLD
+        ));
+        assert!(!should_switch_to_live_without_target(
+            1,
+            None,
+            HISTORICAL_EMPTY_THRESHOLD
+        ));
+        assert!(!should_switch_to_live_without_target(
+            2,
+            Some(10),
+            HISTORICAL_EMPTY_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn runtime_state_only_reports_synced_when_caught_up_to_known_tip() {
+        assert_eq!(
+            runtime_state_for_connectivity(false, 0, 0, 0, 0, 0),
+            NodeState::Discovering
+        );
+        assert_eq!(
+            runtime_state_for_connectivity(false, 1, 0, 0, 0, 0),
+            NodeState::Connecting
+        );
+        assert_eq!(
+            runtime_state_for_connectivity(true, 0, 0, 1, 0, 0),
+            NodeState::Reconnecting
+        );
+        assert_eq!(
+            runtime_state_for_connectivity(true, 1, 1, 0, 50, 100),
+            NodeState::Syncing
+        );
+        assert_eq!(
+            runtime_state_for_connectivity(true, 1, 1, 0, 100, 100),
+            NodeState::Synced
+        );
+    }
 }
