@@ -28,6 +28,13 @@
   - the persisted sync head also stores the block timestamp
   - historical sync resumes explicitly from the sync head, not only from the highest block that emitted logs
   - legacy metadata without timestamps is still accepted on disk
+- The sync loop is more resilient against bad serving peers now:
+  - empty or partial bodies/receipts responses are no longer treated as successful requests
+  - peers that return incomplete block data are penalized and disconnected instead of being retried forever
+  - the default bodies/receipts fetch batch is now more conservative to reduce size-limit related mismatches
+- Shutdown is now bounded:
+  - LogEx no longer waits indefinitely for the Reth network task to stop
+  - node/server/background tasks are aborted after a timeout if graceful shutdown stalls
 - Old direct dependencies from the previous custom networking path were removed from `logex-sync`.
 - Current validation on this refactor:
   - `cargo check -p logex-node`
@@ -42,7 +49,7 @@
    - fresh data dir
    - warm restart with persisted peers
    - sustained historical sync
-   - graceful shutdown and resume
+   - graceful shutdown and resume under real peer churn
 2. Improve candidate-to-serving-peer conversion further if real-world cold starts are still slower than geth/reth.
 3. Decide whether to keep the current lightweight request scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
 4. Persist a recent canonical header window so restart-boundary reorg recovery is durable.

@@ -36,6 +36,7 @@ const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
 const RESEED_KNOWN_PEERS_INTERVAL: Duration = Duration::from_secs(15);
+const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
@@ -155,13 +156,41 @@ impl PeerManager {
 
     /// Gracefully stop the network manager and wait for the background task.
     pub async fn shutdown(&mut self) {
-        if let Err(error) = self.network.shutdown().await {
-            warn!(%error, "failed to shut down p2p network cleanly");
+        self.network_events = Box::pin(tokio_stream::empty());
+        self.discovery_events = Box::pin(tokio_stream::empty());
+
+        match timeout(NETWORK_SHUTDOWN_TIMEOUT, self.network.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "failed to shut down p2p network cleanly");
+            }
+            Err(_) => {
+                warn!(
+                    ?NETWORK_SHUTDOWN_TIMEOUT,
+                    "timed out waiting for p2p network shutdown acknowledgement"
+                );
+            }
         }
-        if let Some(task) = self.network_task.take()
-            && let Err(error) = task.await
-        {
-            warn!(%error, "p2p network task exited unexpectedly");
+
+        if let Some(mut task) = self.network_task.take() {
+            match timeout(NETWORK_SHUTDOWN_TIMEOUT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(%error, "p2p network task exited unexpectedly");
+                }
+                Err(_) => {
+                    warn!(
+                        ?NETWORK_SHUTDOWN_TIMEOUT,
+                        "timed out waiting for p2p network task to stop, aborting it"
+                    );
+                    task.abort();
+                    if let Err(error) = task.await
+                        && !error.is_cancelled()
+                    {
+                        warn!(%error, "p2p network task aborted with an unexpected error");
+                    }
+                }
+            }
         }
     }
 
@@ -273,11 +302,44 @@ impl PeerManager {
         hashes: Vec<B256>,
     ) -> Result<Vec<<EthNetworkPrimitives as NetworkPrimitives>::BlockBody>> {
         self.drain_events_now();
-        self.send_request_to_any_peer(move |peer| PeerRequest::GetBlockBodies {
-            request: GetBlockBodies(hashes.clone()),
-            response: peer,
-        })
-        .await
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let requested = hashes.len();
+        let peer_ids = self.peer_ids_for_requests();
+        let mut dead_peers = HashSet::new();
+
+        for peer_id in peer_ids {
+            let request_hashes = hashes.clone();
+            match self
+                .request_with_channel(peer_id, &move |peer| PeerRequest::GetBlockBodies {
+                    request: GetBlockBodies(request_hashes.clone()),
+                    response: peer,
+                })
+                .await
+            {
+                Ok(response) => {
+                    if response_len_matches_request(requested, response.len()) {
+                        self.on_request_success(peer_id);
+                        return Ok(response);
+                    }
+
+                    self.on_incomplete_response(peer_id, "block bodies", requested, response.len());
+                    dead_peers.insert(peer_id);
+                }
+                Err(error) => {
+                    let should_drop = self.on_request_error(peer_id, &error);
+                    debug!(peer = %peer_id, ?error, "body request failed");
+                    if should_drop {
+                        dead_peers.insert(peer_id);
+                    }
+                }
+            }
+        }
+
+        self.remove_dead_peers(&dead_peers);
+        bail!("no peers available to handle block body request")
     }
 
     /// Request receipts for the given block hashes.
@@ -294,7 +356,11 @@ impl PeerManager {
         >,
     > {
         self.drain_events_now();
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
 
+        let requested = hashes.len();
         let peer_ids = self.peer_ids_for_requests();
         let mut dead_peers = HashSet::new();
 
@@ -314,11 +380,16 @@ impl PeerManager {
 
             match attempt {
                 Ok(receipts) => {
-                    if !receipts.is_empty() {
-                        self.mark_peer_serving(peer_id);
+                    if response_len_matches_request(requested, receipts.len()) {
+                        if !receipts.is_empty() {
+                            self.mark_peer_serving(peer_id);
+                        }
+                        self.on_request_success(peer_id);
+                        return Ok(receipts);
                     }
-                    self.on_request_success(peer_id);
-                    return Ok(receipts);
+
+                    self.on_incomplete_response(peer_id, "receipts", requested, receipts.len());
+                    dead_peers.insert(peer_id);
                 }
                 Err(error) => {
                     let should_drop = self.on_request_error(peer_id, &error);
@@ -332,6 +403,24 @@ impl PeerManager {
 
         self.remove_dead_peers(&dead_peers);
         bail!("no peers available to handle receipt request")
+    }
+
+    fn on_incomplete_response(
+        &mut self,
+        peer_id: PeerId,
+        response_kind: &'static str,
+        requested: usize,
+        returned: usize,
+    ) {
+        self.network
+            .reputation_change(peer_id, ReputationChangeKind::BadMessage);
+        warn!(
+            peer = %peer_id,
+            response_kind,
+            requested,
+            returned,
+            "peer returned an incomplete response, disconnecting it"
+        );
     }
 
     async fn send_request_to_any_peer<T, W, MakeRequest>(
@@ -754,6 +843,10 @@ fn is_bootstrap_node(id: PeerId) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
 }
 
+fn response_len_matches_request(requested: usize, returned: usize) -> bool {
+    requested == returned
+}
+
 fn normalize_network_head(mut head: Head) -> Head {
     if head.hash.is_zero() {
         head.hash = MAINNET.genesis_hash();
@@ -818,5 +911,12 @@ mod tests {
             PeerId::repeat_byte(0x42),
         );
         assert!(!is_bootstrap_node(non_bootstrap.id));
+    }
+
+    #[test]
+    fn response_length_must_match_request() {
+        assert!(response_len_matches_request(8, 8));
+        assert!(!response_len_matches_request(8, 0));
+        assert!(!response_len_matches_request(8, 7));
     }
 }

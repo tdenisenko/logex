@@ -30,7 +30,7 @@ impl Default for SyncConfig {
             checkpoint: None,
             max_peers: 50,
             header_batch_size: 1024,
-            fetch_batch_size: 128,
+            fetch_batch_size: 32,
         }
     }
 }

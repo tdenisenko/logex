@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -23,6 +24,7 @@ use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_ethereum_forks::Head;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -465,8 +467,21 @@ async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
 }
 
 async fn log_task_exit(name: &str, handle: tokio::task::JoinHandle<()>) {
-    if let Err(e) = handle.await {
-        tracing::warn!(task = name, error = %e, "task exited unexpectedly");
+    let mut handle = handle;
+    match tokio::time::timeout(TASK_SHUTDOWN_TIMEOUT, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task = name, error = %e, "task exited unexpectedly");
+        }
+        Err(_) => {
+            tracing::warn!(
+                task = name,
+                ?TASK_SHUTDOWN_TIMEOUT,
+                "task did not stop in time, aborting it"
+            );
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 }
 
