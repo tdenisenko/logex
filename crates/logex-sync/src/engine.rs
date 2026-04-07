@@ -60,48 +60,117 @@ impl SyncEngine {
 
         tracing::info!(start_block, "starting sync");
 
-        // Ensure we have peers
-        self.peers.fill_peers(self.config.max_peers).await;
-        if self.peers.peer_count() == 0 {
-            tracing::warn!("no peers found, waiting...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            self.peers.fill_peers(self.config.max_peers).await;
-            if self.peers.peer_count() == 0 {
-                eyre::bail!("unable to connect to any peers");
+        // Wait until we have at least one connected peer. Discovery's routing
+        // table is empty at startup and most discovered nodes are dead, so we
+        // poll fill_peers with backoff rather than bailing on first failure.
+        //
+        // We pass min=1 here to return as soon as a single peer is connected,
+        // so the engine can issue its first request immediately. Mainnet peers
+        // disconnect us if we sit idle after the eth handshake; greedily
+        // filling to max_peers before doing any work was the previous bug.
+        let mut attempt: u32 = 0;
+        loop {
+            self.peers.fill_peers(1, self.config.max_peers).await;
+            if self.peers.peer_count() > 0 {
+                break;
             }
+            attempt += 1;
+            let delay = Duration::from_secs((attempt as u64).min(10));
+            tracing::warn!(
+                attempt,
+                ?delay,
+                "no peers connected yet, waiting for discovery to populate"
+            );
+            tokio::time::sleep(delay).await;
         }
         tracing::info!(peers = self.peers.peer_count(), "connected to peers");
 
-        // Historical sync: batch-fetch until caught up
+        // Historical sync: batch-fetch until caught up.
+        //
+        // P2P peers churn constantly — they disconnect us mid-request, return
+        // empty bodies, or just go away. Treat each request as best-effort:
+        // on any error, top up peers and retry from the same `current` block.
+        // Bailing on the first failure (the previous behavior) was fatal at
+        // startup when we typically have only one or two peers.
         let mut current = start_block;
+        // Number of consecutive empty header responses we've gotten. A single
+        // empty response doesn't mean we're caught up — peers routinely return
+        // empty bodies when they're load-shedding, syncing, or just being
+        // uncooperative. Only treat the chain as caught up after several
+        // consecutive empty responses, ideally from different peers (the
+        // peer rotation in send_request_and_receive gives us this naturally).
+        const EMPTY_THRESHOLD: u32 = 5;
+        let mut consecutive_empty: u32 = 0;
         loop {
+            // Top up peers when we drop below half the target. We pass min=1
+            // so fill_peers returns as soon as we have any usable peer —
+            // mainnet peers disconnect quickly when idle, so issuing the
+            // next request fast is more important than batching dial attempts.
             if self.peers.peer_count() < self.config.max_peers / 2 {
-                self.peers.fill_peers(self.config.max_peers).await;
+                self.peers.fill_peers(1, self.config.max_peers).await;
+            }
+            if self.peers.peer_count() == 0 {
+                tracing::warn!("no peers available, waiting for discovery");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
             }
 
-            let headers = self
+            let headers = match self
                 .peers
                 .get_headers(current, self.config.header_batch_size)
-                .await?;
+                .await
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::debug!(error = %e, current, "header request failed, retrying");
+                    continue;
+                }
+            };
             if headers.is_empty() {
-                tracing::info!(
-                    block = current.saturating_sub(1),
-                    "historical sync complete"
+                consecutive_empty += 1;
+                if consecutive_empty >= EMPTY_THRESHOLD {
+                    tracing::info!(
+                        block = current.saturating_sub(1),
+                        consecutive_empty,
+                        "historical sync complete"
+                    );
+                    self.progress.mark_synced();
+                    break;
+                }
+                tracing::debug!(
+                    current,
+                    consecutive_empty,
+                    "peer returned empty headers, retrying"
                 );
-                self.progress.mark_synced();
-                break;
+                continue;
             }
+            consecutive_empty = 0;
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
 
             let fetch_size = self.config.fetch_batch_size;
+            let mut chunk_failed = false;
             for chunk_start in (0..headers.len()).step_by(fetch_size) {
                 let chunk_end = (chunk_start + fetch_size).min(headers.len());
                 let chunk_headers = &headers[chunk_start..chunk_end];
                 let chunk_hashes = hashes[chunk_start..chunk_end].to_vec();
 
-                let bodies = self.peers.get_bodies(chunk_hashes.clone()).await?;
-                let receipts = self.peers.get_receipts(chunk_hashes.clone()).await?;
+                let bodies = match self.peers.get_bodies(chunk_hashes.clone()).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "body request failed, retrying batch");
+                        chunk_failed = true;
+                        break;
+                    }
+                };
+                let receipts = match self.peers.get_receipts(chunk_hashes.clone()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "receipt request failed, retrying batch");
+                        chunk_failed = true;
+                        break;
+                    }
+                };
 
                 if bodies.len() != chunk_headers.len() || receipts.len() != chunk_headers.len() {
                     tracing::warn!(
@@ -148,7 +217,22 @@ impl SyncEngine {
                 }
             }
 
-            current = headers.last().map(|h| h.number() + 1).unwrap_or(current);
+            // Only advance `current` if every chunk in the batch succeeded.
+            // A failed chunk means we already top-up peers next iteration and
+            // re-request from the same starting block.
+            if !chunk_failed
+                && let Some(last) = headers.last()
+            {
+                // Tell new peer handshakes how far we are. Without this we
+                // keep advertising head=0 forever, which makes peers treat
+                // us like a fresh useless node and disconnect us early.
+                self.peers.set_head(Head {
+                    number: last.number(),
+                    hash: last.hash_slow(),
+                    ..Default::default()
+                });
+                current = last.number() + 1;
+            }
         }
 
         tracing::info!("entering live sync mode");
@@ -161,7 +245,7 @@ impl SyncEngine {
             tokio::time::sleep(Duration::from_secs(12)).await;
 
             if self.peers.peer_count() < 3 {
-                self.peers.fill_peers(self.config.max_peers).await;
+                self.peers.fill_peers(1, self.config.max_peers).await;
             }
 
             let current = {
