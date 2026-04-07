@@ -159,17 +159,18 @@ function stateToBadge(state) {
 function updateStatus(data) {
   var current = Number(data.current_block || 0);
   var target = Number(data.target_block || 0);
+  var targetKnown = target > 0;
   var nodeState = data.node_state || 'starting';
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
   var badgeData = stateToBadge(nodeState);
   badge.className = badgeData.className;
   badgeText.textContent = data.node_state_label || badgeData.label;
-  var remaining = target > current ? target - current : 0;
-  var pct = target > 0 ? Math.min((current / target) * 100, 100) : 0;
+  var remaining = targetKnown && target > current ? target - current : null;
+  var pct = targetKnown ? Math.min((current / target) * 100, 100) : 0;
 
   document.getElementById('stBlock').textContent = fmt(current);
-  document.getElementById('stTarget').textContent = fmt(target);
+  document.getElementById('stTarget').textContent = targetKnown ? fmt(target) : 'Awaiting tip';
   document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
   document.getElementById('stPeers').textContent = fmt(data.connected_peers);
   document.getElementById('stServing').textContent = fmt(data.serving_peers);
@@ -178,10 +179,16 @@ function updateStatus(data) {
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
   document.getElementById('stRows').textContent = fmt(data.total_rows);
   document.getElementById('stLogs').textContent = fmt(data.logs_ingested);
-  document.getElementById('stHead').textContent = fmt(data.head_block);
-  document.getElementById('stRemaining').textContent = fmt(remaining);
+  document.getElementById('stHead').textContent = targetKnown ? fmt(target) : '--';
+  document.getElementById('stRemaining').textContent = remaining == null ? '--' : fmt(remaining);
   if (nodeState === 'syncing' || nodeState === 'synced') {
-    document.getElementById('stProgressPct').textContent = target > 0 ? pct.toFixed(1) + '% synced' : badgeText.textContent;
+    if (targetKnown) {
+      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% synced';
+    } else {
+      document.getElementById('stProgressPct').textContent = 'Syncing, awaiting peer tip';
+    }
+  } else if (nodeState === 'connecting' && Number(data.connected_peers || 0) > 0) {
+    document.getElementById('stProgressPct').textContent = 'Connected, waiting for serving peer';
   } else {
     document.getElementById('stProgressPct').textContent = badgeText.textContent;
   }

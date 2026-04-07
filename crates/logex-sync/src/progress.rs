@@ -29,10 +29,26 @@ impl ProgressTracker {
 
     /// Set the network tip as the sync target.
     pub fn set_target(&self, target_block: u64) {
+        if target_block == 0 {
+            return;
+        }
+
         let mut status = self.status.lock().unwrap();
+        let previous_target = status.target_block;
         status.target_block = status.target_block.max(target_block);
         status.syncing =
             status.target_block > status.current_block && status.node_state == NodeState::Syncing;
+
+        if status.target_block > previous_target
+            && (previous_target == 0 || status.target_block.saturating_sub(previous_target) >= 1024)
+        {
+            tracing::info!(
+                current_block = status.current_block,
+                target_block = status.target_block,
+                remaining_blocks = status.target_block.saturating_sub(status.current_block),
+                "updated sync target from peer announcements"
+            );
+        }
     }
 
     /// Update the node's connectivity state and peer counts.
@@ -44,12 +60,26 @@ impl ProgressTracker {
         pending_peers: usize,
     ) {
         let mut status = self.status.lock().unwrap();
+        let previous_state = status.node_state;
         status.node_state = node_state;
         status.syncing =
             status.target_block > status.current_block && node_state == NodeState::Syncing;
         status.connected_peers = connected_peers;
         status.serving_peers = serving_peers;
         status.pending_peers = pending_peers;
+
+        if previous_state != node_state {
+            tracing::info!(
+                from = previous_state.as_label(),
+                to = node_state.as_label(),
+                current_block = status.current_block,
+                target_block = status.target_block,
+                connected_peers,
+                serving_peers,
+                pending_peers,
+                "node state changed"
+            );
+        }
     }
 
     /// Record that a block has been ingested.

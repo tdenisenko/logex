@@ -109,6 +109,7 @@ impl PeerManager {
         self.peers
             .iter()
             .filter_map(|peer| peer.remote_status.latest_block)
+            .filter(|block| *block > 0)
             .max()
     }
 
@@ -120,16 +121,6 @@ impl PeerManager {
     /// Snapshot of known peers suitable for writing to disk on shutdown.
     pub fn known_peers(&self) -> Vec<NodeRecord> {
         let mut peers = Vec::with_capacity(MAX_PERSISTED_PEERS);
-
-        for peer in &self.peers {
-            if is_bootstrap_node(peer.remote_record.id) {
-                continue;
-            }
-            push_unique_peer(&mut peers, peer.remote_record);
-            if peers.len() >= MAX_PERSISTED_PEERS {
-                return peers;
-            }
-        }
 
         for peer in &self.productive {
             if is_bootstrap_node(peer.id) {
