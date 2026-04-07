@@ -12,7 +12,7 @@ use logex_index::IndexBuilder;
 use logex_ingestion::extract;
 use logex_server::SubscriptionManager;
 use logex_storage::PartitionManager;
-use logex_types::SyncStatus;
+use logex_types::{NodeState, SyncStatus};
 
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
@@ -29,6 +29,7 @@ pub struct SyncEngine {
     sync_status: Arc<std::sync::Mutex<SyncStatus>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
+    connected_once: bool,
 }
 
 impl SyncEngine {
@@ -48,6 +49,7 @@ impl SyncEngine {
             sync_status,
             head_tracker: HeadTracker::new(256),
             progress,
+            connected_once: false,
         }
     }
 
@@ -59,6 +61,7 @@ impl SyncEngine {
         };
 
         tracing::info!(start_block, "starting sync");
+        self.set_runtime_state(NodeState::Discovering);
 
         // Wait until we have at least one connected peer. Discovery's routing
         // table is empty at startup and most discovered nodes are dead, so we
@@ -70,11 +73,15 @@ impl SyncEngine {
         // filling to max_peers before doing any work was the previous bug.
         let mut attempt: u32 = 0;
         loop {
+            self.refresh_connectivity_state();
             self.peers.fill_peers(1, self.config.max_peers).await;
+            self.refresh_connectivity_state();
             if self.peers.peer_count() > 0 {
+                self.connected_once = true;
                 if let Some(target) = self.peers.highest_peer_block() {
                     self.progress.set_target(target);
                 }
+                self.set_runtime_state(NodeState::Syncing);
                 break;
             }
             attempt += 1;
@@ -106,13 +113,20 @@ impl SyncEngine {
         let mut consecutive_empty: u32 = 0;
         loop {
             // Top up peers when we drop below half the target. We pass min=1
-            // so fill_peers returns as soon as we have any usable peer —
-            // mainnet peers disconnect quickly when idle, so issuing the
-            // next request fast is more important than batching dial attempts.
+            // so fill_peers can add at least one more usable peer without
+            // stalling toward the full target. Passing `1` here was a bug:
+            // once we already had a single peer, fill_peers returned
+            // immediately and we never actually replenished the pool.
             if self.peers.peer_count() < self.config.max_peers / 2 {
-                self.peers.fill_peers(1, self.config.max_peers).await;
+                let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
+                self.refresh_connectivity_state();
+                self.peers
+                    .fill_peers(min_peers, self.config.max_peers)
+                    .await;
+                self.refresh_connectivity_state();
             }
             if self.peers.peer_count() == 0 {
+                self.refresh_connectivity_state();
                 tracing::warn!("no peers available, waiting for discovery");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
@@ -120,6 +134,7 @@ impl SyncEngine {
             if let Some(target) = self.peers.highest_peer_block() {
                 self.progress.set_target(target);
             }
+            self.set_runtime_state(NodeState::Syncing);
 
             let headers = match self
                 .peers
@@ -128,6 +143,7 @@ impl SyncEngine {
             {
                 Ok(h) => h,
                 Err(e) => {
+                    self.refresh_connectivity_state();
                     tracing::debug!(error = %e, current, "header request failed, retrying");
                     continue;
                 }
@@ -233,6 +249,7 @@ impl SyncEngine {
                 self.peers.set_head(Head {
                     number: last.number(),
                     hash: last.hash_slow(),
+                    timestamp: last.timestamp(),
                     ..Default::default()
                 });
                 current = last.number() + 1;
@@ -249,7 +266,16 @@ impl SyncEngine {
             tokio::time::sleep(Duration::from_secs(12)).await;
 
             if self.peers.peer_count() < 3 {
-                self.peers.fill_peers(1, self.config.max_peers).await;
+                let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
+                self.refresh_connectivity_state();
+                self.peers
+                    .fill_peers(min_peers, self.config.max_peers)
+                    .await;
+                self.refresh_connectivity_state();
+            }
+            if self.peers.peer_count() == 0 {
+                self.refresh_connectivity_state();
+                continue;
             }
             if let Some(target) = self.peers.highest_peer_block() {
                 self.progress.set_target(target);
@@ -261,8 +287,20 @@ impl SyncEngine {
             };
 
             let headers = match self.peers.get_headers(current + 1, 16).await {
-                Ok(h) if !h.is_empty() => h,
-                _ => continue,
+                Ok(h) if !h.is_empty() => {
+                    self.set_runtime_state(NodeState::Syncing);
+                    h
+                }
+                Ok(_) => {
+                    self.progress.mark_synced();
+                    self.sync_status_peers();
+                    continue;
+                }
+                Err(e) => {
+                    self.refresh_connectivity_state();
+                    tracing::debug!(error = %e, current, "live header request failed");
+                    continue;
+                }
             };
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
@@ -308,9 +346,13 @@ impl SyncEngine {
                 self.peers.set_head(Head {
                     number: block_number,
                     hash: block_hash,
+                    timestamp,
                     ..Default::default()
                 });
             }
+
+            self.progress.mark_synced();
+            self.sync_status_peers();
         }
     }
 
@@ -375,6 +417,44 @@ impl SyncEngine {
             "handled reorg"
         );
         Ok(())
+    }
+
+    fn sync_status_peers(&self) {
+        let state = {
+            let status = self.sync_status.lock().unwrap();
+            status.node_state
+        };
+        self.progress.update_network_state(
+            state,
+            self.peers.peer_count(),
+            self.peers.pending_count(),
+        );
+    }
+
+    fn set_runtime_state(&self, state: NodeState) {
+        self.progress.update_network_state(
+            state,
+            self.peers.peer_count(),
+            self.peers.pending_count(),
+        );
+    }
+
+    fn refresh_connectivity_state(&self) {
+        let state = if self.peers.peer_count() > 0 {
+            NodeState::Syncing
+        } else if self.connected_once {
+            if self.peers.pending_count() > 0 {
+                NodeState::Reconnecting
+            } else {
+                NodeState::Disconnected
+            }
+        } else if self.peers.pending_count() > 0 {
+            NodeState::Connecting
+        } else {
+            NodeState::Discovering
+        };
+
+        self.set_runtime_state(state);
     }
 }
 

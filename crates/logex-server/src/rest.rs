@@ -219,8 +219,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         None
     };
     Json(serde_json::json!({
-        "synced": !sync.syncing,
+        "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
+        "node_state": sync.node_state,
+        "node_state_label": sync.node_state.as_label(),
+        "connected_peers": sync.connected_peers,
+        "pending_peers": sync.pending_peers,
         "current_block": sync.current_block,
         "target_block": sync.target_block,
         "blocks_per_sec": sync.blocks_per_sec,
@@ -248,7 +252,7 @@ mod tests {
     use axum::http::Request;
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::{LogRow, Source, SyncStatus};
+    use logex_types::{LogRow, NodeState, Source, SyncStatus};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -454,7 +458,10 @@ mod tests {
             storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions: None,
             sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
+                node_state: NodeState::Reconnecting,
                 syncing: true,
+                connected_peers: 0,
+                pending_peers: 12,
                 current_block: 250,
                 target_block: 500,
                 blocks_per_sec: 2.0,
@@ -482,5 +489,44 @@ mod tests {
         assert_eq!(status["indexed_head_block"], 200);
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
+        assert_eq!(status["node_state"], "reconnecting");
+        assert_eq!(status["connected_peers"], 0);
+        assert_eq!(status["pending_peers"], 12);
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_does_not_mark_disconnected_node_as_synced() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState {
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
+            subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
+                node_state: NodeState::Disconnected,
+                syncing: false,
+                connected_peers: 0,
+                pending_peers: 0,
+                current_block: 0,
+                target_block: 0,
+                blocks_per_sec: 0.0,
+                blocks_per_minute: 0.0,
+                logs_ingested: 0,
+                eta_seconds: None,
+            })),
+        });
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["synced"], false);
+        assert_eq!(status["node_state"], "disconnected");
     }
 }

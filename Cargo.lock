@@ -3009,6 +3009,7 @@ dependencies = [
  "logex-storage",
  "logex-types",
  "rand 0.8.5",
+ "reth-chainspec",
  "reth-discv4",
  "reth-ecies",
  "reth-eth-wire",

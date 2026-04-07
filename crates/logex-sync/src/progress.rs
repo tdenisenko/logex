@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use logex_types::SyncStatus;
+use logex_types::{NodeState, SyncStatus};
 
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
@@ -31,7 +31,23 @@ impl ProgressTracker {
     pub fn set_target(&self, target_block: u64) {
         let mut status = self.status.lock().unwrap();
         status.target_block = status.target_block.max(target_block);
-        status.syncing = true;
+        status.syncing = status.target_block > status.current_block;
+        if status.syncing && matches!(status.node_state, NodeState::Starting | NodeState::Synced) {
+            status.node_state = NodeState::Syncing;
+        }
+    }
+
+    /// Update the node's connectivity state and peer counts.
+    pub fn update_network_state(
+        &self,
+        node_state: NodeState,
+        connected_peers: usize,
+        pending_peers: usize,
+    ) {
+        let mut status = self.status.lock().unwrap();
+        status.node_state = node_state;
+        status.connected_peers = connected_peers;
+        status.pending_peers = pending_peers;
     }
 
     /// Record that a block has been ingested.
@@ -48,6 +64,7 @@ impl ProgressTracker {
         let bpm = bps * 60.0;
 
         let mut status = self.status.lock().unwrap();
+        status.node_state = NodeState::Syncing;
         status.current_block = block_number;
         status.blocks_per_sec = bps;
         status.blocks_per_minute = bpm;
@@ -84,6 +101,7 @@ impl ProgressTracker {
     /// Mark sync as complete (caught up to tip).
     pub fn mark_synced(&self) {
         let mut status = self.status.lock().unwrap();
+        status.node_state = NodeState::Synced;
         status.syncing = false;
         status.target_block = status.current_block;
         status.eta_seconds = None;
