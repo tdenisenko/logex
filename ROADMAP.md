@@ -20,13 +20,21 @@
   - real peer/session lifecycle management
   - discv4 + DNS bootstrap under Reth’s manager
   - persisted productive peers reseeded into the live network stack on restart
+- The remaining pre-Reth mainnet handshake shim has been removed:
+  - startup now feeds the local head into Reth through `NetworkConfigBuilder::set_head(...)`
+  - live sync now pushes head updates through `NetworkHandle::update_status(...)`
+  - old custom `mainnet.rs` bootstrap constants/helpers are gone
+- Sync resume metadata is tighter now:
+  - the persisted sync head also stores the block timestamp
+  - historical sync resumes explicitly from the sync head, not only from the highest block that emitted logs
+  - legacy metadata without timestamps is still accepted on disk
+- Old direct dependencies from the previous custom networking path were removed from `logex-sync`.
 - Current validation on this refactor:
   - `cargo check -p logex-node`
   - `cargo fmt --all`
   - `cargo test --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
-  - release-mode smoke run on `http://127.0.0.1:18444/status`
-  - in this environment the release binary stayed honest and quickly accumulated a large pending candidate set (`pending_peers=139` after a few seconds, `640` shortly after), but still could not prove a real serving peer because outbound network access here is limited
+  - real peer/bootstrap behavior still needs validation on an unrestricted network; this sandbox cannot prove serving-peer conversion reliably
 
 ## Next TODO
 
@@ -36,10 +44,10 @@
    - sustained historical sync
    - graceful shutdown and resume
 2. Improve candidate-to-serving-peer conversion further if real-world cold starts are still slower than geth/reth.
-3. Decide whether LogEx should accept inbound sessions as a non-serving node exactly as-is, or advertise a more conservative served range/status.
+3. Decide whether to keep the current lightweight request scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
 4. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
 5. Add end-to-end network regression coverage for bootstrap, restart, shutdown, and resume.
-6. Reconcile the public README with what the code now actually implements.
+6. Reconcile the public README with what the code now actually implements for v1 versus future work.
 
 ## Deferred
 

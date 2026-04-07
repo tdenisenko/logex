@@ -453,7 +453,7 @@ mod tests {
     async fn test_status_endpoint_reports_indexed_head() {
         let (_tmp, mut storage) = setup_storage();
         storage
-            .record_sync_head(250, B256::repeat_byte(0xFE))
+            .record_sync_head(250, B256::repeat_byte(0xFE), 1_650_000_000)
             .unwrap();
         let state = Arc::new(AppState {
             storage: Arc::new(tokio::sync::RwLock::new(storage)),

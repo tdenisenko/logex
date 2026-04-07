@@ -65,7 +65,11 @@ impl SyncEngine {
     pub async fn run(&mut self) -> Result<()> {
         let start_block = {
             let storage = self.storage.read().await;
-            storage.head_block().map(|b| b + 1).unwrap_or(0)
+            storage
+                .sync_head()
+                .map(|head| head.block_number + 1)
+                .or_else(|| storage.indexed_head_block().map(|block| block + 1))
+                .unwrap_or(0)
         };
 
         tracing::info!(start_block, "starting sync");
@@ -529,7 +533,7 @@ impl SyncEngine {
             }
         }
         storage
-            .record_sync_head(block_number, block_hash)
+            .record_sync_head(block_number, block_hash, timestamp)
             .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
 
         Ok(count)

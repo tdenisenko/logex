@@ -17,6 +17,8 @@ const STORAGE_META_FILE: &str = "storage_metadata.json";
 pub struct SyncHead {
     pub block_number: u64,
     pub block_hash: B256,
+    #[serde(default)]
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -289,10 +291,19 @@ impl PartitionManager {
     }
 
     /// Persist the latest fully-validated block, even when it produced no logs.
-    pub fn record_sync_head(&mut self, block_number: u64, block_hash: B256) -> std::io::Result<()> {
+    ///
+    /// The timestamp is stored as well so the network layer can resume with a
+    /// faithful local head instead of having to guess at startup.
+    pub fn record_sync_head(
+        &mut self,
+        block_number: u64,
+        block_hash: B256,
+        timestamp: u64,
+    ) -> std::io::Result<()> {
         let next = SyncHead {
             block_number,
             block_hash,
+            timestamp,
         };
 
         if self.sync_head == Some(next) {
@@ -551,13 +562,15 @@ mod tests {
                 partition_target_rows: 50,
             };
             let mut mgr = PartitionManager::open(config).unwrap();
-            mgr.record_sync_head(1234, expected_hash).unwrap();
+            mgr.record_sync_head(1234, expected_hash, 1_717_171_717)
+                .unwrap();
             assert_eq!(mgr.head_block(), Some(1234));
             assert_eq!(
                 mgr.sync_head(),
                 Some(SyncHead {
                     block_number: 1234,
-                    block_hash: expected_hash
+                    block_hash: expected_hash,
+                    timestamp: 1_717_171_717
                 })
             );
         }
@@ -573,10 +586,45 @@ mod tests {
                 mgr.sync_head(),
                 Some(SyncHead {
                     block_number: 1234,
-                    block_hash: expected_hash
+                    block_hash: expected_hash,
+                    timestamp: 1_717_171_717
                 })
             );
         }
+    }
+
+    #[test]
+    fn test_partition_manager_loads_legacy_sync_head_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let expected_hash = B256::repeat_byte(0xEE);
+
+        fs::write(
+            data_dir.join(STORAGE_META_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "sync_head": {
+                    "block_number": 77,
+                    "block_hash": expected_hash
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mgr = PartitionManager::open(PartitionManagerConfig {
+            data_dir,
+            partition_target_rows: 50,
+        })
+        .unwrap();
+
+        assert_eq!(
+            mgr.sync_head(),
+            Some(SyncHead {
+                block_number: 77,
+                block_hash: expected_hash,
+                timestamp: 0,
+            })
+        );
     }
 
     #[test]
@@ -591,7 +639,8 @@ mod tests {
         mgr.write_batch(&make_test_rows(10, 100)).unwrap();
         assert_eq!(mgr.indexed_head_block(), Some(100));
 
-        mgr.record_sync_head(150, B256::repeat_byte(0xCD)).unwrap();
+        mgr.record_sync_head(150, B256::repeat_byte(0xCD), 1_650_000_000)
+            .unwrap();
         assert_eq!(mgr.head_block(), Some(150));
         assert_eq!(mgr.indexed_head_block(), Some(100));
     }

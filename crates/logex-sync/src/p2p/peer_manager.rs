@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use alloy_primitives::B256;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
-use reth_chainspec::MAINNET;
+use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::Discv4Config;
 use reth_eth_wire::{
     BlockBodies, BlockHeaders, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders,
@@ -28,8 +28,6 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
-
-use super::mainnet::{self, MAINNET_GENESIS};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
@@ -60,7 +58,6 @@ pub struct PeerManager {
     pending: HashMap<PeerId, NodeRecord>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
-    our_head: Head,
     last_known_peer_reseed: Instant,
 }
 
@@ -101,8 +98,10 @@ impl PeerManager {
 
         let listener_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listener_port);
         let discovery_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
+        let network_head = normalize_network_head(our_head);
 
-        let mut config = NetworkConfigBuilder::eth(secret_key)
+        let config = NetworkConfigBuilder::eth(secret_key)
+            .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
             .peer_config(peer_config)
@@ -110,18 +109,6 @@ impl PeerManager {
             .disable_tx_gossip(true)
             .discovery(discovery)
             .build_with_noop_provider(MAINNET.clone());
-
-        let handshake_head = mainnet::handshake_head(our_head);
-        config.fork_filter = mainnet::mainnet_fork_filter(handshake_head);
-        config.status.forkid = config.fork_filter.current();
-        config.status.blockhash = if our_head.hash.is_zero() {
-            MAINNET_GENESIS
-        } else {
-            our_head.hash
-        };
-        config.status.total_difficulty = Some(handshake_head.total_difficulty);
-        config.status.latest_block = Some(our_head.number);
-        config.status.earliest_block = Some(0);
 
         let network = NetworkManager::new(config)
             .await
@@ -143,7 +130,6 @@ impl PeerManager {
             pending: HashMap::new(),
             productive: VecDeque::new(),
             known_peers,
-            our_head,
             last_known_peer_reseed: Instant::now() - RESEED_KNOWN_PEERS_INTERVAL,
         };
 
@@ -161,10 +147,10 @@ impl PeerManager {
         Ok(manager)
     }
 
-    /// Update our local head view. We keep the handshake-safe fork ID that the
-    /// network booted with instead of rewriting status on every block.
+    /// Update our local head view and propagate it into Reth's live network
+    /// status so newly established sessions see the same canonical tip.
     pub fn set_head(&mut self, head: Head) {
-        self.our_head = head;
+        self.network.update_status(normalize_network_head(head));
     }
 
     /// Gracefully stop the network manager and wait for the background task.
@@ -496,7 +482,10 @@ impl PeerManager {
         self.last_known_peer_reseed = Instant::now();
 
         for peer in self.known_peers.clone() {
-            if is_bootstrap_node(peer.id) || peer.tcp_port == 0 || self.peers.contains_key(&peer.id)
+            if is_bootstrap_node(peer.id)
+                || peer.tcp_port == 0
+                || self.peers.contains_key(&peer.id)
+                || self.pending.contains_key(&peer.id)
             {
                 continue;
             }
@@ -505,7 +494,7 @@ impl PeerManager {
             self.remember_productive(peer);
             self.network.connect_peer_kind(
                 peer.id,
-                PeerKind::Static,
+                PeerKind::Basic,
                 peer.tcp_addr(),
                 Some(peer.udp_addr()),
             );
@@ -763,6 +752,16 @@ fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
 
 fn is_bootstrap_node(id: PeerId) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
+}
+
+fn normalize_network_head(mut head: Head) -> Head {
+    if head.hash.is_zero() {
+        head.hash = MAINNET.genesis_hash();
+    }
+    if head.number == 0 && head.timestamp == 0 {
+        head.timestamp = MAINNET.genesis().timestamp;
+    }
+    head
 }
 
 trait IntoResponseValue<T> {

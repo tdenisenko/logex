@@ -3,16 +3,14 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 
-use alloy_primitives::B256;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 use logex_index::IndexBuilder;
 use logex_server::{AppState, SubscriptionManager};
-use logex_storage::{PartitionManager, PartitionManagerConfig};
+use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
-use logex_sync::p2p::mainnet::MAINNET_GENESIS;
 use logex_sync::p2p::{
     peer_manager::PeerManager,
     persistence::{
@@ -21,6 +19,7 @@ use logex_sync::p2p::{
     },
 };
 use logex_types::SyncStatus;
+use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_ethereum_forks::Head;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -185,10 +184,15 @@ async fn run_sync(
     let sync_head = storage.sync_head();
     let head_block = storage.head_block().unwrap_or(0);
     let indexed_head_block = storage.indexed_head_block();
+    let resume_block = sync_head
+        .map(|head| head.block_number)
+        .or(indexed_head_block)
+        .unwrap_or(0);
     tracing::info!(
         total_rows = storage.total_rows(),
         head_block,
         indexed_head_block,
+        sync_head_block = sync_head.map(|head| head.block_number),
         "storage ready"
     );
 
@@ -197,8 +201,8 @@ async fn run_sync(
         storage: Arc::new(tokio::sync::RwLock::new(storage)),
         subscriptions: Some(SubscriptionManager::new()),
         sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
-            current_block: head_block,
-            target_block: head_block,
+            current_block: resume_block,
+            target_block: resume_block,
             ..Default::default()
         })),
     });
@@ -271,22 +275,10 @@ async fn run_sync(
         "query endpoints ready"
     );
 
-    // Create peer manager and sync engine.
-    // For a fresh sync (head_block == 0) we advertise the mainnet genesis hash
-    // so peers see a valid Status during the eth handshake. After the first
-    // ingested block the head_tracker / sync engine will update this via
-    // PeerManager::set_head().
-    let our_head = Head {
-        number: head_block,
-        hash: sync_head.map(|head| head.block_hash).unwrap_or_else(|| {
-            if head_block == 0 {
-                MAINNET_GENESIS
-            } else {
-                B256::ZERO
-            }
-        }),
-        ..Default::default()
-    };
+    // Start the network from the latest persisted sync head when storage has a
+    // complete block hash + timestamp. Legacy metadata without timestamps falls
+    // back to genesis until the next verified block updates the live status.
+    let our_head = startup_network_head(sync_head);
     let peers = match PeerManager::new(
         secret_key,
         p2p_port,
@@ -407,6 +399,38 @@ async fn run_background_indexer(
                 }
             }
         }
+    }
+}
+
+fn startup_network_head(sync_head: Option<SyncHead>) -> Head {
+    match sync_head {
+        Some(head) if head.block_number == 0 || head.timestamp > 0 => Head {
+            number: head.block_number,
+            hash: head.block_hash,
+            timestamp: if head.block_number == 0 {
+                MAINNET.genesis().timestamp
+            } else {
+                head.timestamp
+            },
+            ..Default::default()
+        },
+        Some(head) => {
+            tracing::warn!(
+                block_number = head.block_number,
+                "sync metadata is missing the block timestamp, starting network status from genesis until a new verified block updates it"
+            );
+            genesis_network_head()
+        }
+        None => genesis_network_head(),
+    }
+}
+
+fn genesis_network_head() -> Head {
+    Head {
+        number: 0,
+        hash: MAINNET.genesis_hash(),
+        timestamp: MAINNET.genesis().timestamp,
+        ..Default::default()
     }
 }
 

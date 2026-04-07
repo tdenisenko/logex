@@ -15,7 +15,7 @@ logex-index = { workspace = true }
 logex-ingestion = { workspace = true }
 logex-server = { workspace = true }
 logex-sync = { workspace = true }
-alloy-primitives = { workspace = true }
+reth-chainspec = { workspace = true }
 reth-ethereum-forks = { workspace = true }
 secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 clap = { workspace = true }
