@@ -1,104 +1,182 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use alloy_primitives::{B256, B512};
+use alloy_primitives::B256;
 use eyre::{Result, bail};
-use futures::FutureExt;
-use futures::stream::FuturesUnordered;
-use futures_util::{SinkExt, StreamExt};
-use reth_discv4::Discv4;
+use futures_util::{FutureExt, StreamExt};
+use reth_chainspec::MAINNET;
+use reth_discv4::Discv4Config;
 use reth_eth_wire::{
-    EthMessage, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders, GetReceipts,
-    GetReceipts70, HeadersDirection, message::RequestPair,
+    BlockBodies, BlockHeaders, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders,
+    GetReceipts, GetReceipts70, HeadersDirection, NetworkPrimitives, Receipts, Receipts69,
+    Receipts70, UnifiedStatus,
 };
-use reth_eth_wire_types::NetworkPrimitives;
 use reth_ethereum_forks::Head;
+use reth_network::types::{PeerKind, ReputationChangeKind};
+use reth_network::{
+    DiscoveredEvent, DiscoveryEvent, NetworkConfigBuilder, NetworkEvent,
+    NetworkEventListenerProvider, NetworkHandle, NetworkManager, PeerRequest, PeerRequestSender,
+    Peers, PeersConfig, PeersInfo,
+};
 use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
 use secp256k1::SecretKey;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
-use super::connection::{self, PeerConnection};
-use super::discovery::{Discovery, DiscoveryCandidate, DiscoveryCandidateSource};
+use super::mainnet::{self, MAINNET_GENESIS};
 
-/// Timeout for individual request/response roundtrips.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long to wait for new discovery events when we have nothing to try.
-/// Short enough that startup feels responsive, long enough to let the DHT
-/// emit a meaningful batch of records.
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
-
-/// Wall-clock cap on a single `fill_peers` call. Without this, fill_peers
-/// would loop until `target` is reached or candidates dry up — but on a
-/// fresh start, candidates flow in faster than peers accept us, so the call
-/// blocks the sync engine indefinitely. With a budget, fill_peers returns
-/// whatever progress it made and lets the engine decide whether to start
-/// fetching headers (any peers > 0) or wait and retry.
 const FILL_BUDGET: Duration = Duration::from_secs(12);
-const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-const ACTIVE_RANDOM_LOOKUP_FANOUT: usize = 3;
+const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
+const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
+const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
+const RESEED_KNOWN_PEERS_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_PERSISTED_PEERS: usize = 512;
+const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
-const FAILED_DIAL_BACKOFF: Duration = Duration::from_secs(90);
-static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<B512>> =
+
+static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<PeerId>> =
     LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
 
-/// Manages a pool of peer connections and routes requests.
+type NetworkEvents =
+    Pin<Box<dyn Stream<Item = NetworkEvent<PeerRequest<EthNetworkPrimitives>>> + Send>>;
+type DiscoveryEvents = Pin<Box<dyn Stream<Item = DiscoveryEvent> + Send>>;
+
+/// Manages peer sessions and request routing on top of Reth's real network stack.
 pub struct PeerManager {
-    secret_key: SecretKey,
-    peers: Vec<PeerConnection>,
-    discovery: Discv4,
-    discovery_candidates: ReceiverStream<DiscoveryCandidate>,
-    /// Buffered candidates we haven't tried to connect to yet. The discovery
-    /// stream emits records continuously, and we want to drain everything
-    /// available before sleeping.
-    pending: VecDeque<NodeRecord>,
-    /// Peers that have already proved useful for sync and are worth
-    /// persisting across restarts.
+    network: NetworkHandle<EthNetworkPrimitives>,
+    network_task: Option<JoinHandle<()>>,
+    network_events: NetworkEvents,
+    discovery_events: DiscoveryEvents,
+    peers: HashMap<PeerId, ActivePeer>,
+    peer_order: VecDeque<PeerId>,
+    pending: HashMap<PeerId, NodeRecord>,
     productive: VecDeque<NodeRecord>,
-    /// Nodes that recently failed a dial or became unresponsive. Keeping a
-    /// short backoff here avoids redialing the same weak candidate over and
-    /// over while discovery keeps surfacing fresh options.
-    failed_dials: HashMap<B512, Instant>,
+    known_peers: Vec<NodeRecord>,
     our_head: Head,
-    next_request_id: u64,
-    last_responder: Option<B512>,
+    last_known_peer_reseed: Instant,
+}
+
+#[derive(Clone)]
+struct ActivePeer {
+    sender: PeerRequestSender<PeerRequest<EthNetworkPrimitives>>,
+    remote_record: NodeRecord,
+    remote_status: UnifiedStatus,
+    version: EthVersion,
+    is_serving: bool,
+    consecutive_timeouts: u32,
 }
 
 impl PeerManager {
-    /// Create a new peer manager with discovery running.
-    pub fn new(
+    /// Create a new peer manager backed by Reth's network/session stack.
+    pub async fn new(
         secret_key: SecretKey,
-        discovery: Discovery,
+        listener_port: u16,
+        discovery_port: u16,
+        max_peers: usize,
         our_head: Head,
         known_peers: Vec<NodeRecord>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
+        let peer_config = PeersConfig::default()
+            .with_basic_nodes(basic_nodes)
+            .with_max_outbound(max_peers)
+            .with_max_inbound(max_peers.max(16))
+            .with_max_concurrent_dials(max_peers.clamp(8, 32))
+            .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
+            .with_max_backoff_count(3)
+            .with_enforce_enr_fork_id(true);
+
+        let mut discovery = Discv4Config::builder();
+        discovery
+            .lookup_interval(DISCOVERY_LOOKUP_INTERVAL)
+            .ping_interval(DISCOVERY_PING_INTERVAL);
+
+        let listener_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listener_port);
+        let discovery_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
+
+        let mut config = NetworkConfigBuilder::eth(secret_key)
+            .listener_addr(listener_addr)
+            .discovery_addr(discovery_addr)
+            .peer_config(peer_config)
+            .mainnet_boot_nodes()
+            .disable_tx_gossip(true)
+            .discovery(discovery)
+            .build_with_noop_provider(MAINNET.clone());
+
+        let handshake_head = mainnet::handshake_head(our_head);
+        config.fork_filter = mainnet::mainnet_fork_filter(handshake_head);
+        config.status.forkid = config.fork_filter.current();
+        config.status.blockhash = if our_head.hash.is_zero() {
+            MAINNET_GENESIS
+        } else {
+            our_head.hash
+        };
+        config.status.total_difficulty = Some(handshake_head.total_difficulty);
+        config.status.latest_block = Some(our_head.number);
+        config.status.earliest_block = Some(0);
+
+        let network = NetworkManager::new(config)
+            .await
+            .map_err(|error| eyre::eyre!("failed to start p2p network: {error}"))?;
+        let handle = network.handle().clone();
+        let local_record = handle.local_node_record();
+        let local_enr = handle.local_enr();
+        let network_events = Box::pin(handle.event_listener());
+        let discovery_events = Box::pin(handle.discovery_listener());
+        let network_task = tokio::spawn(network);
+
         let mut manager = Self {
-            secret_key,
-            peers: Vec::new(),
-            discovery: discovery.handle,
-            discovery_candidates: discovery.candidates,
-            pending: VecDeque::new(),
+            network: handle,
+            network_task: Some(network_task),
+            network_events,
+            discovery_events,
+            peers: HashMap::new(),
+            peer_order: VecDeque::new(),
+            pending: HashMap::new(),
             productive: VecDeque::new(),
-            failed_dials: HashMap::new(),
+            known_peers,
             our_head,
-            next_request_id: 1,
-            last_responder: None,
+            last_known_peer_reseed: Instant::now() - RESEED_KNOWN_PEERS_INTERVAL,
         };
 
-        for node in known_peers {
-            manager.seed_known_node(node);
-        }
+        manager.seed_known_peers(true);
 
-        manager
+        info!(
+            peer_id = %manager.network.peer_id(),
+            enode = %local_record,
+            enr = %local_enr,
+            listener = %local_record.tcp_addr(),
+            discovery = %discovery_addr,
+            "p2p networking started"
+        );
+
+        Ok(manager)
     }
 
-    /// Update our advertised head (for new peer handshakes).
+    /// Update our local head view. We keep the handshake-safe fork ID that the
+    /// network booted with instead of rewriting status on every block.
     pub fn set_head(&mut self, head: Head) {
         self.our_head = head;
+    }
+
+    /// Gracefully stop the network manager and wait for the background task.
+    pub async fn shutdown(&mut self) {
+        if let Err(error) = self.network.shutdown().await {
+            warn!(%error, "failed to shut down p2p network cleanly");
+        }
+        if let Some(task) = self.network_task.take()
+            && let Err(error) = task.await
+        {
+            warn!(%error, "p2p network task exited unexpectedly");
+        }
     }
 
     /// Number of currently connected peers.
@@ -106,27 +184,26 @@ impl PeerManager {
         self.peers.len()
     }
 
-    /// Number of connected peers that have successfully answered at least one
-    /// block/receipt request and are therefore actually serving sync data.
+    /// Number of connected peers that have actually served sync data.
     pub fn serving_peer_count(&self) -> usize {
-        self.peers.iter().filter(|peer| peer.is_serving).count()
+        self.peers.values().filter(|peer| peer.is_serving).count()
     }
 
     /// Highest advertised canonical block across connected peers.
     pub fn highest_peer_block(&self) -> Option<u64> {
         self.peers
-            .iter()
+            .values()
             .filter_map(|peer| peer.remote_status.latest_block)
             .filter(|block| *block > 0)
             .max()
     }
 
-    /// Number of queued peer candidates awaiting connection attempts.
+    /// Number of queued peer candidates awaiting or undergoing connection attempts.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    /// Snapshot of known peers suitable for writing to disk on shutdown.
+    /// Snapshot of productive peers suitable for writing to disk on shutdown.
     pub fn known_peers(&self) -> Vec<NodeRecord> {
         let mut peers = Vec::with_capacity(MAX_PERSISTED_PEERS);
 
@@ -143,338 +220,43 @@ impl PeerManager {
         peers
     }
 
-    /// Drain whatever discovery events are immediately available into the
-    /// pending queue. Non-blocking — returns the number of new candidates added.
-    fn drain_discovery(&mut self) -> usize {
-        let mut added = 0;
-        while let Some(candidate) = self.discovery_candidates.next().now_or_never().flatten() {
-            self.handle_candidate(candidate, &mut added);
-        }
-        added
-    }
-
-    /// Wait up to `DISCOVERY_WAIT` for at least one new discovery event,
-    /// then drain anything else that's immediately ready.
-    async fn wait_for_discovery(&mut self) -> usize {
-        let mut added = 0;
-        match timeout(DISCOVERY_WAIT, self.discovery_candidates.next()).await {
-            Ok(Some(candidate)) => self.handle_candidate(candidate, &mut added),
-            Ok(None) => {
-                // Stream closed - discovery service died.
-                warn!("discovery candidate stream closed");
-            }
-            Err(_) => {} // timeout, no events yet
-        }
-        // Pick up anything else that arrived during the same poll window.
-        while let Some(candidate) = self.discovery_candidates.next().now_or_never().flatten() {
-            self.handle_candidate(candidate, &mut added);
-        }
-        added
-    }
-
-    /// Actively query the DHT for nodes when passive discovery has not yet
-    /// produced any candidates.
-    async fn lookup_candidates(&mut self) -> usize {
-        let mut added = 0;
-        let mut tasks = FuturesUnordered::new();
-
-        tasks.push(run_active_lookup(self.discovery.clone(), "self", None));
-
-        for _ in 0..ACTIVE_RANDOM_LOOKUP_FANOUT {
-            tasks.push(run_active_lookup(
-                self.discovery.clone(),
-                "random",
-                Some(PeerId::random()),
-            ));
-        }
-
-        while let Some((lookup_kind, result)) = tasks.next().await {
-            match result {
-                Ok(Ok(records)) => {
-                    let mut lookup_added = 0;
-                    for record in records {
-                        if self.enqueue_candidate(record) {
-                            added += 1;
-                            lookup_added += 1;
-                        }
-                    }
-                    if lookup_added > 0 {
-                        debug!(
-                            lookup = lookup_kind,
-                            added = lookup_added,
-                            "active discovery lookup produced dial candidates"
-                        );
-                    }
-                }
-                Ok(Err(err)) => {
-                    debug!(lookup = lookup_kind, error = %err, "discovery lookup failed");
-                }
-                Err(_) => {
-                    debug!(lookup = lookup_kind, timeout = ?ACTIVE_LOOKUP_TIMEOUT, "discovery lookup timed out");
-                }
-            }
-        }
-        added
-    }
-
-    fn handle_candidate(&mut self, candidate: DiscoveryCandidate, added: &mut usize) {
-        let prioritize = matches!(candidate.source, DiscoveryCandidateSource::Dns);
-        if self.enqueue_candidate_with_priority(candidate.node, prioritize) {
-            *added += 1;
-        }
-    }
-
-    /// Connect to discovered peers, returning as soon as `min` peers are
-    /// connected (or `target` if `min` is already met). Bounded by
-    /// [`FILL_BUDGET`].
-    ///
-    /// Pulls candidates from the discovery candidate stream (discv4 + DNS
-    /// bootstrap) and dials them in parallel because most are firewalled,
-    /// saturated, or speak a different protocol — serial dialing would burn
-    /// the startup budget on dead nodes.
-    ///
-    /// **Why two thresholds?** Mainnet peers drop connections that go idle
-    /// during the eth handshake / first request, so the wall-clock window
-    /// between *connecting* and *issuing the first GetBlockHeaders* must be
-    /// short. Returning eagerly at `min` lets the engine start fetching
-    /// almost immediately; subsequent calls top up toward `target` while
-    /// requests are already in flight. With a single `target` threshold the
-    /// fill loop kept dialing for the full 20s budget, leaving the first
-    /// few peers idle long enough to be disconnected.
-    ///
-    /// Returns early when any of: `min` reached (after the current dial
-    /// batch completes), `target` reached, no new candidates within the
-    /// discovery wait window, or [`FILL_BUDGET`] elapsed. The wall-clock
-    /// budget is what makes this safe to call from the sync engine's main
-    /// loop — without it, a steady candidate inflow combined with a low
-    /// connection success rate keeps fill_peers spinning forever, blocking
-    /// header fetches.
+    /// Wait until we have at least `min` peers or run out of budget.
     pub async fn fill_peers(&mut self, min: usize, target: usize) {
-        // Already meet the caller's minimum — return immediately so they
-        // can use the peers they already have. This prevents the engine
-        // from blocking inside fill_peers (with peers sitting idle) while
-        // dialing toward `target`.
-        if self.peers.len() >= min {
-            return;
-        }
-        if self.peers.len() >= target {
+        self.drain_events_now();
+        if self.peers.len() >= min || self.peers.len() >= target {
             return;
         }
 
-        // Kick the DHT to keep the routing table growing. send_lookup_self
-        // is fire-and-forget, unlike lookup_random which would block ~40s
-        // if the table is sparse.
-        self.discovery.send_lookup_self();
-        for _ in 0..ACTIVE_RANDOM_LOOKUP_FANOUT {
-            self.discovery.send_lookup(PeerId::random());
-        }
-
+        self.seed_known_peers(false);
         let deadline = Instant::now() + FILL_BUDGET;
 
         loop {
-            if self.peers.len() >= target {
+            self.drain_events_now();
+
+            if self.peers.len() >= min || self.peers.len() >= target {
                 return;
             }
+
             if Instant::now() >= deadline {
                 debug!(
-                    current_peers = self.peers.len(),
-                    target, "fill_peers budget exhausted"
+                    connected_peers = self.peers.len(),
+                    pending_peers = self.pending.len(),
+                    target,
+                    "fill_peers budget exhausted"
                 );
                 return;
             }
 
-            self.drain_discovery();
-
-            if self.pending.is_empty() {
-                let added = self.lookup_candidates().await;
-                if added > 0 {
-                    info!(added, "seeded dial queue from active discovery lookup");
-                }
-            }
-
-            if self.pending.is_empty() {
-                let added = self.wait_for_discovery().await;
-                if added == 0 {
-                    // No new candidates within the wait window — let the
-                    // caller decide whether to retry or move on.
-                    return;
-                }
-            }
-
-            // Take a batch and dial them concurrently. Bigger batches improve
-            // throughput at the cost of momentary connection-storm noise.
-            let batch_size = (target - self.peers.len()).max(8);
-            let batch: Vec<NodeRecord> = self
-                .pending
-                .drain(..self.pending.len().min(batch_size))
-                .collect();
-
-            debug!(
-                batch = batch.len(),
-                pending = self.pending.len(),
-                current_peers = self.peers.len(),
-                min,
-                target,
-                "dialing peer batch"
-            );
-
-            if batch.is_empty() {
-                return;
-            }
-
-            let secret_key = self.secret_key;
-            let our_head = self.our_head;
-            let mut failed = 0usize;
-            let mut tasks: FuturesUnordered<_> = batch
-                .into_iter()
-                .map(|node| async move {
-                    let id = node.id;
-                    let result = connection::connect(&node, secret_key, our_head).await;
-                    (id, result)
-                })
-                .collect();
-
-            while let Some((id, result)) = tasks.next().await {
-                match result {
-                    Ok(conn) => {
-                        self.clear_failed_dial(conn.remote_id);
-                        debug!(peer = %conn.remote_id, "new peer connected");
-                        self.peers.push(conn);
-                        if self.peers.len() >= min {
-                            debug!(
-                                current_peers = self.peers.len(),
-                                min,
-                                target,
-                                "fill_peers reached minimum mid-batch, returning immediately"
-                            );
-                            return;
-                        }
-                        if self.peers.len() >= target {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        self.record_failed_dial(id);
-                        debug!(peer = %id, error = %e, "failed to connect to peer");
-                    }
-                }
-                // Re-check the deadline between completions so a slow batch
-                // doesn't blow past the budget by 15s.
-                if Instant::now() >= deadline {
-                    debug!(
-                        current_peers = self.peers.len(),
-                        target, "fill_peers budget exhausted mid-batch"
-                    );
-                    return;
-                }
-            }
-
-            if failed > 0 && self.peers.is_empty() {
-                info!(
-                    failed,
-                    pending = self.pending.len(),
-                    "peer dial batch finished without a connection"
-                );
-            }
-
-            // Return as soon as we have `min` peers — letting the caller
-            // start using them before they get bored and disconnect.
-            // Without this, mainnet peers reliably dropped us after ~20s
-            // of being connected but unused.
-            if self.peers.len() >= min {
+            let remaining = (deadline - Instant::now()).min(DISCOVERY_WAIT);
+            if !self.wait_for_activity(remaining).await {
                 debug!(
-                    current_peers = self.peers.len(),
-                    min, target, "fill_peers reached minimum, returning"
+                    connected_peers = self.peers.len(),
+                    pending_peers = self.pending.len(),
+                    "no network activity while waiting for peers"
                 );
                 return;
             }
         }
-    }
-
-    fn is_connected(&self, id: B512) -> bool {
-        self.peers.iter().any(|p| p.remote_id == id)
-    }
-
-    fn knows_node(&self, id: B512) -> bool {
-        self.is_connected(id) || self.pending.iter().any(|node| node.id == id)
-    }
-
-    fn seed_known_node(&mut self, node: NodeRecord) {
-        if is_bootstrap_node(node.id) {
-            return;
-        }
-        self.discovery.add_node(node);
-        self.remember_productive_with_priority(node, false);
-        self.enqueue_candidate_with_priority(node, true);
-    }
-
-    fn enqueue_candidate(&mut self, node: NodeRecord) -> bool {
-        self.enqueue_candidate_with_priority(node, false)
-    }
-
-    fn enqueue_candidate_with_priority(&mut self, node: NodeRecord, prioritize: bool) -> bool {
-        self.prune_failed_dials();
-
-        if is_bootstrap_node(node.id) || node.tcp_port == 0 {
-            return false;
-        }
-        if self.knows_node(node.id) {
-            return false;
-        }
-        if self.failed_dials.contains_key(&node.id) {
-            return false;
-        }
-
-        if prioritize {
-            self.pending.push_front(node);
-        } else {
-            self.pending.push_back(node);
-        }
-        true
-    }
-
-    fn remember_productive(&mut self, node: NodeRecord) {
-        self.remember_productive_with_priority(node, true);
-    }
-
-    fn remember_productive_with_priority(&mut self, node: NodeRecord, recent: bool) {
-        if let Some(index) = self
-            .productive
-            .iter()
-            .position(|productive| productive.id == node.id)
-        {
-            self.productive.remove(index);
-        }
-
-        if recent {
-            self.productive.push_front(node);
-        } else {
-            self.productive.push_back(node);
-        }
-
-        while self.productive.len() > MAX_PERSISTED_PEERS {
-            self.productive.pop_back();
-        }
-    }
-
-    fn next_id(&mut self) -> u64 {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        id
-    }
-
-    fn record_failed_dial(&mut self, id: B512) {
-        self.failed_dials.insert(id, Instant::now());
-    }
-
-    fn clear_failed_dial(&mut self, id: B512) {
-        self.failed_dials.remove(&id);
-    }
-
-    fn prune_failed_dials(&mut self) {
-        self.failed_dials
-            .retain(|_, attempted_at| attempted_at.elapsed() < FAILED_DIAL_BACKOFF);
     }
 
     /// Request block headers starting at `start_block` for `count` blocks.
@@ -483,7 +265,8 @@ impl PeerManager {
         start_block: u64,
         count: u64,
     ) -> Result<Vec<<EthNetworkPrimitives as NetworkPrimitives>::BlockHeader>> {
-        let request_id = self.next_id();
+        self.drain_events_now();
+
         let request = GetBlockHeaders {
             start_block: start_block.into(),
             limit: count,
@@ -491,28 +274,11 @@ impl PeerManager {
             direction: HeadersDirection::Rising,
         };
 
-        let headers = self
-            .send_request_and_receive(
-                |_| {
-                    EthMessage::GetBlockHeaders(RequestPair {
-                        request_id,
-                        message: request,
-                    })
-                },
-                |msg| match msg {
-                    EthMessage::BlockHeaders(pair) if pair.request_id == request_id => {
-                        Some(pair.message.0)
-                    }
-                    _ => None,
-                },
-            )
-            .await?;
-
-        if !headers.is_empty() {
-            self.mark_last_responder_serving();
-        }
-
-        Ok(headers)
+        self.send_request_to_any_peer(move |peer| PeerRequest::GetBlockHeaders {
+            request,
+            response: peer,
+        })
+        .await
     }
 
     /// Request block bodies for the given block hashes.
@@ -520,28 +286,15 @@ impl PeerManager {
         &mut self,
         hashes: Vec<B256>,
     ) -> Result<Vec<<EthNetworkPrimitives as NetworkPrimitives>::BlockBody>> {
-        let request_id = self.next_id();
-        let request = GetBlockBodies(hashes);
-
-        self.send_request_and_receive(
-            |_| {
-                EthMessage::GetBlockBodies(RequestPair {
-                    request_id,
-                    message: request.clone(),
-                })
-            },
-            |msg| match msg {
-                EthMessage::BlockBodies(pair) if pair.request_id == request_id => {
-                    Some(pair.message.0)
-                }
-                _ => None,
-            },
-        )
+        self.drain_events_now();
+        self.send_request_to_any_peer(move |peer| PeerRequest::GetBlockBodies {
+            request: GetBlockBodies(hashes.clone()),
+            response: peer,
+        })
         .await
     }
 
     /// Request receipts for the given block hashes.
-    /// Returns `Vec<Vec<ReceiptWithBloom<Receipt>>>` — one inner vec per requested block.
     pub async fn get_receipts(
         &mut self,
         hashes: Vec<B256>,
@@ -554,209 +307,451 @@ impl PeerManager {
             >,
         >,
     > {
-        let request_id = self.next_id();
-        let request = GetReceipts(hashes.clone());
+        self.drain_events_now();
 
-        self.send_request_and_receive(
-            move |version| {
-                if version >= EthVersion::Eth70 {
-                    EthMessage::GetReceipts70(RequestPair {
-                        request_id,
-                        message: GetReceipts70 {
-                            first_block_receipt_index: 0,
-                            block_hashes: hashes.clone(),
-                        },
-                    })
-                } else {
-                    EthMessage::GetReceipts(RequestPair {
-                        request_id,
-                        message: request.clone(),
-                    })
-                }
-            },
-            |msg| match msg {
-                EthMessage::Receipts(pair) if pair.request_id == request_id => Some(pair.message.0),
-                EthMessage::Receipts69(pair) if pair.request_id == request_id => {
-                    Some(pair.message.into_with_bloom().0)
-                }
-                EthMessage::Receipts70(pair) if pair.request_id == request_id => {
-                    Some(pair.message.into_with_bloom().0)
-                }
-                _ => None,
-            },
-        )
-        .await
-    }
-
-    /// Send a request to the first available peer and wait for the matching response.
-    async fn send_request_and_receive<T>(
-        &mut self,
-        request_for_version: impl Fn(EthVersion) -> EthMessage<EthNetworkPrimitives>,
-        extract: impl Fn(EthMessage<EthNetworkPrimitives>) -> Option<T>,
-    ) -> Result<T> {
+        let peer_ids = self.peer_ids_for_requests();
         let mut dead_peers = HashSet::new();
-        self.last_responder = None;
 
-        let peer_order: Vec<B512> = self.peers.iter().map(|peer| peer.remote_id).collect();
-
-        for remote_id in peer_order {
-            let Some(idx) = self
-                .peers
-                .iter()
-                .position(|peer| peer.remote_id == remote_id)
-            else {
-                continue;
+        for peer_id in peer_ids {
+            let version = match self.peers.get(&peer_id) {
+                Some(peer) => peer.version,
+                None => continue,
             };
 
-            let outcome = {
-                let peer = &mut self.peers[idx];
-                let request = request_for_version(peer.remote_status.version);
-
-                if peer.stream.send(request).await.is_err() {
-                    Err(RequestAttempt::Disconnected)
-                } else {
-                    match timeout(REQUEST_TIMEOUT, async {
-                        while let Some(msg_result) = peer.stream.next().await {
-                            match msg_result {
-                                Ok(msg) => {
-                                    if let Some(result) = extract(msg) {
-                                        return Ok(result);
-                                    }
-                                }
-                                Err(e) => return Err(eyre::eyre!("stream error: {e}")),
-                            }
-                        }
-                        Err(eyre::eyre!("peer disconnected"))
-                    })
-                    .await
-                    {
-                        Ok(Ok(result)) => Ok(result),
-                        Ok(Err(e)) => Err(RequestAttempt::StreamError(e)),
-                        Err(_) => Err(RequestAttempt::TimedOut),
-                    }
-                }
+            let attempt = if version >= EthVersion::Eth70 {
+                self.request_receipts70(peer_id, hashes.clone()).await
+            } else if version >= EthVersion::Eth69 {
+                self.request_receipts69(peer_id, hashes.clone()).await
+            } else {
+                self.request_receipts(peer_id, hashes.clone()).await
             };
 
-            match outcome {
-                Ok(result) => {
-                    self.last_responder = Some(remote_id);
-                    self.reset_peer_timeout(remote_id);
-                    self.promote_peer(remote_id);
-                    self.remove_dead_peers(&dead_peers);
-                    return Ok(result);
-                }
-                Err(RequestAttempt::TimedOut) => {
-                    debug!(peer = %remote_id, "request timed out");
-                    if self.record_timeout(remote_id) >= MAX_CONSECUTIVE_TIMEOUTS {
-                        dead_peers.insert(remote_id);
-                    } else {
-                        self.demote_peer(remote_id);
+            match attempt {
+                Ok(receipts) => {
+                    if !receipts.is_empty() {
+                        self.mark_peer_serving(peer_id);
                     }
+                    self.on_request_success(peer_id);
+                    return Ok(receipts);
                 }
-                Err(RequestAttempt::StreamError(error)) => {
-                    debug!(peer = %remote_id, error = %error, "peer error during request");
-                    dead_peers.insert(remote_id);
-                }
-                Err(RequestAttempt::Disconnected) => {
-                    dead_peers.insert(remote_id);
+                Err(error) => {
+                    let should_drop = self.on_request_error(peer_id, &error);
+                    debug!(peer = %peer_id, ?error, "receipt request failed");
+                    if should_drop {
+                        dead_peers.insert(peer_id);
+                    }
                 }
             }
         }
 
         self.remove_dead_peers(&dead_peers);
+        bail!("no peers available to handle receipt request")
+    }
 
+    async fn send_request_to_any_peer<T, W, MakeRequest>(
+        &mut self,
+        make_request: MakeRequest,
+    ) -> Result<T>
+    where
+        W: IntoResponseValue<T>,
+        MakeRequest: Fn(
+            oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
+        ) -> PeerRequest<EthNetworkPrimitives>,
+    {
+        let peer_ids = self.peer_ids_for_requests();
+        let mut dead_peers = HashSet::new();
+
+        for peer_id in peer_ids {
+            match self.request_with_channel(peer_id, &make_request).await {
+                Ok(response) => {
+                    self.on_request_success(peer_id);
+                    return Ok(response);
+                }
+                Err(error) => {
+                    let should_drop = self.on_request_error(peer_id, &error);
+                    debug!(peer = %peer_id, ?error, "peer request failed");
+                    if should_drop {
+                        dead_peers.insert(peer_id);
+                    }
+                }
+            }
+        }
+
+        self.remove_dead_peers(&dead_peers);
         bail!("no peers available to handle request")
     }
 
-    fn mark_last_responder_serving(&mut self) {
-        let Some(remote_id) = self.last_responder.take() else {
-            return;
+    async fn request_with_channel<T, W, MakeRequest>(
+        &self,
+        peer_id: PeerId,
+        make_request: &MakeRequest,
+    ) -> std::result::Result<T, RequestAttempt>
+    where
+        W: IntoResponseValue<T>,
+        MakeRequest: Fn(
+            oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
+        ) -> PeerRequest<EthNetworkPrimitives>,
+    {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return Err(RequestAttempt::Disconnected);
         };
 
-        let productive_peer = if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.remote_id == remote_id)
-        {
+        let sender = peer.sender.clone();
+        let (response_tx, response_rx) = oneshot::channel();
+        sender
+            .to_session_tx
+            .send(make_request(response_tx))
+            .await
+            .map_err(|_| RequestAttempt::Disconnected)?;
+
+        match timeout(REQUEST_TIMEOUT, response_rx).await {
+            Ok(Ok(Ok(response))) => Ok(response.into_value()),
+            Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
+            Ok(Err(_)) => Err(RequestAttempt::Disconnected),
+            Err(_) => Err(RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::Timeout,
+            )),
+        }
+    }
+
+    async fn request_receipts(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+    ) -> std::result::Result<
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+        RequestAttempt,
+    > {
+        self.request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts {
+            request: GetReceipts(hashes.clone()),
+            response,
+        })
+        .await
+    }
+
+    async fn request_receipts69(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+    ) -> std::result::Result<
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+        RequestAttempt,
+    > {
+        let receipts: Vec<Vec<<EthNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
+            .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts69 {
+                request: GetReceipts(hashes.clone()),
+                response,
+            })
+            .await?;
+        Ok(Receipts69(receipts).into_with_bloom().0)
+    }
+
+    async fn request_receipts70(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+    ) -> std::result::Result<
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+        RequestAttempt,
+    > {
+        let receipts: Vec<Vec<<EthNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
+            .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
+                request: GetReceipts70 {
+                    first_block_receipt_index: 0,
+                    block_hashes: hashes.clone(),
+                },
+                response,
+            })
+            .await?;
+        Ok(Receipts70 {
+            last_block_incomplete: false,
+            receipts,
+        }
+        .into_with_bloom()
+        .0)
+    }
+
+    fn seed_known_peers(&mut self, force: bool) {
+        if !force && self.last_known_peer_reseed.elapsed() < RESEED_KNOWN_PEERS_INTERVAL {
+            return;
+        }
+        self.last_known_peer_reseed = Instant::now();
+
+        for peer in self.known_peers.clone() {
+            if is_bootstrap_node(peer.id) || peer.tcp_port == 0 || self.peers.contains_key(&peer.id)
+            {
+                continue;
+            }
+
+            self.pending.insert(peer.id, peer);
+            self.remember_productive(peer);
+            self.network.connect_peer_kind(
+                peer.id,
+                PeerKind::Static,
+                peer.tcp_addr(),
+                Some(peer.udp_addr()),
+            );
+        }
+    }
+
+    fn drain_events_now(&mut self) {
+        while let Some(event) = self.network_events.next().now_or_never().flatten() {
+            self.handle_network_event(event);
+        }
+        while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
+            self.handle_discovery_event(event);
+        }
+    }
+
+    async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
+        let delay = tokio::time::sleep(max_wait);
+        tokio::pin!(delay);
+
+        tokio::select! {
+            maybe_event = self.network_events.next() => {
+                if let Some(event) = maybe_event {
+                    self.handle_network_event(event);
+                    true
+                } else {
+                    warn!("network event stream closed");
+                    false
+                }
+            }
+            maybe_event = self.discovery_events.next() => {
+                if let Some(event) = maybe_event {
+                    self.handle_discovery_event(event);
+                    true
+                } else {
+                    warn!("discovery event stream closed");
+                    false
+                }
+            }
+            _ = &mut delay => false,
+        }
+    }
+
+    fn handle_network_event(&mut self, event: NetworkEvent<PeerRequest<EthNetworkPrimitives>>) {
+        match event {
+            NetworkEvent::Peer(reth_network::events::PeerEvent::SessionClosed {
+                peer_id,
+                reason,
+            }) => {
+                self.remove_peer(peer_id);
+                debug!(peer = %peer_id, ?reason, "peer session closed");
+            }
+            NetworkEvent::Peer(reth_network::events::PeerEvent::PeerRemoved(peer_id)) => {
+                self.remove_peer(peer_id);
+            }
+            NetworkEvent::Peer(_) => {}
+            NetworkEvent::ActivePeerSession { info, messages } => {
+                self.insert_peer(info, messages);
+            }
+        }
+    }
+
+    fn handle_discovery_event(&mut self, event: DiscoveryEvent) {
+        match event {
+            DiscoveryEvent::NewNode(DiscoveredEvent::EventQueued { peer_id, addr, .. }) => {
+                let node = NodeRecord::new_with_ports(
+                    addr.tcp().ip(),
+                    addr.tcp().port(),
+                    addr.udp().map(|socket| socket.port()),
+                    peer_id,
+                );
+                self.remember_pending(node);
+            }
+            DiscoveryEvent::EnrForkId(node, _) => {
+                self.remember_pending(node);
+            }
+        }
+    }
+
+    fn insert_peer(
+        &mut self,
+        info: reth_network::events::SessionInfo,
+        messages: PeerRequestSender<PeerRequest<EthNetworkPrimitives>>,
+    ) {
+        let mut record = self
+            .pending
+            .remove(&info.peer_id)
+            .unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
+        record = record.with_tcp_port(info.remote_addr.port());
+
+        let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
+        let peer = ActivePeer {
+            sender: messages,
+            remote_record: record,
+            remote_status: *info.status,
+            version: info.version,
+            is_serving: false,
+            consecutive_timeouts: 0,
+        };
+
+        self.peers.insert(info.peer_id, peer);
+        self.peer_order.retain(|peer_id| *peer_id != info.peer_id);
+        if was_productive {
+            self.peer_order.push_front(info.peer_id);
+        } else {
+            self.peer_order.push_back(info.peer_id);
+        }
+
+        debug!(
+            peer = %info.peer_id,
+            remote_addr = %info.remote_addr,
+            latest_block = info.status.latest_block.unwrap_or_default(),
+            version = ?info.version,
+            "peer session established"
+        );
+    }
+
+    fn remember_pending(&mut self, node: NodeRecord) {
+        if is_bootstrap_node(node.id) || node.tcp_port == 0 || self.peers.contains_key(&node.id) {
+            return;
+        }
+        if self.pending.len() >= MAX_TRACKED_PENDING && !self.pending.contains_key(&node.id) {
+            return;
+        }
+        self.pending.insert(node.id, node);
+    }
+
+    fn peer_ids_for_requests(&self) -> Vec<PeerId> {
+        self.peer_order
+            .iter()
+            .filter(|peer_id| self.peers.contains_key(*peer_id))
+            .copied()
+            .collect()
+    }
+
+    fn on_request_success(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.consecutive_timeouts = 0;
+        }
+        self.promote_peer(peer_id);
+    }
+
+    fn on_request_error(&mut self, peer_id: PeerId, error: &RequestAttempt) -> bool {
+        match error {
+            RequestAttempt::Disconnected => true,
+            RequestAttempt::Request(request_error) => match request_error {
+                reth_network::p2p::error::RequestError::Timeout => {
+                    self.network
+                        .reputation_change(peer_id, ReputationChangeKind::Timeout);
+                    self.record_timeout(peer_id) >= MAX_CONSECUTIVE_TIMEOUTS
+                }
+                reth_network::p2p::error::RequestError::BadResponse => {
+                    self.network
+                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
+                    true
+                }
+                reth_network::p2p::error::RequestError::UnsupportedCapability => {
+                    self.network
+                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
+                    true
+                }
+                reth_network::p2p::error::RequestError::ChannelClosed
+                | reth_network::p2p::error::RequestError::ConnectionDropped => true,
+            },
+        }
+    }
+
+    fn record_timeout(&mut self, peer_id: PeerId) -> u32 {
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return MAX_CONSECUTIVE_TIMEOUTS;
+        };
+        peer.consecutive_timeouts += 1;
+        let consecutive_timeouts = peer.consecutive_timeouts;
+        let _ = peer;
+        self.demote_peer(peer_id);
+        consecutive_timeouts
+    }
+
+    fn mark_peer_serving(&mut self, peer_id: PeerId) {
+        let productive = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.is_serving = true;
             Some(peer.remote_record)
         } else {
             None
         };
 
-        if let Some(peer) = productive_peer {
+        if let Some(peer) = productive {
             self.remember_productive(peer);
         }
     }
 
-    fn reset_peer_timeout(&mut self, remote_id: B512) {
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.remote_id == remote_id)
-        {
-            peer.consecutive_timeouts = 0;
-        }
-    }
-
-    fn record_timeout(&mut self, remote_id: B512) -> u32 {
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.remote_id == remote_id)
-        {
-            peer.consecutive_timeouts += 1;
-            return peer.consecutive_timeouts;
-        }
-        MAX_CONSECUTIVE_TIMEOUTS
-    }
-
-    fn promote_peer(&mut self, remote_id: B512) {
-        let Some(index) = self
-            .peers
+    fn remember_productive(&mut self, node: NodeRecord) {
+        if let Some(index) = self
+            .productive
             .iter()
-            .position(|peer| peer.remote_id == remote_id)
-        else {
-            return;
-        };
-        if index == 0 {
-            return;
+            .position(|productive| productive.id == node.id)
+        {
+            self.productive.remove(index);
         }
-        let peer = self.peers.remove(index);
-        self.peers.insert(0, peer);
+
+        self.productive.push_front(node);
+        while self.productive.len() > MAX_PERSISTED_PEERS {
+            self.productive.pop_back();
+        }
+
+        if !self.known_peers.iter().any(|peer| peer.id == node.id) {
+            self.known_peers.push(node);
+        }
     }
 
-    fn demote_peer(&mut self, remote_id: B512) {
-        let Some(index) = self
-            .peers
-            .iter()
-            .position(|peer| peer.remote_id == remote_id)
-        else {
-            return;
-        };
-        if index + 1 == self.peers.len() {
-            return;
-        }
-        let peer = self.peers.remove(index);
-        self.peers.push(peer);
+    fn promote_peer(&mut self, peer_id: PeerId) {
+        self.peer_order.retain(|id| *id != peer_id);
+        self.peer_order.push_front(peer_id);
     }
 
-    fn remove_dead_peers(&mut self, dead_peers: &HashSet<B512>) {
+    fn demote_peer(&mut self, peer_id: PeerId) {
+        self.peer_order.retain(|id| *id != peer_id);
+        self.peer_order.push_back(peer_id);
+    }
+
+    fn remove_dead_peers(&mut self, dead_peers: &HashSet<PeerId>) {
         if dead_peers.is_empty() {
             return;
         }
-        for remote_id in dead_peers {
-            self.record_failed_dial(*remote_id);
+
+        for peer_id in dead_peers {
+            self.network.disconnect_peer(*peer_id);
+            self.remove_peer(*peer_id);
         }
-        self.peers
-            .retain(|peer| !dead_peers.contains(&peer.remote_id));
+    }
+
+    fn remove_peer(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peers.remove(&peer_id) {
+            if peer.is_serving {
+                self.remember_productive(peer.remote_record);
+            } else {
+                self.remember_pending(peer.remote_record);
+            }
+        }
+        self.peer_order.retain(|id| *id != peer_id);
     }
 }
 
+#[derive(Debug, Clone)]
 enum RequestAttempt {
-    TimedOut,
     Disconnected,
-    StreamError(eyre::Error),
+    Request(reth_network::p2p::error::RequestError),
 }
 
 fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
@@ -766,26 +761,42 @@ fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
     peers.push(node);
 }
 
-fn is_bootstrap_node(id: B512) -> bool {
+fn is_bootstrap_node(id: PeerId) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
 }
 
-async fn run_active_lookup(
-    discovery: Discv4,
-    lookup_kind: &'static str,
-    target: Option<PeerId>,
-) -> (
-    &'static str,
-    std::result::Result<
-        std::result::Result<Vec<NodeRecord>, reth_discv4::error::Discv4Error>,
-        tokio::time::error::Elapsed,
-    >,
-) {
-    let result = match target {
-        Some(target) => timeout(ACTIVE_LOOKUP_TIMEOUT, discovery.lookup(target)).await,
-        None => timeout(ACTIVE_LOOKUP_TIMEOUT, discovery.lookup_self()).await,
-    };
-    (lookup_kind, result)
+trait IntoResponseValue<T> {
+    fn into_value(self) -> T;
+}
+
+impl<T> IntoResponseValue<Vec<T>> for BlockHeaders<T> {
+    fn into_value(self) -> Vec<T> {
+        self.0
+    }
+}
+
+impl<T> IntoResponseValue<Vec<T>> for BlockBodies<T> {
+    fn into_value(self) -> Vec<T> {
+        self.0
+    }
+}
+
+impl<T> IntoResponseValue<Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>>> for Receipts<T> {
+    fn into_value(self) -> Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>> {
+        self.0
+    }
+}
+
+impl<T> IntoResponseValue<Vec<Vec<T>>> for Receipts69<T> {
+    fn into_value(self) -> Vec<Vec<T>> {
+        self.0
+    }
+}
+
+impl<T> IntoResponseValue<Vec<Vec<T>>> for Receipts70<T> {
+    fn into_value(self) -> Vec<Vec<T>> {
+        self.receipts
+    }
 }
 
 #[cfg(test)]
@@ -805,7 +816,7 @@ mod tests {
     fn non_bootstrap_peer_is_not_treated_as_bootstrap() {
         let non_bootstrap = NodeRecord::new(
             "203.0.113.10:30303".parse().expect("valid address"),
-            B512::repeat_byte(0x42),
+            PeerId::repeat_byte(0x42),
         );
         assert!(!is_bootstrap_node(non_bootstrap.id));
     }

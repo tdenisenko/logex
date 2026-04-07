@@ -641,6 +641,10 @@ impl SyncEngine {
     pub fn known_peers(&self) -> Vec<NodeRecord> {
         self.peers.known_peers()
     }
+
+    pub async fn shutdown(&mut self) {
+        self.peers.shutdown().await;
+    }
 }
 
 fn should_mark_historical_complete(
