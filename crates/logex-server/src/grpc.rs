@@ -103,14 +103,24 @@ fn log_row_to_entry(row: &LogRow) -> LogEntry {
 pub async fn serve_grpc(
     state: Arc<AppState>,
     addr: SocketAddr,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), tonic::transport::Error> {
     let service = LogExGrpcService::new(state);
     tracing::info!(%addr, "gRPC server listening");
 
     tonic::transport::Server::builder()
         .add_service(LogExServiceServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, grpc_shutdown_signal(shutdown))
         .await
+}
+
+async fn grpc_shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+    tracing::info!("gRPC server shutting down");
 }
 
 #[cfg(test)]

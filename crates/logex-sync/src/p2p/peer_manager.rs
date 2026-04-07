@@ -37,6 +37,7 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 /// whatever progress it made and lets the engine decide whether to start
 /// fetching headers (any peers > 0) or wait and retry.
 const FILL_BUDGET: Duration = Duration::from_secs(20);
+const MAX_PERSISTED_PEERS: usize = 512;
 
 /// Manages a pool of peer connections and routes requests.
 pub struct PeerManager {
@@ -48,25 +49,45 @@ pub struct PeerManager {
     /// stream emits records continuously, and we want to drain everything
     /// available before sleeping.
     pending: VecDeque<NodeRecord>,
+    /// Known peers discovered or successfully connected during this run.
+    /// We keep these across queue drains so shutdown persistence does not
+    /// accidentally forget useful peers after a bad reconnect cycle.
+    known: VecDeque<NodeRecord>,
     our_head: Head,
     next_request_id: u64,
 }
 
 impl PeerManager {
     /// Create a new peer manager with discovery running.
-    pub fn new(secret_key: SecretKey, discovery: Discovery, our_head: Head) -> Self {
-        Self {
+    pub fn new(
+        secret_key: SecretKey,
+        discovery: Discovery,
+        our_head: Head,
+        known_peers: Vec<NodeRecord>,
+    ) -> Self {
+        let mut manager = Self {
             secret_key,
             peers: Vec::new(),
             discovery: discovery.handle,
             discovery_updates: discovery.updates,
-            // Seed the queue with hardcoded mainnet bootnodes so startup can
-            // dial immediately instead of waiting on the discovery stream to
-            // produce its first records.
-            pending: mainnet_nodes().into_iter().collect(),
+            pending: VecDeque::new(),
+            known: VecDeque::new(),
             our_head,
             next_request_id: 1,
+        };
+
+        for node in known_peers {
+            manager.seed_known_node(node);
         }
+
+        // Seed the queue with persisted peers first, then hardcoded mainnet
+        // bootnodes so startup can dial immediately instead of waiting on the
+        // discovery stream to produce its first records.
+        for node in mainnet_nodes() {
+            manager.enqueue_candidate(node, false);
+        }
+
+        manager
     }
 
     /// Update our advertised head (for new peer handshakes).
@@ -90,6 +111,15 @@ impl PeerManager {
     /// Number of queued peer candidates awaiting connection attempts.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Snapshot of known peers suitable for writing to disk on shutdown.
+    pub fn known_peers(&self) -> Vec<NodeRecord> {
+        self.known
+            .iter()
+            .copied()
+            .take(MAX_PERSISTED_PEERS)
+            .collect()
     }
 
     /// Drain whatever discovery events are immediately available into the
@@ -128,8 +158,7 @@ impl PeerManager {
         match timeout(FILL_BUDGET / 2, self.discovery.lookup_self()).await {
             Ok(Ok(records)) => {
                 for record in records {
-                    if !self.knows_node(record.id) {
-                        self.pending.push_back(record);
+                    if self.enqueue_candidate(record, true) {
                         added += 1;
                     }
                 }
@@ -147,8 +176,7 @@ impl PeerManager {
     fn handle_update(&mut self, update: DiscoveryUpdate, added: &mut usize) {
         match update {
             DiscoveryUpdate::Added(record) | DiscoveryUpdate::DiscoveredAtCapacity(record) => {
-                if !self.knows_node(record.id) {
-                    self.pending.push_back(record);
+                if self.enqueue_candidate(record, true) {
                     *added += 1;
                 }
             }
@@ -272,6 +300,7 @@ impl PeerManager {
                 match result {
                     Ok(conn) => {
                         debug!(peer = %conn.remote_id, "new peer connected");
+                        self.remember_node(conn.remote_record);
                         self.peers.push(conn);
                         if self.peers.len() >= target {
                             return;
@@ -321,6 +350,44 @@ impl PeerManager {
 
     fn knows_node(&self, id: B512) -> bool {
         self.is_connected(id) || self.pending.iter().any(|node| node.id == id)
+    }
+
+    fn seed_known_node(&mut self, node: NodeRecord) {
+        self.remember_node_with_priority(node, false);
+        self.enqueue_candidate(node, false);
+    }
+
+    fn enqueue_candidate(&mut self, node: NodeRecord, remember: bool) -> bool {
+        if remember {
+            self.remember_node(node);
+        }
+
+        if self.knows_node(node.id) {
+            return false;
+        }
+
+        self.pending.push_back(node);
+        true
+    }
+
+    fn remember_node(&mut self, node: NodeRecord) {
+        self.remember_node_with_priority(node, true);
+    }
+
+    fn remember_node_with_priority(&mut self, node: NodeRecord, recent: bool) {
+        if let Some(index) = self.known.iter().position(|known| known.id == node.id) {
+            self.known.remove(index);
+        }
+
+        if recent {
+            self.known.push_front(node);
+        } else {
+            self.known.push_back(node);
+        }
+
+        while self.known.len() > MAX_PERSISTED_PEERS {
+            self.known.pop_back();
+        }
     }
 
     fn next_id(&mut self) -> u64 {

@@ -31,7 +31,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 pub async fn serve(
     state: Arc<AppState>,
     addr: SocketAddr,
-    shutdown: tokio::sync::watch::Receiver<()>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -42,7 +42,11 @@ pub async fn serve(
         .map_err(std::io::Error::other)
 }
 
-async fn shutdown_signal(mut rx: tokio::sync::watch::Receiver<()>) {
-    let _ = rx.changed().await;
+async fn shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
     tracing::info!("HTTP server shutting down");
 }
