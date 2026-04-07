@@ -224,6 +224,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "node_state": sync.node_state,
         "node_state_label": sync.node_state.as_label(),
         "connected_peers": sync.connected_peers,
+        "serving_peers": sync.serving_peers,
         "pending_peers": sync.pending_peers,
         "current_block": sync.current_block,
         "target_block": sync.target_block,
@@ -461,6 +462,7 @@ mod tests {
                 node_state: NodeState::Reconnecting,
                 syncing: true,
                 connected_peers: 0,
+                serving_peers: 0,
                 pending_peers: 12,
                 current_block: 250,
                 target_block: 500,
@@ -491,6 +493,7 @@ mod tests {
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");
         assert_eq!(status["connected_peers"], 0);
+        assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
     }
 
@@ -504,6 +507,7 @@ mod tests {
                 node_state: NodeState::Disconnected,
                 syncing: false,
                 connected_peers: 0,
+                serving_peers: 0,
                 pending_peers: 0,
                 current_block: 0,
                 target_block: 0,

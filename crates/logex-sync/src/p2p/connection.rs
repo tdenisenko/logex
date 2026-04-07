@@ -31,6 +31,8 @@ pub struct PeerConnection {
     pub stream: PeerStream,
     pub remote_id: B512,
     pub remote_record: NodeRecord,
+    pub is_serving: bool,
+    pub consecutive_timeouts: u32,
     pub remote_status: UnifiedStatus,
 }
 
@@ -144,6 +146,8 @@ async fn connect_inner(
         stream: eth_stream,
         remote_id,
         remote_record: *node,
+        is_serving: false,
+        consecutive_timeouts: 0,
         remote_status: their_status,
     })
 }
