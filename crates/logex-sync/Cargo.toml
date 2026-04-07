@@ -24,6 +24,7 @@ reth-eth-wire-types = { workspace = true }
 reth-ecies = { workspace = true }
 reth-discv4 = { workspace = true }
 reth-dns-discovery = { workspace = true }
+reth-network = { workspace = true }
 reth-network-peers = { workspace = true }
 reth-chainspec = { workspace = true }
 reth-ethereum-forks = { workspace = true }

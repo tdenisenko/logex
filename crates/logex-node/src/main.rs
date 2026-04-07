@@ -14,7 +14,6 @@ use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
 use logex_sync::p2p::mainnet::MAINNET_GENESIS;
 use logex_sync::p2p::{
-    discovery,
     peer_manager::PeerManager,
     persistence::{
         discovery_secret_path, known_peers_path, load_known_peers, load_or_create_secret_key,
@@ -68,6 +67,10 @@ enum Command {
         /// P2P discovery port (UDP).
         #[arg(long, default_value = "30303")]
         discovery_port: u16,
+
+        /// P2P listener port (TCP).
+        #[arg(long, default_value = "30303")]
+        p2p_port: u16,
 
         /// Maximum peer connections.
         #[arg(long, default_value = "50")]
@@ -140,6 +143,7 @@ fn main() {
             http_port,
             grpc_port,
             discovery_port,
+            p2p_port,
             max_peers,
         } => {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
@@ -148,6 +152,7 @@ fn main() {
                 http_port,
                 grpc_port,
                 discovery_port,
+                p2p_port,
                 max_peers,
             ));
         }
@@ -161,6 +166,7 @@ async fn run_sync(
     http_port: u16,
     grpc_port: u16,
     discovery_port: u16,
+    p2p_port: u16,
     max_peers: usize,
 ) {
     let data_dir = pm_config.data_dir.clone();
@@ -265,15 +271,6 @@ async fn run_sync(
         "query endpoints ready"
     );
 
-    // Start peer discovery (returns handle + update stream)
-    let discovery = match discovery::start_discovery(secret_key, discovery_port).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to start peer discovery");
-            std::process::exit(1);
-        }
-    };
-
     // Create peer manager and sync engine.
     // For a fresh sync (head_block == 0) we advertise the mainnet genesis hash
     // so peers see a valid Status during the eth handshake. After the first
@@ -290,7 +287,22 @@ async fn run_sync(
         }),
         ..Default::default()
     };
-    let peers = PeerManager::new(secret_key, discovery, our_head, known_peers);
+    let peers = match PeerManager::new(
+        secret_key,
+        p2p_port,
+        discovery_port,
+        max_peers,
+        our_head,
+        known_peers,
+    )
+    .await
+    {
+        Ok(peers) => peers,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start p2p networking");
+            std::process::exit(1);
+        }
+    };
 
     let sync_config = SyncConfig {
         max_peers,
@@ -322,6 +334,8 @@ async fn run_sync(
     if let Err(e) = engine_result {
         tracing::error!(error = %e, "sync engine error");
     }
+
+    engine.shutdown().await;
 
     let known_peers = engine.known_peers();
     if let Err(e) = persist_known_peers(&known_peers_file, &known_peers) {
