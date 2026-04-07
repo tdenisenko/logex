@@ -220,9 +220,7 @@ impl SyncEngine {
             // Only advance `current` if every chunk in the batch succeeded.
             // A failed chunk means we already top-up peers next iteration and
             // re-request from the same starting block.
-            if !chunk_failed
-                && let Some(last) = headers.last()
-            {
+            if !chunk_failed && let Some(last) = headers.last() {
                 // Tell new peer handshakes how far we are. Without this we
                 // keep advertising head=0 forever, which makes peers treat
                 // us like a fresh useless node and disconnect us early.
