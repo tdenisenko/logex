@@ -1,12 +1,13 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use alloy_consensus::{BlockHeader, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{B256, Log};
 use eyre::Result;
 use reth_ethereum_forks::Head;
+use reth_network_peers::NodeRecord;
 use reth_primitives_traits::SignedTransaction;
-use tokio::sync::RwLock;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{RwLock, watch};
 
 use logex_index::IndexBuilder;
 use logex_ingestion::extract;
@@ -30,6 +31,7 @@ pub struct SyncEngine {
     head_tracker: HeadTracker,
     progress: ProgressTracker,
     connected_once: bool,
+    shutdown: watch::Receiver<bool>,
 }
 
 impl SyncEngine {
@@ -39,6 +41,7 @@ impl SyncEngine {
         storage: Arc<RwLock<PartitionManager>>,
         subscriptions: Option<SubscriptionManager>,
         sync_status: Arc<std::sync::Mutex<SyncStatus>>,
+        shutdown: watch::Receiver<bool>,
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));
         Self {
@@ -50,6 +53,7 @@ impl SyncEngine {
             head_tracker: HeadTracker::new(256),
             progress,
             connected_once: false,
+            shutdown,
         }
     }
 
@@ -73,8 +77,19 @@ impl SyncEngine {
         // filling to max_peers before doing any work was the previous bug.
         let mut attempt: u32 = 0;
         loop {
+            if self.shutdown_requested() {
+                return self.finish_shutdown();
+            }
             self.refresh_connectivity_state();
-            self.peers.fill_peers(1, self.config.max_peers).await;
+            if cancelable(
+                &mut self.shutdown,
+                self.peers.fill_peers(1, self.config.max_peers),
+            )
+            .await
+            .is_none()
+            {
+                return self.finish_shutdown();
+            }
             self.refresh_connectivity_state();
             if self.peers.peer_count() > 0 {
                 self.connected_once = true;
@@ -91,7 +106,12 @@ impl SyncEngine {
                 ?delay,
                 "no peers connected yet, waiting for discovery to populate"
             );
-            tokio::time::sleep(delay).await;
+            if cancelable(&mut self.shutdown, tokio::time::sleep(delay))
+                .await
+                .is_none()
+            {
+                return self.finish_shutdown();
+            }
         }
         tracing::info!(peers = self.peers.peer_count(), "connected to peers");
 
@@ -112,6 +132,9 @@ impl SyncEngine {
         const EMPTY_THRESHOLD: u32 = 5;
         let mut consecutive_empty: u32 = 0;
         loop {
+            if self.shutdown_requested() {
+                return self.finish_shutdown();
+            }
             // Top up peers when we drop below half the target. We pass min=1
             // so fill_peers can add at least one more usable peer without
             // stalling toward the full target. Passing `1` here was a bug:
@@ -120,15 +143,29 @@ impl SyncEngine {
             if self.peers.peer_count() < self.config.max_peers / 2 {
                 let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
                 self.refresh_connectivity_state();
-                self.peers
-                    .fill_peers(min_peers, self.config.max_peers)
-                    .await;
+                if cancelable(
+                    &mut self.shutdown,
+                    self.peers.fill_peers(min_peers, self.config.max_peers),
+                )
+                .await
+                .is_none()
+                {
+                    return self.finish_shutdown();
+                }
                 self.refresh_connectivity_state();
             }
             if self.peers.peer_count() == 0 {
                 self.refresh_connectivity_state();
                 tracing::warn!("no peers available, waiting for discovery");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                if cancelable(
+                    &mut self.shutdown,
+                    tokio::time::sleep(Duration::from_secs(2)),
+                )
+                .await
+                .is_none()
+                {
+                    return self.finish_shutdown();
+                }
                 continue;
             }
             if let Some(target) = self.peers.highest_peer_block() {
@@ -136,17 +173,20 @@ impl SyncEngine {
             }
             self.set_runtime_state(NodeState::Syncing);
 
-            let headers = match self
-                .peers
-                .get_headers(current, self.config.header_batch_size)
-                .await
+            let headers = match cancelable(
+                &mut self.shutdown,
+                self.peers
+                    .get_headers(current, self.config.header_batch_size),
+            )
+            .await
             {
-                Ok(h) => h,
-                Err(e) => {
+                Some(Ok(h)) => h,
+                Some(Err(e)) => {
                     self.refresh_connectivity_state();
                     tracing::debug!(error = %e, current, "header request failed, retrying");
                     continue;
                 }
+                None => return self.finish_shutdown(),
             };
             if headers.is_empty() {
                 consecutive_empty += 1;
@@ -177,21 +217,33 @@ impl SyncEngine {
                 let chunk_headers = &headers[chunk_start..chunk_end];
                 let chunk_hashes = hashes[chunk_start..chunk_end].to_vec();
 
-                let bodies = match self.peers.get_bodies(chunk_hashes.clone()).await {
-                    Ok(b) => b,
-                    Err(e) => {
+                let bodies = match cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_bodies(chunk_hashes.clone()),
+                )
+                .await
+                {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => {
                         tracing::debug!(error = %e, "body request failed, retrying batch");
                         chunk_failed = true;
                         break;
                     }
+                    None => return self.finish_shutdown(),
                 };
-                let receipts = match self.peers.get_receipts(chunk_hashes.clone()).await {
-                    Ok(r) => r,
-                    Err(e) => {
+                let receipts = match cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_receipts(chunk_hashes.clone()),
+                )
+                .await
+                {
+                    Some(Ok(r)) => r,
+                    Some(Err(e)) => {
                         tracing::debug!(error = %e, "receipt request failed, retrying batch");
                         chunk_failed = true;
                         break;
                     }
+                    None => return self.finish_shutdown(),
                 };
 
                 if bodies.len() != chunk_headers.len() || receipts.len() != chunk_headers.len() {
@@ -263,14 +315,28 @@ impl SyncEngine {
     /// Follow the chain head, ingesting new blocks as they arrive.
     async fn run_live_sync(&mut self) -> Result<()> {
         loop {
-            tokio::time::sleep(Duration::from_secs(12)).await;
+            if cancelable(
+                &mut self.shutdown,
+                tokio::time::sleep(Duration::from_secs(12)),
+            )
+            .await
+            .is_none()
+            {
+                return self.finish_shutdown();
+            }
 
             if self.peers.peer_count() < 3 {
                 let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
                 self.refresh_connectivity_state();
-                self.peers
-                    .fill_peers(min_peers, self.config.max_peers)
-                    .await;
+                if cancelable(
+                    &mut self.shutdown,
+                    self.peers.fill_peers(min_peers, self.config.max_peers),
+                )
+                .await
+                .is_none()
+                {
+                    return self.finish_shutdown();
+                }
                 self.refresh_connectivity_state();
             }
             if self.peers.peer_count() == 0 {
@@ -286,33 +352,41 @@ impl SyncEngine {
                 status.current_block
             };
 
-            let headers = match self.peers.get_headers(current + 1, 16).await {
-                Ok(h) if !h.is_empty() => {
-                    self.set_runtime_state(NodeState::Syncing);
-                    h
-                }
-                Ok(_) => {
-                    self.progress.mark_synced();
-                    self.sync_status_peers();
-                    continue;
-                }
-                Err(e) => {
-                    self.refresh_connectivity_state();
-                    tracing::debug!(error = %e, current, "live header request failed");
-                    continue;
-                }
-            };
+            let headers =
+                match cancelable(&mut self.shutdown, self.peers.get_headers(current + 1, 16)).await
+                {
+                    Some(Ok(h)) if !h.is_empty() => {
+                        self.set_runtime_state(NodeState::Syncing);
+                        h
+                    }
+                    Some(Ok(_)) => {
+                        self.progress.mark_synced();
+                        self.sync_status_peers();
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        self.refresh_connectivity_state();
+                        tracing::debug!(error = %e, current, "live header request failed");
+                        continue;
+                    }
+                    None => return self.finish_shutdown(),
+                };
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
 
-            let bodies = match self.peers.get_bodies(hashes.clone()).await {
-                Ok(b) if b.len() == headers.len() => b,
-                _ => continue,
-            };
-            let receipts = match self.peers.get_receipts(hashes.clone()).await {
-                Ok(r) if r.len() == headers.len() => r,
-                _ => continue,
-            };
+            let bodies =
+                match cancelable(&mut self.shutdown, self.peers.get_bodies(hashes.clone())).await {
+                    Some(Ok(b)) if b.len() == headers.len() => b,
+                    Some(Ok(_)) | Some(Err(_)) => continue,
+                    None => return self.finish_shutdown(),
+                };
+            let receipts =
+                match cancelable(&mut self.shutdown, self.peers.get_receipts(hashes.clone())).await
+                {
+                    Some(Ok(r)) if r.len() == headers.len() => r,
+                    Some(Ok(_)) | Some(Err(_)) => continue,
+                    None => return self.finish_shutdown(),
+                };
 
             for (i, header) in headers.iter().enumerate() {
                 let block_hash = hashes[i];
@@ -455,6 +529,36 @@ impl SyncEngine {
         };
 
         self.set_runtime_state(state);
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown.has_changed().unwrap_or(true)
+    }
+
+    fn finish_shutdown(&self) -> Result<()> {
+        tracing::info!("shutdown requested, stopping sync engine");
+        let mut status = self.sync_status.lock().unwrap();
+        status.syncing = false;
+        status.eta_seconds = None;
+        Ok(())
+    }
+
+    pub fn known_peers(&self) -> Vec<NodeRecord> {
+        self.peers.known_peers()
+    }
+}
+
+async fn cancelable<T>(
+    shutdown: &mut watch::Receiver<bool>,
+    future: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        changed = shutdown.changed() => {
+            let _ = changed;
+            None
+        }
+        result = future => Some(result),
     }
 }
 

@@ -30,6 +30,7 @@ pub type PeerStream = EthStream<P2PStream<ECIESStream<TcpStream>>, EthNetworkPri
 pub struct PeerConnection {
     pub stream: PeerStream,
     pub remote_id: B512,
+    pub remote_record: NodeRecord,
     pub remote_status: UnifiedStatus,
 }
 
@@ -142,6 +143,7 @@ async fn connect_inner(
     Ok(PeerConnection {
         stream: eth_stream,
         remote_id,
+        remote_record: *node,
         remote_status: their_status,
     })
 }
