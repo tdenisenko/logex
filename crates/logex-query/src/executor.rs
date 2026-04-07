@@ -6,7 +6,7 @@ use logex_index::{BTreeIndexReader, CompositeQuery};
 use logex_storage::{ColumnReader, PartitionManager};
 use logex_types::LogRow;
 
-use crate::ast::{Expr, OrderByItem, Query, SelectItem};
+use crate::ast::{BinOp, Expr, OrderByItem, Query, SelectItem};
 use crate::planner::{self, QueryPlan};
 
 /// Query execution result.
@@ -22,6 +22,7 @@ pub fn execute(
     storage: &PartitionManager,
     head_block: Option<u64>,
 ) -> std::io::Result<QueryResult> {
+    let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
     let mut plan = match &query.where_clause {
         Some(expr) => planner::plan_where(expr),
         None => QueryPlan::default(),
@@ -29,8 +30,7 @@ pub fn execute(
 
     // Resolve `latest` if needed
     if plan.uses_latest {
-        let head = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
-        planner::resolve_latest(&mut plan, head);
+        planner::resolve_latest(&mut plan, head_block);
     }
 
     let mut all_rows = Vec::new();
@@ -54,9 +54,10 @@ pub fn execute(
         all_rows.extend(rows);
     }
 
-    // Apply residual filters
-    if !plan.residual_filters.is_empty() {
-        all_rows.retain(|row| plan.residual_filters.iter().all(|f| eval_filter(f, row)));
+    // Apply the full WHERE clause after index lookups. This keeps query results
+    // correct even when a hot partition has not been re-indexed yet.
+    if let Some(expr) = &query.where_clause {
+        all_rows.retain(|row| eval_filter(expr, row, head_block));
     }
 
     // Apply ORDER BY
@@ -246,59 +247,225 @@ fn compare_by_expr(a: &LogRow, b: &LogRow, expr: &Expr) -> std::cmp::Ordering {
 }
 
 /// Evaluate a residual filter against a single row.
-fn eval_filter(expr: &Expr, row: &LogRow) -> bool {
+fn eval_filter(expr: &Expr, row: &LogRow, head_block: u64) -> bool {
     match expr {
         Expr::BinaryOp {
             left,
-            op: crate::ast::BinOp::Eq,
+            op: BinOp::And,
             right,
-        } => {
-            if let Expr::Column(name) = left.as_ref() {
-                return match_eq(name, right, row);
-            }
-            true
+        } => eval_filter(left, row, head_block) && eval_filter(right, row, head_block),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Or,
+            right,
+        } => eval_filter(left, row, head_block) || eval_filter(right, row, head_block),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Eq,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Eq,
+        ),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Ne,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Ne,
+        ),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Lt,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Lt,
+        ),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Gt,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Gt,
+        ),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Le,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Le,
+        ),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Ge,
+            right,
+        } => compare_values(
+            eval_value(left, row, head_block),
+            eval_value(right, row, head_block),
+            BinOp::Ge,
+        ),
+        Expr::Between { expr, low, high } => {
+            let value = eval_value(expr, row, head_block);
+            let low = eval_value(low, row, head_block);
+            let high = eval_value(high, row, head_block);
+            compare_values(value.clone(), low, BinOp::Ge) && compare_values(value, high, BinOp::Le)
         }
-        Expr::BinaryOp {
-            left,
-            op: crate::ast::BinOp::Ne,
-            right,
+        Expr::InList {
+            expr,
+            list,
+            negated,
         } => {
-            if let Expr::Column(name) = left.as_ref() {
-                return !match_eq(name, right, row);
-            }
-            true
+            let value = eval_value(expr, row, head_block);
+            let contains = list.iter().any(|candidate| {
+                compare_values(
+                    value.clone(),
+                    eval_value(candidate, row, head_block),
+                    BinOp::Eq,
+                )
+            });
+            if *negated { !contains } else { contains }
         }
-        Expr::BinaryOp {
-            left,
-            op: crate::ast::BinOp::And,
-            right,
-        } => eval_filter(left, row) && eval_filter(right, row),
-        Expr::BinaryOp {
-            left,
-            op: crate::ast::BinOp::Or,
-            right,
-        } => eval_filter(left, row) || eval_filter(right, row),
-        Expr::Not(inner) => !eval_filter(inner, row),
-        _ => true, // Unknown filters pass through
+        Expr::Not(inner) => !eval_filter(inner, row, head_block),
+        _ => eval_value(expr, row, head_block)
+            .and_then(|value| match value {
+                QueryValue::Bool(result) => Some(result),
+                _ => None,
+            })
+            .unwrap_or(false),
     }
 }
 
-fn match_eq(column: &str, value: &Expr, row: &LogRow) -> bool {
-    match column {
-        "address" => match value {
-            Expr::StringLit(s) => {
-                let hex = s.strip_prefix("0x").unwrap_or(s);
-                hex::decode(hex)
-                    .ok()
-                    .is_some_and(|bytes| bytes == row.address.as_slice())
-            }
-            _ => false,
-        },
-        "source" => match value {
-            Expr::Number(n) => row.source as u8 == *n as u8,
-            _ => false,
-        },
-        _ => true,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueryValue {
+    Number(i128),
+    Bytes(Vec<u8>),
+    String(String),
+    Bool(bool),
+}
+
+fn eval_value(expr: &Expr, row: &LogRow, head_block: u64) -> Option<QueryValue> {
+    match expr {
+        Expr::Column(name) => column_value(name, row),
+        Expr::Number(value) => Some(QueryValue::Number(*value as i128)),
+        Expr::StringLit(value) => Some(string_literal_value(value)),
+        Expr::EventHash(hash) | Expr::AddressPadded(hash) => {
+            Some(QueryValue::Bytes(hash.as_slice().to_vec()))
+        }
+        Expr::Latest => Some(QueryValue::Number(head_block as i128)),
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Add,
+            right,
+        } => {
+            let left = eval_numeric(left, row, head_block)?;
+            let right = eval_numeric(right, row, head_block)?;
+            Some(QueryValue::Number(left + right))
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinOp::Sub,
+            right,
+        } => {
+            let left = eval_numeric(left, row, head_block)?;
+            let right = eval_numeric(right, row, head_block)?;
+            Some(QueryValue::Number(left - right))
+        }
+        Expr::BinaryOp { .. } | Expr::Between { .. } | Expr::InList { .. } | Expr::Not(_) => {
+            Some(QueryValue::Bool(eval_filter(expr, row, head_block)))
+        }
+        Expr::Function { .. } | Expr::Star => None,
+    }
+}
+
+fn eval_numeric(expr: &Expr, row: &LogRow, head_block: u64) -> Option<i128> {
+    match eval_value(expr, row, head_block)? {
+        QueryValue::Number(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn column_value(name: &str, row: &LogRow) -> Option<QueryValue> {
+    match name {
+        "block_number" => Some(QueryValue::Number(row.block_number as i128)),
+        "block_hash" => Some(QueryValue::Bytes(row.block_hash.as_slice().to_vec())),
+        "timestamp" => Some(QueryValue::Number(row.timestamp as i128)),
+        "tx_hash" => Some(QueryValue::Bytes(row.tx_hash.as_slice().to_vec())),
+        "tx_index" => Some(QueryValue::Number(row.tx_index as i128)),
+        "log_index" => Some(QueryValue::Number(row.log_index as i128)),
+        "address" => Some(QueryValue::Bytes(row.address.as_slice().to_vec())),
+        "topic0" => row
+            .topic0
+            .map(|value| QueryValue::Bytes(value.as_slice().to_vec())),
+        "topic1" => row
+            .topic1
+            .map(|value| QueryValue::Bytes(value.as_slice().to_vec())),
+        "topic2" => row
+            .topic2
+            .map(|value| QueryValue::Bytes(value.as_slice().to_vec())),
+        "topic3" => row
+            .topic3
+            .map(|value| QueryValue::Bytes(value.as_slice().to_vec())),
+        "data" => Some(QueryValue::Bytes(row.data.to_vec())),
+        "data_len" => Some(QueryValue::Number(row.data_len as i128)),
+        "source" => Some(QueryValue::Number(row.source as u8 as i128)),
+        _ => None,
+    }
+}
+
+fn string_literal_value(value: &str) -> QueryValue {
+    let stripped = value.strip_prefix("0x").unwrap_or(value);
+    if stripped.len().is_multiple_of(2)
+        && !stripped.is_empty()
+        && stripped.chars().all(|ch| ch.is_ascii_hexdigit())
+        && let Ok(bytes) = hex::decode(stripped)
+    {
+        return QueryValue::Bytes(bytes);
+    }
+
+    QueryValue::String(value.to_owned())
+}
+
+fn compare_values(left: Option<QueryValue>, right: Option<QueryValue>, op: BinOp) -> bool {
+    let Some(left) = left else {
+        return false;
+    };
+    let Some(right) = right else {
+        return false;
+    };
+
+    match (left, right) {
+        (QueryValue::Number(left), QueryValue::Number(right)) => {
+            compare_ordering(left.cmp(&right), op)
+        }
+        (QueryValue::Bytes(left), QueryValue::Bytes(right)) => {
+            compare_ordering(left.cmp(&right), op)
+        }
+        (QueryValue::String(left), QueryValue::String(right)) => {
+            compare_ordering(left.cmp(&right), op)
+        }
+        (QueryValue::Bool(left), QueryValue::Bool(right)) => compare_ordering(left.cmp(&right), op),
+        _ => false,
+    }
+}
+
+fn compare_ordering(ordering: std::cmp::Ordering, op: BinOp) -> bool {
+    match op {
+        BinOp::Eq => ordering == std::cmp::Ordering::Equal,
+        BinOp::Ne => ordering != std::cmp::Ordering::Equal,
+        BinOp::Lt => ordering == std::cmp::Ordering::Less,
+        BinOp::Gt => ordering == std::cmp::Ordering::Greater,
+        BinOp::Le => ordering != std::cmp::Ordering::Greater,
+        BinOp::Ge => ordering != std::cmp::Ordering::Less,
+        _ => false,
     }
 }
 
@@ -348,7 +515,7 @@ mod tests {
                 log_index: 0,
                 address: Address::repeat_byte(0xBB),
                 topic0: Some(B256::repeat_byte(0xEE)),
-                topic1: None,
+                topic1: Some(B256::repeat_byte(0x99)),
                 topic2: None,
                 topic3: None,
                 data: bytes!("cafe"),
@@ -386,6 +553,17 @@ mod tests {
         // Build indexes on the hot partition
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
 
+        (tmp, mgr)
+    }
+
+    fn setup_storage_without_indexes() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let config = PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+        };
+        let mut mgr = PartitionManager::open(config).unwrap();
+        mgr.write_batch(&make_test_rows()).unwrap();
         (tmp, mgr)
     }
 
@@ -511,5 +689,27 @@ mod tests {
         // Head block is 300, so latest - 100 = 200
         let result = execute(&q, &storage, Some(300)).unwrap();
         assert_eq!(result.rows.len(), 2); // blocks 200, 300
+    }
+
+    #[test]
+    fn test_filter_by_topic1_without_indexes() {
+        let (_tmp, storage) = setup_storage_without_indexes();
+        let topic = hex::encode(B256::repeat_byte(0x99));
+        let q = parse(&format!("SELECT * FROM logs WHERE topic1 = '0x{topic}'")).unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].block_number, 200);
+    }
+
+    #[test]
+    fn test_filter_by_block_hash_without_indexes() {
+        let (_tmp, storage) = setup_storage_without_indexes();
+        let hash = hex::encode(B256::repeat_byte(0x03));
+        let q = parse(&format!("SELECT * FROM logs WHERE block_hash = '0x{hash}'")).unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].block_number, 300);
     }
 }

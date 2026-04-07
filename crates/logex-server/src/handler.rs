@@ -64,6 +64,10 @@ fn handle_eth_get_logs(
     let filter: EthFilter =
         serde_json::from_value(params[0].clone()).map_err(|e| format!("invalid filter: {e}"))?;
 
+    if filter.block_hash.is_some() && (filter.from_block.is_some() || filter.to_block.is_some()) {
+        return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
+    }
+
     // Convert eth_getLogs filter to a LogSQL query
     let sql = filter_to_logsql(&filter, storage);
     tracing::debug!(sql = %sql, "eth_getLogs query");
@@ -138,6 +142,10 @@ fn filter_to_logsql(filter: &EthFilter, storage: &PartitionManager) -> String {
         conditions.push(format!("topic0 = '0x{}'", hex::encode(hash)));
     }
     // Multi-topic0 handled via matches_filter
+
+    if let Some(block_hash) = filter.block_hash {
+        conditions.push(format!("block_hash = '0x{}'", hex::encode(block_hash)));
+    }
 
     let where_clause = if conditions.is_empty() {
         String::new()

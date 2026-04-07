@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use alloy_primitives::B256;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -163,10 +164,13 @@ async fn run_sync(
         }
     };
 
+    let sync_head = storage.sync_head();
     let head_block = storage.head_block().unwrap_or(0);
+    let indexed_head_block = storage.indexed_head_block();
     tracing::info!(
         total_rows = storage.total_rows(),
         head_block,
+        indexed_head_block,
         "storage ready"
     );
 
@@ -174,7 +178,11 @@ async fn run_sync(
     let state = Arc::new(AppState {
         storage: Arc::new(tokio::sync::RwLock::new(storage)),
         subscriptions: Some(SubscriptionManager::new()),
-        sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
+        sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
+            current_block: head_block,
+            target_block: head_block,
+            ..Default::default()
+        })),
     });
 
     // Spawn HTTP server
@@ -227,11 +235,13 @@ async fn run_sync(
     // PeerManager::set_head().
     let our_head = Head {
         number: head_block,
-        hash: if head_block == 0 {
-            MAINNET_GENESIS
-        } else {
-            alloy_primitives::B256::ZERO
-        },
+        hash: sync_head.map(|head| head.block_hash).unwrap_or_else(|| {
+            if head_block == 0 {
+                MAINNET_GENESIS
+            } else {
+                B256::ZERO
+            }
+        }),
         ..Default::default()
     };
     let peers = PeerManager::new(secret_key, discovery, our_head);
@@ -260,25 +270,31 @@ async fn run_sync(
 
 /// Background task that periodically rebuilds indexes on the hot partition.
 async fn run_background_indexer(state: Arc<AppState>) {
-    let mut last_indexed_rows = 0u64;
+    let mut last_indexed: Option<HotIndexState> = None;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
-        let (hot_path, hot_rows) = {
+        let current = {
             let storage = state.storage.read().await;
-            let hp = storage.hot_partition().meta.path.clone();
-            let rows = storage.hot_partition().meta.row_count;
-            (hp, rows)
+            HotIndexState {
+                partition_id: storage.hot_partition().meta.id,
+                row_count: storage.hot_partition().meta.row_count,
+                path: storage.hot_partition().meta.path.clone(),
+            }
         };
 
-        if hot_rows > last_indexed_rows && hot_rows > 0 {
-            let path = hot_path.clone();
+        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current) {
+            let path = current.path.clone();
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
             {
                 Ok(Ok(())) => {
-                    tracing::debug!(rows = hot_rows, "indexes rebuilt");
-                    last_indexed_rows = hot_rows;
+                    tracing::debug!(
+                        partition_id = current.partition_id,
+                        rows = current.row_count,
+                        "indexes rebuilt"
+                    );
+                    last_indexed = Some(current);
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "failed to build indexes");
@@ -288,6 +304,28 @@ async fn run_background_indexer(state: Arc<AppState>) {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HotIndexState {
+    partition_id: u64,
+    row_count: u64,
+    path: PathBuf,
+}
+
+fn should_rebuild_hot_indexes(
+    last_indexed: Option<&HotIndexState>,
+    current: &HotIndexState,
+) -> bool {
+    if current.row_count == 0 {
+        return false;
+    }
+
+    match last_indexed {
+        None => true,
+        Some(last) if last.partition_id != current.partition_id => true,
+        Some(last) => current.row_count > last.row_count,
     }
 }
 
@@ -330,13 +368,56 @@ fn run_info(config: PartitionManagerConfig) {
     println!("  Total rows:         {}", storage.total_rows());
     println!("  Sealed partitions:  {}", storage.sealed_count());
     println!(
-        "  Head block:         {}",
+        "  Synced head:        {}",
         storage
             .head_block()
+            .map_or("none".to_string(), |b| b.to_string())
+    );
+    println!(
+        "  Indexed head:       {}",
+        storage
+            .indexed_head_block()
             .map_or("none".to_string(), |b| b.to_string())
     );
     println!(
         "  Hot partition rows:  {}",
         storage.hot_partition().meta.row_count
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rebuild_hot_indexes_when_partition_rotates() {
+        let last = HotIndexState {
+            partition_id: 1,
+            row_count: 150,
+            path: PathBuf::from("/tmp/old"),
+        };
+        let current = HotIndexState {
+            partition_id: 2,
+            row_count: 1,
+            path: PathBuf::from("/tmp/new"),
+        };
+
+        assert!(should_rebuild_hot_indexes(Some(&last), &current));
+    }
+
+    #[test]
+    fn test_skip_rebuild_when_hot_partition_is_unchanged() {
+        let last = HotIndexState {
+            partition_id: 7,
+            row_count: 200,
+            path: PathBuf::from("/tmp/hot"),
+        };
+        let current = HotIndexState {
+            partition_id: 7,
+            row_count: 200,
+            path: PathBuf::from("/tmp/hot"),
+        };
+
+        assert!(!should_rebuild_hot_indexes(Some(&last), &current));
+    }
 }

@@ -72,6 +72,9 @@ impl SyncEngine {
         loop {
             self.peers.fill_peers(1, self.config.max_peers).await;
             if self.peers.peer_count() > 0 {
+                if let Some(target) = self.peers.highest_peer_block() {
+                    self.progress.set_target(target);
+                }
                 break;
             }
             attempt += 1;
@@ -113,6 +116,9 @@ impl SyncEngine {
                 tracing::warn!("no peers available, waiting for discovery");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
+            }
+            if let Some(target) = self.peers.highest_peer_block() {
+                self.progress.set_target(target);
             }
 
             let headers = match self
@@ -245,6 +251,9 @@ impl SyncEngine {
             if self.peers.peer_count() < 3 {
                 self.peers.fill_peers(1, self.config.max_peers).await;
             }
+            if let Some(target) = self.peers.highest_peer_block() {
+                self.progress.set_target(target);
+            }
 
             let current = {
                 let status = self.sync_status.lock().unwrap();
@@ -316,8 +325,8 @@ impl SyncEngine {
         let rows = extract::extract_from_block(block_number, block_hash, timestamp, txs);
         let count = rows.len() as u64;
 
+        let mut storage = self.storage.write().await;
         if !rows.is_empty() {
-            let mut storage = self.storage.write().await;
             let sealed_before = storage.sealed_count();
             storage
                 .write_batch(&rows)
@@ -338,6 +347,9 @@ impl SyncEngine {
                 subs.notify(&rows);
             }
         }
+        storage
+            .record_sync_head(block_number, block_hash)
+            .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
 
         Ok(count)
     }

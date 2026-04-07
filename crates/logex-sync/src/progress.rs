@@ -11,6 +11,8 @@ pub struct ProgressTracker {
     logs_ingested: u64,
     /// Block number when we last logged progress.
     last_log_block: u64,
+    /// Timestamp of the last terminal progress line.
+    last_log_at: Instant,
 }
 
 impl ProgressTracker {
@@ -21,13 +23,14 @@ impl ProgressTracker {
             blocks_processed: 0,
             logs_ingested: 0,
             last_log_block: 0,
+            last_log_at: Instant::now(),
         }
     }
 
     /// Set the network tip as the sync target.
     pub fn set_target(&self, target_block: u64) {
         let mut status = self.status.lock().unwrap();
-        status.target_block = target_block;
+        status.target_block = status.target_block.max(target_block);
         status.syncing = true;
     }
 
@@ -42,10 +45,12 @@ impl ProgressTracker {
         } else {
             0.0
         };
+        let bpm = bps * 60.0;
 
         let mut status = self.status.lock().unwrap();
         status.current_block = block_number;
         status.blocks_per_sec = bps;
+        status.blocks_per_minute = bpm;
         status.logs_ingested = self.logs_ingested;
 
         if bps > 0.0 && status.target_block > block_number {
@@ -55,14 +60,22 @@ impl ProgressTracker {
             status.eta_seconds = None;
         }
 
-        // Log progress every 1000 blocks.
-        if block_number / 1000 > self.last_log_block / 1000 {
+        // Log progress periodically so operators get geth/reth-style feedback
+        // even when blocks are sparse or many blocks contain no logs.
+        let should_log = block_number / 1000 > self.last_log_block / 1000
+            || self.last_log_at.elapsed().as_secs() >= 15;
+        if should_log {
             self.last_log_block = block_number;
+            self.last_log_at = Instant::now();
             tracing::info!(
-                block = block_number,
+                current_block = block_number,
+                target_block = status.target_block,
+                remaining_blocks = status.target_block.saturating_sub(block_number),
                 total_blocks = self.blocks_processed,
                 total_logs = self.logs_ingested,
-                blocks_per_sec = format!("{bps:.1}"),
+                blocks_per_sec = format!("{bps:.2}"),
+                blocks_per_minute = format!("{bpm:.1}"),
+                eta_seconds = status.eta_seconds.map(|eta| eta.round() as u64),
                 "sync progress"
             );
         }
@@ -72,6 +85,7 @@ impl ProgressTracker {
     pub fn mark_synced(&self) {
         let mut status = self.status.lock().unwrap();
         status.syncing = false;
+        status.target_block = status.current_block;
         status.eta_seconds = None;
     }
 

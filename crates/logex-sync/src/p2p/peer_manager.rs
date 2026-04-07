@@ -76,6 +76,14 @@ impl PeerManager {
         self.peers.len()
     }
 
+    /// Highest advertised canonical block across connected peers.
+    pub fn highest_peer_block(&self) -> Option<u64> {
+        self.peers
+            .iter()
+            .filter_map(|peer| peer.remote_status.latest_block)
+            .max()
+    }
+
     /// Drain whatever discovery events are immediately available into the
     /// pending queue. Non-blocking — returns the number of new candidates added.
     fn drain_discovery(&mut self) -> usize {

@@ -1,11 +1,29 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use alloy_primitives::B256;
 use logex_types::{LogRow, PartitionMeta};
+use serde::{Deserialize, Serialize};
 
 use crate::column::ColumnFile;
 use crate::reader::ColumnReader;
 use crate::wal::WriteAheadLog;
+
+const STORAGE_META_FILE: &str = "storage_metadata.json";
+
+/// Persisted sync head metadata. This advances even for blocks that contain
+/// zero logs so the node can resume sync and report head height correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncHead {
+    pub block_number: u64,
+    pub block_hash: B256,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StorageMetadata {
+    #[serde(default)]
+    sync_head: Option<SyncHead>,
+}
 
 /// A single partition — either the writable hot partition or a sealed immutable one.
 pub struct Partition {
@@ -103,13 +121,41 @@ pub struct PartitionManager {
     hot_partition: Partition,
     next_partition_id: u64,
     wal: WriteAheadLog,
+    sync_head: Option<SyncHead>,
 }
 
 impl PartitionManager {
+    fn metadata_path(&self) -> PathBuf {
+        self.config.data_dir.join(STORAGE_META_FILE)
+    }
+
+    fn load_metadata(path: &Path) -> std::io::Result<StorageMetadata> {
+        if !path.exists() {
+            return Ok(StorageMetadata::default());
+        }
+
+        let json = fs::read_to_string(path)?;
+        serde_json::from_str(&json).map_err(std::io::Error::other)
+    }
+
+    fn persist_metadata(&self) -> std::io::Result<()> {
+        let path = self.metadata_path();
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(&StorageMetadata {
+            sync_head: self.sync_head,
+        })
+        .map_err(std::io::Error::other)?;
+
+        fs::write(&tmp, json)?;
+        fs::rename(tmp, path)?;
+        Ok(())
+    }
+
     /// Open or create a partition manager at the given data directory.
     pub fn open(config: PartitionManagerConfig) -> std::io::Result<Self> {
         let partitions_dir = config.data_dir.join("partitions");
         let wal_dir = config.data_dir.join("wal");
+        let metadata_path = config.data_dir.join(STORAGE_META_FILE);
         fs::create_dir_all(&partitions_dir)?;
         fs::create_dir_all(&wal_dir)?;
 
@@ -155,6 +201,7 @@ impl PartitionManager {
         }
 
         let wal = WriteAheadLog::open(wal_dir.join("pending.wal"))?;
+        let metadata = Self::load_metadata(&metadata_path)?;
 
         let mut manager = Self {
             config,
@@ -162,6 +209,7 @@ impl PartitionManager {
             hot_partition,
             next_partition_id: max_id,
             wal,
+            sync_head: metadata.sync_head,
         };
 
         // Replay any pending WAL entries
@@ -240,6 +288,26 @@ impl PartitionManager {
         Ok(())
     }
 
+    /// Persist the latest fully-validated block, even when it produced no logs.
+    pub fn record_sync_head(&mut self, block_number: u64, block_hash: B256) -> std::io::Result<()> {
+        let next = SyncHead {
+            block_number,
+            block_hash,
+        };
+
+        if self.sync_head == Some(next) {
+            return Ok(());
+        }
+
+        self.sync_head = Some(next);
+        self.persist_metadata()
+    }
+
+    /// Return the most recently persisted sync head, if any.
+    pub fn sync_head(&self) -> Option<SyncHead> {
+        self.sync_head
+    }
+
     /// Mark rows in a given block as non-canonical (during reorg).
     ///
     /// Scans all partitions (sealed + hot) whose block range could contain the
@@ -289,13 +357,21 @@ impl PartitionManager {
         Ok(total_marked)
     }
 
-    /// Get the current head block number (highest block in hot partition).
-    pub fn head_block(&self) -> Option<u64> {
+    /// Highest block number that produced at least one stored log row.
+    pub fn indexed_head_block(&self) -> Option<u64> {
         if self.hot_partition.meta.row_count > 0 {
             Some(self.hot_partition.meta.max_block)
         } else {
             self.sealed_partitions.last().map(|p| p.meta.max_block)
         }
+    }
+
+    /// Current sync head, falling back to the indexed head when metadata has
+    /// not been persisted yet.
+    pub fn head_block(&self) -> Option<u64> {
+        self.sync_head
+            .map(|head| head.block_number)
+            .or_else(|| self.indexed_head_block())
     }
 
     /// Total number of rows across all partitions.
@@ -461,5 +537,62 @@ mod tests {
             assert_eq!(mgr.sealed_count(), 1);
             assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 100);
         }
+    }
+
+    #[test]
+    fn test_partition_manager_persists_sync_head_without_rows() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let expected_hash = B256::repeat_byte(0xAB);
+
+        {
+            let config = PartitionManagerConfig {
+                data_dir: data_dir.clone(),
+                partition_target_rows: 50,
+            };
+            let mut mgr = PartitionManager::open(config).unwrap();
+            mgr.record_sync_head(1234, expected_hash).unwrap();
+            assert_eq!(mgr.head_block(), Some(1234));
+            assert_eq!(
+                mgr.sync_head(),
+                Some(SyncHead {
+                    block_number: 1234,
+                    block_hash: expected_hash
+                })
+            );
+        }
+
+        {
+            let config = PartitionManagerConfig {
+                data_dir,
+                partition_target_rows: 50,
+            };
+            let mgr = PartitionManager::open(config).unwrap();
+            assert_eq!(mgr.head_block(), Some(1234));
+            assert_eq!(
+                mgr.sync_head(),
+                Some(SyncHead {
+                    block_number: 1234,
+                    block_hash: expected_hash
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_head_block_prefers_sync_head_over_indexed_head() {
+        let tmp = TempDir::new().unwrap();
+        let config = PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000,
+        };
+
+        let mut mgr = PartitionManager::open(config).unwrap();
+        mgr.write_batch(&make_test_rows(10, 100)).unwrap();
+        assert_eq!(mgr.indexed_head_block(), Some(100));
+
+        mgr.record_sync_head(150, B256::repeat_byte(0xCD)).unwrap();
+        assert_eq!(mgr.head_block(), Some(150));
+        assert_eq!(mgr.indexed_head_block(), Some(100));
     }
 }

@@ -182,6 +182,12 @@ impl From<&LogRow> for RpcLog {
 
 /// Check if a LogRow matches an `eth_getLogs` filter.
 pub fn matches_filter(row: &LogRow, filter: &EthFilter) -> bool {
+    if let Some(block_hash) = filter.block_hash
+        && row.block_hash != block_hash
+    {
+        return false;
+    }
+
     // Address filter
     match &filter.address {
         AddressFilter::Any => {}
@@ -314,6 +320,15 @@ mod tests {
             ..Default::default()
         };
         assert!(matches_filter(&test_row(), &filter));
+    }
+
+    #[test]
+    fn test_filter_block_hash_mismatch() {
+        let filter = EthFilter {
+            block_hash: Some(B256::repeat_byte(0xFF)),
+            ..Default::default()
+        };
+        assert!(!matches_filter(&test_row(), &filter));
     }
 
     #[test]

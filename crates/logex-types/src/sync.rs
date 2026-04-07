@@ -11,6 +11,8 @@ pub struct SyncStatus {
     pub target_block: u64,
     /// Current sync throughput.
     pub blocks_per_sec: f64,
+    /// Average sync throughput expressed in blocks per minute.
+    pub blocks_per_minute: f64,
     /// Total logs ingested since the node started.
     pub logs_ingested: u64,
     /// Estimated seconds remaining to reach target.

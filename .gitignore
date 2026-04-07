@@ -4,6 +4,8 @@
 # Markdown files (except README.md)
 *.md
 !README.md
+!README2.md
+!ANALYSIS_AND_ROADMAP.md
 
 # Claude Code local settings
 .claude/

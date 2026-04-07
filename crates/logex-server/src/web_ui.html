@@ -26,6 +26,12 @@
   .stat b { color: #c9d1d9; }
 
   main { flex: 1; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+  .progress-card { background: linear-gradient(135deg, rgba(88,166,255,.12), rgba(35,134,54,.08)); border: 1px solid #21262d; border-radius: 10px; padding: 14px 16px; }
+  .progress-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .progress-top strong { font-size: 14px; color: #f0f6fc; }
+  .progress-meta { font-size: 12px; color: #8b949e; display: flex; gap: 14px; flex-wrap: wrap; }
+  .progress-bar { height: 10px; border-radius: 999px; background: #161b22; border: 1px solid #30363d; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #1f6feb, #3fb950); transition: width .35s ease; }
 
   .query-panel { display: flex; flex-direction: column; gap: 10px; }
   textarea { width: 100%; height: 90px; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; resize: vertical; outline: none; }
@@ -59,16 +65,27 @@
   </div>
   <div class="status-panel" id="statusPanel">
     <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
-    <span class="stat">Block: <b id="stBlock">--</b></span>
+    <span class="stat">Synced: <b id="stBlock">--</b></span>
     <span class="stat">Target: <b id="stTarget">--</b></span>
-    <span class="stat">Speed: <b id="stSpeed">--</b> blk/s</span>
+    <span class="stat">Indexed: <b id="stIndexed">--</b></span>
+    <span class="stat">Rate: <b id="stSpeed">--</b> blk/min</span>
     <span class="stat">ETA: <b id="stEta">--</b></span>
     <span class="stat">Rows: <b id="stRows">--</b></span>
-    <span class="stat">Head: <b id="stHead">--</b></span>
+    <span class="stat">Logs: <b id="stLogs">--</b></span>
   </div>
 </header>
 
 <main>
+  <div class="progress-card">
+    <div class="progress-top">
+      <strong id="stProgressPct">--</strong>
+      <div class="progress-meta">
+        <span>Remaining blocks: <b id="stRemaining">--</b></span>
+        <span>Network head: <b id="stHead">--</b></span>
+      </div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="stProgressFill"></div></div>
+  </div>
   <div class="query-panel">
     <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
     <div class="query-bar">
@@ -87,7 +104,7 @@
 </main>
 
 <footer>
-  <span>JSON-RPC: POST /</span> | <span>REST: POST /query</span> | <span>gRPC: port 50051</span> | <span>WebSocket: /ws</span>
+  <span>JSON-RPC: POST /</span> | <span>REST: POST /query</span> | <span>gRPC: --grpc-port (default 8578)</span> | <span>WebSocket: /ws</span>
 </footer>
 
 <script>
@@ -112,7 +129,9 @@ function fmtEta(seconds) {
 }
 
 function updateStatus(data) {
-  var synced = data.synced || (data.current_block && data.target_block && data.current_block >= data.target_block);
+  var current = Number(data.current_block || 0);
+  var target = Number(data.target_block || 0);
+  var synced = data.synced === true || (target > 0 && current >= target);
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
   if (synced) {
@@ -122,12 +141,20 @@ function updateStatus(data) {
     badge.className = 'status-badge badge-syncing';
     badgeText.textContent = 'Syncing';
   }
-  document.getElementById('stBlock').textContent = fmt(data.current_block);
-  document.getElementById('stTarget').textContent = fmt(data.target_block);
-  document.getElementById('stSpeed').textContent = data.blocks_per_sec != null ? data.blocks_per_sec.toFixed(1) : '--';
+  var remaining = target > current ? target - current : 0;
+  var pct = target > 0 ? Math.min((current / target) * 100, 100) : 0;
+
+  document.getElementById('stBlock').textContent = fmt(current);
+  document.getElementById('stTarget').textContent = fmt(target);
+  document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
+  document.getElementById('stSpeed').textContent = data.blocks_per_minute != null ? data.blocks_per_minute.toFixed(1) : '--';
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
   document.getElementById('stRows').textContent = fmt(data.total_rows);
+  document.getElementById('stLogs').textContent = fmt(data.logs_ingested);
   document.getElementById('stHead').textContent = fmt(data.head_block);
+  document.getElementById('stRemaining').textContent = fmt(remaining);
+  document.getElementById('stProgressPct').textContent = target > 0 ? pct.toFixed(1) + '% synced' : '--';
+  document.getElementById('stProgressFill').style.width = pct.toFixed(1) + '%';
 }
 
 function fetchStatus() {
