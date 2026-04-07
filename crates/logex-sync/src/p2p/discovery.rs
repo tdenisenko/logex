@@ -7,6 +7,9 @@ use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
 use tokio_stream::wrappers::ReceiverStream;
 
+const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
+const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Handle to a running discv4 service plus the stream of newly discovered peers.
 ///
 /// We expose the update stream alongside the handle because polling
@@ -30,13 +33,16 @@ pub async fn start_discovery(secret_key: SecretKey, discovery_port: u16) -> Resu
     let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
     let local_enr = NodeRecord::new(local_addr, peer_id);
 
-    // Default lookup_interval is 20s, which is glacial for a fresh start.
-    // 5s walks the DHT fast enough to fill 50 peers within the first minute.
-    let config = Discv4Config {
-        bootstrap_nodes: mainnet_nodes().into_iter().collect(),
-        lookup_interval: Duration::from_secs(5),
-        ..Default::default()
-    };
+    // Reth/geth-style cold starts keep discovery busy enough that the routing
+    // table turns over quickly in the first minute instead of waiting on long
+    // default timeouts between walks. We still keep discovery-only bootnodes
+    // out of the dial queue; this only makes the DHT bootstrap more eager.
+    let mut config_builder = Discv4Config::builder();
+    let config = config_builder
+        .add_boot_nodes(mainnet_nodes())
+        .lookup_interval(DISCOVERY_LOOKUP_INTERVAL)
+        .ping_interval(DISCOVERY_PING_INTERVAL)
+        .build();
 
     let (handle, mut service) = Discv4::bind(local_addr, local_enr, secret_key, config).await?;
 

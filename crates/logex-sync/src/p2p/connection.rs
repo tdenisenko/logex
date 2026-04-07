@@ -21,7 +21,7 @@ use super::mainnet::{self, MAINNET_CHAIN_ID, MAINNET_GENESIS};
 /// before giving up on a peer. Reth's internal eth handshake has its own
 /// 10s timeout (HANDSHAKE_TIMEOUT in p2pstream), so anything below that
 /// risks killing connections that would have succeeded.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// The inner P2P stream type after all handshakes complete.
 pub type PeerStream = EthStream<P2PStream<ECIESStream<TcpStream>>, EthNetworkPrimitives>;
