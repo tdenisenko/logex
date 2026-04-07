@@ -10,6 +10,7 @@ use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
+use logex_sync::p2p::mainnet::MAINNET_GENESIS;
 use logex_sync::p2p::{discovery, peer_manager::PeerManager};
 use logex_types::SyncStatus;
 use reth_ethereum_forks::Head;
@@ -210,8 +211,8 @@ async fn run_sync(
     // Generate node identity
     let secret_key = secp256k1::SecretKey::new(&mut rand::thread_rng());
 
-    // Start peer discovery
-    let disc = match discovery::start_discovery(secret_key, discovery_port).await {
+    // Start peer discovery (returns handle + update stream)
+    let discovery = match discovery::start_discovery(secret_key, discovery_port).await {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, "failed to start peer discovery");
@@ -219,13 +220,21 @@ async fn run_sync(
         }
     };
 
-    // Create peer manager and sync engine
+    // Create peer manager and sync engine.
+    // For a fresh sync (head_block == 0) we advertise the mainnet genesis hash
+    // so peers see a valid Status during the eth handshake. After the first
+    // ingested block the head_tracker / sync engine will update this via
+    // PeerManager::set_head().
     let our_head = Head {
         number: head_block,
-        hash: alloy_primitives::B256::ZERO,
+        hash: if head_block == 0 {
+            MAINNET_GENESIS
+        } else {
+            alloy_primitives::B256::ZERO
+        },
         ..Default::default()
     };
-    let peers = PeerManager::new(secret_key, disc, our_head);
+    let peers = PeerManager::new(secret_key, discovery, our_head);
 
     let sync_config = SyncConfig {
         max_peers,

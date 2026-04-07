@@ -1,40 +1,66 @@
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{B256, B512};
 use eyre::{Result, bail};
+use futures::FutureExt;
+use futures::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
-use reth_discv4::Discv4;
+use reth_discv4::{DiscoveryUpdate, Discv4};
 use reth_eth_wire::{
     EthMessage, EthNetworkPrimitives, GetBlockBodies, GetBlockHeaders, GetReceipts,
     HeadersDirection, message::RequestPair,
 };
 use reth_eth_wire_types::NetworkPrimitives;
 use reth_ethereum_forks::Head;
+use reth_network_peers::NodeRecord;
 use secp256k1::SecretKey;
 use tokio::time::timeout;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
 use super::connection::{self, PeerConnection};
+use super::discovery::Discovery;
 
 /// Timeout for individual request/response roundtrips.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for new discovery events when we have nothing to try.
+/// Short enough that startup feels responsive, long enough to let the DHT
+/// emit a meaningful batch of records.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
+
+/// Wall-clock cap on a single `fill_peers` call. Without this, fill_peers
+/// would loop until `target` is reached or candidates dry up — but on a
+/// fresh start, candidates flow in faster than peers accept us, so the call
+/// blocks the sync engine indefinitely. With a budget, fill_peers returns
+/// whatever progress it made and lets the engine decide whether to start
+/// fetching headers (any peers > 0) or wait and retry.
+const FILL_BUDGET: Duration = Duration::from_secs(20);
 
 /// Manages a pool of peer connections and routes requests.
 pub struct PeerManager {
     secret_key: SecretKey,
     peers: Vec<PeerConnection>,
     discovery: Discv4,
+    discovery_updates: ReceiverStream<DiscoveryUpdate>,
+    /// Buffered candidates we haven't tried to connect to yet. The discovery
+    /// stream emits records continuously, and we want to drain everything
+    /// available before sleeping.
+    pending: VecDeque<NodeRecord>,
     our_head: Head,
     next_request_id: u64,
 }
 
 impl PeerManager {
     /// Create a new peer manager with discovery running.
-    pub fn new(secret_key: SecretKey, discovery: Discv4, our_head: Head) -> Self {
+    pub fn new(secret_key: SecretKey, discovery: Discovery, our_head: Head) -> Self {
         Self {
             secret_key,
             peers: Vec::new(),
-            discovery,
+            discovery: discovery.handle,
+            discovery_updates: discovery.updates,
+            pending: VecDeque::new(),
             our_head,
             next_request_id: 1,
         }
@@ -50,39 +76,181 @@ impl PeerManager {
         self.peers.len()
     }
 
-    /// Connect to discovered peers until we reach `target` connections.
-    pub async fn fill_peers(&mut self, target: usize) {
+    /// Drain whatever discovery events are immediately available into the
+    /// pending queue. Non-blocking — returns the number of new candidates added.
+    fn drain_discovery(&mut self) -> usize {
+        let mut added = 0;
+        while let Some(update) = self.discovery_updates.next().now_or_never().flatten() {
+            self.handle_update(update, &mut added);
+        }
+        added
+    }
+
+    /// Wait up to `DISCOVERY_WAIT` for at least one new discovery event,
+    /// then drain anything else that's immediately ready.
+    async fn wait_for_discovery(&mut self) -> usize {
+        let mut added = 0;
+        match timeout(DISCOVERY_WAIT, self.discovery_updates.next()).await {
+            Ok(Some(update)) => self.handle_update(update, &mut added),
+            Ok(None) => {
+                // Stream closed - discovery service died.
+                warn!("discovery update stream closed");
+            }
+            Err(_) => {} // timeout, no events yet
+        }
+        // Pick up anything else that arrived during the same poll window.
+        while let Some(update) = self.discovery_updates.next().now_or_never().flatten() {
+            self.handle_update(update, &mut added);
+        }
+        added
+    }
+
+    fn handle_update(&mut self, update: DiscoveryUpdate, added: &mut usize) {
+        match update {
+            DiscoveryUpdate::Added(record) | DiscoveryUpdate::DiscoveredAtCapacity(record) => {
+                if !self.is_connected(record.id) {
+                    self.pending.push_back(record);
+                    *added += 1;
+                }
+            }
+            DiscoveryUpdate::Batch(updates) => {
+                for u in updates {
+                    self.handle_update(u, added);
+                }
+            }
+            DiscoveryUpdate::EnrForkId(_, _) | DiscoveryUpdate::Removed(_) => {}
+        }
+    }
+
+    /// Connect to discovered peers, returning as soon as `min` peers are
+    /// connected (or `target` if `min` is already met). Bounded by
+    /// [`FILL_BUDGET`].
+    ///
+    /// Pulls candidates from the discv4 update stream (populated by the
+    /// background DHT walk) and dials them in parallel because most are
+    /// firewalled, saturated, or speak a different protocol — serial dialing
+    /// would burn the startup budget on dead nodes.
+    ///
+    /// **Why two thresholds?** Mainnet peers drop connections that go idle
+    /// during the eth handshake / first request, so the wall-clock window
+    /// between *connecting* and *issuing the first GetBlockHeaders* must be
+    /// short. Returning eagerly at `min` lets the engine start fetching
+    /// almost immediately; subsequent calls top up toward `target` while
+    /// requests are already in flight. With a single `target` threshold the
+    /// fill loop kept dialing for the full 20s budget, leaving the first
+    /// few peers idle long enough to be disconnected.
+    ///
+    /// Returns early when any of: `min` reached (after the current dial
+    /// batch completes), `target` reached, no new candidates within the
+    /// discovery wait window, or [`FILL_BUDGET`] elapsed. The wall-clock
+    /// budget is what makes this safe to call from the sync engine's main
+    /// loop — without it, a steady candidate inflow combined with a low
+    /// connection success rate keeps fill_peers spinning forever, blocking
+    /// header fetches.
+    pub async fn fill_peers(&mut self, min: usize, target: usize) {
+        // Already meet the caller's minimum — return immediately so they
+        // can use the peers they already have. This prevents the engine
+        // from blocking inside fill_peers (with peers sitting idle) while
+        // dialing toward `target`.
+        if self.peers.len() >= min {
+            return;
+        }
         if self.peers.len() >= target {
             return;
         }
-        let needed = target - self.peers.len();
 
-        // Discover new peers
-        let nodes = match self.discovery.lookup_random().await {
-            Ok(n) => n,
-            Err(e) => {
-                warn!(error = %e, "peer discovery lookup failed");
+        // Kick the DHT to keep the routing table growing. send_lookup_self
+        // is fire-and-forget, unlike lookup_random which would block ~40s
+        // if the table is sparse.
+        self.discovery.send_lookup_self();
+
+        let deadline = Instant::now() + FILL_BUDGET;
+
+        loop {
+            if self.peers.len() >= target {
                 return;
             }
-        };
-
-        let mut connected = 0usize;
-        for node in nodes.into_iter().take(needed * 2) {
-            if self.is_connected(node.id) {
-                continue;
+            if Instant::now() >= deadline {
+                debug!(
+                    current_peers = self.peers.len(),
+                    target, "fill_peers budget exhausted"
+                );
+                return;
             }
-            match connection::connect(&node, self.secret_key, self.our_head).await {
-                Ok(conn) => {
-                    debug!(peer = %conn.remote_id, "new peer connected");
-                    self.peers.push(conn);
-                    connected += 1;
-                    if connected >= needed {
-                        break;
+
+            self.drain_discovery();
+
+            if self.pending.is_empty() {
+                let added = self.wait_for_discovery().await;
+                if added == 0 {
+                    // No new candidates within the wait window — let the
+                    // caller decide whether to retry or move on.
+                    return;
+                }
+            }
+
+            // Take a batch and dial them concurrently. Bigger batches improve
+            // throughput at the cost of momentary connection-storm noise.
+            let batch_size = (target - self.peers.len()).max(8);
+            let batch: Vec<NodeRecord> = self
+                .pending
+                .drain(..self.pending.len().min(batch_size))
+                .collect();
+
+            debug!(
+                batch = batch.len(),
+                pending = self.pending.len(),
+                current_peers = self.peers.len(),
+                min,
+                target,
+                "dialing peer batch"
+            );
+
+            let secret_key = self.secret_key;
+            let our_head = self.our_head;
+            let mut tasks: FuturesUnordered<_> = batch
+                .into_iter()
+                .map(|node| async move {
+                    let id = node.id;
+                    let result = connection::connect(&node, secret_key, our_head).await;
+                    (id, result)
+                })
+                .collect();
+
+            while let Some((id, result)) = tasks.next().await {
+                match result {
+                    Ok(conn) => {
+                        debug!(peer = %conn.remote_id, "new peer connected");
+                        self.peers.push(conn);
+                        if self.peers.len() >= target {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        debug!(peer = %id, error = %e, "failed to connect to peer");
                     }
                 }
-                Err(e) => {
-                    debug!(peer = %node.id, error = %e, "failed to connect to peer");
+                // Re-check the deadline between completions so a slow batch
+                // doesn't blow past the budget by 15s.
+                if Instant::now() >= deadline {
+                    debug!(
+                        current_peers = self.peers.len(),
+                        target, "fill_peers budget exhausted mid-batch"
+                    );
+                    return;
                 }
+            }
+
+            // Return as soon as we have `min` peers — letting the caller
+            // start using them before they get bored and disconnect.
+            // Without this, mainnet peers reliably dropped us after ~20s
+            // of being connected but unused.
+            if self.peers.len() >= min {
+                debug!(
+                    current_peers = self.peers.len(),
+                    min, target, "fill_peers reached minimum, returning"
+                );
+                return;
             }
         }
     }
