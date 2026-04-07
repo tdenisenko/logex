@@ -14,7 +14,7 @@ use reth_eth_wire::{
 };
 use reth_eth_wire_types::NetworkPrimitives;
 use reth_ethereum_forks::Head;
-use reth_network_peers::{NodeRecord, mainnet_nodes};
+use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
 use secp256k1::SecretKey;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
@@ -37,7 +37,9 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 /// blocks the sync engine indefinitely. With a budget, fill_peers returns
 /// whatever progress it made and lets the engine decide whether to start
 /// fetching headers (any peers > 0) or wait and retry.
-const FILL_BUDGET: Duration = Duration::from_secs(20);
+const FILL_BUDGET: Duration = Duration::from_secs(12);
+const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+const ACTIVE_RANDOM_LOOKUP_FANOUT: usize = 1;
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
 static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<B512>> =
@@ -168,19 +170,42 @@ impl PeerManager {
     /// produced any candidates.
     async fn lookup_candidates(&mut self) -> usize {
         let mut added = 0;
-        match timeout(FILL_BUDGET / 2, self.discovery.lookup_self()).await {
-            Ok(Ok(records)) => {
-                for record in records {
-                    if self.enqueue_candidate(record) {
-                        added += 1;
+        let mut tasks = FuturesUnordered::new();
+
+        tasks.push(run_active_lookup(self.discovery.clone(), "self", None));
+
+        for _ in 0..ACTIVE_RANDOM_LOOKUP_FANOUT {
+            tasks.push(run_active_lookup(
+                self.discovery.clone(),
+                "random",
+                Some(PeerId::random()),
+            ));
+        }
+
+        while let Some((lookup_kind, result)) = tasks.next().await {
+            match result {
+                Ok(Ok(records)) => {
+                    let mut lookup_added = 0;
+                    for record in records {
+                        if self.enqueue_candidate(record) {
+                            added += 1;
+                            lookup_added += 1;
+                        }
+                    }
+                    if lookup_added > 0 {
+                        debug!(
+                            lookup = lookup_kind,
+                            added = lookup_added,
+                            "active discovery lookup produced dial candidates"
+                        );
                     }
                 }
-            }
-            Ok(Err(err)) => {
-                debug!(error = %err, "discovery lookup failed");
-            }
-            Err(_) => {
-                debug!("discovery lookup timed out");
+                Ok(Err(err)) => {
+                    debug!(lookup = lookup_kind, error = %err, "discovery lookup failed");
+                }
+                Err(_) => {
+                    debug!(lookup = lookup_kind, timeout = ?ACTIVE_LOOKUP_TIMEOUT, "discovery lookup timed out");
+                }
             }
         }
         added
@@ -243,6 +268,9 @@ impl PeerManager {
         // is fire-and-forget, unlike lookup_random which would block ~40s
         // if the table is sparse.
         self.discovery.send_lookup_self();
+        for _ in 0..ACTIVE_RANDOM_LOOKUP_FANOUT {
+            self.discovery.send_lookup(PeerId::random());
+        }
 
         let deadline = Instant::now() + FILL_BUDGET;
 
@@ -377,6 +405,7 @@ impl PeerManager {
         if is_bootstrap_node(node.id) {
             return;
         }
+        self.discovery.add_node(node);
         self.remember_productive_with_priority(node, false);
         self.enqueue_candidate(node);
     }
@@ -711,6 +740,24 @@ fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
 
 fn is_bootstrap_node(id: B512) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
+}
+
+async fn run_active_lookup(
+    discovery: Discv4,
+    lookup_kind: &'static str,
+    target: Option<PeerId>,
+) -> (
+    &'static str,
+    std::result::Result<
+        std::result::Result<Vec<NodeRecord>, reth_discv4::error::Discv4Error>,
+        tokio::time::error::Elapsed,
+    >,
+) {
+    let result = match target {
+        Some(target) => timeout(ACTIVE_LOOKUP_TIMEOUT, discovery.lookup(target)).await,
+        None => timeout(ACTIVE_LOOKUP_TIMEOUT, discovery.lookup_self()).await,
+    };
+    (lookup_kind, result)
 }
 
 #[cfg(test)]
