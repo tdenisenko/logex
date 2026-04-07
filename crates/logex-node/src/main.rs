@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
 
 use alloy_primitives::B256;
@@ -230,12 +231,6 @@ async fn run_sync(
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let signal_shutdown_tx = shutdown_tx.clone();
-    let signal_handle = tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        tracing::info!("shutdown signal received");
-        let _ = signal_shutdown_tx.send(true);
-    });
 
     // Spawn HTTP server
     let http_addr: SocketAddr = ([0, 0, 0, 0], http_port).into();
@@ -311,8 +306,20 @@ async fn run_sync(
         shutdown_rx.clone(),
     );
 
-    // Run sync (blocks until error or shutdown)
-    if let Err(e) = engine.run().await {
+    // Run sync until completion or an external shutdown signal arrives.
+    let engine_result = {
+        let mut engine_run = pin!(engine.run());
+        tokio::select! {
+            res = &mut engine_run => res,
+            signal = wait_for_shutdown_signal() => {
+                tracing::info!(signal, "shutdown requested, stopping node gracefully");
+                let _ = shutdown_tx.send(true);
+                engine_run.await
+            }
+        }
+    };
+
+    if let Err(e) = engine_result {
         tracing::error!(error = %e, "sync engine error");
     }
 
@@ -332,8 +339,7 @@ async fn run_sync(
     }
 
     let _ = shutdown_tx.send(true);
-    signal_handle.abort();
-    let _ = signal_handle.await;
+    tracing::info!("waiting for HTTP, gRPC, and indexing tasks to stop");
     log_task_exit("HTTP server", http_handle).await;
     log_task_exit("gRPC server", grpc_handle).await;
     log_task_exit("background indexer", index_handle).await;
@@ -390,21 +396,25 @@ async fn run_background_indexer(
     }
 }
 
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to install SIGINT handler");
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("failed to install SIGTERM handler");
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
+            _ = interrupt.recv() => "SIGINT",
+            _ = terminate.recv() => "SIGTERM",
         }
     }
 
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
     }
 }
 

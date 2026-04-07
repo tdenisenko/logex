@@ -74,7 +74,8 @@
     <span class="stat">Current: <b id="stBlock">--</b></span>
     <span class="stat">Target: <b id="stTarget">--</b></span>
     <span class="stat">Indexed: <b id="stIndexed">--</b></span>
-    <span class="stat">Peers: <b id="stPeers">--</b></span>
+    <span class="stat">Peers: <b id="stServing">--</b></span>
+    <span class="stat">Connected: <b id="stPeers">--</b></span>
     <span class="stat">Candidates: <b id="stPending">--</b></span>
     <span class="stat">Rate: <b id="stSpeed">--</b> blk/min</span>
     <span class="stat">ETA: <b id="stEta">--</b></span>
@@ -171,6 +172,7 @@ function updateStatus(data) {
   document.getElementById('stTarget').textContent = fmt(target);
   document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
   document.getElementById('stPeers').textContent = fmt(data.connected_peers);
+  document.getElementById('stServing').textContent = fmt(data.serving_peers);
   document.getElementById('stPending').textContent = fmt(data.pending_peers);
   document.getElementById('stSpeed').textContent = data.blocks_per_minute != null ? data.blocks_per_minute.toFixed(1) : '--';
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);

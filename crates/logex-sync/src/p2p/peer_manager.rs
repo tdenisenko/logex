@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::{B256, B512};
@@ -8,8 +9,8 @@ use futures::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
 use reth_discv4::{DiscoveryUpdate, Discv4};
 use reth_eth_wire::{
-    EthMessage, EthNetworkPrimitives, GetBlockBodies, GetBlockHeaders, GetReceipts,
-    HeadersDirection, message::RequestPair,
+    EthMessage, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders, GetReceipts,
+    GetReceipts70, HeadersDirection, message::RequestPair,
 };
 use reth_eth_wire_types::NetworkPrimitives;
 use reth_ethereum_forks::Head;
@@ -38,6 +39,9 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 /// fetching headers (any peers > 0) or wait and retry.
 const FILL_BUDGET: Duration = Duration::from_secs(20);
 const MAX_PERSISTED_PEERS: usize = 512;
+const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
+static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<B512>> =
+    LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
 
 /// Manages a pool of peer connections and routes requests.
 pub struct PeerManager {
@@ -49,12 +53,12 @@ pub struct PeerManager {
     /// stream emits records continuously, and we want to drain everything
     /// available before sleeping.
     pending: VecDeque<NodeRecord>,
-    /// Known peers discovered or successfully connected during this run.
-    /// We keep these across queue drains so shutdown persistence does not
-    /// accidentally forget useful peers after a bad reconnect cycle.
-    known: VecDeque<NodeRecord>,
+    /// Peers that have already proved useful for sync and are worth
+    /// persisting across restarts.
+    productive: VecDeque<NodeRecord>,
     our_head: Head,
     next_request_id: u64,
+    last_responder: Option<B512>,
 }
 
 impl PeerManager {
@@ -71,20 +75,14 @@ impl PeerManager {
             discovery: discovery.handle,
             discovery_updates: discovery.updates,
             pending: VecDeque::new(),
-            known: VecDeque::new(),
+            productive: VecDeque::new(),
             our_head,
             next_request_id: 1,
+            last_responder: None,
         };
 
         for node in known_peers {
             manager.seed_known_node(node);
-        }
-
-        // Seed the queue with persisted peers first, then hardcoded mainnet
-        // bootnodes so startup can dial immediately instead of waiting on the
-        // discovery stream to produce its first records.
-        for node in mainnet_nodes() {
-            manager.enqueue_candidate(node, false);
         }
 
         manager
@@ -98,6 +96,12 @@ impl PeerManager {
     /// Number of currently connected peers.
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    /// Number of connected peers that have successfully answered at least one
+    /// block/receipt request and are therefore actually serving sync data.
+    pub fn serving_peer_count(&self) -> usize {
+        self.peers.iter().filter(|peer| peer.is_serving).count()
     }
 
     /// Highest advertised canonical block across connected peers.
@@ -115,11 +119,29 @@ impl PeerManager {
 
     /// Snapshot of known peers suitable for writing to disk on shutdown.
     pub fn known_peers(&self) -> Vec<NodeRecord> {
-        self.known
-            .iter()
-            .copied()
-            .take(MAX_PERSISTED_PEERS)
-            .collect()
+        let mut peers = Vec::with_capacity(MAX_PERSISTED_PEERS);
+
+        for peer in &self.peers {
+            if is_bootstrap_node(peer.remote_record.id) {
+                continue;
+            }
+            push_unique_peer(&mut peers, peer.remote_record);
+            if peers.len() >= MAX_PERSISTED_PEERS {
+                return peers;
+            }
+        }
+
+        for peer in &self.productive {
+            if is_bootstrap_node(peer.id) {
+                continue;
+            }
+            push_unique_peer(&mut peers, *peer);
+            if peers.len() >= MAX_PERSISTED_PEERS {
+                break;
+            }
+        }
+
+        peers
     }
 
     /// Drain whatever discovery events are immediately available into the
@@ -158,7 +180,7 @@ impl PeerManager {
         match timeout(FILL_BUDGET / 2, self.discovery.lookup_self()).await {
             Ok(Ok(records)) => {
                 for record in records {
-                    if self.enqueue_candidate(record, true) {
+                    if self.enqueue_candidate(record) {
                         added += 1;
                     }
                 }
@@ -176,7 +198,7 @@ impl PeerManager {
     fn handle_update(&mut self, update: DiscoveryUpdate, added: &mut usize) {
         match update {
             DiscoveryUpdate::Added(record) | DiscoveryUpdate::DiscoveredAtCapacity(record) => {
-                if self.enqueue_candidate(record, true) {
+                if self.enqueue_candidate(record) {
                     *added += 1;
                 }
             }
@@ -300,8 +322,16 @@ impl PeerManager {
                 match result {
                     Ok(conn) => {
                         debug!(peer = %conn.remote_id, "new peer connected");
-                        self.remember_node(conn.remote_record);
                         self.peers.push(conn);
+                        if self.peers.len() >= min {
+                            debug!(
+                                current_peers = self.peers.len(),
+                                min,
+                                target,
+                                "fill_peers reached minimum mid-batch, returning immediately"
+                            );
+                            return;
+                        }
                         if self.peers.len() >= target {
                             return;
                         }
@@ -353,15 +383,17 @@ impl PeerManager {
     }
 
     fn seed_known_node(&mut self, node: NodeRecord) {
-        self.remember_node_with_priority(node, false);
-        self.enqueue_candidate(node, false);
+        if is_bootstrap_node(node.id) {
+            return;
+        }
+        self.remember_productive_with_priority(node, false);
+        self.enqueue_candidate(node);
     }
 
-    fn enqueue_candidate(&mut self, node: NodeRecord, remember: bool) -> bool {
-        if remember {
-            self.remember_node(node);
+    fn enqueue_candidate(&mut self, node: NodeRecord) -> bool {
+        if is_bootstrap_node(node.id) {
+            return false;
         }
-
         if self.knows_node(node.id) {
             return false;
         }
@@ -370,23 +402,27 @@ impl PeerManager {
         true
     }
 
-    fn remember_node(&mut self, node: NodeRecord) {
-        self.remember_node_with_priority(node, true);
+    fn remember_productive(&mut self, node: NodeRecord) {
+        self.remember_productive_with_priority(node, true);
     }
 
-    fn remember_node_with_priority(&mut self, node: NodeRecord, recent: bool) {
-        if let Some(index) = self.known.iter().position(|known| known.id == node.id) {
-            self.known.remove(index);
+    fn remember_productive_with_priority(&mut self, node: NodeRecord, recent: bool) {
+        if let Some(index) = self
+            .productive
+            .iter()
+            .position(|productive| productive.id == node.id)
+        {
+            self.productive.remove(index);
         }
 
         if recent {
-            self.known.push_front(node);
+            self.productive.push_front(node);
         } else {
-            self.known.push_back(node);
+            self.productive.push_back(node);
         }
 
-        while self.known.len() > MAX_PERSISTED_PEERS {
-            self.known.pop_back();
+        while self.productive.len() > MAX_PERSISTED_PEERS {
+            self.productive.pop_back();
         }
     }
 
@@ -410,19 +446,28 @@ impl PeerManager {
             direction: HeadersDirection::Rising,
         };
 
-        self.send_request_and_receive(
-            EthMessage::GetBlockHeaders(RequestPair {
-                request_id,
-                message: request,
-            }),
-            |msg| match msg {
-                EthMessage::BlockHeaders(pair) if pair.request_id == request_id => {
-                    Some(pair.message.0)
-                }
-                _ => None,
-            },
-        )
-        .await
+        let headers = self
+            .send_request_and_receive(
+                |_| {
+                    EthMessage::GetBlockHeaders(RequestPair {
+                        request_id,
+                        message: request,
+                    })
+                },
+                |msg| match msg {
+                    EthMessage::BlockHeaders(pair) if pair.request_id == request_id => {
+                        Some(pair.message.0)
+                    }
+                    _ => None,
+                },
+            )
+            .await?;
+
+        if !headers.is_empty() {
+            self.mark_last_responder_serving();
+        }
+
+        Ok(headers)
     }
 
     /// Request block bodies for the given block hashes.
@@ -434,10 +479,12 @@ impl PeerManager {
         let request = GetBlockBodies(hashes);
 
         self.send_request_and_receive(
-            EthMessage::GetBlockBodies(RequestPair {
-                request_id,
-                message: request,
-            }),
+            |_| {
+                EthMessage::GetBlockBodies(RequestPair {
+                    request_id,
+                    message: request.clone(),
+                })
+            },
             |msg| match msg {
                 EthMessage::BlockBodies(pair) if pair.request_id == request_id => {
                     Some(pair.message.0)
@@ -463,15 +510,33 @@ impl PeerManager {
         >,
     > {
         let request_id = self.next_id();
-        let request = GetReceipts(hashes);
+        let request = GetReceipts(hashes.clone());
 
         self.send_request_and_receive(
-            EthMessage::GetReceipts(RequestPair {
-                request_id,
-                message: request,
-            }),
+            move |version| {
+                if version >= EthVersion::Eth70 {
+                    EthMessage::GetReceipts70(RequestPair {
+                        request_id,
+                        message: GetReceipts70 {
+                            first_block_receipt_index: 0,
+                            block_hashes: hashes.clone(),
+                        },
+                    })
+                } else {
+                    EthMessage::GetReceipts(RequestPair {
+                        request_id,
+                        message: request.clone(),
+                    })
+                }
+            },
             |msg| match msg {
                 EthMessage::Receipts(pair) if pair.request_id == request_id => Some(pair.message.0),
+                EthMessage::Receipts69(pair) if pair.request_id == request_id => {
+                    Some(pair.message.into_with_bloom().0)
+                }
+                EthMessage::Receipts70(pair) if pair.request_id == request_id => {
+                    Some(pair.message.into_with_bloom().0)
+                }
                 _ => None,
             },
         )
@@ -481,59 +546,201 @@ impl PeerManager {
     /// Send a request to the first available peer and wait for the matching response.
     async fn send_request_and_receive<T>(
         &mut self,
-        request: EthMessage<EthNetworkPrimitives>,
+        request_for_version: impl Fn(EthVersion) -> EthMessage<EthNetworkPrimitives>,
         extract: impl Fn(EthMessage<EthNetworkPrimitives>) -> Option<T>,
     ) -> Result<T> {
-        // Try each peer in order, remove dead ones
-        let mut dead_peers = Vec::new();
+        let mut dead_peers = HashSet::new();
+        self.last_responder = None;
 
-        for (idx, peer) in self.peers.iter_mut().enumerate() {
-            // Send
-            if peer.stream.send(request.clone()).await.is_err() {
-                dead_peers.push(idx);
+        let peer_order: Vec<B512> = self.peers.iter().map(|peer| peer.remote_id).collect();
+
+        for remote_id in peer_order {
+            let Some(idx) = self
+                .peers
+                .iter()
+                .position(|peer| peer.remote_id == remote_id)
+            else {
                 continue;
-            }
+            };
 
-            // Wait for matching response
-            match timeout(REQUEST_TIMEOUT, async {
-                while let Some(msg_result) = peer.stream.next().await {
-                    match msg_result {
-                        Ok(msg) => {
-                            if let Some(result) = extract(msg) {
-                                return Ok(result);
+            let outcome = {
+                let peer = &mut self.peers[idx];
+                let request = request_for_version(peer.remote_status.version);
+
+                if peer.stream.send(request).await.is_err() {
+                    Err(RequestAttempt::Disconnected)
+                } else {
+                    match timeout(REQUEST_TIMEOUT, async {
+                        while let Some(msg_result) = peer.stream.next().await {
+                            match msg_result {
+                                Ok(msg) => {
+                                    if let Some(result) = extract(msg) {
+                                        return Ok(result);
+                                    }
+                                }
+                                Err(e) => return Err(eyre::eyre!("stream error: {e}")),
                             }
-                            // Not our response, keep reading
                         }
-                        Err(e) => return Err(eyre::eyre!("stream error: {e}")),
+                        Err(eyre::eyre!("peer disconnected"))
+                    })
+                    .await
+                    {
+                        Ok(Ok(result)) => Ok(result),
+                        Ok(Err(e)) => Err(RequestAttempt::StreamError(e)),
+                        Err(_) => Err(RequestAttempt::TimedOut),
                     }
                 }
-                Err(eyre::eyre!("peer disconnected"))
-            })
-            .await
-            {
-                Ok(Ok(result)) => {
-                    // Clean up dead peers before returning
-                    for &idx in dead_peers.iter().rev() {
-                        self.peers.swap_remove(idx);
-                    }
+            };
+
+            match outcome {
+                Ok(result) => {
+                    self.last_responder = Some(remote_id);
+                    self.reset_peer_timeout(remote_id);
+                    self.promote_peer(remote_id);
+                    self.remove_dead_peers(&dead_peers);
                     return Ok(result);
                 }
-                Ok(Err(e)) => {
-                    debug!(peer = %peer.remote_id, error = %e, "peer error during request");
-                    dead_peers.push(idx);
+                Err(RequestAttempt::TimedOut) => {
+                    debug!(peer = %remote_id, "request timed out");
+                    if self.record_timeout(remote_id) >= MAX_CONSECUTIVE_TIMEOUTS {
+                        dead_peers.insert(remote_id);
+                    } else {
+                        self.demote_peer(remote_id);
+                    }
                 }
-                Err(_) => {
-                    debug!(peer = %peer.remote_id, "request timed out");
-                    dead_peers.push(idx);
+                Err(RequestAttempt::StreamError(error)) => {
+                    debug!(peer = %remote_id, error = %error, "peer error during request");
+                    dead_peers.insert(remote_id);
+                }
+                Err(RequestAttempt::Disconnected) => {
+                    dead_peers.insert(remote_id);
                 }
             }
         }
 
-        // Clean up dead peers
-        for &idx in dead_peers.iter().rev() {
-            self.peers.swap_remove(idx);
-        }
+        self.remove_dead_peers(&dead_peers);
 
         bail!("no peers available to handle request")
+    }
+
+    fn mark_last_responder_serving(&mut self) {
+        let Some(remote_id) = self.last_responder.take() else {
+            return;
+        };
+
+        let productive_peer = if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.remote_id == remote_id)
+        {
+            peer.is_serving = true;
+            Some(peer.remote_record)
+        } else {
+            None
+        };
+
+        if let Some(peer) = productive_peer {
+            self.remember_productive(peer);
+        }
+    }
+
+    fn reset_peer_timeout(&mut self, remote_id: B512) {
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.remote_id == remote_id)
+        {
+            peer.consecutive_timeouts = 0;
+        }
+    }
+
+    fn record_timeout(&mut self, remote_id: B512) -> u32 {
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.remote_id == remote_id)
+        {
+            peer.consecutive_timeouts += 1;
+            return peer.consecutive_timeouts;
+        }
+        MAX_CONSECUTIVE_TIMEOUTS
+    }
+
+    fn promote_peer(&mut self, remote_id: B512) {
+        let Some(index) = self
+            .peers
+            .iter()
+            .position(|peer| peer.remote_id == remote_id)
+        else {
+            return;
+        };
+        if index == 0 {
+            return;
+        }
+        let peer = self.peers.remove(index);
+        self.peers.insert(0, peer);
+    }
+
+    fn demote_peer(&mut self, remote_id: B512) {
+        let Some(index) = self
+            .peers
+            .iter()
+            .position(|peer| peer.remote_id == remote_id)
+        else {
+            return;
+        };
+        if index + 1 == self.peers.len() {
+            return;
+        }
+        let peer = self.peers.remove(index);
+        self.peers.push(peer);
+    }
+
+    fn remove_dead_peers(&mut self, dead_peers: &HashSet<B512>) {
+        if dead_peers.is_empty() {
+            return;
+        }
+        self.peers
+            .retain(|peer| !dead_peers.contains(&peer.remote_id));
+    }
+}
+
+enum RequestAttempt {
+    TimedOut,
+    Disconnected,
+    StreamError(eyre::Error),
+}
+
+fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
+    if peers.iter().any(|peer| peer.id == node.id) {
+        return;
+    }
+    peers.push(node);
+}
+
+fn is_bootstrap_node(id: B512) -> bool {
+    MAINNET_BOOTNODE_IDS.contains(&id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mainnet_bootnodes_are_recognized() {
+        let bootnode = mainnet_nodes()
+            .into_iter()
+            .next()
+            .expect("mainnet bootnodes should not be empty");
+        assert!(is_bootstrap_node(bootnode.id));
+    }
+
+    #[test]
+    fn non_bootstrap_peer_is_not_treated_as_bootstrap() {
+        let non_bootstrap = NodeRecord::new(
+            "203.0.113.10:30303".parse().expect("valid address"),
+            B512::repeat_byte(0x42),
+        );
+        assert!(!is_bootstrap_node(non_bootstrap.id));
     }
 }

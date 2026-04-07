@@ -96,7 +96,7 @@ impl SyncEngine {
                 if let Some(target) = self.peers.highest_peer_block() {
                     self.progress.set_target(target);
                 }
-                self.set_runtime_state(NodeState::Syncing);
+                self.refresh_connectivity_state();
                 break;
             }
             attempt += 1;
@@ -171,7 +171,7 @@ impl SyncEngine {
             if let Some(target) = self.peers.highest_peer_block() {
                 self.progress.set_target(target);
             }
-            self.set_runtime_state(NodeState::Syncing);
+            self.refresh_connectivity_state();
 
             let headers = match cancelable(
                 &mut self.shutdown,
@@ -188,6 +188,7 @@ impl SyncEngine {
                 }
                 None => return self.finish_shutdown(),
             };
+            self.refresh_connectivity_state();
             if headers.is_empty() {
                 consecutive_empty += 1;
                 if consecutive_empty >= EMPTY_THRESHOLD {
@@ -212,6 +213,8 @@ impl SyncEngine {
 
             let fetch_size = self.config.fetch_batch_size;
             let mut chunk_failed = false;
+            let mut next_block = current;
+            let mut last_ingested_head: Option<Head> = None;
             for chunk_start in (0..headers.len()).step_by(fetch_size) {
                 let chunk_end = (chunk_start + fetch_size).min(headers.len());
                 let chunk_headers = &headers[chunk_start..chunk_end];
@@ -251,9 +254,10 @@ impl SyncEngine {
                         headers = chunk_headers.len(),
                         bodies = bodies.len(),
                         receipts = receipts.len(),
-                        "peer returned mismatched counts, skipping batch"
+                        "peer returned mismatched counts, retrying from last ingested block"
                     );
-                    continue;
+                    chunk_failed = true;
+                    break;
                 }
 
                 for (i, header) in chunk_headers.iter().enumerate() {
@@ -269,9 +273,10 @@ impl SyncEngine {
                         tracing::warn!(
                             block_number,
                             %block_hash,
-                            "receipt root mismatch — discarding batch from peer"
+                            "receipt root mismatch — retrying from last ingested block"
                         );
-                        continue;
+                        chunk_failed = true;
+                        break;
                     }
 
                     // Extract tx hashes from block body, zip with receipt logs
@@ -288,23 +293,27 @@ impl SyncEngine {
                         .ingest_block(block_number, block_hash, timestamp, &txs)
                         .await?;
                     self.progress.record_block(block_number, log_count);
+                    next_block = block_number + 1;
+                    last_ingested_head = Some(Head {
+                        number: block_number,
+                        hash: block_hash,
+                        timestamp,
+                        ..Default::default()
+                    });
+                }
+
+                if chunk_failed {
+                    break;
                 }
             }
 
-            // Only advance `current` if every chunk in the batch succeeded.
-            // A failed chunk means we already top-up peers next iteration and
-            // re-request from the same starting block.
-            if !chunk_failed && let Some(last) = headers.last() {
-                // Tell new peer handshakes how far we are. Without this we
-                // keep advertising head=0 forever, which makes peers treat
-                // us like a fresh useless node and disconnect us early.
-                self.peers.set_head(Head {
-                    number: last.number(),
-                    hash: last.hash_slow(),
-                    timestamp: last.timestamp(),
-                    ..Default::default()
-                });
-                current = last.number() + 1;
+            if let Some(head) = last_ingested_head {
+                self.peers.set_head(head);
+            }
+            current = next_block;
+
+            if chunk_failed {
+                continue;
             }
         }
 
@@ -356,7 +365,7 @@ impl SyncEngine {
                 match cancelable(&mut self.shutdown, self.peers.get_headers(current + 1, 16)).await
                 {
                     Some(Ok(h)) if !h.is_empty() => {
-                        self.set_runtime_state(NodeState::Syncing);
+                        self.refresh_connectivity_state();
                         h
                     }
                     Some(Ok(_)) => {
@@ -388,6 +397,7 @@ impl SyncEngine {
                     None => return self.finish_shutdown(),
                 };
 
+            let mut batch_failed = false;
             for (i, header) in headers.iter().enumerate() {
                 let block_hash = hashes[i];
                 let block_number = header.number();
@@ -398,9 +408,10 @@ impl SyncEngine {
                     tracing::warn!(
                         block_number,
                         %block_hash,
-                        "receipt root mismatch in live sync — skipping block"
+                        "receipt root mismatch in live sync — retrying from current head"
                     );
-                    continue;
+                    batch_failed = true;
+                    break;
                 }
 
                 let txs = assemble_txs(&bodies[i], &receipts[i]);
@@ -423,6 +434,10 @@ impl SyncEngine {
                     timestamp,
                     ..Default::default()
                 });
+            }
+
+            if batch_failed {
+                continue;
             }
 
             self.progress.mark_synced();
@@ -501,6 +516,7 @@ impl SyncEngine {
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
+            self.peers.serving_peer_count(),
             self.peers.pending_count(),
         );
     }
@@ -509,23 +525,28 @@ impl SyncEngine {
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
+            self.peers.serving_peer_count(),
             self.peers.pending_count(),
         );
     }
 
     fn refresh_connectivity_state(&self) {
-        let state = if self.peers.peer_count() > 0 {
+        let state = if self.peers.serving_peer_count() > 0 {
             NodeState::Syncing
+        } else if self.peers.peer_count() > 0 {
+            NodeState::Connecting
         } else if self.connected_once {
             if self.peers.pending_count() > 0 {
                 NodeState::Reconnecting
             } else {
                 NodeState::Disconnected
             }
-        } else if self.peers.pending_count() > 0 {
-            NodeState::Connecting
         } else {
-            NodeState::Discovering
+            if self.peers.pending_count() > 0 {
+                NodeState::Connecting
+            } else {
+                NodeState::Discovering
+            }
         };
 
         self.set_runtime_state(state);

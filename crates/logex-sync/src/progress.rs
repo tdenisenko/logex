@@ -31,10 +31,8 @@ impl ProgressTracker {
     pub fn set_target(&self, target_block: u64) {
         let mut status = self.status.lock().unwrap();
         status.target_block = status.target_block.max(target_block);
-        status.syncing = status.target_block > status.current_block;
-        if status.syncing && matches!(status.node_state, NodeState::Starting | NodeState::Synced) {
-            status.node_state = NodeState::Syncing;
-        }
+        status.syncing =
+            status.target_block > status.current_block && status.node_state == NodeState::Syncing;
     }
 
     /// Update the node's connectivity state and peer counts.
@@ -42,11 +40,15 @@ impl ProgressTracker {
         &self,
         node_state: NodeState,
         connected_peers: usize,
+        serving_peers: usize,
         pending_peers: usize,
     ) {
         let mut status = self.status.lock().unwrap();
         status.node_state = node_state;
+        status.syncing =
+            status.target_block > status.current_block && node_state == NodeState::Syncing;
         status.connected_peers = connected_peers;
+        status.serving_peers = serving_peers;
         status.pending_peers = pending_peers;
     }
 
@@ -65,6 +67,7 @@ impl ProgressTracker {
 
         let mut status = self.status.lock().unwrap();
         status.node_state = NodeState::Syncing;
+        status.syncing = true;
         status.current_block = block_number;
         status.blocks_per_sec = bps;
         status.blocks_per_minute = bpm;

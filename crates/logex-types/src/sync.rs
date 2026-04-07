@@ -37,6 +37,8 @@ pub struct SyncStatus {
     pub syncing: bool,
     /// Number of currently connected peers.
     pub connected_peers: usize,
+    /// Number of peers that have successfully answered sync requests.
+    pub serving_peers: usize,
     /// Number of pending peer candidates waiting to be dialed.
     pub pending_peers: usize,
     /// The highest block number ingested so far.
