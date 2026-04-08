@@ -21,6 +21,7 @@
   - real peer/session lifecycle management
   - discv4 + DNS bootstrap under Reth’s manager
   - persisted productive peers reseeded into the live network stack on restart
+  - inbound `eth` requests are now wired through Reth's request-handler path so peers get prompt empty responses instead of timing out on silent drops
 - The remaining pre-Reth mainnet handshake shim has been removed:
   - startup now feeds the local head into Reth through `NetworkConfigBuilder::set_head(...)`
   - live sync now pushes head updates through `NetworkHandle::update_status(...)`

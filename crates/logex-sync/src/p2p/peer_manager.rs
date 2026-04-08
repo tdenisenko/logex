@@ -23,6 +23,7 @@ use reth_network::{
     Peers, PeersConfig, PeersInfo,
 };
 use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
+use reth_storage_api::noop::NoopProvider;
 use secp256k1::SecretKey;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -40,6 +41,8 @@ const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
 const RESEED_KNOWN_PEERS_INTERVAL: Duration = Duration::from_secs(15);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
@@ -55,6 +58,7 @@ type DiscoveryEvents = Pin<Box<dyn Stream<Item = DiscoveryEvent> + Send>>;
 pub struct PeerManager {
     network: NetworkHandle<EthNetworkPrimitives>,
     network_task: Option<JoinHandle<()>>,
+    eth_request_task: Option<JoinHandle<()>>,
     network_events: NetworkEvents,
     discovery_events: DiscoveryEvents,
     peers: HashMap<PeerId, ActivePeer>,
@@ -75,6 +79,7 @@ struct ActivePeer {
     version: EthVersion,
     is_serving: bool,
     consecutive_timeouts: u32,
+    connected_at: Instant,
 }
 
 impl PeerManager {
@@ -89,6 +94,7 @@ impl PeerManager {
         known_peers_path: PathBuf,
     ) -> Result<Self> {
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
+        let noop_provider = NoopProvider::eth(MAINNET.clone());
         let peer_config = PeersConfig::default()
             .with_basic_nodes(basic_nodes)
             .with_max_outbound(max_peers)
@@ -115,21 +121,24 @@ impl PeerManager {
             .mainnet_boot_nodes()
             .disable_tx_gossip(true)
             .discovery(discovery)
-            .build_with_noop_provider(MAINNET.clone());
+            .build(noop_provider.clone());
 
-        let network = NetworkManager::new(config)
+        let builder = NetworkManager::builder(config)
             .await
             .map_err(|error| eyre::eyre!("failed to start p2p network: {error}"))?;
-        let handle = network.handle().clone();
+        let (handle, network, _, request_handler) =
+            builder.request_handler(noop_provider).split_with_handle();
         let local_record = handle.local_node_record();
         let local_enr = handle.local_enr();
         let network_events = Box::pin(handle.event_listener());
         let discovery_events = Box::pin(handle.discovery_listener());
         let network_task = tokio::spawn(network);
+        let eth_request_task = tokio::spawn(request_handler);
 
         let mut manager = Self {
             network: handle,
             network_task: Some(network_task),
+            eth_request_task: Some(eth_request_task),
             network_events,
             discovery_events,
             peers: HashMap::new(),
@@ -197,6 +206,27 @@ impl PeerManager {
                         && !error.is_cancelled()
                     {
                         warn!(%error, "p2p network task aborted with an unexpected error");
+                    }
+                }
+            }
+        }
+
+        if let Some(mut task) = self.eth_request_task.take() {
+            match timeout(REQUEST_HANDLER_SHUTDOWN_TIMEOUT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(%error, "eth request handler task exited unexpectedly");
+                }
+                Err(_) => {
+                    debug!(
+                        ?REQUEST_HANDLER_SHUTDOWN_TIMEOUT,
+                        "timed out waiting for eth request handler task to stop, aborting it"
+                    );
+                    task.abort();
+                    if let Err(error) = task.await
+                        && !error.is_cancelled()
+                    {
+                        warn!(%error, "eth request handler task aborted with an unexpected error");
                     }
                 }
             }
@@ -656,8 +686,8 @@ impl PeerManager {
                 peer_id,
                 reason,
             }) => {
+                self.log_session_closed(peer_id, reason);
                 self.remove_peer(peer_id);
-                debug!(peer = %peer_id, ?reason, "peer session closed");
             }
             NetworkEvent::Peer(reth_network::events::PeerEvent::PeerRemoved(peer_id)) => {
                 self.remove_peer(peer_id);
@@ -705,6 +735,7 @@ impl PeerManager {
             version: info.version,
             is_serving: false,
             consecutive_timeouts: 0,
+            connected_at: Instant::now(),
         };
 
         self.peers.insert(info.peer_id, peer);
@@ -872,6 +903,40 @@ impl PeerManager {
             }
         }
         self.peer_order.retain(|id| *id != peer_id);
+    }
+
+    fn log_session_closed(&self, peer_id: PeerId, reason: Option<reth_eth_wire::DisconnectReason>) {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            debug!(peer = %peer_id, ?reason, "peer session closed");
+            return;
+        };
+
+        let connected_for = peer.connected_at.elapsed();
+        let latest_block = peer.remote_status.latest_block.unwrap_or_default();
+
+        if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
+            info!(
+                peer = %peer_id,
+                remote_addr = %peer.remote_record.tcp_addr(),
+                ?reason,
+                ?connected_for,
+                serving = peer.is_serving,
+                version = ?peer.version,
+                latest_block,
+                "peer session closed"
+            );
+        } else {
+            debug!(
+                peer = %peer_id,
+                remote_addr = %peer.remote_record.tcp_addr(),
+                ?reason,
+                ?connected_for,
+                serving = peer.is_serving,
+                version = ?peer.version,
+                latest_block,
+                "peer session closed"
+            );
+        }
     }
 }
 
