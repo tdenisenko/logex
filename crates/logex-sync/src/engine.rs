@@ -24,6 +24,7 @@ use crate::validation::{receipts_match_transaction_count, validate_receipts_for_
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
 const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
 const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
+const MIN_ACTIVE_SYNC_PEERS: usize = 4;
 
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {
@@ -136,13 +137,13 @@ impl SyncEngine {
             if self.shutdown_requested() {
                 return self.finish_shutdown();
             }
-            // Top up peers when we drop below half the target. We pass min=1
-            // so fill_peers can add at least one more usable peer without
-            // stalling toward the full target. Passing `1` here was a bug:
-            // once we already had a single peer, fill_peers returned
-            // immediately and we never actually replenished the pool.
+            // Top up peers when we drop below half the target. Keep a small
+            // floor of live peers so sync is not serialized behind a single
+            // slow or flaky session.
             if self.peers.peer_count() < self.config.max_peers / 2 {
-                let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
+                let min_peers = (self.peers.peer_count() + 1)
+                    .max(refill_peer_floor(self.config.max_peers))
+                    .min(self.config.max_peers);
                 self.refresh_connectivity_state();
                 if cancelable(
                     &mut self.shutdown,
@@ -354,6 +355,11 @@ impl SyncEngine {
                         self.handle_reorg(reorg).await?;
                     }
 
+                    self.peers.cache_canonical_block(
+                        header.clone(),
+                        bodies[i].clone(),
+                        &receipts[i],
+                    );
                     let log_count = self
                         .ingest_block(block_number, block_hash, timestamp, &txs)
                         .await?;
@@ -539,6 +545,8 @@ impl SyncEngine {
                     self.handle_reorg(reorg).await?;
                 }
 
+                self.peers
+                    .cache_canonical_block(header.clone(), bodies[i].clone(), &receipts[i]);
                 let log_count = self
                     .ingest_block(block_number, block_hash, timestamp, &txs)
                     .await?;
@@ -609,6 +617,8 @@ impl SyncEngine {
         if reorg.reverted_hashes.is_empty() {
             return Ok(());
         }
+
+        self.peers.remove_cached_blocks(&reorg.reverted_hashes);
 
         let storage = self.storage.write().await;
         let mut total_reverted = 0u64;
@@ -793,6 +803,10 @@ where
             (tx_hash, logs)
         })
         .collect()
+}
+
+fn refill_peer_floor(max_peers: usize) -> usize {
+    max_peers.clamp(1, MIN_ACTIVE_SYNC_PEERS)
 }
 
 #[cfg(test)]
