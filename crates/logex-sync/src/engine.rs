@@ -4,6 +4,7 @@ use eyre::Result;
 use reth_ethereum_forks::Head;
 use reth_network_peers::NodeRecord;
 use reth_primitives_traits::{BlockBody, SignedTransaction};
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -294,13 +295,13 @@ impl SyncEngine {
                     .map(|header| header.number())
                     .unwrap_or(current);
 
-                let (body_peer, bodies) = match cancelable(
+                let bodies = match cancelable(
                     &mut self.shutdown,
                     self.peers.get_bodies(chunk_hashes.clone(), required_block),
                 )
                 .await
                 {
-                    Some(Ok(b)) => b,
+                    Some(Ok(bodies)) => bodies,
                     Some(Err(e)) => {
                         tracing::debug!(error = %e, "body request failed, retrying batch");
                         chunk_failed = true;
@@ -335,12 +336,14 @@ impl SyncEngine {
                     break;
                 }
 
+                let mut validated_body_peers = HashSet::new();
                 for (i, header) in chunk_headers.iter().enumerate() {
                     let block_hash = chunk_hashes[i];
                     let block_number = header.number();
                     let timestamp = header.timestamp();
+                    let (body_peer, body) = &bodies[i];
 
-                    if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
+                    if let Err(error) = validate_block_pre_execution(header, body) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
@@ -349,17 +352,17 @@ impl SyncEngine {
                             "block pre-execution validation failed — retrying from last ingested block"
                         );
                         self.peers
-                            .report_invalid_block_data(body_peer, "block bodies");
+                            .report_invalid_block_data(*body_peer, "block bodies");
                         chunk_failed = true;
                         break;
                     }
 
-                    if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
+                    if !receipts_match_transaction_count(body, &receipts[i]) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
                             receipt_peer = %receipt_peer,
-                            transactions = bodies[i].transaction_count(),
+                            transactions = body.transaction_count(),
                             receipts = receipts[i].len(),
                             "block body / receipt count mismatch — retrying from last ingested block"
                         );
@@ -384,22 +387,20 @@ impl SyncEngine {
                     }
 
                     // Extract tx hashes from block body, zip with receipt logs
-                    let txs = assemble_txs(&bodies[i], &receipts[i]);
+                    let txs = assemble_txs(body, &receipts[i]);
 
                     if let Some(reorg) = self.head_tracker.track(header.clone()) {
                         self.handle_reorg(reorg).await?;
                     }
 
                     let recent_headers = self.head_tracker.snapshot();
-                    self.peers.cache_canonical_block(
-                        header.clone(),
-                        bodies[i].clone(),
-                        &receipts[i],
-                    );
+                    self.peers
+                        .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
                     let log_count = self
                         .ingest_block(header, block_hash, &txs, &recent_headers)
                         .await?;
                     self.progress.record_block(block_number, log_count);
+                    validated_body_peers.insert(*body_peer);
                     next_block = block_number + 1;
                     last_ingested_head = Some(Head {
                         number: block_number,
@@ -413,7 +414,9 @@ impl SyncEngine {
                     break;
                 }
 
-                self.peers.report_valid_serving_peer(body_peer);
+                for peer_id in validated_body_peers {
+                    self.peers.report_valid_serving_peer(peer_id);
+                }
                 self.peers.report_valid_serving_peer(receipt_peer);
             }
 
@@ -532,13 +535,13 @@ impl SyncEngine {
                 .map(|header| header.number())
                 .unwrap_or(current + 1);
 
-            let (body_peer, bodies) = match cancelable(
+            let bodies = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_bodies(hashes.clone(), required_block),
             )
             .await
             {
-                Some(Ok((peer_id, bodies))) if bodies.len() == headers.len() => (peer_id, bodies),
+                Some(Ok(bodies)) if bodies.len() == headers.len() => bodies,
                 Some(Ok(_)) | Some(Err(_)) => continue,
                 None => return self.finish_shutdown(),
             };
@@ -556,12 +559,14 @@ impl SyncEngine {
             };
 
             let mut batch_failed = false;
+            let mut validated_body_peers = HashSet::new();
             for (i, header) in headers.iter().enumerate() {
                 let block_hash = hashes[i];
                 let block_number = header.number();
                 let timestamp = header.timestamp();
+                let (body_peer, body) = &bodies[i];
 
-                if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
+                if let Err(error) = validate_block_pre_execution(header, body) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
@@ -570,17 +575,17 @@ impl SyncEngine {
                         "block pre-execution validation failed in live sync — retrying from current head"
                     );
                     self.peers
-                        .report_invalid_block_data(body_peer, "block bodies");
+                        .report_invalid_block_data(*body_peer, "block bodies");
                     batch_failed = true;
                     break;
                 }
 
-                if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
+                if !receipts_match_transaction_count(body, &receipts[i]) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
                         receipt_peer = %receipt_peer,
-                        transactions = bodies[i].transaction_count(),
+                        transactions = body.transaction_count(),
                         receipts = receipts[i].len(),
                         "block body / receipt count mismatch in live sync — retrying from current head"
                     );
@@ -604,7 +609,7 @@ impl SyncEngine {
                     break;
                 }
 
-                let txs = assemble_txs(&bodies[i], &receipts[i]);
+                let txs = assemble_txs(body, &receipts[i]);
 
                 if let Some(reorg) = self.head_tracker.track(header.clone()) {
                     self.handle_reorg(reorg).await?;
@@ -612,11 +617,12 @@ impl SyncEngine {
 
                 let recent_headers = self.head_tracker.snapshot();
                 self.peers
-                    .cache_canonical_block(header.clone(), bodies[i].clone(), &receipts[i]);
+                    .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
                 let log_count = self
                     .ingest_block(header, block_hash, &txs, &recent_headers)
                     .await?;
                 self.progress.record_block(block_number, log_count);
+                validated_body_peers.insert(*body_peer);
 
                 self.peers.set_head(Head {
                     number: block_number,
@@ -631,7 +637,9 @@ impl SyncEngine {
             }
 
             self.last_validated_header = headers.last().cloned();
-            self.peers.report_valid_serving_peer(body_peer);
+            for peer_id in validated_body_peers {
+                self.peers.report_valid_serving_peer(peer_id);
+            }
             self.peers.report_valid_serving_peer(receipt_peer);
 
             if self.try_mark_synced("caught up to advertised peer tip") {
