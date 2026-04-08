@@ -22,6 +22,12 @@
   - discv4 + DNS bootstrap under Reth’s manager
   - persisted productive peers reseeded into the live network stack on restart
   - inbound `eth` requests are now wired through Reth's request-handler path so peers get prompt empty responses instead of timing out on silent drops
+- Peer bootstrap is now closer to Reth’s normal node startup path:
+  - NAT/external IP resolution is enabled through Reth’s network builder
+  - session event buffers scale with peer capacity like Reth’s node config does
+  - persisted productive peers are treated as preferred trusted reconnect targets instead of only plain basic nodes
+  - ENR fork-ID gating is no longer over-enforced during discovery, which reduces false-negative candidate drops on startup
+  - remote `TooManyPeers` churn is logged more honestly and short-lived rejected sessions are no longer recycled into LogEx’s local pending cache
 - The remaining pre-Reth mainnet handshake shim has been removed:
   - startup now feeds the local head into Reth through `NetworkConfigBuilder::set_head(...)`
   - live sync now pushes head updates through `NetworkHandle::update_status(...)`

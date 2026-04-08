@@ -9,20 +9,20 @@ use alloy_primitives::B256;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
 use reth_chainspec::{EthChainSpec, MAINNET};
-use reth_discv4::Discv4Config;
+use reth_discv4::{Discv4Config, NatResolver};
 use reth_eth_wire::{
-    BlockBodies, BlockHeaders, EthNetworkPrimitives, EthVersion, GetBlockBodies, GetBlockHeaders,
-    GetReceipts, GetReceipts70, HeadersDirection, NetworkPrimitives, Receipts, Receipts69,
-    Receipts70, UnifiedStatus,
+    BlockBodies, BlockHeaders, DisconnectReason, EthNetworkPrimitives, EthVersion, GetBlockBodies,
+    GetBlockHeaders, GetReceipts, GetReceipts70, HeadersDirection, NetworkPrimitives, Receipts,
+    Receipts69, Receipts70, UnifiedStatus,
 };
 use reth_ethereum_forks::Head;
 use reth_network::types::{PeerKind, ReputationChangeKind};
 use reth_network::{
     DiscoveredEvent, DiscoveryEvent, NetworkConfigBuilder, NetworkEvent,
     NetworkEventListenerProvider, NetworkHandle, NetworkManager, PeerRequest, PeerRequestSender,
-    Peers, PeersConfig, PeersInfo,
+    Peers, PeersConfig, PeersInfo, SessionsConfig,
 };
-use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
+use reth_network_peers::{NodeRecord, PeerId, TrustedPeer, mainnet_nodes};
 use reth_storage_api::noop::NoopProvider;
 use secp256k1::SecretKey;
 use tokio::sync::oneshot;
@@ -94,15 +94,18 @@ impl PeerManager {
         known_peers_path: PathBuf,
     ) -> Result<Self> {
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
+        let trusted_nodes: Vec<TrustedPeer> =
+            known_peers.iter().copied().map(TrustedPeer::from).collect();
         let noop_provider = NoopProvider::eth(MAINNET.clone());
         let peer_config = PeersConfig::default()
             .with_basic_nodes(basic_nodes)
+            .with_trusted_nodes(trusted_nodes)
             .with_max_outbound(max_peers)
             .with_max_inbound(max_peers.max(16))
-            .with_max_concurrent_dials(max_peers.clamp(8, 32))
             .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
-            .with_max_backoff_count(3)
-            .with_enforce_enr_fork_id(true);
+            .with_enforce_enr_fork_id(false);
+        let sessions_config =
+            SessionsConfig::default().with_upscaled_event_buffer(peer_config.max_peers());
 
         let mut discovery = Discv4Config::builder();
         discovery
@@ -117,6 +120,8 @@ impl PeerManager {
             .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
+            .external_ip_resolver(NatResolver::Any)
+            .sessions_config(sessions_config)
             .peer_config(peer_config)
             .mainnet_boot_nodes()
             .disable_tx_gossip(true)
@@ -637,7 +642,7 @@ impl PeerManager {
             self.remember_productive(peer);
             self.network.connect_peer_kind(
                 peer.id,
-                PeerKind::Basic,
+                PeerKind::Trusted,
                 peer.tcp_addr(),
                 Some(peer.udp_addr()),
             );
@@ -895,17 +900,15 @@ impl PeerManager {
     }
 
     fn remove_peer(&mut self, peer_id: PeerId) {
-        if let Some(peer) = self.peers.remove(&peer_id) {
-            if peer.is_serving {
-                self.remember_productive(peer.remote_record);
-            } else {
-                self.remember_pending(peer.remote_record);
-            }
+        if let Some(peer) = self.peers.remove(&peer_id)
+            && peer.is_serving
+        {
+            self.remember_productive(peer.remote_record);
         }
         self.peer_order.retain(|id| *id != peer_id);
     }
 
-    fn log_session_closed(&self, peer_id: PeerId, reason: Option<reth_eth_wire::DisconnectReason>) {
+    fn log_session_closed(&self, peer_id: PeerId, reason: Option<DisconnectReason>) {
         let Some(peer) = self.peers.get(&peer_id) else {
             debug!(peer = %peer_id, ?reason, "peer session closed");
             return;
@@ -913,6 +916,7 @@ impl PeerManager {
 
         let connected_for = peer.connected_at.elapsed();
         let latest_block = peer.remote_status.latest_block.unwrap_or_default();
+        let saturated_remote = matches!(reason, Some(DisconnectReason::TooManyPeers));
 
         if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
             info!(
@@ -923,6 +927,7 @@ impl PeerManager {
                 serving = peer.is_serving,
                 version = ?peer.version,
                 latest_block,
+                saturated_remote,
                 "peer session closed"
             );
         } else {
@@ -934,6 +939,7 @@ impl PeerManager {
                 serving = peer.is_serving,
                 version = ?peer.version,
                 latest_block,
+                saturated_remote,
                 "peer session closed"
             );
         }
