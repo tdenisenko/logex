@@ -62,6 +62,11 @@
   - stale failed/disconnected discovery candidates are no longer left forever in LogEx's local pending-peer view
   - Reth peer-manager dial concurrency and non-fatal backoff durations are tuned for faster blank-dir bootstrap instead of slowly recycling saturated peers
 - Old direct dependencies from the previous custom networking path were removed from `logex-sync`.
+- Dead scaffolding and stale dependency drift are reduced:
+  - unused workspace-level Reth deps from earlier experiments were removed
+  - unused `SyncConfig` checkpoint / `FetchedBlock` scaffolding was removed
+  - unused `logex-types` column/error shells were removed
+  - crate-local unused dependencies were pruned from the manifests
 - Live-network validation has now gone further:
   - release-mode sync resumed from persisted head `46146`
   - crossed the old failure point and advanced past block `50,000`

@@ -9,7 +9,6 @@ logex-types = { workspace = true }
 alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 crc32fast = "1"
 zstd = "0.13"
