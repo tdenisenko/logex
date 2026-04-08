@@ -49,7 +49,7 @@ const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
-const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 50;
+const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 100;
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(5),
     medium: Duration::from_secs(30),
@@ -73,6 +73,7 @@ pub struct PeerManager {
     discovery_events: DiscoveryEvents,
     peers: HashMap<PeerId, ActivePeer>,
     peer_order: VecDeque<PeerId>,
+    request_cursor: usize,
     pending: HashMap<PeerId, NodeRecord>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
@@ -113,7 +114,11 @@ impl PeerManager {
             .with_trusted_nodes(trusted_nodes)
             .with_max_outbound(max_peers)
             .with_max_inbound(max_peers.max(16))
-            .with_max_concurrent_dials(max_peers.clamp(8, MAX_CONCURRENT_OUTBOUND_DIALS))
+            .with_max_concurrent_dials(
+                max_peers
+                    .saturating_mul(2)
+                    .clamp(8, MAX_CONCURRENT_OUTBOUND_DIALS),
+            )
             .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
             .with_backoff_durations(DIAL_BACKOFF_DURATIONS)
             .with_enforce_enr_fork_id(false);
@@ -162,6 +167,7 @@ impl PeerManager {
             discovery_events,
             peers: HashMap::new(),
             peer_order: VecDeque::new(),
+            request_cursor: 0,
             pending: HashMap::new(),
             productive,
             known_peers,
@@ -378,6 +384,9 @@ impl PeerManager {
             {
                 Ok(response) => {
                     if response_len_matches_request(requested, response.len()) {
+                        if !response.is_empty() && self.mark_peer_serving(peer_id) {
+                            self.persist_productive_peers();
+                        }
                         self.on_request_success(peer_id);
                         return Ok((peer_id, response));
                     }
@@ -778,6 +787,7 @@ impl PeerManager {
         } else {
             self.peer_order.push_back(info.peer_id);
         }
+        self.rebalance_request_cursor();
 
         debug!(
             peer = %info.peer_id,
@@ -799,18 +809,21 @@ impl PeerManager {
     }
 
     fn peer_ids_for_requests(&self) -> Vec<PeerId> {
-        self.peer_order
+        let mut peers: Vec<_> = self
+            .peer_order
             .iter()
             .filter(|peer_id| self.peers.contains_key(*peer_id))
             .copied()
-            .collect()
+            .collect();
+        rotate_request_candidates(&mut peers, self.request_cursor);
+        peers
     }
 
     fn on_request_success(&mut self, peer_id: PeerId) {
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.consecutive_timeouts = 0;
         }
-        self.promote_peer(peer_id);
+        self.advance_request_cursor();
     }
 
     fn on_request_error(&mut self, peer_id: PeerId, error: &RequestAttempt) -> bool {
@@ -906,14 +919,10 @@ impl PeerManager {
         }
     }
 
-    fn promote_peer(&mut self, peer_id: PeerId) {
-        self.peer_order.retain(|id| *id != peer_id);
-        self.peer_order.push_front(peer_id);
-    }
-
     fn demote_peer(&mut self, peer_id: PeerId) {
         self.peer_order.retain(|id| *id != peer_id);
         self.peer_order.push_back(peer_id);
+        self.rebalance_request_cursor();
     }
 
     fn remove_dead_peers(&mut self, dead_peers: &HashSet<PeerId>) {
@@ -931,6 +940,7 @@ impl PeerManager {
         self.peers.remove(&peer_id);
         self.pending.remove(&peer_id);
         self.peer_order.retain(|id| *id != peer_id);
+        self.rebalance_request_cursor();
         let productive_before = self.productive.len();
         self.productive.retain(|peer| peer.id != peer_id);
         let known_before = self.known_peers.len();
@@ -946,6 +956,25 @@ impl PeerManager {
             self.remember_productive(peer.remote_record);
         }
         self.peer_order.retain(|id| *id != peer_id);
+        self.rebalance_request_cursor();
+    }
+
+    fn advance_request_cursor(&mut self) {
+        let len = self.peer_order.len();
+        if len == 0 {
+            self.request_cursor = 0;
+        } else {
+            self.request_cursor = (self.request_cursor + 1) % len;
+        }
+    }
+
+    fn rebalance_request_cursor(&mut self) {
+        let len = self.peer_order.len();
+        if len == 0 {
+            self.request_cursor = 0;
+        } else if self.request_cursor >= len {
+            self.request_cursor %= len;
+        }
     }
 
     fn log_session_closed(&self, peer_id: PeerId, reason: Option<DisconnectReason>) {
@@ -1034,6 +1063,12 @@ fn seed_productive_peers(known_peers: &[NodeRecord]) -> VecDeque<NodeRecord> {
         .filter(|peer| !is_bootstrap_node(peer.id) && peer.tcp_port > 0)
         .take(MAX_PERSISTED_PEERS)
         .collect()
+}
+
+fn rotate_request_candidates(peers: &mut [PeerId], request_cursor: usize) {
+    if peers.len() > 1 {
+        peers.rotate_left(request_cursor % peers.len());
+    }
 }
 
 fn upsert_known_peer(known_peers: &mut Vec<NodeRecord>, node: NodeRecord) -> bool {
@@ -1260,6 +1295,20 @@ mod tests {
         let productive: Vec<_> = productive.into_iter().collect();
 
         assert_eq!(productive, vec![first, second]);
+    }
+
+    #[test]
+    fn request_rotation_moves_starting_peer() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let mut peers = vec![first, second, third];
+
+        rotate_request_candidates(&mut peers, 1);
+        assert_eq!(peers, vec![second, third, first]);
+
+        rotate_request_candidates(&mut peers, 2);
+        assert_eq!(peers, vec![first, second, third]);
     }
 
     fn fake_receipt(gas: u64) -> Receipt {
