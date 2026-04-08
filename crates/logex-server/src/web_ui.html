@@ -79,8 +79,8 @@
     <span class="stat">Candidates: <b id="stPending">--</b></span>
     <span class="stat">Rate: <b id="stSpeed">--</b> blk/s</span>
     <span class="stat">ETA: <b id="stEta">--</b></span>
-    <span class="stat">Rows: <b id="stRows">--</b></span>
-    <span class="stat">Logs: <b id="stLogs">--</b></span>
+    <span class="stat">Stored logs: <b id="stStoredLogs">--</b></span>
+    <span class="stat">New this run: <b id="stSessionLogs">--</b></span>
   </div>
 </header>
 
@@ -177,8 +177,8 @@ function updateStatus(data) {
   document.getElementById('stPending').textContent = fmt(data.pending_peers);
   document.getElementById('stSpeed').textContent = data.blocks_per_sec != null ? data.blocks_per_sec.toFixed(2) : '--';
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
-  document.getElementById('stRows').textContent = fmt(data.total_rows);
-  document.getElementById('stLogs').textContent = fmt(data.logs_ingested);
+  document.getElementById('stStoredLogs').textContent = fmt(data.total_rows);
+  document.getElementById('stSessionLogs').textContent = fmt(data.logs_ingested);
   document.getElementById('stHead').textContent = targetKnown ? fmt(target) : '--';
   document.getElementById('stRemaining').textContent = remaining == null ? '--' : fmt(remaining);
   if (nodeState === 'syncing' || nodeState === 'synced') {
