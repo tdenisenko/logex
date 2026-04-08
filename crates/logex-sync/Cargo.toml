@@ -16,6 +16,7 @@ logex-server = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-eips = "1.8"
+alloy-rlp = "0.3"
 
 # Reth networking (lightweight, no EVM)
 reth-eth-wire = { workspace = true }

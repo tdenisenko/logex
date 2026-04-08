@@ -11,9 +11,9 @@ use futures_util::{FutureExt, StreamExt};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
 use reth_eth_wire::{
-    BlockBodies, BlockHeaders, DisconnectReason, EthNetworkPrimitives, EthVersion, GetBlockBodies,
-    GetBlockHeaders, GetReceipts, GetReceipts70, HeadersDirection, NetworkPrimitives, Receipts,
-    Receipts69, Receipts70, UnifiedStatus,
+    BlockBodies, BlockHeaders, DisconnectReason, EthVersion, GetBlockBodies, GetBlockHeaders,
+    GetReceipts, GetReceipts70, HeadersDirection, NetworkPrimitives, Receipts, Receipts69,
+    Receipts70, UnifiedStatus,
 };
 use reth_ethereum_forks::Head;
 use reth_network::types::{PeerKind, ReputationChangeKind};
@@ -32,6 +32,7 @@ use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
 use crate::p2p::persistence::persist_known_peers_if_changed;
+use crate::primitives::{LogexNetworkPrimitives, LogexPrimitives};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
@@ -51,12 +52,12 @@ static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<PeerId>> =
     LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
 
 type NetworkEvents =
-    Pin<Box<dyn Stream<Item = NetworkEvent<PeerRequest<EthNetworkPrimitives>>> + Send>>;
+    Pin<Box<dyn Stream<Item = NetworkEvent<PeerRequest<LogexNetworkPrimitives>>> + Send>>;
 type DiscoveryEvents = Pin<Box<dyn Stream<Item = DiscoveryEvent> + Send>>;
 
 /// Manages peer sessions and request routing on top of Reth's real network stack.
 pub struct PeerManager {
-    network: NetworkHandle<EthNetworkPrimitives>,
+    network: NetworkHandle<LogexNetworkPrimitives>,
     network_task: Option<JoinHandle<()>>,
     eth_request_task: Option<JoinHandle<()>>,
     network_events: NetworkEvents,
@@ -73,7 +74,7 @@ pub struct PeerManager {
 
 #[derive(Clone)]
 struct ActivePeer {
-    sender: PeerRequestSender<PeerRequest<EthNetworkPrimitives>>,
+    sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     remote_record: NodeRecord,
     remote_status: UnifiedStatus,
     version: EthVersion,
@@ -96,7 +97,7 @@ impl PeerManager {
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
         let trusted_nodes: Vec<TrustedPeer> =
             known_peers.iter().copied().map(TrustedPeer::from).collect();
-        let noop_provider = NoopProvider::eth(MAINNET.clone());
+        let noop_provider = NoopProvider::<_, LogexPrimitives>::new(MAINNET.clone());
         let peer_config = PeersConfig::default()
             .with_basic_nodes(basic_nodes)
             .with_trusted_nodes(trusted_nodes)
@@ -116,7 +117,7 @@ impl PeerManager {
         let discovery_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
         let network_head = normalize_network_head(our_head);
 
-        let config = NetworkConfigBuilder::eth(secret_key)
+        let config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
             .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
@@ -323,7 +324,7 @@ impl PeerManager {
         &mut self,
         start_block: u64,
         count: u64,
-    ) -> Result<Vec<<EthNetworkPrimitives as NetworkPrimitives>::BlockHeader>> {
+    ) -> Result<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>> {
         self.drain_events_now();
 
         let request = GetBlockHeaders {
@@ -344,10 +345,13 @@ impl PeerManager {
     pub async fn get_bodies(
         &mut self,
         hashes: Vec<B256>,
-    ) -> Result<Vec<<EthNetworkPrimitives as NetworkPrimitives>::BlockBody>> {
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
+    )> {
         self.drain_events_now();
         if hashes.is_empty() {
-            return Ok(Vec::new());
+            return Ok((PeerId::ZERO, Vec::new()));
         }
 
         let requested = hashes.len();
@@ -366,7 +370,7 @@ impl PeerManager {
                 Ok(response) => {
                     if response_len_matches_request(requested, response.len()) {
                         self.on_request_success(peer_id);
-                        return Ok(response);
+                        return Ok((peer_id, response));
                     }
 
                     self.on_incomplete_response(peer_id, "block bodies", requested, response.len());
@@ -390,18 +394,19 @@ impl PeerManager {
     pub async fn get_receipts(
         &mut self,
         hashes: Vec<B256>,
-    ) -> Result<
+    ) -> Result<(
+        PeerId,
         Vec<
             Vec<
                 alloy_consensus::ReceiptWithBloom<
-                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
                 >,
             >,
         >,
-    > {
+    )> {
         self.drain_events_now();
         if hashes.is_empty() {
-            return Ok(Vec::new());
+            return Ok((PeerId::ZERO, Vec::new()));
         }
 
         let requested = hashes.len();
@@ -429,7 +434,7 @@ impl PeerManager {
                             self.persist_productive_peers();
                         }
                         self.on_request_success(peer_id);
-                        return Ok(receipts);
+                        return Ok((peer_id, receipts));
                     }
 
                     self.on_incomplete_response(peer_id, "receipts", requested, receipts.len());
@@ -447,6 +452,26 @@ impl PeerManager {
 
         self.remove_dead_peers(&dead_peers);
         bail!("no peers available to handle receipt request")
+    }
+
+    /// Disconnect and de-prioritize a peer that served invalid block data.
+    pub fn report_invalid_block_data(&mut self, peer_id: PeerId, response_kind: &'static str) {
+        if peer_id == PeerId::ZERO {
+            return;
+        }
+
+        self.network
+            .reputation_change(peer_id, ReputationChangeKind::BadMessage);
+        self.network.disconnect_peer(peer_id);
+        let known_changed = self.forget_peer(peer_id);
+        if known_changed {
+            self.persist_productive_peers();
+        }
+        warn!(
+            peer = %peer_id,
+            response_kind,
+            "peer served invalid block data, disconnecting it"
+        );
     }
 
     fn on_incomplete_response(
@@ -475,7 +500,7 @@ impl PeerManager {
         W: IntoResponseValue<T>,
         MakeRequest: Fn(
             oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
-        ) -> PeerRequest<EthNetworkPrimitives>,
+        ) -> PeerRequest<LogexNetworkPrimitives>,
     {
         let peer_ids = self.peer_ids_for_requests();
         let mut dead_peers = HashSet::new();
@@ -509,7 +534,7 @@ impl PeerManager {
         W: IntoResponseValue<T>,
         MakeRequest: Fn(
             oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
-        ) -> PeerRequest<EthNetworkPrimitives>,
+        ) -> PeerRequest<LogexNetworkPrimitives>,
     {
         let Some(peer) = self.peers.get(&peer_id) else {
             return Err(RequestAttempt::Disconnected);
@@ -541,7 +566,7 @@ impl PeerManager {
         Vec<
             Vec<
                 alloy_consensus::ReceiptWithBloom<
-                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
                 >,
             >,
         >,
@@ -562,13 +587,13 @@ impl PeerManager {
         Vec<
             Vec<
                 alloy_consensus::ReceiptWithBloom<
-                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
                 >,
             >,
         >,
         RequestAttempt,
     > {
-        let receipts: Vec<Vec<<EthNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
+        let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
             .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts69 {
                 request: GetReceipts(hashes.clone()),
                 response,
@@ -585,7 +610,7 @@ impl PeerManager {
         Vec<
             Vec<
                 alloy_consensus::ReceiptWithBloom<
-                    <EthNetworkPrimitives as NetworkPrimitives>::Receipt,
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
                 >,
             >,
         >,
@@ -597,7 +622,7 @@ impl PeerManager {
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
-            let response: Receipts70<<EthNetworkPrimitives as NetworkPrimitives>::Receipt> = self
+            let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
                 .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
                     request: GetReceipts70 {
                         first_block_receipt_index,
@@ -685,7 +710,7 @@ impl PeerManager {
         }
     }
 
-    fn handle_network_event(&mut self, event: NetworkEvent<PeerRequest<EthNetworkPrimitives>>) {
+    fn handle_network_event(&mut self, event: NetworkEvent<PeerRequest<LogexNetworkPrimitives>>) {
         match event {
             NetworkEvent::Peer(reth_network::events::PeerEvent::SessionClosed {
                 peer_id,
@@ -724,7 +749,7 @@ impl PeerManager {
     fn insert_peer(
         &mut self,
         info: reth_network::events::SessionInfo,
-        messages: PeerRequestSender<PeerRequest<EthNetworkPrimitives>>,
+        messages: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     ) {
         let mut record = self
             .pending
@@ -899,6 +924,17 @@ impl PeerManager {
         }
     }
 
+    fn forget_peer(&mut self, peer_id: PeerId) -> bool {
+        self.peers.remove(&peer_id);
+        self.pending.remove(&peer_id);
+        self.peer_order.retain(|id| *id != peer_id);
+        let productive_before = self.productive.len();
+        self.productive.retain(|peer| peer.id != peer_id);
+        let known_before = self.known_peers.len();
+        self.known_peers.retain(|peer| peer.id != peer_id);
+        productive_before != self.productive.len() || known_before != self.known_peers.len()
+    }
+
     fn remove_peer(&mut self, peer_id: PeerId) {
         if let Some(peer) = self.peers.remove(&peer_id)
             && peer.is_serving
@@ -917,8 +953,22 @@ impl PeerManager {
         let connected_for = peer.connected_at.elapsed();
         let latest_block = peer.remote_status.latest_block.unwrap_or_default();
         let saturated_remote = matches!(reason, Some(DisconnectReason::TooManyPeers));
+        let noisy_remote_rejection =
+            saturated_remote && !peer.is_serving && connected_for <= EARLY_SESSION_DROP_THRESHOLD;
 
-        if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
+        if noisy_remote_rejection {
+            debug!(
+                peer = %peer_id,
+                remote_addr = %peer.remote_record.tcp_addr(),
+                ?reason,
+                ?connected_for,
+                serving = peer.is_serving,
+                version = ?peer.version,
+                latest_block,
+                saturated_remote,
+                "peer session closed"
+            );
+        } else if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
             info!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
