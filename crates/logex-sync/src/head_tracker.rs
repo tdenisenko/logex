@@ -1,17 +1,23 @@
+use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
 use std::collections::VecDeque;
 
 /// Tracks the recent chain head for reorg detection.
 ///
-/// Maintains a sliding window of recent block hashes. When a new block
-/// arrives whose parent_hash doesn't match the current tip, the tracker
-/// walks backward to find the fork point and reports which blocks were
-/// reverted.
+/// Maintains a sliding window of recent canonical headers. When a new header
+/// arrives whose parent hash doesn't match the current tip, the tracker walks
+/// backward to find the fork point and reports which blocks were reverted.
 pub struct HeadTracker {
-    /// Recent blocks: (block_number, block_hash, parent_hash).
-    recent: VecDeque<(u64, B256, B256)>,
+    /// Recent canonical headers and their hashes.
+    recent: VecDeque<TrackedHeader>,
     /// Maximum number of recent blocks to keep.
     max_depth: usize,
+}
+
+#[derive(Clone)]
+struct TrackedHeader {
+    header: Header,
+    hash: B256,
 }
 
 /// Information about a detected chain reorganization.
@@ -32,52 +38,64 @@ impl HeadTracker {
         }
     }
 
+    /// Restore the tracker from a previously persisted canonical header window.
+    pub fn restore<I>(&mut self, headers: I)
+    where
+        I: IntoIterator<Item = Header>,
+    {
+        self.recent.clear();
+        for header in headers {
+            self.push(header);
+        }
+    }
+
+    /// Snapshot the current recent canonical header window for persistence.
+    pub fn snapshot(&self) -> Vec<Header> {
+        self.recent
+            .iter()
+            .map(|tracked| tracked.header.clone())
+            .collect()
+    }
+
     /// Record a new block. Returns `None` if it extends the chain normally,
     /// or `Some(ReorgInfo)` if a reorg is detected.
     ///
     /// After calling this, the tracker's state reflects the new chain
     /// (reverted blocks are removed, new block is added).
-    pub fn track(&mut self, number: u64, hash: B256, parent_hash: B256) -> Option<ReorgInfo> {
+    pub fn track(&mut self, header: Header) -> Option<ReorgInfo> {
+        let tracked = TrackedHeader::new(header);
         if let Some(tip) = self.recent.back() {
-            if parent_hash == tip.1 {
-                // Normal extension — parent matches our tip
-                self.push(number, hash, parent_hash);
+            if tracked.header.parent_hash() == tip.hash {
+                self.push_tracked(tracked);
                 return None;
             }
 
-            // Parent doesn't match tip — potential reorg.
-            // Walk backward to find the fork point.
-            if let Some(fork_idx) = self.recent.iter().rposition(|(_, h, _)| *h == parent_hash) {
-                // Fork point found in our window.
-                let fork = self.recent[fork_idx];
-
-                // Collect reverted block hashes (everything after fork point).
-                let reverted_hashes: Vec<B256> = self
+            if let Some(fork_idx) = self
+                .recent
+                .iter()
+                .rposition(|candidate| candidate.hash == tracked.header.parent_hash())
+            {
+                let fork = self.recent[fork_idx].clone();
+                let reverted_hashes = self
                     .recent
                     .iter()
                     .skip(fork_idx + 1)
-                    .map(|(_, h, _)| *h)
+                    .map(|candidate| candidate.hash)
                     .collect();
 
-                // Trim the chain back to the fork point.
                 self.recent.truncate(fork_idx + 1);
-
-                // Add the new block on top.
-                self.push(number, hash, parent_hash);
+                self.push_tracked(tracked);
 
                 return Some(ReorgInfo {
-                    fork_block: fork.0,
-                    fork_hash: fork.1,
+                    fork_block: fork.header.number(),
+                    fork_hash: fork.hash,
                     reverted_hashes,
                 });
             }
 
-            // Parent not found in our window — deep reorg beyond tracking depth.
-            // Report all tracked blocks as reverted. The caller must handle
-            // this as a full resync from the new block's ancestry.
-            let reverted_hashes: Vec<B256> = self.recent.iter().map(|(_, h, _)| *h).collect();
+            let reverted_hashes = self.recent.iter().map(|candidate| candidate.hash).collect();
             self.recent.clear();
-            self.push(number, hash, parent_hash);
+            self.push_tracked(tracked);
 
             return Some(ReorgInfo {
                 fork_block: 0,
@@ -86,14 +104,20 @@ impl HeadTracker {
             });
         }
 
-        // First block ever tracked.
-        self.push(number, hash, parent_hash);
+        self.push_tracked(tracked);
         None
     }
 
     /// The current chain tip, if any.
     pub fn tip(&self) -> Option<(u64, B256)> {
-        self.recent.back().map(|(n, h, _)| (*n, *h))
+        self.recent
+            .back()
+            .map(|tracked| (tracked.header.number(), tracked.hash))
+    }
+
+    /// The current canonical tip header, if any.
+    pub fn tip_header(&self) -> Option<&Header> {
+        self.recent.back().map(|tracked| &tracked.header)
     }
 
     /// Number of blocks currently tracked.
@@ -105,11 +129,22 @@ impl HeadTracker {
         self.recent.is_empty()
     }
 
-    fn push(&mut self, number: u64, hash: B256, parent_hash: B256) {
-        self.recent.push_back((number, hash, parent_hash));
+    fn push(&mut self, header: Header) {
+        self.push_tracked(TrackedHeader::new(header));
+    }
+
+    fn push_tracked(&mut self, tracked: TrackedHeader) {
+        self.recent.push_back(tracked);
         if self.recent.len() > self.max_depth {
             self.recent.pop_front();
         }
+    }
+}
+
+impl TrackedHeader {
+    fn new(header: Header) -> Self {
+        let hash = header.hash_slow();
+        Self { header, hash }
     }
 }
 
@@ -117,88 +152,130 @@ impl HeadTracker {
 mod tests {
     use super::*;
 
-    fn hash(n: u8) -> B256 {
-        B256::repeat_byte(n)
+    fn header(number: u64, parent_hash: B256, marker: u8) -> Header {
+        let mut header = Header {
+            number,
+            parent_hash,
+            gas_limit: 30_000_000,
+            timestamp: 1_700_000_000 + number,
+            ..Default::default()
+        };
+        header.extra_data = vec![marker].into();
+        header
     }
 
     #[test]
     fn normal_extension() {
         let mut tracker = HeadTracker::new(64);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
 
-        // First block — no reorg.
-        assert!(tracker.track(100, hash(1), hash(0)).is_none());
-        assert_eq!(tracker.tip(), Some((100, hash(1))));
+        assert!(tracker.track(first.clone()).is_none());
+        assert_eq!(tracker.tip(), Some((100, first.hash_slow())));
 
-        // Normal extension.
-        assert!(tracker.track(101, hash(2), hash(1)).is_none());
-        assert_eq!(tracker.tip(), Some((101, hash(2))));
+        assert!(tracker.track(second.clone()).is_none());
+        assert_eq!(tracker.tip(), Some((101, second.hash_slow())));
 
-        assert!(tracker.track(102, hash(3), hash(2)).is_none());
-        assert_eq!(tracker.tip(), Some((102, hash(3))));
+        assert!(tracker.track(third.clone()).is_none());
+        assert_eq!(tracker.tip(), Some((102, third.hash_slow())));
         assert_eq!(tracker.len(), 3);
     }
 
     #[test]
     fn single_block_reorg() {
         let mut tracker = HeadTracker::new(64);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
+        let competing = header(102, second.hash_slow(), 0xF3);
 
-        tracker.track(100, hash(1), hash(0));
-        tracker.track(101, hash(2), hash(1));
-        tracker.track(102, hash(3), hash(2));
+        tracker.track(first);
+        tracker.track(second.clone());
+        tracker.track(third.clone());
 
-        // Block 102' with parent=hash(2) — reverts block 102.
-        let reorg = tracker.track(102, hash(0xF3), hash(2)).unwrap();
+        let reorg = tracker.track(competing.clone()).unwrap();
         assert_eq!(reorg.fork_block, 101);
-        assert_eq!(reorg.fork_hash, hash(2));
-        assert_eq!(reorg.reverted_hashes, vec![hash(3)]);
-        assert_eq!(tracker.tip(), Some((102, hash(0xF3))));
+        assert_eq!(reorg.fork_hash, second.hash_slow());
+        assert_eq!(reorg.reverted_hashes, vec![third.hash_slow()]);
+        assert_eq!(tracker.tip(), Some((102, competing.hash_slow())));
     }
 
     #[test]
     fn multi_block_reorg() {
         let mut tracker = HeadTracker::new(64);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
+        let fourth = header(103, third.hash_slow(), 4);
+        let competing = header(102, second.hash_slow(), 0xA2);
 
-        tracker.track(100, hash(1), hash(0));
-        tracker.track(101, hash(2), hash(1));
-        tracker.track(102, hash(3), hash(2));
-        tracker.track(103, hash(4), hash(3));
+        tracker.track(first);
+        tracker.track(second.clone());
+        tracker.track(third.clone());
+        tracker.track(fourth.clone());
 
-        // Reorg back to block 101: new block 102' with parent=hash(2).
-        let reorg = tracker.track(102, hash(0xA2), hash(2)).unwrap();
+        let reorg = tracker.track(competing.clone()).unwrap();
         assert_eq!(reorg.fork_block, 101);
-        assert_eq!(reorg.reverted_hashes, vec![hash(3), hash(4)]);
-        assert_eq!(tracker.tip(), Some((102, hash(0xA2))));
-        // Tracker now has: 100, 101, 102'
+        assert_eq!(
+            reorg.reverted_hashes,
+            vec![third.hash_slow(), fourth.hash_slow()]
+        );
+        assert_eq!(tracker.tip(), Some((102, competing.hash_slow())));
         assert_eq!(tracker.len(), 3);
     }
 
     #[test]
     fn deep_reorg_beyond_window() {
         let mut tracker = HeadTracker::new(3);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
+        let fourth = header(103, third.hash_slow(), 4);
+        let competing = header(102, first.hash_slow(), 0xB2);
 
-        tracker.track(100, hash(1), hash(0));
-        tracker.track(101, hash(2), hash(1));
-        tracker.track(102, hash(3), hash(2));
-        // Window is full (3 blocks). Adding 103 evicts 100.
-        tracker.track(103, hash(4), hash(3));
-        assert_eq!(tracker.len(), 3); // 101, 102, 103
+        tracker.track(first.clone());
+        tracker.track(second.clone());
+        tracker.track(third.clone());
+        tracker.track(fourth.clone());
+        assert_eq!(tracker.len(), 3);
 
-        // Now a reorg with parent=hash(1) — which was evicted.
-        let reorg = tracker.track(102, hash(0xB2), hash(1)).unwrap();
-        assert_eq!(reorg.fork_block, 0); // deep reorg sentinel
-        assert_eq!(reorg.reverted_hashes, vec![hash(2), hash(3), hash(4)]);
+        let reorg = tracker.track(competing).unwrap();
+        assert_eq!(reorg.fork_block, 0);
+        assert_eq!(
+            reorg.reverted_hashes,
+            vec![second.hash_slow(), third.hash_slow(), fourth.hash_slow()]
+        );
     }
 
     #[test]
     fn sliding_window_evicts_old_blocks() {
         let mut tracker = HeadTracker::new(3);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
+        let fourth = header(103, third.hash_slow(), 4);
 
-        tracker.track(100, hash(1), hash(0));
-        tracker.track(101, hash(2), hash(1));
-        tracker.track(102, hash(3), hash(2));
-        tracker.track(103, hash(4), hash(3));
+        tracker.track(first);
+        tracker.track(second);
+        tracker.track(third);
+        tracker.track(fourth.clone());
 
         assert_eq!(tracker.len(), 3);
-        assert_eq!(tracker.tip(), Some((103, hash(4))));
+        assert_eq!(tracker.tip(), Some((103, fourth.hash_slow())));
+    }
+
+    #[test]
+    fn restore_rehydrates_tip_and_snapshot() {
+        let mut tracker = HeadTracker::new(4);
+        let first = header(100, B256::ZERO, 1);
+        let second = header(101, first.hash_slow(), 2);
+        let third = header(102, second.hash_slow(), 3);
+
+        tracker.restore(vec![first.clone(), second.clone(), third.clone()]);
+
+        assert_eq!(tracker.tip(), Some((102, third.hash_slow())));
+        assert_eq!(tracker.tip_header(), Some(&third));
+        assert_eq!(tracker.snapshot(), vec![first, second, third]);
     }
 }

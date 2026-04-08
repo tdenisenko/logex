@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
 use logex_types::{LogRow, PartitionMeta};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,8 @@ pub struct SyncHead {
 struct StorageMetadata {
     #[serde(default)]
     sync_head: Option<SyncHead>,
+    #[serde(default)]
+    recent_headers: Vec<Header>,
 }
 
 /// A single partition — either the writable hot partition or a sealed immutable one.
@@ -124,6 +127,7 @@ pub struct PartitionManager {
     next_partition_id: u64,
     wal: WriteAheadLog,
     sync_head: Option<SyncHead>,
+    recent_headers: Vec<Header>,
 }
 
 impl PartitionManager {
@@ -145,6 +149,7 @@ impl PartitionManager {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(&StorageMetadata {
             sync_head: self.sync_head,
+            recent_headers: self.recent_headers.clone(),
         })
         .map_err(std::io::Error::other)?;
 
@@ -212,6 +217,7 @@ impl PartitionManager {
             next_partition_id: max_id,
             wal,
             sync_head: metadata.sync_head,
+            recent_headers: metadata.recent_headers,
         };
 
         // Replay any pending WAL entries
@@ -319,6 +325,33 @@ impl PartitionManager {
         self.sync_head
     }
 
+    /// Return the most recently persisted canonical header window.
+    pub fn recent_headers(&self) -> &[Header] {
+        &self.recent_headers
+    }
+
+    /// Persist the latest canonical head and recent canonical header window.
+    pub fn record_canonical_state(
+        &mut self,
+        header: &Header,
+        recent_headers: &[Header],
+    ) -> std::io::Result<()> {
+        let next_sync_head = SyncHead {
+            block_number: header.number(),
+            block_hash: header.hash_slow(),
+            timestamp: header.timestamp(),
+        };
+        let next_recent_headers = recent_headers.to_vec();
+
+        if self.sync_head == Some(next_sync_head) && self.recent_headers == next_recent_headers {
+            return Ok(());
+        }
+
+        self.sync_head = Some(next_sync_head);
+        self.recent_headers = next_recent_headers;
+        self.persist_metadata()
+    }
+
     /// Mark rows in a given block as non-canonical (during reorg).
     ///
     /// Scans all partitions (sealed + hot) whose block range could contain the
@@ -414,6 +447,7 @@ impl PartitionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, bytes};
     use logex_types::Source;
     use tempfile::TempDir;
@@ -441,6 +475,18 @@ mod tests {
                 source: Source::Receipt,
             })
             .collect()
+    }
+
+    fn make_header(number: u64, parent_hash: B256, marker: u8) -> Header {
+        let mut header = Header {
+            number,
+            parent_hash,
+            gas_limit: 30_000_000,
+            timestamp: 1_700_000_000 + number,
+            ..Default::default()
+        };
+        header.extra_data = vec![marker].into();
+        header
     }
 
     #[test]
@@ -643,5 +689,36 @@ mod tests {
             .unwrap();
         assert_eq!(mgr.head_block(), Some(150));
         assert_eq!(mgr.indexed_head_block(), Some(100));
+    }
+
+    #[test]
+    fn test_partition_manager_persists_recent_canonical_headers() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        let first = make_header(100, B256::repeat_byte(0x11), 1);
+        let second = make_header(101, first.hash_slow(), 2);
+        let headers = vec![first.clone(), second.clone()];
+
+        {
+            let config = PartitionManagerConfig {
+                data_dir: data_dir.clone(),
+                partition_target_rows: 50,
+            };
+            let mut mgr = PartitionManager::open(config).unwrap();
+            mgr.record_canonical_state(&second, &headers).unwrap();
+            assert_eq!(mgr.sync_head().unwrap().block_number, 101);
+            assert_eq!(mgr.recent_headers(), headers.as_slice());
+        }
+
+        {
+            let config = PartitionManagerConfig {
+                data_dir,
+                partition_target_rows: 50,
+            };
+            let mgr = PartitionManager::open(config).unwrap();
+            assert_eq!(mgr.sync_head().unwrap().block_number, 101);
+            assert_eq!(mgr.recent_headers(), headers.as_slice());
+        }
     }
 }
