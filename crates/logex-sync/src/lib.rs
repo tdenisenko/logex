@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod head_tracker;
 pub mod p2p;
+pub mod primitives;
 pub mod progress;
 pub mod validation;
 

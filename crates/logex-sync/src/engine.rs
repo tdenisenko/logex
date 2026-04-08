@@ -256,7 +256,7 @@ impl SyncEngine {
                 let chunk_headers = &headers[chunk_start..chunk_end];
                 let chunk_hashes = hashes[chunk_start..chunk_end].to_vec();
 
-                let bodies = match cancelable(
+                let (body_peer, bodies) = match cancelable(
                     &mut self.shutdown,
                     self.peers.get_bodies(chunk_hashes.clone()),
                 )
@@ -270,7 +270,7 @@ impl SyncEngine {
                     }
                     None => return self.finish_shutdown(),
                 };
-                let receipts = match cancelable(
+                let (receipt_peer, receipts) = match cancelable(
                     &mut self.shutdown,
                     self.peers.get_receipts(chunk_hashes.clone()),
                 )
@@ -302,14 +302,30 @@ impl SyncEngine {
                     let timestamp = header.timestamp();
                     let parent_hash = header.parent_hash();
 
+                    if bodies[i].calculate_tx_root() != header.transactions_root() {
+                        tracing::warn!(
+                            block_number,
+                            %block_hash,
+                            body_peer = %body_peer,
+                            "block body transaction root mismatch — retrying from last ingested block"
+                        );
+                        self.peers
+                            .report_invalid_block_data(body_peer, "block bodies");
+                        chunk_failed = true;
+                        break;
+                    }
+
                     if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
+                            receipt_peer = %receipt_peer,
                             transactions = bodies[i].transaction_count(),
                             receipts = receipts[i].len(),
                             "block body / receipt count mismatch — retrying from last ingested block"
                         );
+                        self.peers
+                            .report_invalid_block_data(receipt_peer, "receipts");
                         chunk_failed = true;
                         break;
                     }
@@ -318,9 +334,12 @@ impl SyncEngine {
                         tracing::warn!(
                             block_number,
                             %block_hash,
+                            receipt_peer = %receipt_peer,
                             %error,
                             "receipt validation failed — retrying from last ingested block"
                         );
+                        self.peers
+                            .report_invalid_block_data(receipt_peer, "receipts");
                         chunk_failed = true;
                         break;
                     }
@@ -444,16 +463,20 @@ impl SyncEngine {
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
 
-            let bodies =
+            let (body_peer, bodies) =
                 match cancelable(&mut self.shutdown, self.peers.get_bodies(hashes.clone())).await {
-                    Some(Ok(b)) if b.len() == headers.len() => b,
+                    Some(Ok((peer_id, bodies))) if bodies.len() == headers.len() => {
+                        (peer_id, bodies)
+                    }
                     Some(Ok(_)) | Some(Err(_)) => continue,
                     None => return self.finish_shutdown(),
                 };
-            let receipts =
+            let (receipt_peer, receipts) =
                 match cancelable(&mut self.shutdown, self.peers.get_receipts(hashes.clone())).await
                 {
-                    Some(Ok(r)) if r.len() == headers.len() => r,
+                    Some(Ok((peer_id, receipts))) if receipts.len() == headers.len() => {
+                        (peer_id, receipts)
+                    }
                     Some(Ok(_)) | Some(Err(_)) => continue,
                     None => return self.finish_shutdown(),
                 };
@@ -465,14 +488,30 @@ impl SyncEngine {
                 let timestamp = header.timestamp();
                 let parent_hash = header.parent_hash();
 
+                if bodies[i].calculate_tx_root() != header.transactions_root() {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        body_peer = %body_peer,
+                        "block body transaction root mismatch in live sync — retrying from current head"
+                    );
+                    self.peers
+                        .report_invalid_block_data(body_peer, "block bodies");
+                    batch_failed = true;
+                    break;
+                }
+
                 if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
+                        receipt_peer = %receipt_peer,
                         transactions = bodies[i].transaction_count(),
                         receipts = receipts[i].len(),
                         "block body / receipt count mismatch in live sync — retrying from current head"
                     );
+                    self.peers
+                        .report_invalid_block_data(receipt_peer, "receipts");
                     batch_failed = true;
                     break;
                 }
@@ -481,9 +520,12 @@ impl SyncEngine {
                     tracing::warn!(
                         block_number,
                         %block_hash,
+                        receipt_peer = %receipt_peer,
                         %error,
                         "receipt validation failed in live sync — retrying from current head"
                     );
+                    self.peers
+                        .report_invalid_block_data(receipt_peer, "receipts");
                     batch_failed = true;
                     break;
                 }

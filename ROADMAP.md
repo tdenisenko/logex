@@ -49,28 +49,33 @@
   - multi-round receipt fetches are stitched back together before ingestion
   - zero-progress / malformed continuation responses are rejected as bad responses
 - The sync engine now also rejects per-block transaction/receipt count mismatches before ingestion.
+- Historical receipt decoding on the wire is now fixed for ancient mainnet blocks:
+  - LogEx uses a custom Reth-compatible network receipt type that preserves `status_or_post_state`
+  - pre-Byzantium receipts with legacy post-state no longer blow up the session decoder
+  - this cleared the real mainnet stall around block `46147`
 - Shutdown is now bounded:
   - LogEx no longer waits indefinitely for the Reth network task to stop
   - node/server/background tasks are aborted after a timeout if graceful shutdown stalls
 - Old direct dependencies from the previous custom networking path were removed from `logex-sync`.
+- Live-network validation has now gone further:
+  - release-mode sync resumed from persisted head `46146`
+  - crossed the old failure point and advanced past block `50,000`
+  - persisted sync metadata advanced to block `54946`
+  - restart resumed from `54946` instead of starting over
+  - `known-peers.json` remained populated with serving peers across restart
 - Current validation on this refactor:
-  - `cargo check -p logex-node`
   - `cargo fmt --all`
-  - `cargo test --workspace --all-targets`
-  - `cargo clippy --workspace --all-targets -- -D warnings`
-  - real peer/bootstrap behavior still needs validation on an unrestricted network; this sandbox cannot prove serving-peer conversion reliably
+  - `cargo test -p logex-sync`
+  - `cargo clippy -p logex-sync -- -D warnings`
+  - `cargo build --release --bin logex`
 
 ## Next TODO
 
-1. Validate the new Reth-backed network stack against real mainnet peers outside the sandbox:
-   - fresh data dir
-   - warm restart with persisted peers
-   - sustained historical sync
-   - graceful shutdown and resume under real peer churn
-2. Improve candidate-to-serving-peer conversion further if real-world cold starts are still slower than geth/reth.
-3. Decide whether to keep the current lightweight request scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
+1. Improve warm-restart reconnect quality so persisted serving peers more reliably convert back into fast sessions right after restart.
+2. Fix the remaining p2p shutdown rough edge: the node exits, but the network task still sometimes needs to be aborted after the timeout instead of stopping cleanly on its own.
+3. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
 4. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
-5. Add end-to-end network regression coverage for bootstrap, restart, shutdown, and resume.
+5. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
 6. Reconcile the public README with what the code now actually implements for v1 versus future work.
 7. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
 
