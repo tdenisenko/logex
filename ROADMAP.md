@@ -12,6 +12,7 @@
 - Standalone log-only node exists: no external RPC, no EVM execution, logs stored locally and queryable.
 - Sync head persistence, query correctness, index rebuild behavior, and status/UI honesty were fixed in earlier passes.
 - Peer identity is persistent via `discovery-secret`; only productive serving peers are persisted in `known-peers.json`.
+- Productive peers are now persisted immediately when they first serve sync data, not only on shutdown, and refreshed records overwrite stale endpoint info.
 - Bootnodes are discovery-only, not fake sync peers.
 - DNS discovery and stricter peer honesty/status reporting are in place.
 - Custom outbound-only TCP/discovery code has now been removed.

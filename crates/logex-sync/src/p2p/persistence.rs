@@ -59,6 +59,20 @@ pub fn persist_known_peers(path: &Path, peers: &[NodeRecord]) -> io::Result<()> 
     Ok(())
 }
 
+pub fn persist_known_peers_if_changed(
+    path: &Path,
+    peers: &[NodeRecord],
+    last_persisted: &mut Vec<NodeRecord>,
+) -> io::Result<bool> {
+    if last_persisted.as_slice() == peers {
+        return Ok(false);
+    }
+
+    persist_known_peers(path, peers)?;
+    *last_persisted = peers.to_vec();
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +109,21 @@ mod tests {
         persist_known_peers(&path, &peers).unwrap();
         let loaded = load_known_peers(&path).unwrap();
 
+        assert_eq!(loaded, peers);
+    }
+
+    #[test]
+    fn known_peers_persist_only_when_changed() {
+        let tmp = TempDir::new().unwrap();
+        let path = known_peers_path(tmp.path());
+        let peers = vec![test_node(30303, 1), test_node(30304, 2)];
+        let mut last_persisted = Vec::new();
+
+        assert!(persist_known_peers_if_changed(&path, &peers, &mut last_persisted).unwrap());
+        assert_eq!(last_persisted, peers);
+        assert!(!persist_known_peers_if_changed(&path, &peers, &mut last_persisted).unwrap());
+
+        let loaded = load_known_peers(&path).unwrap();
         assert_eq!(loaded, peers);
     }
 }

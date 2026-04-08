@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -28,6 +29,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
+
+use crate::p2p::persistence::persist_known_peers_if_changed;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
@@ -59,6 +62,8 @@ pub struct PeerManager {
     pending: HashMap<PeerId, NodeRecord>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
+    known_peers_path: PathBuf,
+    persisted_known_peers: Vec<NodeRecord>,
     last_known_peer_reseed: Instant,
 }
 
@@ -81,6 +86,7 @@ impl PeerManager {
         max_peers: usize,
         our_head: Head,
         known_peers: Vec<NodeRecord>,
+        known_peers_path: PathBuf,
     ) -> Result<Self> {
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
         let peer_config = PeersConfig::default()
@@ -131,10 +137,13 @@ impl PeerManager {
             pending: HashMap::new(),
             productive: VecDeque::new(),
             known_peers,
+            known_peers_path,
+            persisted_known_peers: Vec::new(),
             last_known_peer_reseed: Instant::now() - RESEED_KNOWN_PEERS_INTERVAL,
         };
 
         manager.seed_known_peers(true);
+        manager.persisted_known_peers = manager.known_peers();
 
         info!(
             peer_id = %manager.network.peer_id(),
@@ -381,8 +390,8 @@ impl PeerManager {
             match attempt {
                 Ok(receipts) => {
                     if response_len_matches_request(requested, receipts.len()) {
-                        if !receipts.is_empty() {
-                            self.mark_peer_serving(peer_id);
+                        if !receipts.is_empty() && self.mark_peer_serving(peer_id) {
+                            self.persist_productive_peers();
                         }
                         self.on_request_success(peer_id);
                         return Ok(receipts);
@@ -776,7 +785,7 @@ impl PeerManager {
         consecutive_timeouts
     }
 
-    fn mark_peer_serving(&mut self, peer_id: PeerId) {
+    fn mark_peer_serving(&mut self, peer_id: PeerId) -> bool {
         let productive = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.is_serving = true;
             Some(peer.remote_record)
@@ -785,16 +794,17 @@ impl PeerManager {
         };
 
         if let Some(peer) = productive {
-            self.remember_productive(peer);
+            return self.remember_productive(peer);
         }
+        false
     }
 
-    fn remember_productive(&mut self, node: NodeRecord) {
-        if let Some(index) = self
+    fn remember_productive(&mut self, node: NodeRecord) -> bool {
+        let existing_index = self
             .productive
             .iter()
-            .position(|productive| productive.id == node.id)
-        {
+            .position(|productive| productive.id == node.id);
+        if let Some(index) = existing_index {
             self.productive.remove(index);
         }
 
@@ -803,8 +813,32 @@ impl PeerManager {
             self.productive.pop_back();
         }
 
-        if !self.known_peers.iter().any(|peer| peer.id == node.id) {
-            self.known_peers.push(node);
+        let known_changed = upsert_known_peer(&mut self.known_peers, node);
+        existing_index != Some(0) || known_changed
+    }
+
+    fn persist_productive_peers(&mut self) {
+        let peers = self.known_peers();
+        match persist_known_peers_if_changed(
+            &self.known_peers_path,
+            &peers,
+            &mut self.persisted_known_peers,
+        ) {
+            Ok(true) => {
+                info!(
+                    peers = peers.len(),
+                    path = %self.known_peers_path.display(),
+                    "persisted known peers after serving peer update"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    path = %self.known_peers_path.display(),
+                    "failed to persist known peers after serving peer update"
+                );
+            }
         }
     }
 
@@ -866,6 +900,19 @@ fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
         return;
     }
     peers.push(node);
+}
+
+fn upsert_known_peer(known_peers: &mut Vec<NodeRecord>, node: NodeRecord) -> bool {
+    if let Some(existing) = known_peers.iter_mut().find(|peer| peer.id == node.id) {
+        if *existing == node {
+            return false;
+        }
+        *existing = node;
+        return true;
+    }
+
+    known_peers.push(node);
+    true
 }
 
 fn is_bootstrap_node(id: PeerId) -> bool {
@@ -1019,6 +1066,27 @@ mod tests {
         assert!(response_len_matches_request(8, 8));
         assert!(!response_len_matches_request(8, 0));
         assert!(!response_len_matches_request(8, 7));
+    }
+
+    #[test]
+    fn upsert_known_peer_updates_existing_record() {
+        let peer_id = PeerId::repeat_byte(0x42);
+        let mut known_peers = vec![NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30303,
+            Some(30303),
+            peer_id,
+        )];
+
+        let changed = upsert_known_peer(
+            &mut known_peers,
+            NodeRecord::new_with_ports("127.0.0.1".parse().unwrap(), 30304, Some(30305), peer_id),
+        );
+
+        assert!(changed);
+        assert_eq!(known_peers.len(), 1);
+        assert_eq!(known_peers[0].tcp_port, 30304);
+        assert_eq!(known_peers[0].udp_port, 30305);
     }
 
     fn fake_receipt(gas: u64) -> Receipt {

@@ -288,6 +288,7 @@ async fn run_sync(
         max_peers,
         our_head,
         known_peers,
+        known_peers_file.clone(),
     )
     .await
     {
