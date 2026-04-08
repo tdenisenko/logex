@@ -87,6 +87,10 @@
   - `known-peers.json` is no longer rewritten just because an already-known productive peer was moved to the front of the in-memory recency queue
   - peers are only promoted/persisted as serving after the fetched body/receipt batch passes block-level validation, instead of immediately after a length match
   - body/receipt requests now prefer peers that either already served valid sync data or advertise a tip high enough for the requested block range
+- Request handling is now closer to real downloader behavior:
+  - partial block-body and legacy receipt responses no longer cause immediate disconnects; LogEx now continues the remaining tail request on the same peer first
+  - only impossible response overflows are treated as malformed protocol responses
+  - peers that serve canonically invalid bodies or receipts are now escalated with Reth's stronger `BadProtocol` penalty instead of the softer generic bad-message penalty
 - P2P shutdown handling is now closer to intentional node behavior:
   - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
 - Current validation on this refactor:
@@ -122,6 +126,7 @@
 9. Reconcile the public README with what the code now actually implements for v1 versus future work.
 10. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
 11. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
+12. Improve peer-count/status freshness during large historical batches so `serving_peers` does not temporarily lag behind active validated sync work.
 
 ## Deferred
 

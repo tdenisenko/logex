@@ -374,33 +374,67 @@ impl PeerManager {
             return Ok((PeerId::ZERO, Vec::new()));
         }
 
-        let requested = hashes.len();
         let peer_ids = self.peer_ids_for_requests(Some(required_block));
         let mut dead_peers = HashSet::new();
 
         for peer_id in peer_ids {
-            let request_hashes = hashes.clone();
-            match self
-                .request_with_channel(peer_id, &move |peer| PeerRequest::GetBlockBodies {
-                    request: GetBlockBodies(request_hashes.clone()),
-                    response: peer,
-                })
-                .await
-            {
-                Ok(response) => {
-                    if response_len_matches_request(requested, response.len()) {
-                        self.on_request_success(peer_id);
-                        return Ok((peer_id, response));
-                    }
+            let mut remaining_hashes = hashes.clone();
+            let mut collected = Vec::with_capacity(hashes.len());
 
-                    self.on_incomplete_response(peer_id, "block bodies", requested, response.len());
-                    dead_peers.insert(peer_id);
-                }
-                Err(error) => {
-                    let should_drop = self.on_request_error(peer_id, &error);
-                    debug!(peer = %peer_id, ?error, "body request failed");
-                    if should_drop {
-                        dead_peers.insert(peer_id);
+            while !remaining_hashes.is_empty() {
+                let request_hashes = remaining_hashes.clone();
+                let request_hashes_for_wire = request_hashes.clone();
+                match self
+                    .request_with_channel(peer_id, &move |peer| PeerRequest::GetBlockBodies {
+                        request: GetBlockBodies(request_hashes_for_wire.clone()),
+                        response: peer,
+                    })
+                    .await
+                {
+                    Ok(response) => {
+                        match classify_response_progress(request_hashes.len(), response.len()) {
+                            ResponseProgress::Complete => {
+                                self.on_request_success(peer_id);
+                                collected.extend(response);
+                                return Ok((peer_id, collected));
+                            }
+                            ResponseProgress::Partial { returned } => {
+                                self.on_partial_response(
+                                    peer_id,
+                                    "block bodies",
+                                    request_hashes.len(),
+                                    returned,
+                                );
+                                collected.extend(response);
+                                remaining_hashes = request_hashes[returned..].to_vec();
+                            }
+                            ResponseProgress::Empty => {
+                                self.on_zero_progress_response(
+                                    peer_id,
+                                    "block bodies",
+                                    request_hashes.len(),
+                                );
+                                break;
+                            }
+                            ResponseProgress::Overflow { returned } => {
+                                self.on_invalid_response_length(
+                                    peer_id,
+                                    "block bodies",
+                                    request_hashes.len(),
+                                    returned,
+                                );
+                                dead_peers.insert(peer_id);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let should_drop = self.on_request_error(peer_id, &error);
+                        debug!(peer = %peer_id, ?error, "body request failed");
+                        if should_drop {
+                            dead_peers.insert(peer_id);
+                        }
+                        break;
                     }
                 }
             }
@@ -430,7 +464,6 @@ impl PeerManager {
             return Ok((PeerId::ZERO, Vec::new()));
         }
 
-        let requested = hashes.len();
         let peer_ids = self.peer_ids_for_requests(Some(required_block));
         let mut dead_peers = HashSet::new();
 
@@ -440,29 +473,80 @@ impl PeerManager {
                 None => continue,
             };
 
-            let attempt = if version >= EthVersion::Eth70 {
-                self.request_receipts70(peer_id, hashes.clone()).await
-            } else if version >= EthVersion::Eth69 {
-                self.request_receipts69(peer_id, hashes.clone()).await
-            } else {
-                self.request_receipts(peer_id, hashes.clone()).await
-            };
-
-            match attempt {
-                Ok(receipts) => {
-                    if response_len_matches_request(requested, receipts.len()) {
+            if version >= EthVersion::Eth70 {
+                match self.request_receipts70(peer_id, hashes.clone()).await {
+                    Ok(receipts) => {
                         self.on_request_success(peer_id);
                         return Ok((peer_id, receipts));
                     }
-
-                    self.on_incomplete_response(peer_id, "receipts", requested, receipts.len());
-                    dead_peers.insert(peer_id);
+                    Err(error) => {
+                        let should_drop = self.on_request_error(peer_id, &error);
+                        debug!(peer = %peer_id, ?error, "receipt request failed");
+                        if should_drop {
+                            dead_peers.insert(peer_id);
+                        }
+                        continue;
+                    }
                 }
-                Err(error) => {
-                    let should_drop = self.on_request_error(peer_id, &error);
-                    debug!(peer = %peer_id, ?error, "receipt request failed");
-                    if should_drop {
-                        dead_peers.insert(peer_id);
+            }
+
+            let mut remaining_hashes = hashes.clone();
+            let mut collected = Vec::with_capacity(hashes.len());
+
+            while !remaining_hashes.is_empty() {
+                let request_hashes = remaining_hashes.clone();
+                let attempt = if version >= EthVersion::Eth69 {
+                    self.request_receipts69(peer_id, request_hashes.clone())
+                        .await
+                } else {
+                    self.request_receipts(peer_id, request_hashes.clone()).await
+                };
+
+                match attempt {
+                    Ok(receipts) => {
+                        match classify_response_progress(request_hashes.len(), receipts.len()) {
+                            ResponseProgress::Complete => {
+                                self.on_request_success(peer_id);
+                                collected.extend(receipts);
+                                return Ok((peer_id, collected));
+                            }
+                            ResponseProgress::Partial { returned } => {
+                                self.on_partial_response(
+                                    peer_id,
+                                    "receipts",
+                                    request_hashes.len(),
+                                    returned,
+                                );
+                                collected.extend(receipts);
+                                remaining_hashes = request_hashes[returned..].to_vec();
+                            }
+                            ResponseProgress::Empty => {
+                                self.on_zero_progress_response(
+                                    peer_id,
+                                    "receipts",
+                                    request_hashes.len(),
+                                );
+                                break;
+                            }
+                            ResponseProgress::Overflow { returned } => {
+                                self.on_invalid_response_length(
+                                    peer_id,
+                                    "receipts",
+                                    request_hashes.len(),
+                                    returned,
+                                );
+                                dead_peers.insert(peer_id);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let should_drop = self.on_request_error(peer_id, &error);
+                        debug!(peer = %peer_id, ?error, "receipt request failed");
+                        if should_drop {
+                            dead_peers.insert(peer_id);
+                        }
+                        break;
                     }
                 }
             }
@@ -479,7 +563,7 @@ impl PeerManager {
         }
 
         self.network
-            .reputation_change(peer_id, ReputationChangeKind::BadMessage);
+            .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
         self.network.disconnect_peer(peer_id);
         let known_changed = self.forget_peer(peer_id);
         if known_changed {
@@ -492,7 +576,7 @@ impl PeerManager {
         );
     }
 
-    fn on_incomplete_response(
+    fn on_invalid_response_length(
         &mut self,
         peer_id: PeerId,
         response_kind: &'static str,
@@ -500,13 +584,47 @@ impl PeerManager {
         returned: usize,
     ) {
         self.network
-            .reputation_change(peer_id, ReputationChangeKind::BadMessage);
+            .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
         warn!(
             peer = %peer_id,
             response_kind,
             requested,
             returned,
-            "peer returned an incomplete response, disconnecting it"
+            "peer returned more items than requested, disconnecting it"
+        );
+    }
+
+    fn on_partial_response(
+        &mut self,
+        peer_id: PeerId,
+        response_kind: &'static str,
+        requested: usize,
+        returned: usize,
+    ) {
+        self.reset_peer_timeout(peer_id);
+        debug!(
+            peer = %peer_id,
+            response_kind,
+            requested,
+            returned,
+            remaining = requested.saturating_sub(returned),
+            "peer returned a partial response, requesting the remaining tail"
+        );
+    }
+
+    fn on_zero_progress_response(
+        &mut self,
+        peer_id: PeerId,
+        response_kind: &'static str,
+        requested: usize,
+    ) {
+        self.reset_peer_timeout(peer_id);
+        self.demote_peer(peer_id);
+        debug!(
+            peer = %peer_id,
+            response_kind,
+            requested,
+            "peer returned no data for a non-empty request"
         );
     }
 
@@ -844,10 +962,14 @@ impl PeerManager {
     }
 
     fn on_request_success(&mut self, peer_id: PeerId) {
+        self.reset_peer_timeout(peer_id);
+        self.advance_request_cursor();
+    }
+
+    fn reset_peer_timeout(&mut self, peer_id: PeerId) {
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.consecutive_timeouts = 0;
         }
-        self.advance_request_cursor();
     }
 
     fn on_request_error(&mut self, peer_id: PeerId, error: &RequestAttempt) -> bool {
@@ -1120,6 +1242,14 @@ enum Receipts70MergeError {
     NoProgress,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseProgress {
+    Complete,
+    Partial { returned: usize },
+    Empty,
+    Overflow { returned: usize },
+}
+
 impl Receipts70MergeError {
     fn into_request_attempt(self) -> RequestAttempt {
         RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
@@ -1197,8 +1327,13 @@ fn is_bootstrap_node(id: PeerId) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
 }
 
-fn response_len_matches_request(requested: usize, returned: usize) -> bool {
-    requested == returned
+fn classify_response_progress(requested: usize, returned: usize) -> ResponseProgress {
+    match returned.cmp(&requested) {
+        std::cmp::Ordering::Equal => ResponseProgress::Complete,
+        std::cmp::Ordering::Less if returned == 0 => ResponseProgress::Empty,
+        std::cmp::Ordering::Less => ResponseProgress::Partial { returned },
+        std::cmp::Ordering::Greater => ResponseProgress::Overflow { returned },
+    }
 }
 
 fn peer_is_preferred_for_block(
@@ -1370,10 +1505,17 @@ mod tests {
     }
 
     #[test]
-    fn response_length_must_match_request() {
-        assert!(response_len_matches_request(8, 8));
-        assert!(!response_len_matches_request(8, 0));
-        assert!(!response_len_matches_request(8, 7));
+    fn response_progress_distinguishes_complete_partial_and_overflow() {
+        assert_eq!(classify_response_progress(8, 8), ResponseProgress::Complete);
+        assert_eq!(classify_response_progress(8, 0), ResponseProgress::Empty);
+        assert_eq!(
+            classify_response_progress(8, 7),
+            ResponseProgress::Partial { returned: 7 }
+        );
+        assert_eq!(
+            classify_response_progress(8, 9),
+            ResponseProgress::Overflow { returned: 9 }
+        );
     }
 
     #[test]
