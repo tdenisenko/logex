@@ -8,5 +8,6 @@ license.workspace = true
 alloy-primitives = { workspace = true }
 alloy-rpc-types = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
 serde_json = { workspace = true }
-thiserror = { workspace = true }

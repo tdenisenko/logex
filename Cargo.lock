@@ -3161,10 +3161,7 @@ dependencies = [
  "logex-storage",
  "logex-types",
  "roaring",
- "serde",
- "serde_json",
  "tempfile",
- "thiserror",
  "tracing",
 ]
 
@@ -3177,7 +3174,6 @@ dependencies = [
  "logex-storage",
  "logex-types",
  "tempfile",
- "thiserror",
  "tracing",
 ]
 
@@ -3186,14 +3182,12 @@ name = "logex-node"
 version = "0.1.0"
 dependencies = [
  "clap",
- "eyre",
  "logex-index",
  "logex-ingestion",
  "logex-server",
  "logex-storage",
  "logex-sync",
  "logex-types",
- "rand 0.8.5",
  "reth-chainspec",
  "reth-ethereum-forks",
  "secp256k1 0.30.0",
@@ -3234,7 +3228,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3254,7 +3247,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tracing",
  "zstd",
 ]
@@ -3302,7 +3294,6 @@ dependencies = [
  "alloy-rpc-types",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
