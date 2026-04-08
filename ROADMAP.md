@@ -95,6 +95,10 @@
   - downloaded headers are validated with Reth's `EthBeaconConsensus` standalone and parent-against-child rules whenever the parent header is available in-process
   - block bodies now go through Reth pre-execution validation instead of only LogEx's custom transaction-root checks
   - header peers can now be penalized for serving invalid header sequences, not just invalid bodies or receipts
+- Restart-boundary canonical header validation is now stronger:
+  - a recent canonical header window is persisted alongside the sync head in storage metadata
+  - startup restores that window into the sync engine before new requests are validated
+  - restart-time header-against-parent validation and recent reorg tracking no longer have to fall back to a blind first batch after process restart
 - P2P shutdown handling is now closer to intentional node behavior:
   - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
 - Current validation on this refactor:
@@ -103,38 +107,36 @@
   - `cargo clippy -p logex-sync -p logex-node -- -D warnings`
   - `cargo build --release --bin logex`
 
-## Next TODO
+## Prioritized TODO
 
-1. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
-2. Replace the custom REST/gRPC "simple SELECT only" gate with a DataFusion-backed query path over the existing storage engine.
+1. Add post-merge canonical-chain verification instead of relying on execution peers alone.
+   - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
+   - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
+2. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
+3. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
+4. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
+5. Improve peer-count/status freshness during large historical batches so `serving_peers` does not temporarily lag behind active validated sync work.
+6. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
+7. Replace the custom REST/gRPC "simple SELECT only" gate with a DataFusion-backed query path over the existing storage engine.
    - Add a dedicated adapter crate or module that exposes LogEx storage as a DataFusion `TableProvider`.
    - Define an Arrow schema for the current log row model (`block_number`, `block_hash`, `timestamp`, `tx_hash`, `tx_index`, `log_index`, `address`, `topic0..topic3`, `data`, `data_len`, `source`).
    - Convert partition reads into Arrow `RecordBatch` output without changing the on-disk storage format.
-3. Preserve LogEx storage/index advantages inside the DataFusion path instead of falling back to naive full scans.
+8. Preserve LogEx storage/index advantages inside the DataFusion path instead of falling back to naive full scans.
    - Push partition pruning from `block_number` ranges into the adapter.
    - Reuse the existing address/topic/block indexes when a SQL filter can be mapped onto the current planner/index readers.
    - Keep canonical-row filtering and hot-partition correctness guarantees.
-4. Implement the first real SQL expansion on top of DataFusion while keeping the current storage layout.
+9. Implement the first real SQL expansion on top of DataFusion while keeping the current storage layout.
    - Support `COUNT(*)`, `COUNT(column)`, `MIN`, `MAX`, and `SUM` on numeric columns.
    - Support `GROUP BY`, aggregate `ORDER BY`, `DESC`, aliases, and `LIMIT` for aggregate queries.
    - Keep existing row-query behavior working for `SELECT *`, projected columns, `WHERE`, and non-aggregate `ORDER BY`.
-5. Preserve LogEx-specific query ergonomics when moving to DataFusion.
-   - Rewrite or expose `event'...'`, `address'...'`, and `latest` as SQL-compatible expressions or UDFs.
-   - Decide whether `decode(...)` should become a DataFusion UDF in v1 or stay explicitly deferred.
-6. Add API compatibility and regression coverage for the new query layer.
-   - REST `/query`, gRPC query, and web UI must all use the same DataFusion execution path.
-   - Add tests for aggregate correctness, alias ordering, mixed filters, and hot-partition visibility.
-   - Benchmark simple indexed queries against the current path so we do not regress the common case badly.
-7. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
-8. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
-9. Reconcile the public README with what the code now actually implements for v1 versus future work.
-10. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
-11. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
-12. Improve peer-count/status freshness during large historical batches so `serving_peers` does not temporarily lag behind active validated sync work.
-13. Add post-merge canonical-chain verification instead of relying on execution peers alone.
-    - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
-    - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
-14. Persist a recent canonical header window so restart-boundary header-against-parent validation can stay strict across process restarts.
+10. Preserve LogEx-specific query ergonomics when moving to DataFusion.
+    - Rewrite or expose `event'...'`, `address'...'`, and `latest` as SQL-compatible expressions or UDFs.
+    - Decide whether `decode(...)` should become a DataFusion UDF in v1 or stay explicitly deferred.
+11. Add API compatibility and regression coverage for the new query layer.
+    - REST `/query`, gRPC query, and web UI must all use the same DataFusion execution path.
+    - Add tests for aggregate correctness, alias ordering, mixed filters, and hot-partition visibility.
+    - Benchmark simple indexed queries against the current path so we do not regress the common case badly.
+12. Reconcile the public README with what the code now actually implements for v1 versus future work.
 
 ## Deferred
 

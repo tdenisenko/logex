@@ -69,14 +69,27 @@ impl SyncEngine {
 
     /// Run the sync loop: historical catch-up, then live following.
     pub async fn run(&mut self) -> Result<()> {
-        let start_block = {
+        let (start_block, recent_headers) = {
             let storage = self.storage.read().await;
-            storage
-                .sync_head()
-                .map(|head| head.block_number + 1)
-                .or_else(|| storage.indexed_head_block().map(|block| block + 1))
-                .unwrap_or(0)
+            (
+                storage
+                    .sync_head()
+                    .map(|head| head.block_number + 1)
+                    .or_else(|| storage.indexed_head_block().map(|block| block + 1))
+                    .unwrap_or(0),
+                storage.recent_headers().to_vec(),
+            )
         };
+
+        if !recent_headers.is_empty() {
+            self.head_tracker.restore(recent_headers.clone());
+            self.last_validated_header = recent_headers.last().cloned();
+            tracing::info!(
+                restored_headers = recent_headers.len(),
+                restored_tip = self.head_tracker.tip().map(|(number, _)| number),
+                "restored recent canonical header window from storage"
+            );
+        }
 
         tracing::info!(start_block, "starting sync");
         self.set_runtime_state(NodeState::Discovering);
@@ -326,7 +339,6 @@ impl SyncEngine {
                     let block_hash = chunk_hashes[i];
                     let block_number = header.number();
                     let timestamp = header.timestamp();
-                    let parent_hash = header.parent_hash();
 
                     if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
                         tracing::warn!(
@@ -374,20 +386,18 @@ impl SyncEngine {
                     // Extract tx hashes from block body, zip with receipt logs
                     let txs = assemble_txs(&bodies[i], &receipts[i]);
 
-                    if let Some(reorg) =
-                        self.head_tracker
-                            .track(block_number, block_hash, parent_hash)
-                    {
+                    if let Some(reorg) = self.head_tracker.track(header.clone()) {
                         self.handle_reorg(reorg).await?;
                     }
 
+                    let recent_headers = self.head_tracker.snapshot();
                     self.peers.cache_canonical_block(
                         header.clone(),
                         bodies[i].clone(),
                         &receipts[i],
                     );
                     let log_count = self
-                        .ingest_block(block_number, block_hash, timestamp, &txs)
+                        .ingest_block(header, block_hash, &txs, &recent_headers)
                         .await?;
                     self.progress.record_block(block_number, log_count);
                     next_block = block_number + 1;
@@ -550,7 +560,6 @@ impl SyncEngine {
                 let block_hash = hashes[i];
                 let block_number = header.number();
                 let timestamp = header.timestamp();
-                let parent_hash = header.parent_hash();
 
                 if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
                     tracing::warn!(
@@ -597,17 +606,15 @@ impl SyncEngine {
 
                 let txs = assemble_txs(&bodies[i], &receipts[i]);
 
-                if let Some(reorg) = self
-                    .head_tracker
-                    .track(block_number, block_hash, parent_hash)
-                {
+                if let Some(reorg) = self.head_tracker.track(header.clone()) {
                     self.handle_reorg(reorg).await?;
                 }
 
+                let recent_headers = self.head_tracker.snapshot();
                 self.peers
                     .cache_canonical_block(header.clone(), bodies[i].clone(), &receipts[i]);
                 let log_count = self
-                    .ingest_block(block_number, block_hash, timestamp, &txs)
+                    .ingest_block(header, block_hash, &txs, &recent_headers)
                     .await?;
                 self.progress.record_block(block_number, log_count);
 
@@ -638,11 +645,13 @@ impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
     async fn ingest_block(
         &self,
-        block_number: u64,
+        header: &Header,
         block_hash: B256,
-        timestamp: u64,
         txs: &[(B256, Vec<Log>)],
+        recent_headers: &[Header],
     ) -> Result<u64> {
+        let block_number = header.number();
+        let timestamp = header.timestamp();
         let rows = extract::extract_from_block(block_number, block_hash, timestamp, txs);
         let count = rows.len() as u64;
 
@@ -669,7 +678,7 @@ impl SyncEngine {
             }
         }
         storage
-            .record_sync_head(block_number, block_hash, timestamp)
+            .record_canonical_state(header, recent_headers)
             .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
 
         Ok(count)

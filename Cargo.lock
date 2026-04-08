@@ -3240,6 +3240,7 @@ dependencies = [
 name = "logex-storage"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "crc32fast",
  "logex-types",
