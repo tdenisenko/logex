@@ -1,160 +1,167 @@
 # LogEx Roadmap
 
+## Goal
+
+LogEx should become a canonical Ethereum event-log node that:
+
+- uses Ethereum P2P only
+- does not execute the EVM
+- does not store the full state trie
+- stores logs locally and makes them queryable
+- relies on a weak subjectivity checkpoint as the only unavoidable trust assumption
+- is otherwise theoretically trustless for canonical log verification after that checkpoint
+
 ## Direction
 
-- Stay close to a real Ethereum execution node on the networking side, while keeping LogEx log-only on storage/execution.
-- Use Reth crates where they remove networking risk or missing protocol behavior.
-- Do not spend v1 time re-implementing peer discovery, session management, or wire handling that mature clients already ship and test.
-- Move the query layer toward Apache DataFusion instead of continuing to grow the custom LogSQL executor by hand.
-- Keep the current on-disk storage/index format as the source of truth and make it queriable through DataFusion; do not introduce an external database dependency for v1.
-- Revisit internalizing selected networking pieces only after bootstrap, sync stability, and operator UX are solid.
+- Keep the execution-layer networking close to Reth.
+- Do not depend on an external execution RPC or an external consensus RPC for steady-state operation.
+- Do not require a local full beacon node like Lighthouse as a runtime dependency.
+- Implement an embedded consensus-side light-client path inside LogEx, then bind EL receipt verification to that.
+- Use Helios as a reference for light-client architecture and implementation ideas where helpful, but not as a drop-in dependency today.
+  - Helios is useful because it already implements a real light-client model.
+  - Helios is not a direct fit because its normal Ethereum mode still assumes an execution RPC.
+- Keep the existing query/storage roadmap in scope; canonicality work comes first, but SQL/query improvements are still part of v1.
 
-## Done
+## Important Clarification
 
-- Standalone log-only node exists: no external RPC, no EVM execution, logs stored locally and queryable.
-- The current query path supports filtered row queries over the local storage engine, but REST/gRPC still intentionally gate queries to the simple non-aggregate subset.
-- Sync head persistence, query correctness, index rebuild behavior, and status/UI honesty were fixed in earlier passes.
-- Peer identity is persistent via `discovery-secret`; only productive serving peers are persisted in `known-peers.json`.
-- Productive peers are now persisted immediately when they first serve sync data, not only on shutdown, and refreshed records overwrite stale endpoint info.
-- Bootnodes are discovery-only, not fake sync peers.
-- DNS discovery and stricter peer honesty/status reporting are in place.
-- Custom outbound-only TCP/discovery code has now been removed.
-- LogEx now runs on top of Reth’s actual network manager/session stack:
-  - real listener socket
-  - real peer/session lifecycle management
-  - discv4 + DNS bootstrap under Reth’s manager
-  - persisted productive peers reseeded into the live network stack on restart
-  - inbound `eth` requests are now wired through Reth's request-handler path
-  - recently fetched canonical headers/bodies/receipts are cached in-memory so LogEx can answer recent peer requests instead of behaving like a silent or empty server
-- Peer bootstrap is now closer to Reth’s normal node startup path:
-  - NAT/external IP resolution is enabled through Reth’s network builder
-  - session event buffers scale with peer capacity like Reth’s node config does
-  - persisted productive peers are treated as preferred trusted reconnect targets instead of only plain basic nodes
-  - ENR fork-ID gating is no longer over-enforced during discovery, which reduces false-negative candidate drops on startup
-  - remote `TooManyPeers` churn is logged more honestly and short-lived rejected sessions are no longer recycled into LogEx’s local pending cache
-- The remaining pre-Reth mainnet handshake shim has been removed:
-  - startup now feeds the local head into Reth through `NetworkConfigBuilder::set_head(...)`
-  - live sync now pushes head updates through `NetworkHandle::update_status(...)`
-  - old custom `mainnet.rs` bootstrap constants/helpers are gone
-- Sync resume metadata is tighter now:
-  - the persisted sync head also stores the block timestamp
-  - historical sync resumes explicitly from the sync head, not only from the highest block that emitted logs
-  - legacy metadata without timestamps is still accepted on disk
-- The sync loop is more resilient against bad serving peers now:
-  - empty or partial bodies/receipts responses are no longer treated as successful requests
-  - peers that return incomplete block data are penalized and disconnected instead of being retried forever
-  - the default bodies/receipts fetch batch is now more conservative to reduce size-limit related mismatches
-- Receipt validation now follows Reth's historical/mainnet consensus rules:
-  - gas-used, receipt-root, and bloom checks are now enforced for both ancient and modern blocks
-  - LogEx's custom receipt type preserves pre-Byzantium `post_state`, so old mainnet receipts can now be verified against the header instead of being trusted once decoded
-- The eth/70 receipt path now handles partial last-block responses correctly:
-  - `last_block_incomplete` and `first_block_receipt_index` are honored
-  - multi-round receipt fetches are stitched back together before ingestion
-  - zero-progress / malformed continuation responses are rejected as bad responses
-- The sync engine now also rejects per-block transaction/receipt count mismatches before ingestion.
-- Historical receipt decoding on the wire is now fixed for ancient mainnet blocks:
-  - LogEx uses a custom Reth-compatible network receipt type that preserves `status_or_post_state`
-  - pre-Byzantium receipts with legacy post-state no longer blow up the session decoder
-  - this cleared the real mainnet stall around block `46147`
-- Ancient canonical log assurance is now stronger:
-  - pre-Byzantium receipt-root and logs-bloom verification are no longer skipped
-  - a malicious peer can no longer alter ancient receipts/logs while still passing LogEx's header-attested receipt checks
-- Shutdown is now bounded:
-  - LogEx no longer waits indefinitely for the Reth network task to stop
-  - node/server/background tasks are aborted after a timeout if graceful shutdown stalls
-- Peer refill/bootstrap behavior is now materially better:
-  - peer refill no longer exits after a single quiet wait interval; it uses its full refill budget
-  - stale failed/disconnected discovery candidates are no longer left forever in LogEx's local pending-peer view
-  - Reth peer-manager dial concurrency and non-fatal backoff durations are tuned for faster blank-dir bootstrap instead of slowly recycling saturated peers
-- Old direct dependencies from the previous custom networking path were removed from `logex-sync`.
-- Dead scaffolding and stale dependency drift are reduced:
-  - unused workspace-level Reth deps from earlier experiments were removed
-  - unused `SyncConfig` checkpoint / `FetchedBlock` scaffolding was removed
-  - unused `logex-types` column/error shells were removed
-  - crate-local unused dependencies were pruned from the manifests
-- Live-network validation has now gone further:
-  - release-mode sync resumed from persisted head `46146`
-  - crossed the old failure point and advanced past block `50,000`
-  - persisted sync metadata advanced to block `54946`
-  - restart resumed from `54946` instead of starting over
-  - `known-peers.json` remained populated with serving peers across restart
-  - fresh-dir bootstrap on April 8, 2026 reached a serving peer and advanced persisted sync state to block `2079`
-  - restarting that same data dir resumed quickly and advanced onward to block `3103`
-- Warm-restart reconnect and operator status were tightened again:
-  - productive peers loaded from `known-peers.json` are now rehydrated into the in-memory productive queue on startup instead of being treated like anonymous peers until they re-serve data
-  - restart ordering now prefers those previously serving peers immediately, and shutdown no longer risks rewriting the on-disk productive peer cache to `[]` just because no peer re-served data during the current process lifetime
-  - live sync now refills peers with the same small active-peer floor used during historical sync, instead of coasting at one or two sessions after restart
-  - `syncing` status stays true while blocks are advancing even when no peer has advertised a credible target head yet
-- Serving-peer persistence and request routing are now stricter:
-  - `known-peers.json` is no longer rewritten just because an already-known productive peer was moved to the front of the in-memory recency queue
-  - peers are only promoted/persisted as serving after the fetched body/receipt batch passes block-level validation, instead of immediately after a length match
-  - body/receipt requests now prefer peers that either already served valid sync data or advertise a tip high enough for the requested block range
-- Request handling is now closer to real downloader behavior:
-  - partial block-body and legacy receipt responses no longer cause immediate disconnects; LogEx now continues the remaining tail request on the same peer first
-  - only impossible response overflows are treated as malformed protocol responses
-  - peers that serve canonically invalid bodies or receipts are now escalated with Reth's stronger `BadProtocol` penalty instead of the softer generic bad-message penalty
-- Header and body fetching now lean further on Reth instead of LogEx-owned request routing:
-  - header requests now use Reth's `FetchClient` instead of LogEx's custom per-peer `GetBlockHeaders` loop
-  - body requests now use Reth's `FetchClient` with block-range hints instead of LogEx's custom per-peer `GetBlockBodies` loop
-  - LogEx still keeps the receipt path custom, because upstream Reth does not expose the same kind of public receipt downloader for a no-execution node
-  - body batches can now be assembled across multiple peers while still attributing invalid block bodies back to the exact peer that supplied them
-- Live-network validation on the Reth-fetch refactor is positive:
-  - on April 8, 2026, a release-mode run on the existing local storage with fixed HTTP port `18444` resumed from block `470076` and advanced into the `471100` range on real peers
-  - connected peers grew while syncing and the resumed head kept moving forward without the old LogEx-owned header/body router
-- Serving-peer status is now fresher during long historical batches:
-  - peers are promoted to `serving` as soon as the first validated block in the batch proves them useful, instead of waiting until the batch tail finishes
-  - the shared status/UI peer counters are refreshed immediately on that first validated serving result, so active sync work no longer sits at `serving_peers=0` just because a large batch is still in flight
-- Execution-layer validation now uses Reth consensus code directly:
-  - downloaded headers are validated with Reth's `EthBeaconConsensus` standalone and parent-against-child rules whenever the parent header is available in-process
-  - block bodies now go through Reth pre-execution validation instead of only LogEx's custom transaction-root checks
-  - header peers can now be penalized for serving invalid header sequences, not just invalid bodies or receipts
-- Restart-boundary canonical header validation is now stronger:
-  - a recent canonical header window is persisted alongside the sync head in storage metadata
-  - startup restores that window into the sync engine before new requests are validated
-  - restart-time header-against-parent validation and recent reorg tracking no longer have to fall back to a blind first batch after process restart
-- P2P shutdown handling is now closer to intentional node behavior:
-  - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
-- Current validation on this refactor:
-  - `cargo fmt --all`
-  - `cargo test -p logex-sync -p logex-node`
-  - `cargo clippy -p logex-sync -p logex-node -- -D warnings`
-  - `cargo build --release --bin logex`
+- A standard EL <-> CL setup like `Reth + Lighthouse` is not the right target for LogEx.
+  - A normal beacon node expects a real execution engine over Engine API.
+  - LogEx intentionally does not execute blocks, so it should not pretend to be a full EL for a normal CL.
+- The consensus-side primitive LogEx needs is the beacon light-client protocol.
+  - Sync committees verify light-client updates and finality/optimistic updates.
+  - They do not directly act as a signature over every beacon block in the way a naive gossip-only design would imply.
+- Therefore the canonicality path should be:
+  1. verify beacon light-client updates from a weak subjectivity checkpoint
+  2. extract verified execution anchors from the corresponding beacon data
+  3. fetch raw receipts from EL peers
+  4. reconstruct the receipt trie locally
+  5. require the computed receipts root to match the verified execution anchor
+
+## Already Done
+
+- Standalone LogEx node exists and syncs from EL P2P without any external RPC.
+- Reth networking is already integrated for devp2p sessions, discovery, and fetch paths.
+- Persistent node identity and productive peer persistence are in place.
+- Restart/resume and recent canonical header persistence are in place.
+- Ancient and modern receipt-root / bloom verification are in place.
+- Historical receipt decoding and partial receipt-response handling are fixed.
+- The node can ingest logs locally and expose them through the current query APIs.
+- The current EL sync stack is materially closer to a real client than the original prototype:
+  - Reth-backed session management and discovery are in place.
+  - Reth-backed header/body fetch paths are in place.
+  - custom receipt transport remains, because LogEx is intentionally no-execution.
+- Operator-facing honesty is much better than before:
+  - persistent sync head and recent headers are stored locally
+  - restart resumes from durable metadata
+  - productive peers are persisted
+  - UI/runtime state no longer falsely claims sync completion on missing targets
+- Query/storage direction is already established:
+  - local storage is the source of truth
+  - current APIs support row/filter queries
+  - DataFusion remains the planned path for richer SQL
+
+## Explicitly Not Needed
+
+- A full state trie
+- EVM execution
+- A local full consensus client as a mandatory dependency
+- An external execution RPC URL
+- An external consensus RPC URL in the final design
+- Engine API compatibility with a standard beacon node as the primary canonicality path
 
 ## Prioritized TODO
 
-1. Add post-merge canonical-chain verification instead of relying on execution peers alone.
-   - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
-   - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
-   - Ancient receipt verification is no longer part of this gap; the remaining missing piece is beacon/consensus-layer verification for post-merge canonicality.
-2. Decide whether there is any networking value left in moving beyond Reth `FetchClient` for headers/bodies.
-   - Headers and bodies already use Reth's fetch path now; the remaining custom transport is receipts.
-   - Only evaluate `ReverseHeadersDownloader` / `BodiesDownloader` if LogEx starts persisting a fuller canonical header history that can satisfy Reth's downloader/provider assumptions cleanly.
-   - Keep comparing the remaining receipt scheduler and retry logic against Reth/geth, because that is still the main LogEx-owned sync surface.
-3. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
-4. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
-5. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
-6. Replace the custom REST/gRPC "simple SELECT only" gate with a DataFusion-backed query path over the existing storage engine.
-   - Add a dedicated adapter crate or module that exposes LogEx storage as a DataFusion `TableProvider`.
-   - Define an Arrow schema for the current log row model (`block_number`, `block_hash`, `timestamp`, `tx_hash`, `tx_index`, `log_index`, `address`, `topic0..topic3`, `data`, `data_len`, `source`).
-   - Convert partition reads into Arrow `RecordBatch` output without changing the on-disk storage format.
-7. Preserve LogEx storage/index advantages inside the DataFusion path instead of falling back to naive full scans.
-   - Push partition pruning from `block_number` ranges into the adapter.
-   - Reuse the existing address/topic/block indexes when a SQL filter can be mapped onto the current planner/index readers.
-   - Keep canonical-row filtering and hot-partition correctness guarantees.
-8. Implement the first real SQL expansion on top of DataFusion while keeping the current storage layout.
-   - Support `COUNT(*)`, `COUNT(column)`, `MIN`, `MAX`, and `SUM` on numeric columns.
-   - Support `GROUP BY`, aggregate `ORDER BY`, `DESC`, aliases, and `LIMIT` for aggregate queries.
+1. Build the CL light-client foundation first.
+   - Add weak subjectivity checkpoint input, persistence, and restart handling.
+   - Implement the beacon light-client bootstrap/update/finality flow.
+   - Verify sync committee aggregate signatures and committee rotation.
+   - Persist verified consensus outputs that matter to LogEx:
+     - finalized execution block hash
+     - optimistic/head execution block hash
+     - block number
+     - receipts root
+   - Expose these verified anchors in node status and storage metadata.
+
+2. Adapt EL receipt syncing to consume verified CL anchors.
+   - Keep the current Reth-backed devp2p stack.
+   - Fetch receipts by block hash for CL-anchored execution blocks.
+   - Fetch from multiple EL peers and cross-check for omission or inconsistent receipt sets.
+   - Reconstruct the receipt trie locally and require its root to equal the verified receipts root from CL.
+   - Distinguish finalized anchors from optimistic/head anchors in persistence and status.
+   - Keep comparing the remaining receipt scheduler and retry logic against Reth/geth, because receipts are still the main LogEx-owned sync surface.
+
+3. Add proof-oriented log verification on top of the receipt-root match.
+   - Preserve enough local structure to prove receipt inclusion.
+   - Derive or store the data needed to prove a specific log against its receipt.
+   - Make the proof boundary explicit in APIs and docs.
+
+4. Keep improving EL throughput after the trust anchor exists.
+   - Better peer fanout for receipts.
+   - Better batching and fallback for large receipt responses.
+   - Better blank-dir bootstrap and serving-peer conversion.
+   - Better peer scoring for omission or malformed receipt behavior.
+   - Revisit batch sizing and fallback behavior for huge receipt/body responses so honest peers are not penalized when soft response limits are hit.
+
+5. Add end-to-end validation coverage for the new trust model.
+   - weak subjectivity restart
+   - sync committee rotation
+   - finalized/optimistic anchor updates
+   - receipt-root reconstruction
+   - malicious peer mismatch detection
+   - bootstrap, restart, shutdown, and resume regressions
+
+6. Replace the current limited SQL gate with a DataFusion-backed query path.
+   - Expose current storage as a `TableProvider`.
+   - Define an Arrow schema for the current log row model.
+   - Convert partition reads into `RecordBatch` output without changing the on-disk storage format.
+   - Add aggregates, ordering, aliases, and better SQL coverage without changing the on-disk storage format.
+   - Preserve partition pruning and current index advantages.
+   - Reuse the existing address/topic/block indexes where the planner can map filters onto them.
+
+7. Preserve LogEx-specific query ergonomics while moving to DataFusion.
    - Keep existing row-query behavior working for `SELECT *`, projected columns, `WHERE`, and non-aggregate `ORDER BY`.
-9. Preserve LogEx-specific query ergonomics when moving to DataFusion.
-   - Rewrite or expose `event'...'`, `address'...'`, and `latest` as SQL-compatible expressions or UDFs.
-   - Decide whether `decode(...)` should become a DataFusion UDF in v1 or stay explicitly deferred.
-10. Add API compatibility and regression coverage for the new query layer.
-   - REST `/query`, gRPC query, and web UI must all use the same DataFusion execution path.
-   - Add tests for aggregate correctness, alias ordering, mixed filters, and hot-partition visibility.
-   - Benchmark simple indexed queries against the current path so we do not regress the common case badly.
-11. Reconcile the public README with what the code now actually implements for v1 versus future work.
+   - Preserve `event'...'`, `address'...'`, and `latest` through rewrites or UDFs.
+   - Decide whether `decode(...)` is part of v1 or remains deferred.
+
+8. Add API compatibility and regression coverage for the richer query path.
+   - REST, gRPC, and web UI should all use the same query engine.
+   - Add tests for aggregates, aliases, mixed filters, ordering, and hot-partition visibility.
+   - Benchmark common indexed queries so the current fast path does not regress badly.
+
+9. Reconcile the public README with the actual trust model and runtime model.
+   - Make it explicit what is verified today.
+   - Make it explicit what the weak subjectivity assumption is.
+   - Make it explicit that LogEx is not a full execution node and not a standard EL<->CL pair.
+
+## Sequencing Decision
+
+Do the CL implementation first.
+
+Why:
+
+- Without verified CL anchors, EL work improves performance but not canonicality.
+- The CL output defines the exact EL data LogEx should trust and verify.
+- Once the CL anchor format is fixed, the EL side becomes a much clearer adaptation of the current receipt pipeline.
+- This keeps LogEx aligned with its real goal: canonical logs without EVM execution.
+- The other TODOs stay in scope; this only sets the order of work.
+
+## Validation Target
+
+LogEx should eventually be able to say all of the following:
+
+- it bootstrapped from a weak subjectivity checkpoint
+- it verified beacon light-client updates locally
+- it learned the canonical execution block hash and receipts root from that verified CL data
+- it fetched receipts from EL peers over devp2p
+- it recomputed the receipts trie locally
+- it only accepted logs whose receipts root matches the verified canonical chain
 
 ## Deferred
 
-- Historical ETH transfer backfill is out of scope for v1 and stays deferred to a possible v2.
-- Running a separate PostgreSQL-compatible storage engine is out of scope for v1; the preferred direction is embedded DataFusion over LogEx's own storage.
+- Historical ETH transfer backfill remains deferred to a possible v2.
+- V2 can expand the same proof-based model beyond event logs by verifying and exposing additional execution payload roots:
+  - `state_root` for account balances, nonces, and code hashes
+  - `receipts_root` for logs, gas used, and transaction success or revert status
+  - `transactions_root` for transaction inclusion proofs
+  - `withdrawals_root` for validator withdrawals after Shanghai
+- A PostgreSQL-compatible storage backend remains out of scope for v1.
