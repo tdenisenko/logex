@@ -91,6 +91,14 @@
   - partial block-body and legacy receipt responses no longer cause immediate disconnects; LogEx now continues the remaining tail request on the same peer first
   - only impossible response overflows are treated as malformed protocol responses
   - peers that serve canonically invalid bodies or receipts are now escalated with Reth's stronger `BadProtocol` penalty instead of the softer generic bad-message penalty
+- Header and body fetching now lean further on Reth instead of LogEx-owned request routing:
+  - header requests now use Reth's `FetchClient` instead of LogEx's custom per-peer `GetBlockHeaders` loop
+  - body requests now use Reth's `FetchClient` with block-range hints instead of LogEx's custom per-peer `GetBlockBodies` loop
+  - LogEx still keeps the receipt path custom, because upstream Reth does not expose the same kind of public receipt downloader for a no-execution node
+  - body batches can now be assembled across multiple peers while still attributing invalid block bodies back to the exact peer that supplied them
+- Live-network validation on the Reth-fetch refactor is positive:
+  - on April 8, 2026, a release-mode run on the existing local storage with fixed HTTP port `18444` resumed from block `470076` and advanced into the `471100` range on real peers
+  - connected peers grew while syncing and the resumed head kept moving forward without the old LogEx-owned header/body router
 - Execution-layer validation now uses Reth consensus code directly:
   - downloaded headers are validated with Reth's `EthBeaconConsensus` standalone and parent-against-child rules whenever the parent header is available in-process
   - block bodies now go through Reth pre-execution validation instead of only LogEx's custom transaction-root checks
@@ -112,7 +120,10 @@
 1. Add post-merge canonical-chain verification instead of relying on execution peers alone.
    - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
    - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
-2. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
+2. Decide whether there is any networking value left in moving beyond Reth `FetchClient` for headers/bodies.
+   - Headers and bodies already use Reth's fetch path now; the remaining custom transport is receipts.
+   - Only evaluate `ReverseHeadersDownloader` / `BodiesDownloader` if LogEx starts persisting a fuller canonical header history that can satisfy Reth's downloader/provider assumptions cleanly.
+   - Keep comparing the remaining receipt scheduler and retry logic against Reth/geth, because that is still the main LogEx-owned sync surface.
 3. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
 4. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
 5. Improve peer-count/status freshness during large historical batches so `serving_peers` does not temporarily lag behind active validated sync work.
