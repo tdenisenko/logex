@@ -75,6 +75,13 @@
   - `known-peers.json` remained populated with serving peers across restart
   - fresh-dir bootstrap on April 8, 2026 reached a serving peer and advanced persisted sync state to block `2079`
   - restarting that same data dir resumed quickly and advanced onward to block `3103`
+- Warm-restart reconnect and operator status were tightened again:
+  - productive peers loaded from `known-peers.json` are now rehydrated into the in-memory productive queue on startup instead of being treated like anonymous peers until they re-serve data
+  - restart ordering now prefers those previously serving peers immediately, and shutdown no longer risks rewriting the on-disk productive peer cache to `[]` just because no peer re-served data during the current process lifetime
+  - live sync now refills peers with the same small active-peer floor used during historical sync, instead of coasting at one or two sessions after restart
+  - `syncing` status stays true while blocks are advancing even when no peer has advertised a credible target head yet
+- P2P shutdown handling is now closer to intentional node behavior:
+  - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
 - Current validation on this refactor:
   - `cargo fmt --all`
   - `cargo test -p logex-sync -p logex-node`
@@ -83,14 +90,12 @@
 
 ## Next TODO
 
-1. Improve warm-restart reconnect quality further so persisted serving peers more consistently fan back out into multiple active sessions, not just one fast peer.
-2. Fix target-head/progress reporting when sync is advancing but no peer exposes a usable advertised tip yet; ETA/progress should stay truthful without dropping to a misleading zero target.
-3. Fix the remaining p2p shutdown rough edge: the node exits, but the network task still sometimes needs to be aborted after the timeout instead of stopping cleanly on its own.
-4. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
-5. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
-6. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
-7. Reconcile the public README with what the code now actually implements for v1 versus future work.
-8. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
+1. Continue comparing the sync/request path against Reth/geth and decide whether to keep the current lightweight scheduler or adopt more of Reth’s downloader pipeline for headers/bodies/receipts.
+2. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
+3. Add end-to-end regression coverage for bootstrap, restart, shutdown, resume, and ancient-block receipt decoding.
+4. Reconcile the public README with what the code now actually implements for v1 versus future work.
+5. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
+6. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
 
 ## Deferred
 

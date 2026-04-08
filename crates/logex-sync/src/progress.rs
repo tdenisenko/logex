@@ -36,8 +36,7 @@ impl ProgressTracker {
         let mut status = self.status.lock().unwrap();
         let previous_target = status.target_block;
         status.target_block = status.target_block.max(target_block);
-        status.syncing =
-            status.target_block > status.current_block && status.node_state == NodeState::Syncing;
+        status.syncing = status.node_state == NodeState::Syncing;
 
         if status.target_block > previous_target
             && (previous_target == 0 || status.target_block.saturating_sub(previous_target) >= 1024)
@@ -62,8 +61,7 @@ impl ProgressTracker {
         let mut status = self.status.lock().unwrap();
         let previous_state = status.node_state;
         status.node_state = node_state;
-        status.syncing =
-            status.target_block > status.current_block && node_state == NodeState::Syncing;
+        status.syncing = node_state == NodeState::Syncing;
         status.connected_peers = connected_peers;
         status.serving_peers = serving_peers;
         status.pending_peers = pending_peers;
@@ -146,5 +144,36 @@ impl ProgressTracker {
 
     pub fn logs_ingested(&self) -> u64 {
         self.logs_ingested
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logex_types::{NodeState, SyncStatus};
+
+    #[test]
+    fn syncing_flag_stays_true_while_syncing_without_known_target() {
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Syncing, 1, 1, 0);
+
+        let status = status.lock().unwrap().clone();
+        assert!(status.syncing);
+        assert_eq!(status.target_block, 0);
+        assert_eq!(status.node_state, NodeState::Syncing);
+    }
+
+    #[test]
+    fn syncing_flag_turns_off_when_node_is_not_syncing() {
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Connecting, 1, 0, 10);
+
+        let status = status.lock().unwrap().clone();
+        assert!(!status.syncing);
+        assert_eq!(status.node_state, NodeState::Connecting);
     }
 }

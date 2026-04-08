@@ -141,9 +141,8 @@ impl SyncEngine {
             // floor of live peers so sync is not serialized behind a single
             // slow or flaky session.
             if self.peers.peer_count() < self.config.max_peers / 2 {
-                let min_peers = (self.peers.peer_count() + 1)
-                    .max(refill_peer_floor(self.config.max_peers))
-                    .min(self.config.max_peers);
+                let min_peers =
+                    desired_refill_min_peers(self.peers.peer_count(), self.config.max_peers);
                 self.refresh_connectivity_state();
                 if cancelable(
                     &mut self.shutdown,
@@ -409,8 +408,9 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
 
-            if self.peers.peer_count() < 3 {
-                let min_peers = (self.peers.peer_count() + 1).min(self.config.max_peers);
+            if self.peers.peer_count() < self.config.max_peers / 2 {
+                let min_peers =
+                    desired_refill_min_peers(self.peers.peer_count(), self.config.max_peers);
                 self.refresh_connectivity_state();
                 if cancelable(
                     &mut self.shutdown,
@@ -809,6 +809,12 @@ fn refill_peer_floor(max_peers: usize) -> usize {
     max_peers.clamp(1, MIN_ACTIVE_SYNC_PEERS)
 }
 
+fn desired_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
+    (connected_peers + 1)
+        .max(refill_peer_floor(max_peers))
+        .min(max_peers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,5 +876,18 @@ mod tests {
             runtime_state_for_connectivity(true, 1, 1, 0, 100, 100),
             NodeState::Synced
         );
+        assert_eq!(
+            runtime_state_for_connectivity(true, 1, 1, 0, 100, 0),
+            NodeState::Syncing
+        );
+    }
+
+    #[test]
+    fn desired_refill_min_peers_maintains_a_small_live_floor() {
+        assert_eq!(desired_refill_min_peers(0, 50), 4);
+        assert_eq!(desired_refill_min_peers(1, 50), 4);
+        assert_eq!(desired_refill_min_peers(3, 50), 4);
+        assert_eq!(desired_refill_min_peers(4, 50), 5);
+        assert_eq!(desired_refill_min_peers(0, 2), 2);
     }
 }

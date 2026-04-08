@@ -43,6 +43,7 @@ const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
 const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const MAX_PERSISTED_PEERS: usize = 512;
@@ -102,6 +103,7 @@ impl PeerManager {
         known_peers: Vec<NodeRecord>,
         known_peers_path: PathBuf,
     ) -> Result<Self> {
+        let productive = seed_productive_peers(&known_peers);
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
         let trusted_nodes: Vec<TrustedPeer> =
             known_peers.iter().copied().map(TrustedPeer::from).collect();
@@ -161,14 +163,14 @@ impl PeerManager {
             peers: HashMap::new(),
             peer_order: VecDeque::new(),
             pending: HashMap::new(),
-            productive: VecDeque::new(),
+            productive,
             known_peers,
             known_peers_path,
             persisted_known_peers: Vec::new(),
             serve_cache,
         };
 
-        manager.seed_known_peers(true);
+        manager.seed_known_peers();
         manager.persisted_known_peers = manager.known_peers();
 
         info!(
@@ -206,9 +208,6 @@ impl PeerManager {
 
     /// Gracefully stop the network manager and wait for the background task.
     pub async fn shutdown(&mut self) {
-        self.network_events = Box::pin(tokio_stream::empty());
-        self.discovery_events = Box::pin(tokio_stream::empty());
-
         match timeout(NETWORK_SHUTDOWN_TIMEOUT, self.network.shutdown()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -222,45 +221,30 @@ impl PeerManager {
             }
         }
 
-        if let Some(mut task) = self.network_task.take() {
-            match timeout(NETWORK_SHUTDOWN_TIMEOUT, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    warn!(%error, "p2p network task exited unexpectedly");
-                }
-                Err(_) => {
-                    warn!(
-                        ?NETWORK_SHUTDOWN_TIMEOUT,
-                        "timed out waiting for p2p network task to stop, aborting it"
-                    );
-                    task.abort();
-                    if let Err(error) = task.await
-                        && !error.is_cancelled()
-                    {
-                        warn!(%error, "p2p network task aborted with an unexpected error");
-                    }
-                }
-            }
+        self.drain_shutdown_events(NETWORK_SHUTDOWN_DRAIN_TIMEOUT)
+            .await;
+        self.network_events = Box::pin(tokio_stream::empty());
+        self.discovery_events = Box::pin(tokio_stream::empty());
+
+        if let Some(task) = self.network_task.take() {
+            debug!(
+                ?NETWORK_SHUTDOWN_DRAIN_TIMEOUT,
+                "aborting long-lived reth network task after graceful disconnect drain"
+            );
+            abort_and_wait(task, "p2p network task").await;
         }
 
-        if let Some(mut task) = self.eth_request_task.take() {
-            match timeout(REQUEST_HANDLER_SHUTDOWN_TIMEOUT, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    warn!(%error, "eth request handler task exited unexpectedly");
-                }
-                Err(_) => {
-                    debug!(
-                        ?REQUEST_HANDLER_SHUTDOWN_TIMEOUT,
-                        "timed out waiting for eth request handler task to stop, aborting it"
-                    );
-                    task.abort();
-                    if let Err(error) = task.await
-                        && !error.is_cancelled()
-                    {
-                        warn!(%error, "eth request handler task aborted with an unexpected error");
-                    }
-                }
+        if let Some(task) = self.eth_request_task.take() {
+            abort_and_wait(task, "eth request handler task").await;
+        }
+    }
+
+    async fn drain_shutdown_events(&mut self, max_wait: Duration) {
+        let deadline = Instant::now() + max_wait;
+        while Instant::now() < deadline && (!self.peers.is_empty() || !self.pending.is_empty()) {
+            let remaining = (deadline - Instant::now()).min(Duration::from_millis(100));
+            if !self.wait_for_activity(remaining).await {
+                break;
             }
         }
     }
@@ -673,11 +657,7 @@ impl PeerManager {
         Ok(merged)
     }
 
-    fn seed_known_peers(&mut self, force: bool) {
-        if !force {
-            return;
-        }
-
+    fn seed_known_peers(&mut self) {
         for peer in self.known_peers.clone() {
             if is_bootstrap_node(peer.id)
                 || peer.tcp_port == 0
@@ -1047,6 +1027,15 @@ fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
     peers.push(node);
 }
 
+fn seed_productive_peers(known_peers: &[NodeRecord]) -> VecDeque<NodeRecord> {
+    known_peers
+        .iter()
+        .copied()
+        .filter(|peer| !is_bootstrap_node(peer.id) && peer.tcp_port > 0)
+        .take(MAX_PERSISTED_PEERS)
+        .collect()
+}
+
 fn upsert_known_peer(known_peers: &mut Vec<NodeRecord>, node: NodeRecord) -> bool {
     if let Some(existing) = known_peers.iter_mut().find(|peer| peer.id == node.id) {
         if *existing == node {
@@ -1076,6 +1065,24 @@ fn normalize_network_head(mut head: Head) -> Head {
         head.timestamp = MAINNET.genesis().timestamp;
     }
     head
+}
+
+async fn abort_and_wait(task: JoinHandle<()>, task_name: &'static str) {
+    task.abort();
+    match timeout(REQUEST_HANDLER_SHUTDOWN_TIMEOUT, task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            if !error.is_cancelled() {
+                warn!(%error, task = task_name, "task exited unexpectedly during shutdown");
+            }
+        }
+        Err(_) => {
+            debug!(
+                task = task_name,
+                "task abort is still pending after timeout"
+            );
+        }
+    }
 }
 
 fn merge_receipts70_response<T>(
@@ -1232,6 +1239,27 @@ mod tests {
         assert_eq!(known_peers.len(), 1);
         assert_eq!(known_peers[0].tcp_port, 30304);
         assert_eq!(known_peers[0].udp_port, 30305);
+    }
+
+    #[test]
+    fn seed_productive_peers_preserves_restart_priority_order() {
+        let first = NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x11),
+        );
+        let second = NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30304,
+            Some(30304),
+            PeerId::repeat_byte(0x22),
+        );
+
+        let productive = seed_productive_peers(&[first, second]);
+        let productive: Vec<_> = productive.into_iter().collect();
+
+        assert_eq!(productive, vec![first, second]);
     }
 
     fn fake_receipt(gas: u64) -> Receipt {
