@@ -2,7 +2,7 @@ use alloy_consensus::{BlockHeader, Header, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{B256, Log};
 use eyre::Result;
 use reth_ethereum_forks::Head;
-use reth_network_peers::NodeRecord;
+use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
 use std::collections::HashSet;
 use std::future::Future;
@@ -336,7 +336,7 @@ impl SyncEngine {
                     break;
                 }
 
-                let mut validated_body_peers = HashSet::new();
+                let mut newly_serving_peers = HashSet::new();
                 for (i, header) in chunk_headers.iter().enumerate() {
                     let block_hash = chunk_hashes[i];
                     let block_number = header.number();
@@ -400,7 +400,8 @@ impl SyncEngine {
                         .ingest_block(header, block_hash, &txs, &recent_headers)
                         .await?;
                     self.progress.record_block(block_number, log_count);
-                    validated_body_peers.insert(*body_peer);
+                    self.note_serving_peer(*body_peer, &mut newly_serving_peers);
+                    self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
                     next_block = block_number + 1;
                     last_ingested_head = Some(Head {
                         number: block_number,
@@ -413,11 +414,6 @@ impl SyncEngine {
                 if chunk_failed {
                     break;
                 }
-
-                for peer_id in validated_body_peers {
-                    self.peers.report_valid_serving_peer(peer_id);
-                }
-                self.peers.report_valid_serving_peer(receipt_peer);
             }
 
             if let Some(head) = last_ingested_head {
@@ -559,7 +555,7 @@ impl SyncEngine {
             };
 
             let mut batch_failed = false;
-            let mut validated_body_peers = HashSet::new();
+            let mut newly_serving_peers = HashSet::new();
             for (i, header) in headers.iter().enumerate() {
                 let block_hash = hashes[i];
                 let block_number = header.number();
@@ -622,7 +618,8 @@ impl SyncEngine {
                     .ingest_block(header, block_hash, &txs, &recent_headers)
                     .await?;
                 self.progress.record_block(block_number, log_count);
-                validated_body_peers.insert(*body_peer);
+                self.note_serving_peer(*body_peer, &mut newly_serving_peers);
+                self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
 
                 self.peers.set_head(Head {
                     number: block_number,
@@ -637,10 +634,6 @@ impl SyncEngine {
             }
 
             self.last_validated_header = headers.last().cloned();
-            for peer_id in validated_body_peers {
-                self.peers.report_valid_serving_peer(peer_id);
-            }
-            self.peers.report_valid_serving_peer(receipt_peer);
 
             if self.try_mark_synced("caught up to advertised peer tip") {
                 self.sync_status_peers();
@@ -810,6 +803,16 @@ impl SyncEngine {
     pub async fn shutdown(&mut self) {
         self.peers.shutdown().await;
     }
+
+    fn note_serving_peer(&mut self, peer_id: PeerId, newly_serving: &mut HashSet<PeerId>) {
+        if !should_note_serving_peer(peer_id, newly_serving) {
+            return;
+        }
+
+        if self.peers.report_valid_serving_peer(peer_id) {
+            self.sync_status_peers();
+        }
+    }
 }
 
 fn should_mark_historical_complete(
@@ -901,6 +904,10 @@ fn desired_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
         .min(max_peers)
 }
 
+fn should_note_serving_peer(peer_id: PeerId, newly_serving: &mut HashSet<PeerId>) -> bool {
+    peer_id != PeerId::ZERO && newly_serving.insert(peer_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,5 +982,15 @@ mod tests {
         assert_eq!(desired_refill_min_peers(3, 50), 4);
         assert_eq!(desired_refill_min_peers(4, 50), 5);
         assert_eq!(desired_refill_min_peers(0, 2), 2);
+    }
+
+    #[test]
+    fn serving_peer_notifications_ignore_zero_and_duplicates() {
+        let first = PeerId::repeat_byte(0x11);
+        let mut seen = HashSet::new();
+
+        assert!(should_note_serving_peer(first, &mut seen));
+        assert!(!should_note_serving_peer(first, &mut seen));
+        assert!(!should_note_serving_peer(PeerId::ZERO, &mut seen));
     }
 }

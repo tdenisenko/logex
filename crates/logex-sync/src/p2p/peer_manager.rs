@@ -970,28 +970,31 @@ impl PeerManager {
         consecutive_timeouts
     }
 
-    fn mark_peer_serving(&mut self, peer_id: PeerId) -> bool {
-        let productive = if let Some(peer) = self.peers.get_mut(&peer_id) {
+    fn mark_peer_serving(&mut self, peer_id: PeerId) -> (bool, bool) {
+        let (became_serving, productive) = if let Some(peer) = self.peers.get_mut(&peer_id) {
+            let became_serving = !peer.is_serving;
             peer.is_serving = true;
-            Some(peer.remote_record)
+            (became_serving, Some(peer.remote_record))
         } else {
-            None
+            (false, None)
         };
 
-        if let Some(peer) = productive {
-            return self.remember_productive(peer);
-        }
-        false
+        let should_persist = productive
+            .map(|peer| self.remember_productive(peer))
+            .unwrap_or(false);
+        (became_serving, should_persist)
     }
 
-    pub fn report_valid_serving_peer(&mut self, peer_id: PeerId) {
+    pub fn report_valid_serving_peer(&mut self, peer_id: PeerId) -> bool {
         if peer_id == PeerId::ZERO {
-            return;
+            return false;
         }
 
-        if self.mark_peer_serving(peer_id) {
+        let (became_serving, should_persist) = self.mark_peer_serving(peer_id);
+        if should_persist {
             self.persist_productive_peers();
         }
+        became_serving
     }
 
     fn remember_productive(&mut self, node: NodeRecord) -> bool {
