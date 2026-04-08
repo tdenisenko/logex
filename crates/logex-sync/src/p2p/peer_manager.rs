@@ -547,21 +547,36 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
-        let receipts: Vec<Vec<<EthNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
-            .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
-                request: GetReceipts70 {
-                    first_block_receipt_index: 0,
-                    block_hashes: hashes.clone(),
-                },
+        let mut merged = Vec::with_capacity(hashes.len());
+        let mut next_block_index = 0usize;
+        let mut first_block_receipt_index = 0u64;
+
+        while next_block_index < hashes.len() {
+            let request_hashes = hashes[next_block_index..].to_vec();
+            let response: Receipts70<<EthNetworkPrimitives as NetworkPrimitives>::Receipt> = self
+                .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
+                    request: GetReceipts70 {
+                        first_block_receipt_index,
+                        block_hashes: request_hashes.clone(),
+                    },
+                    response,
+                })
+                .await?;
+
+            let (updated_block_index, updated_receipt_index) = merge_receipts70_response(
+                &mut merged,
+                next_block_index,
+                first_block_receipt_index,
                 response,
-            })
-            .await?;
-        Ok(Receipts70 {
-            last_block_incomplete: false,
-            receipts,
+                hashes.len(),
+            )
+            .map_err(Receipts70MergeError::into_request_attempt)?;
+
+            next_block_index = updated_block_index;
+            first_block_receipt_index = updated_receipt_index;
         }
-        .into_with_bloom()
-        .0)
+
+        Ok(merged)
     }
 
     fn seed_known_peers(&mut self, force: bool) {
@@ -832,6 +847,20 @@ enum RequestAttempt {
     Request(reth_network::p2p::error::RequestError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Receipts70MergeError {
+    EmptyResponse,
+    ResponseOverflow,
+    UnexpectedAppend,
+    NoProgress,
+}
+
+impl Receipts70MergeError {
+    fn into_request_attempt(self) -> RequestAttempt {
+        RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
+    }
+}
+
 fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {
     if peers.iter().any(|peer| peer.id == node.id) {
         return;
@@ -855,6 +884,69 @@ fn normalize_network_head(mut head: Head) -> Head {
         head.timestamp = MAINNET.genesis().timestamp;
     }
     head
+}
+
+fn merge_receipts70_response<T>(
+    merged: &mut Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>>,
+    next_block_index: usize,
+    first_block_receipt_index: u64,
+    response: Receipts70<T>,
+    expected_blocks: usize,
+) -> std::result::Result<(usize, u64), Receipts70MergeError>
+where
+    T: alloy_consensus::TxReceipt,
+{
+    let previous_state = (next_block_index, first_block_receipt_index);
+    let returned_blocks = response.receipts.len();
+    if returned_blocks == 0 {
+        return Err(Receipts70MergeError::EmptyResponse);
+    }
+
+    if next_block_index + returned_blocks > expected_blocks {
+        return Err(Receipts70MergeError::ResponseOverflow);
+    }
+
+    let last_block_incomplete = response.last_block_incomplete;
+    let receipts = response.into_with_bloom().0;
+    for (offset, block_receipts) in receipts.into_iter().enumerate() {
+        let target_index = next_block_index + offset;
+        if target_index < merged.len() {
+            if offset != 0 || first_block_receipt_index == 0 {
+                return Err(Receipts70MergeError::UnexpectedAppend);
+            }
+            if block_receipts.is_empty() {
+                return Err(Receipts70MergeError::NoProgress);
+            }
+            merged[target_index].extend(block_receipts);
+        } else if target_index == merged.len() {
+            merged.push(block_receipts);
+        } else {
+            return Err(Receipts70MergeError::ResponseOverflow);
+        }
+    }
+
+    let (updated_block_index, updated_receipt_index) = if last_block_incomplete {
+        let partial_block_index = next_block_index + returned_blocks - 1;
+        let received_receipts = merged
+            .get(partial_block_index)
+            .map(Vec::len)
+            .unwrap_or_default();
+        if received_receipts == 0 {
+            return Err(Receipts70MergeError::NoProgress);
+        }
+        (
+            next_block_index + returned_blocks - 1,
+            received_receipts as u64,
+        )
+    } else {
+        (next_block_index + returned_blocks, 0)
+    };
+
+    if (updated_block_index, updated_receipt_index) == previous_state {
+        return Err(Receipts70MergeError::NoProgress);
+    }
+
+    Ok((updated_block_index, updated_receipt_index))
 }
 
 trait IntoResponseValue<T> {
@@ -891,9 +983,18 @@ impl<T> IntoResponseValue<Vec<Vec<T>>> for Receipts70<T> {
     }
 }
 
+impl<T> IntoResponseValue<Receipts70<T>> for Receipts70<T> {
+    fn into_value(self) -> Receipts70<T> {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::{ReceiptWithBloom, TxType};
+    use alloy_primitives::Log;
+    use reth_ethereum_primitives::Receipt;
 
     #[test]
     fn mainnet_bootnodes_are_recognized() {
@@ -918,5 +1019,76 @@ mod tests {
         assert!(response_len_matches_request(8, 8));
         assert!(!response_len_matches_request(8, 0));
         assert!(!response_len_matches_request(8, 7));
+    }
+
+    fn fake_receipt(gas: u64) -> Receipt {
+        Receipt {
+            tx_type: TxType::Legacy,
+            success: true,
+            cumulative_gas_used: gas,
+            logs: Vec::<Log>::new(),
+        }
+    }
+
+    #[test]
+    fn eth70_partial_receipts_are_merged_across_requests() {
+        let mut merged = Vec::<Vec<ReceiptWithBloom<Receipt>>>::new();
+
+        let (next_block_index, first_block_receipt_index) = merge_receipts70_response(
+            &mut merged,
+            0,
+            0,
+            Receipts70 {
+                last_block_incomplete: true,
+                receipts: vec![
+                    vec![fake_receipt(1)],
+                    vec![fake_receipt(2)],
+                    vec![fake_receipt(3)],
+                ],
+            },
+            3,
+        )
+        .expect("first partial response should merge");
+
+        assert_eq!(next_block_index, 2);
+        assert_eq!(first_block_receipt_index, 1);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[2].len(), 1);
+
+        let (next_block_index, first_block_receipt_index) = merge_receipts70_response(
+            &mut merged,
+            next_block_index,
+            first_block_receipt_index,
+            Receipts70 {
+                last_block_incomplete: false,
+                receipts: vec![vec![fake_receipt(4)]],
+            },
+            3,
+        )
+        .expect("continuation response should merge");
+
+        assert_eq!(next_block_index, 3);
+        assert_eq!(first_block_receipt_index, 0);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[2].len(), 2);
+    }
+
+    #[test]
+    fn eth70_empty_response_is_rejected() {
+        let mut merged = Vec::<Vec<ReceiptWithBloom<Receipt>>>::new();
+
+        let error = merge_receipts70_response(
+            &mut merged,
+            0,
+            0,
+            Receipts70 {
+                last_block_incomplete: false,
+                receipts: Vec::<Vec<Receipt>>::new(),
+            },
+            1,
+        )
+        .expect_err("empty response should be rejected");
+
+        assert_eq!(error, Receipts70MergeError::EmptyResponse);
     }
 }

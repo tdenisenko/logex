@@ -32,6 +32,15 @@
   - empty or partial bodies/receipts responses are no longer treated as successful requests
   - peers that return incomplete block data are penalized and disconnected instead of being retried forever
   - the default bodies/receipts fetch batch is now more conservative to reduce size-limit related mismatches
+- Receipt validation now follows Reth's historical/mainnet consensus rules:
+  - gas-used checks are always enforced
+  - receipt-root and bloom checks are skipped pre-Byzantium, which fixes ancient-mainnet stalls like block `46147`
+  - post-Byzantium receipt-root and bloom checks are still enforced
+- The eth/70 receipt path now handles partial last-block responses correctly:
+  - `last_block_incomplete` and `first_block_receipt_index` are honored
+  - multi-round receipt fetches are stitched back together before ingestion
+  - zero-progress / malformed continuation responses are rejected as bad responses
+- The sync engine now also rejects per-block transaction/receipt count mismatches before ingestion.
 - Shutdown is now bounded:
   - LogEx no longer waits indefinitely for the Reth network task to stop
   - node/server/background tasks are aborted after a timeout if graceful shutdown stalls
@@ -55,6 +64,7 @@
 4. Persist a recent canonical header window so restart-boundary reorg recovery is durable.
 5. Add end-to-end network regression coverage for bootstrap, restart, shutdown, and resume.
 6. Reconcile the public README with what the code now actually implements for v1 versus future work.
+7. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
 
 ## Deferred
 

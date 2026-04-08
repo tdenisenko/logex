@@ -3,7 +3,7 @@ use alloy_primitives::{B256, Log};
 use eyre::Result;
 use reth_ethereum_forks::Head;
 use reth_network_peers::NodeRecord;
-use reth_primitives_traits::SignedTransaction;
+use reth_primitives_traits::{BlockBody, SignedTransaction};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::PeerManager;
 use crate::progress::ProgressTracker;
-use crate::validation::validate_receipt_root;
+use crate::validation::{receipts_match_transaction_count, validate_receipts_for_header};
 
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
 const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
@@ -302,14 +302,24 @@ impl SyncEngine {
                     let timestamp = header.timestamp();
                     let parent_hash = header.parent_hash();
 
-                    // Trustless verification: the header's receipts_root is consensus-attested,
-                    // so recomputing the trie from the receipts a peer sent us proves they're
-                    // genuine. Mismatches mean the peer is lying or buggy — drop the batch.
-                    if !validate_receipt_root(&receipts[i], header.receipts_root()) {
+                    if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
-                            "receipt root mismatch — retrying from last ingested block"
+                            transactions = bodies[i].transaction_count(),
+                            receipts = receipts[i].len(),
+                            "block body / receipt count mismatch — retrying from last ingested block"
+                        );
+                        chunk_failed = true;
+                        break;
+                    }
+
+                    if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                        tracing::warn!(
+                            block_number,
+                            %block_hash,
+                            %error,
+                            "receipt validation failed — retrying from last ingested block"
                         );
                         chunk_failed = true;
                         break;
@@ -455,11 +465,24 @@ impl SyncEngine {
                 let timestamp = header.timestamp();
                 let parent_hash = header.parent_hash();
 
-                if !validate_receipt_root(&receipts[i], header.receipts_root()) {
+                if !receipts_match_transaction_count(&bodies[i], &receipts[i]) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
-                        "receipt root mismatch in live sync — retrying from current head"
+                        transactions = bodies[i].transaction_count(),
+                        receipts = receipts[i].len(),
+                        "block body / receipt count mismatch in live sync — retrying from current head"
+                    );
+                    batch_failed = true;
+                    break;
+                }
+
+                if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        %error,
+                        "receipt validation failed in live sync — retrying from current head"
                     );
                     batch_failed = true;
                     break;
