@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use reth_eth_wire::{
     Receipts70, UnifiedStatus,
 };
 use reth_ethereum_forks::Head;
+use reth_network::types::peers::config::PeerBackoffDurations;
 use reth_network::types::{PeerKind, ReputationChangeKind};
 use reth_network::{
     DiscoveredEvent, DiscoveryEvent, NetworkConfigBuilder, NetworkEvent,
@@ -23,7 +25,6 @@ use reth_network::{
     Peers, PeersConfig, PeersInfo, SessionsConfig,
 };
 use reth_network_peers::{NodeRecord, PeerId, TrustedPeer, mainnet_nodes};
-use reth_storage_api::noop::NoopProvider;
 use secp256k1::SecretKey;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -32,7 +33,8 @@ use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
 use crate::p2p::persistence::persist_known_peers_if_changed;
-use crate::primitives::{LogexNetworkPrimitives, LogexPrimitives};
+use crate::p2p::serve_cache::ServeCacheProvider;
+use crate::primitives::LogexNetworkPrimitives;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
@@ -40,13 +42,19 @@ const FILL_BUDGET: Duration = Duration::from_secs(12);
 const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
-const RESEED_KNOWN_PEERS_INTERVAL: Duration = Duration::from_secs(15);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
+const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 50;
+const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
+    low: Duration::from_secs(5),
+    medium: Duration::from_secs(30),
+    high: Duration::from_secs(60 * 5),
+    max: Duration::from_secs(60 * 15),
+};
 
 static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<PeerId>> =
     LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
@@ -69,7 +77,7 @@ pub struct PeerManager {
     known_peers: Vec<NodeRecord>,
     known_peers_path: PathBuf,
     persisted_known_peers: Vec<NodeRecord>,
-    last_known_peer_reseed: Instant,
+    serve_cache: Arc<ServeCacheProvider>,
 }
 
 #[derive(Clone)]
@@ -97,13 +105,15 @@ impl PeerManager {
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
         let trusted_nodes: Vec<TrustedPeer> =
             known_peers.iter().copied().map(TrustedPeer::from).collect();
-        let noop_provider = NoopProvider::<_, LogexPrimitives>::new(MAINNET.clone());
+        let serve_cache = Arc::new(ServeCacheProvider::new());
         let peer_config = PeersConfig::default()
             .with_basic_nodes(basic_nodes)
             .with_trusted_nodes(trusted_nodes)
             .with_max_outbound(max_peers)
             .with_max_inbound(max_peers.max(16))
+            .with_max_concurrent_dials(max_peers.clamp(8, MAX_CONCURRENT_OUTBOUND_DIALS))
             .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
+            .with_backoff_durations(DIAL_BACKOFF_DURATIONS)
             .with_enforce_enr_fork_id(false);
         let sessions_config =
             SessionsConfig::default().with_upscaled_event_buffer(peer_config.max_peers());
@@ -127,13 +137,14 @@ impl PeerManager {
             .mainnet_boot_nodes()
             .disable_tx_gossip(true)
             .discovery(discovery)
-            .build(noop_provider.clone());
+            .build(Arc::clone(&serve_cache));
 
         let builder = NetworkManager::builder(config)
             .await
             .map_err(|error| eyre::eyre!("failed to start p2p network: {error}"))?;
-        let (handle, network, _, request_handler) =
-            builder.request_handler(noop_provider).split_with_handle();
+        let (handle, network, _, request_handler) = builder
+            .request_handler(Arc::clone(&serve_cache))
+            .split_with_handle();
         let local_record = handle.local_node_record();
         let local_enr = handle.local_enr();
         let network_events = Box::pin(handle.event_listener());
@@ -154,7 +165,7 @@ impl PeerManager {
             known_peers,
             known_peers_path,
             persisted_known_peers: Vec::new(),
-            last_known_peer_reseed: Instant::now() - RESEED_KNOWN_PEERS_INTERVAL,
+            serve_cache,
         };
 
         manager.seed_known_peers(true);
@@ -176,6 +187,21 @@ impl PeerManager {
     /// status so newly established sessions see the same canonical tip.
     pub fn set_head(&mut self, head: Head) {
         self.network.update_status(normalize_network_head(head));
+    }
+
+    pub fn cache_canonical_block(
+        &self,
+        header: <LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader,
+        body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
+        receipts: &[alloy_consensus::ReceiptWithBloom<
+            <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+        >],
+    ) {
+        self.serve_cache.insert_block(header, body, receipts);
+    }
+
+    pub fn remove_cached_blocks(&self, reverted_hashes: &[B256]) {
+        self.serve_cache.remove_blocks(reverted_hashes);
     }
 
     /// Gracefully stop the network manager and wait for the background task.
@@ -287,7 +313,6 @@ impl PeerManager {
             return;
         }
 
-        self.seed_known_peers(false);
         let deadline = Instant::now() + FILL_BUDGET;
 
         loop {
@@ -312,9 +337,9 @@ impl PeerManager {
                 debug!(
                     connected_peers = self.peers.len(),
                     pending_peers = self.pending.len(),
-                    "no network activity while waiting for peers"
+                    "no network activity while waiting for peers during this refill interval"
                 );
-                return;
+                continue;
             }
         }
     }
@@ -649,10 +674,9 @@ impl PeerManager {
     }
 
     fn seed_known_peers(&mut self, force: bool) {
-        if !force && self.last_known_peer_reseed.elapsed() < RESEED_KNOWN_PEERS_INTERVAL {
+        if !force {
             return;
         }
-        self.last_known_peer_reseed = Instant::now();
 
         for peer in self.known_peers.clone() {
             if is_bootstrap_node(peer.id)
@@ -664,7 +688,6 @@ impl PeerManager {
             }
 
             self.pending.insert(peer.id, peer);
-            self.remember_productive(peer);
             self.network.connect_peer_kind(
                 peer.id,
                 PeerKind::Trusted,
@@ -936,6 +959,7 @@ impl PeerManager {
     }
 
     fn remove_peer(&mut self, peer_id: PeerId) {
+        self.pending.remove(&peer_id);
         if let Some(peer) = self.peers.remove(&peer_id)
             && peer.is_serving
         {

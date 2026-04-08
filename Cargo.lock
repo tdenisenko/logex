@@ -3277,6 +3277,7 @@ dependencies = [
  "logex-types",
  "rand 0.8.5",
  "reth-chainspec",
+ "reth-db-models",
  "reth-discv4",
  "reth-eth-wire",
  "reth-ethereum-forks",

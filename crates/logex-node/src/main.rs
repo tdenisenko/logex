@@ -202,11 +202,7 @@ async fn run_sync(
     let state = Arc::new(AppState {
         storage: Arc::new(tokio::sync::RwLock::new(storage)),
         subscriptions: Some(SubscriptionManager::new()),
-        sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
-            current_block: resume_block,
-            target_block: resume_block,
-            ..Default::default()
-        })),
+        sync_status: Arc::new(std::sync::Mutex::new(initial_sync_status(resume_block))),
     });
 
     let known_peers = match load_known_peers(&known_peers_file) {
@@ -353,6 +349,17 @@ async fn run_sync(
     log_task_exit("gRPC server", grpc_handle).await;
     log_task_exit("background indexer", index_handle).await;
     tracing::info!("shutting down");
+}
+
+fn initial_sync_status(resume_block: u64) -> SyncStatus {
+    SyncStatus {
+        current_block: resume_block,
+        // The persisted sync head is our local resume point, not evidence of
+        // the network tip. Keep the target unknown until a peer advertises a
+        // credible latest block.
+        target_block: 0,
+        ..Default::default()
+    }
 }
 
 /// Background task that periodically rebuilds indexes on the hot partition.
@@ -598,5 +605,13 @@ mod tests {
         };
 
         assert!(!should_rebuild_hot_indexes(Some(&last), &current));
+    }
+
+    #[test]
+    fn initial_sync_status_does_not_treat_resume_block_as_network_target() {
+        let status = initial_sync_status(83_714);
+
+        assert_eq!(status.current_block, 83_714);
+        assert_eq!(status.target_block, 0);
     }
 }
