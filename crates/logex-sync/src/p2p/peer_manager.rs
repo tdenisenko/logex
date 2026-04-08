@@ -46,6 +46,7 @@ const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
 const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
+const USELESS_PEER_GRACE_PERIOD: Duration = Duration::from_secs(20);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
@@ -87,6 +88,7 @@ struct ActivePeer {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     remote_record: NodeRecord,
     remote_status: UnifiedStatus,
+    client_version: Arc<str>,
     version: EthVersion,
     is_serving: bool,
     consecutive_timeouts: u32,
@@ -693,6 +695,7 @@ impl PeerManager {
         while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
             self.handle_discovery_event(event);
         }
+        self.prune_stale_nonserving_peers();
     }
 
     async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
@@ -774,6 +777,7 @@ impl PeerManager {
             sender: messages,
             remote_record: record,
             remote_status: *info.status,
+            client_version: info.client_version,
             version: info.version,
             is_serving: false,
             consecutive_timeouts: 0,
@@ -959,6 +963,37 @@ impl PeerManager {
         self.rebalance_request_cursor();
     }
 
+    fn prune_stale_nonserving_peers(&mut self) {
+        let stale_peers: Vec<_> = self
+            .peers
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                is_stale_nonserving_peer(
+                    peer.is_serving,
+                    peer.remote_status.latest_block,
+                    peer.connected_at.elapsed(),
+                )
+                .then_some(*peer_id)
+            })
+            .collect();
+
+        for peer_id in stale_peers {
+            let Some(peer) = self.peers.get(&peer_id) else {
+                continue;
+            };
+
+            info!(
+                peer = %peer_id,
+                remote_addr = %peer.remote_record.tcp_addr(),
+                client_version = %peer.client_version,
+                connected_for = ?peer.connected_at.elapsed(),
+                "disconnecting stale non-serving peer without an advertised tip"
+            );
+            self.network.disconnect_peer(peer_id);
+            self.remove_peer(peer_id);
+        }
+    }
+
     fn advance_request_cursor(&mut self) {
         let len = self.peer_order.len();
         if len == 0 {
@@ -988,41 +1023,53 @@ impl PeerManager {
         let saturated_remote = matches!(reason, Some(DisconnectReason::TooManyPeers));
         let noisy_remote_rejection =
             saturated_remote && !peer.is_serving && connected_for <= EARLY_SESSION_DROP_THRESHOLD;
+        let disconnect_note = disconnect_note(
+            reason,
+            peer.is_serving,
+            peer.remote_status.latest_block,
+            connected_for,
+        );
 
         if noisy_remote_rejection {
             debug!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
+                client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,
                 serving = peer.is_serving,
                 version = ?peer.version,
                 latest_block,
                 saturated_remote,
+                disconnect_note,
                 "peer session closed"
             );
         } else if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
             info!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
+                client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,
                 serving = peer.is_serving,
                 version = ?peer.version,
                 latest_block,
                 saturated_remote,
+                disconnect_note,
                 "peer session closed"
             );
         } else {
             debug!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
+                client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,
                 serving = peer.is_serving,
                 version = ?peer.version,
                 latest_block,
                 saturated_remote,
+                disconnect_note,
                 "peer session closed"
             );
         }
@@ -1068,6 +1115,38 @@ fn seed_productive_peers(known_peers: &[NodeRecord]) -> VecDeque<NodeRecord> {
 fn rotate_request_candidates(peers: &mut [PeerId], request_cursor: usize) {
     if peers.len() > 1 {
         peers.rotate_left(request_cursor % peers.len());
+    }
+}
+
+fn is_stale_nonserving_peer(
+    is_serving: bool,
+    latest_block: Option<u64>,
+    connected_for: Duration,
+) -> bool {
+    !is_serving
+        && latest_block.unwrap_or_default() == 0
+        && connected_for >= USELESS_PEER_GRACE_PERIOD
+}
+
+fn disconnect_note(
+    reason: Option<DisconnectReason>,
+    is_serving: bool,
+    latest_block: Option<u64>,
+    connected_for: Duration,
+) -> &'static str {
+    match reason {
+        Some(DisconnectReason::SubprotocolSpecific) => {
+            "likely peer sent an invalid post-merge subprotocol message"
+        }
+        Some(DisconnectReason::TooManyPeers) => "remote peer was saturated",
+        None if is_stale_nonserving_peer(is_serving, latest_block, connected_for) => {
+            "peer never advertised a usable tip and was not useful for sync"
+        }
+        None if !is_serving && latest_block.unwrap_or_default() == 0 => {
+            "peer disconnected before advertising a usable tip"
+        }
+        None if !is_serving => "peer disconnected before serving sync data",
+        _ => "session churn",
     }
 }
 
@@ -1309,6 +1388,48 @@ mod tests {
 
         rotate_request_candidates(&mut peers, 2);
         assert_eq!(peers, vec![first, second, third]);
+    }
+
+    #[test]
+    fn stale_nonserving_peer_detection_requires_zero_tip_and_grace_period() {
+        assert!(is_stale_nonserving_peer(
+            false,
+            Some(0),
+            USELESS_PEER_GRACE_PERIOD
+        ));
+        assert!(is_stale_nonserving_peer(
+            false,
+            None,
+            USELESS_PEER_GRACE_PERIOD + Duration::from_secs(1)
+        ));
+        assert!(!is_stale_nonserving_peer(
+            true,
+            Some(0),
+            USELESS_PEER_GRACE_PERIOD + Duration::from_secs(1)
+        ));
+        assert!(!is_stale_nonserving_peer(
+            false,
+            Some(1),
+            USELESS_PEER_GRACE_PERIOD + Duration::from_secs(1)
+        ));
+        assert!(!is_stale_nonserving_peer(
+            false,
+            Some(0),
+            Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn disconnect_note_explains_subprotocol_specific_disconnects() {
+        assert_eq!(
+            disconnect_note(
+                Some(DisconnectReason::SubprotocolSpecific),
+                false,
+                Some(0),
+                Duration::from_millis(10)
+            ),
+            "likely peer sent an invalid post-merge subprotocol message"
+        );
     }
 
     fn fake_receipt(gas: u64) -> Receipt {
