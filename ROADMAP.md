@@ -45,9 +45,8 @@
   - peers that return incomplete block data are penalized and disconnected instead of being retried forever
   - the default bodies/receipts fetch batch is now more conservative to reduce size-limit related mismatches
 - Receipt validation now follows Reth's historical/mainnet consensus rules:
-  - gas-used checks are always enforced
-  - receipt-root and bloom checks are skipped pre-Byzantium, which fixes ancient-mainnet stalls like block `46147`
-  - post-Byzantium receipt-root and bloom checks are still enforced
+  - gas-used, receipt-root, and bloom checks are now enforced for both ancient and modern blocks
+  - LogEx's custom receipt type preserves pre-Byzantium `post_state`, so old mainnet receipts can now be verified against the header instead of being trusted once decoded
 - The eth/70 receipt path now handles partial last-block responses correctly:
   - `last_block_incomplete` and `first_block_receipt_index` are honored
   - multi-round receipt fetches are stitched back together before ingestion
@@ -57,6 +56,9 @@
   - LogEx uses a custom Reth-compatible network receipt type that preserves `status_or_post_state`
   - pre-Byzantium receipts with legacy post-state no longer blow up the session decoder
   - this cleared the real mainnet stall around block `46147`
+- Ancient canonical log assurance is now stronger:
+  - pre-Byzantium receipt-root and logs-bloom verification are no longer skipped
+  - a malicious peer can no longer alter ancient receipts/logs while still passing LogEx's header-attested receipt checks
 - Shutdown is now bounded:
   - LogEx no longer waits indefinitely for the Reth network task to stop
   - node/server/background tasks are aborted after a timeout if graceful shutdown stalls
@@ -123,6 +125,7 @@
 1. Add post-merge canonical-chain verification instead of relying on execution peers alone.
    - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
    - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
+   - Ancient receipt verification is no longer part of this gap; the remaining missing piece is beacon/consensus-layer verification for post-merge canonicality.
 2. Decide whether there is any networking value left in moving beyond Reth `FetchClient` for headers/bodies.
    - Headers and bodies already use Reth's fetch path now; the remaining custom transport is receipts.
    - Only evaluate `ReverseHeadersDownloader` / `BodiesDownloader` if LogEx starts persisting a fuller canonical header history that can satisfy Reth's downloader/provider assumptions cleanly.

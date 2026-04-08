@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, proofs};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
-use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
+use reth_chainspec::{ChainSpec, MAINNET};
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_primitives::{Block as EthereumBlock, BlockBody as EthereumBlockBody};
@@ -117,9 +117,11 @@ impl std::fmt::Display for ReceiptValidationError {
     }
 }
 
-/// Validate receipts against the block header using Reth's historical rules:
-/// gas is always checked, while receipts root and bloom are only checked from
-/// Byzantium onward.
+/// Validate receipts against the block header.
+///
+/// Gas-used, receipt-root, and logs-bloom checks are all enforced. Ancient
+/// pre-Byzantium receipts are now verifiable because LogEx preserves the
+/// historical `post_state` value on the wire.
 pub fn validate_receipts_for_header<H, R>(
     header: &H,
     receipts: &[ReceiptWithBloom<R>],
@@ -138,13 +140,6 @@ where
             expected: header.gas_used(),
             got: cumulative_gas_used,
         });
-    }
-
-    // Before Byzantium, receipts committed the post-state root rather than the
-    // EIP-658 status flag. As a log-only node we cannot reconstruct that root,
-    // so we follow Reth and skip receipts-root/bloom verification pre-Byzantium.
-    if !MAINNET.is_byzantium_active_at_block(header.number()) {
-        return Ok(());
     }
 
     let calculated_root = proofs::calculate_receipt_root(receipts);
@@ -175,9 +170,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Header, ReceiptWithBloom, TxType};
+    use alloy_consensus::{Eip658Value, Header, ReceiptWithBloom, TxType};
     use alloy_primitives::{Address, B256, Bloom, Log, LogData, bloom};
     use reth_ethereum_primitives::Receipt as RethReceipt;
+
+    use crate::primitives::LogexReceipt;
 
     /// Build a single fake EIP-1559 receipt for round-trip tests.
     fn fake_receipt() -> ReceiptWithBloom<RethReceipt> {
@@ -298,17 +295,69 @@ mod tests {
     }
 
     #[test]
-    fn pre_byzantium_skips_root_validation() {
-        let receipts = vec![fake_receipt()];
+    fn pre_byzantium_validates_root_and_logs_bloom() {
+        let logs = vec![Log {
+            address: Address::repeat_byte(0xAA),
+            data: LogData::new_unchecked(
+                vec![B256::repeat_byte(0xBB)],
+                alloy_primitives::Bytes::from_static(b"ancient"),
+            ),
+        }];
+        let logs_bloom = alloy_primitives::logs_bloom(logs.iter());
+        let receipts = vec![ReceiptWithBloom {
+            receipt: LogexReceipt {
+                tx_type: TxType::Legacy,
+                status: Eip658Value::PostState(B256::repeat_byte(0x44)),
+                cumulative_gas_used: 21_000,
+                logs,
+            },
+            logs_bloom,
+        }];
         let header = Header {
             number: 46_147,
             gas_used: receipts[0].cumulative_gas_used(),
-            receipts_root: B256::repeat_byte(0x11),
-            logs_bloom: Bloom::repeat_byte(0x22),
+            receipts_root: proofs::calculate_receipt_root(&receipts),
+            logs_bloom: receipts[0].logs_bloom,
             ..Default::default()
         };
 
         assert_eq!(validate_receipts_for_header(&header, &receipts), Ok(()));
+    }
+
+    #[test]
+    fn tampered_pre_byzantium_receipt_fails_root_check() {
+        let logs = vec![Log {
+            address: Address::repeat_byte(0xAA),
+            data: LogData::new_unchecked(
+                vec![B256::repeat_byte(0xBB)],
+                alloy_primitives::Bytes::from_static(b"ancient"),
+            ),
+        }];
+        let logs_bloom = alloy_primitives::logs_bloom(logs.iter());
+        let receipts = vec![ReceiptWithBloom {
+            receipt: LogexReceipt {
+                tx_type: TxType::Legacy,
+                status: Eip658Value::PostState(B256::repeat_byte(0x44)),
+                cumulative_gas_used: 21_000,
+                logs,
+            },
+            logs_bloom,
+        }];
+        let header = Header {
+            number: 46_147,
+            gas_used: receipts[0].cumulative_gas_used(),
+            receipts_root: proofs::calculate_receipt_root(&receipts),
+            logs_bloom: receipts[0].logs_bloom,
+            ..Default::default()
+        };
+
+        let mut tampered = receipts.clone();
+        tampered[0].receipt.status = Eip658Value::PostState(B256::repeat_byte(0x99));
+
+        assert!(matches!(
+            validate_receipts_for_header(&header, &tampered),
+            Err(ReceiptValidationError::ReceiptRootMismatch { .. })
+        ));
     }
 
     #[test]
