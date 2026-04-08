@@ -255,10 +255,14 @@ impl SyncEngine {
                 let chunk_end = (chunk_start + fetch_size).min(headers.len());
                 let chunk_headers = &headers[chunk_start..chunk_end];
                 let chunk_hashes = hashes[chunk_start..chunk_end].to_vec();
+                let required_block = chunk_headers
+                    .last()
+                    .map(|header| header.number())
+                    .unwrap_or(current);
 
                 let (body_peer, bodies) = match cancelable(
                     &mut self.shutdown,
-                    self.peers.get_bodies(chunk_hashes.clone()),
+                    self.peers.get_bodies(chunk_hashes.clone(), required_block),
                 )
                 .await
                 {
@@ -272,7 +276,8 @@ impl SyncEngine {
                 };
                 let (receipt_peer, receipts) = match cancelable(
                     &mut self.shutdown,
-                    self.peers.get_receipts(chunk_hashes.clone()),
+                    self.peers
+                        .get_receipts(chunk_hashes.clone(), required_block),
                 )
                 .await
                 {
@@ -375,6 +380,9 @@ impl SyncEngine {
                 if chunk_failed {
                     break;
                 }
+
+                self.peers.report_valid_serving_peer(body_peer);
+                self.peers.report_valid_serving_peer(receipt_peer);
             }
 
             if let Some(head) = last_ingested_head {
@@ -468,24 +476,33 @@ impl SyncEngine {
             };
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
+            let required_block = headers
+                .last()
+                .map(|header| header.number())
+                .unwrap_or(current + 1);
 
-            let (body_peer, bodies) =
-                match cancelable(&mut self.shutdown, self.peers.get_bodies(hashes.clone())).await {
-                    Some(Ok((peer_id, bodies))) if bodies.len() == headers.len() => {
-                        (peer_id, bodies)
-                    }
-                    Some(Ok(_)) | Some(Err(_)) => continue,
-                    None => return self.finish_shutdown(),
-                };
-            let (receipt_peer, receipts) =
-                match cancelable(&mut self.shutdown, self.peers.get_receipts(hashes.clone())).await
-                {
-                    Some(Ok((peer_id, receipts))) if receipts.len() == headers.len() => {
-                        (peer_id, receipts)
-                    }
-                    Some(Ok(_)) | Some(Err(_)) => continue,
-                    None => return self.finish_shutdown(),
-                };
+            let (body_peer, bodies) = match cancelable(
+                &mut self.shutdown,
+                self.peers.get_bodies(hashes.clone(), required_block),
+            )
+            .await
+            {
+                Some(Ok((peer_id, bodies))) if bodies.len() == headers.len() => (peer_id, bodies),
+                Some(Ok(_)) | Some(Err(_)) => continue,
+                None => return self.finish_shutdown(),
+            };
+            let (receipt_peer, receipts) = match cancelable(
+                &mut self.shutdown,
+                self.peers.get_receipts(hashes.clone(), required_block),
+            )
+            .await
+            {
+                Some(Ok((peer_id, receipts))) if receipts.len() == headers.len() => {
+                    (peer_id, receipts)
+                }
+                Some(Ok(_)) | Some(Err(_)) => continue,
+                None => return self.finish_shutdown(),
+            };
 
             let mut batch_failed = false;
             for (i, header) in headers.iter().enumerate() {
@@ -563,6 +580,9 @@ impl SyncEngine {
             if batch_failed {
                 continue;
             }
+
+            self.peers.report_valid_serving_peer(body_peer);
+            self.peers.report_valid_serving_peer(receipt_peer);
 
             if self.try_mark_synced("caught up to advertised peer tip") {
                 self.sync_status_peers();

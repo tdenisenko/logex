@@ -83,6 +83,10 @@
   - restart ordering now prefers those previously serving peers immediately, and shutdown no longer risks rewriting the on-disk productive peer cache to `[]` just because no peer re-served data during the current process lifetime
   - live sync now refills peers with the same small active-peer floor used during historical sync, instead of coasting at one or two sessions after restart
   - `syncing` status stays true while blocks are advancing even when no peer has advertised a credible target head yet
+- Serving-peer persistence and request routing are now stricter:
+  - `known-peers.json` is no longer rewritten just because an already-known productive peer was moved to the front of the in-memory recency queue
+  - peers are only promoted/persisted as serving after the fetched body/receipt batch passes block-level validation, instead of immediately after a length match
+  - body/receipt requests now prefer peers that either already served valid sync data or advertise a tip high enough for the requested block range
 - P2P shutdown handling is now closer to intentional node behavior:
   - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
 - Current validation on this refactor:

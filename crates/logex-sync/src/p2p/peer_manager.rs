@@ -351,9 +351,11 @@ impl PeerManager {
             direction: HeadersDirection::Rising,
         };
 
-        self.send_request_to_any_peer(move |peer| PeerRequest::GetBlockHeaders {
-            request,
-            response: peer,
+        self.send_request_to_any_peer(Some(start_block), move |peer| {
+            PeerRequest::GetBlockHeaders {
+                request,
+                response: peer,
+            }
         })
         .await
     }
@@ -362,6 +364,7 @@ impl PeerManager {
     pub async fn get_bodies(
         &mut self,
         hashes: Vec<B256>,
+        required_block: u64,
     ) -> Result<(
         PeerId,
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
@@ -372,7 +375,7 @@ impl PeerManager {
         }
 
         let requested = hashes.len();
-        let peer_ids = self.peer_ids_for_requests();
+        let peer_ids = self.peer_ids_for_requests(Some(required_block));
         let mut dead_peers = HashSet::new();
 
         for peer_id in peer_ids {
@@ -386,9 +389,6 @@ impl PeerManager {
             {
                 Ok(response) => {
                     if response_len_matches_request(requested, response.len()) {
-                        if !response.is_empty() && self.mark_peer_serving(peer_id) {
-                            self.persist_productive_peers();
-                        }
                         self.on_request_success(peer_id);
                         return Ok((peer_id, response));
                     }
@@ -414,6 +414,7 @@ impl PeerManager {
     pub async fn get_receipts(
         &mut self,
         hashes: Vec<B256>,
+        required_block: u64,
     ) -> Result<(
         PeerId,
         Vec<
@@ -430,7 +431,7 @@ impl PeerManager {
         }
 
         let requested = hashes.len();
-        let peer_ids = self.peer_ids_for_requests();
+        let peer_ids = self.peer_ids_for_requests(Some(required_block));
         let mut dead_peers = HashSet::new();
 
         for peer_id in peer_ids {
@@ -450,9 +451,6 @@ impl PeerManager {
             match attempt {
                 Ok(receipts) => {
                     if response_len_matches_request(requested, receipts.len()) {
-                        if !receipts.is_empty() && self.mark_peer_serving(peer_id) {
-                            self.persist_productive_peers();
-                        }
                         self.on_request_success(peer_id);
                         return Ok((peer_id, receipts));
                     }
@@ -514,6 +512,7 @@ impl PeerManager {
 
     async fn send_request_to_any_peer<T, W, MakeRequest>(
         &mut self,
+        required_block: Option<u64>,
         make_request: MakeRequest,
     ) -> Result<T>
     where
@@ -522,7 +521,7 @@ impl PeerManager {
             oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
         ) -> PeerRequest<LogexNetworkPrimitives>,
     {
-        let peer_ids = self.peer_ids_for_requests();
+        let peer_ids = self.peer_ids_for_requests(required_block);
         let mut dead_peers = HashSet::new();
 
         for peer_id in peer_ids {
@@ -812,7 +811,7 @@ impl PeerManager {
         self.pending.insert(node.id, node);
     }
 
-    fn peer_ids_for_requests(&self) -> Vec<PeerId> {
+    fn peer_ids_for_requests(&self, required_block: Option<u64>) -> Vec<PeerId> {
         let mut peers: Vec<_> = self
             .peer_order
             .iter()
@@ -820,7 +819,28 @@ impl PeerManager {
             .copied()
             .collect();
         rotate_request_candidates(&mut peers, self.request_cursor);
-        peers
+
+        let Some(required_block) = required_block else {
+            return peers;
+        };
+
+        let (mut preferred, mut fallback) = (Vec::with_capacity(peers.len()), Vec::new());
+        for peer_id in peers {
+            let prefer = self.peers.get(&peer_id).is_some_and(|peer| {
+                peer_is_preferred_for_block(
+                    peer.is_serving,
+                    peer.remote_status.latest_block,
+                    required_block,
+                )
+            });
+            if prefer {
+                preferred.push(peer_id);
+            } else {
+                fallback.push(peer_id);
+            }
+        }
+        preferred.extend(fallback);
+        preferred
     }
 
     fn on_request_success(&mut self, peer_id: PeerId) {
@@ -880,6 +900,16 @@ impl PeerManager {
         false
     }
 
+    pub fn report_valid_serving_peer(&mut self, peer_id: PeerId) {
+        if peer_id == PeerId::ZERO {
+            return;
+        }
+
+        if self.mark_peer_serving(peer_id) {
+            self.persist_productive_peers();
+        }
+    }
+
     fn remember_productive(&mut self, node: NodeRecord) -> bool {
         let existing_index = self
             .productive
@@ -895,7 +925,7 @@ impl PeerManager {
         }
 
         let known_changed = upsert_known_peer(&mut self.known_peers, node);
-        existing_index != Some(0) || known_changed
+        should_persist_productive_update(existing_index, known_changed)
     }
 
     fn persist_productive_peers(&mut self) {
@@ -1171,6 +1201,18 @@ fn response_len_matches_request(requested: usize, returned: usize) -> bool {
     requested == returned
 }
 
+fn peer_is_preferred_for_block(
+    is_serving: bool,
+    latest_block: Option<u64>,
+    required_block: u64,
+) -> bool {
+    is_serving || latest_block.is_some_and(|block| block > 0 && block >= required_block)
+}
+
+fn should_persist_productive_update(existing_index: Option<usize>, known_changed: bool) -> bool {
+    existing_index.is_none() || known_changed
+}
+
 fn normalize_network_head(mut head: Head) -> Head {
     if head.hash.is_zero() {
         head.hash = MAINNET.genesis_hash();
@@ -1417,6 +1459,23 @@ mod tests {
             Some(0),
             Duration::from_secs(5)
         ));
+    }
+
+    #[test]
+    fn peer_preference_requires_serving_or_sufficient_tip() {
+        assert!(peer_is_preferred_for_block(false, Some(500), 400));
+        assert!(peer_is_preferred_for_block(true, Some(0), 400));
+        assert!(!peer_is_preferred_for_block(false, Some(0), 400));
+        assert!(!peer_is_preferred_for_block(false, Some(399), 400));
+        assert!(!peer_is_preferred_for_block(false, None, 400));
+    }
+
+    #[test]
+    fn productive_reordering_alone_does_not_force_persist() {
+        assert!(!should_persist_productive_update(Some(0), false));
+        assert!(!should_persist_productive_update(Some(3), false));
+        assert!(should_persist_productive_update(None, false));
+        assert!(should_persist_productive_update(Some(1), true));
     }
 
     #[test]
