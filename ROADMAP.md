@@ -91,6 +91,10 @@
   - partial block-body and legacy receipt responses no longer cause immediate disconnects; LogEx now continues the remaining tail request on the same peer first
   - only impossible response overflows are treated as malformed protocol responses
   - peers that serve canonically invalid bodies or receipts are now escalated with Reth's stronger `BadProtocol` penalty instead of the softer generic bad-message penalty
+- Execution-layer validation now uses Reth consensus code directly:
+  - downloaded headers are validated with Reth's `EthBeaconConsensus` standalone and parent-against-child rules whenever the parent header is available in-process
+  - block bodies now go through Reth pre-execution validation instead of only LogEx's custom transaction-root checks
+  - header peers can now be penalized for serving invalid header sequences, not just invalid bodies or receipts
 - P2P shutdown handling is now closer to intentional node behavior:
   - LogEx asks Reth to disconnect peers gracefully, drains close events briefly, then aborts the long-lived Reth network/request-handler tasks explicitly instead of waiting on tasks that are not expected to resolve on their own
 - Current validation on this refactor:
@@ -127,6 +131,10 @@
 10. Revisit batch-sizing/fallback strategy for huge bodies/receipt responses so honest peers are not penalized when soft response limits are hit on large blocks.
 11. Keep validating blank-dir bootstrap quality on unrestricted networks; cold-start serving-peer conversion is improved, but it is still the key real-world metric to keep watching.
 12. Improve peer-count/status freshness during large historical batches so `serving_peers` does not temporarily lag behind active validated sync work.
+13. Add post-merge canonical-chain verification instead of relying on execution peers alone.
+    - Execution-layer validation is now much stronger, but it still does not prove finalized/safe canonicality on Ethereum PoS by itself.
+    - To make LogEx a true source of canonical truth, integrate a consensus-layer light client or equivalent beacon-chain verification path and bind execution sync to that verified forkchoice.
+14. Persist a recent canonical header window so restart-boundary header-against-parent validation can stay strict across process restarts.
 
 ## Deferred
 

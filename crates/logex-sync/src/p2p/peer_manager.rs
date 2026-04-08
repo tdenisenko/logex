@@ -341,7 +341,10 @@ impl PeerManager {
         &mut self,
         start_block: u64,
         count: u64,
-    ) -> Result<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>> {
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
         self.drain_events_now();
 
         let request = GetBlockHeaders {
@@ -351,13 +354,33 @@ impl PeerManager {
             direction: HeadersDirection::Rising,
         };
 
-        self.send_request_to_any_peer(Some(start_block), move |peer| {
-            PeerRequest::GetBlockHeaders {
-                request,
-                response: peer,
+        let peer_ids = self.peer_ids_for_requests(Some(start_block));
+        let mut dead_peers = HashSet::new();
+
+        for peer_id in peer_ids {
+            match self
+                .request_with_channel(peer_id, &move |peer| PeerRequest::GetBlockHeaders {
+                    request,
+                    response: peer,
+                })
+                .await
+            {
+                Ok(response) => {
+                    self.on_request_success(peer_id);
+                    return Ok((peer_id, response));
+                }
+                Err(error) => {
+                    let should_drop = self.on_request_error(peer_id, &error);
+                    debug!(peer = %peer_id, ?error, "header request failed");
+                    if should_drop {
+                        dead_peers.insert(peer_id);
+                    }
+                }
             }
-        })
-        .await
+        }
+
+        self.remove_dead_peers(&dead_peers);
+        bail!("no peers available to handle header request")
     }
 
     /// Request block bodies for the given block hashes.
@@ -626,40 +649,6 @@ impl PeerManager {
             requested,
             "peer returned no data for a non-empty request"
         );
-    }
-
-    async fn send_request_to_any_peer<T, W, MakeRequest>(
-        &mut self,
-        required_block: Option<u64>,
-        make_request: MakeRequest,
-    ) -> Result<T>
-    where
-        W: IntoResponseValue<T>,
-        MakeRequest: Fn(
-            oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
-        ) -> PeerRequest<LogexNetworkPrimitives>,
-    {
-        let peer_ids = self.peer_ids_for_requests(required_block);
-        let mut dead_peers = HashSet::new();
-
-        for peer_id in peer_ids {
-            match self.request_with_channel(peer_id, &make_request).await {
-                Ok(response) => {
-                    self.on_request_success(peer_id);
-                    return Ok(response);
-                }
-                Err(error) => {
-                    let should_drop = self.on_request_error(peer_id, &error);
-                    debug!(peer = %peer_id, ?error, "peer request failed");
-                    if should_drop {
-                        dead_peers.insert(peer_id);
-                    }
-                }
-            }
-        }
-
-        self.remove_dead_peers(&dead_peers);
-        bail!("no peers available to handle request")
     }
 
     async fn request_with_channel<T, W, MakeRequest>(

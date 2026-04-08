@@ -1,7 +1,17 @@
-use alloy_consensus::{BlockHeader, ReceiptWithBloom, TxReceipt, proofs};
+use std::fmt;
+use std::sync::LazyLock;
+
+use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, proofs};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
-use reth_chainspec::{EthereumHardforks, MAINNET};
+use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
+use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
+use reth_ethereum_consensus::EthBeaconConsensus;
+use reth_ethereum_primitives::{Block as EthereumBlock, BlockBody as EthereumBlockBody};
+use reth_primitives_traits::{SealedBlock, SealedHeader};
+
+static EXECUTION_CONSENSUS: LazyLock<EthBeaconConsensus<ChainSpec>> =
+    LazyLock::new(|| EthBeaconConsensus::new(MAINNET.clone()));
 
 /// The empty Merkle Patricia Trie root: `keccak256(rlp(""))`.
 ///
@@ -16,6 +26,81 @@ pub enum ReceiptValidationError {
     GasUsedMismatch { expected: u64, got: u64 },
     ReceiptRootMismatch { expected: B256, got: B256 },
     LogsBloomMismatch,
+}
+
+#[derive(Debug, Clone)]
+pub enum HeaderValidationError {
+    StartBlockMismatch { expected: u64, got: u64 },
+    Standalone(ConsensusError),
+    AgainstParent(ConsensusError),
+}
+
+impl fmt::Display for HeaderValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartBlockMismatch { expected, got } => {
+                write!(
+                    f,
+                    "header batch started at unexpected block: expected {expected}, got {got}"
+                )
+            }
+            Self::Standalone(error) => write!(f, "{error}"),
+            Self::AgainstParent(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+pub fn validate_downloaded_headers(
+    expected_start_block: u64,
+    previous_header: Option<&Header>,
+    headers: &[Header],
+) -> Result<(), HeaderValidationError> {
+    let Some(first_header) = headers.first() else {
+        return Ok(());
+    };
+
+    if first_header.number() != expected_start_block {
+        return Err(HeaderValidationError::StartBlockMismatch {
+            expected: expected_start_block,
+            got: first_header.number(),
+        });
+    }
+
+    let mut parent = previous_header.cloned().map(SealedHeader::seal_slow);
+    for header in headers {
+        let sealed = SealedHeader::seal_slow(header.clone());
+        EXECUTION_CONSENSUS
+            .validate_header(&sealed)
+            .map_err(HeaderValidationError::Standalone)?;
+
+        if let Some(ref parent_header) = parent {
+            EXECUTION_CONSENSUS
+                .validate_header_against_parent(&sealed, parent_header)
+                .map_err(HeaderValidationError::AgainstParent)?;
+        }
+
+        parent = Some(sealed);
+    }
+
+    Ok(())
+}
+
+pub fn validate_block_pre_execution(
+    header: &Header,
+    body: &EthereumBlockBody,
+) -> Result<(), ConsensusError> {
+    let sealed_header = SealedHeader::seal_slow(header.clone());
+    <EthBeaconConsensus<ChainSpec> as Consensus<EthereumBlock>>::validate_body_against_header(
+        &*EXECUTION_CONSENSUS,
+        body,
+        &sealed_header,
+    )?;
+
+    let sealed_block = SealedBlock::seal_slow(EthereumBlock {
+        header: header.clone(),
+        body: body.clone(),
+    });
+    EXECUTION_CONSENSUS.validate_block_pre_execution(&sealed_block)
 }
 
 impl std::fmt::Display for ReceiptValidationError {

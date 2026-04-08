@@ -1,4 +1,4 @@
-use alloy_consensus::{BlockHeader, TxReceipt, transaction::TxHashRef};
+use alloy_consensus::{BlockHeader, Header, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{B256, Log};
 use eyre::Result;
 use reth_ethereum_forks::Head;
@@ -19,7 +19,10 @@ use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::PeerManager;
 use crate::progress::ProgressTracker;
-use crate::validation::{receipts_match_transaction_count, validate_receipts_for_header};
+use crate::validation::{
+    receipts_match_transaction_count, validate_block_pre_execution, validate_downloaded_headers,
+    validate_receipts_for_header,
+};
 
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
 const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
@@ -36,6 +39,7 @@ pub struct SyncEngine {
     head_tracker: HeadTracker,
     progress: ProgressTracker,
     connected_once: bool,
+    last_validated_header: Option<Header>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -58,6 +62,7 @@ impl SyncEngine {
             head_tracker: HeadTracker::new(256),
             progress,
             connected_once: false,
+            last_validated_header: None,
             shutdown,
         }
     }
@@ -174,7 +179,7 @@ impl SyncEngine {
             }
             self.refresh_connectivity_state();
 
-            let headers = match cancelable(
+            let (header_peer, headers) = match cancelable(
                 &mut self.shutdown,
                 self.peers
                     .get_headers(current, self.config.header_batch_size),
@@ -245,6 +250,22 @@ impl SyncEngine {
             }
             consecutive_empty = 0;
 
+            if let Err(error) = validate_downloaded_headers(
+                current,
+                self.expected_parent_for_validation(current),
+                &headers,
+            ) {
+                tracing::warn!(
+                    start_block = current,
+                    header_peer = %header_peer,
+                    %error,
+                    "header validation failed — retrying from last ingested block"
+                );
+                self.peers.report_invalid_block_data(header_peer, "headers");
+                self.refresh_connectivity_state();
+                continue;
+            }
+
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
 
             let fetch_size = self.config.fetch_batch_size;
@@ -307,12 +328,13 @@ impl SyncEngine {
                     let timestamp = header.timestamp();
                     let parent_hash = header.parent_hash();
 
-                    if bodies[i].calculate_tx_root() != header.transactions_root() {
+                    if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
                             body_peer = %body_peer,
-                            "block body transaction root mismatch — retrying from last ingested block"
+                            %error,
+                            "block pre-execution validation failed — retrying from last ingested block"
                         );
                         self.peers
                             .report_invalid_block_data(body_peer, "block bodies");
@@ -388,6 +410,9 @@ impl SyncEngine {
             if let Some(head) = last_ingested_head {
                 self.peers.set_head(head);
             }
+            if !chunk_failed {
+                self.last_validated_header = headers.last().cloned();
+            }
             current = next_block;
 
             if chunk_failed {
@@ -444,15 +469,15 @@ impl SyncEngine {
                 status.current_block
             };
 
-            let headers = match cancelable(
+            let (header_peer, headers) = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_headers(current + 1, 16),
             )
             .await
             {
-                Some(Ok(h)) if !h.is_empty() => {
+                Some(Ok((peer_id, headers))) if !headers.is_empty() => {
                     self.refresh_connectivity_state();
-                    h
+                    (peer_id, headers)
                 }
                 Some(Ok(_)) => {
                     if self.try_mark_synced("caught up to advertised peer tip") {
@@ -474,6 +499,22 @@ impl SyncEngine {
                 }
                 None => return self.finish_shutdown(),
             };
+
+            if let Err(error) = validate_downloaded_headers(
+                current + 1,
+                self.expected_parent_for_validation(current + 1),
+                &headers,
+            ) {
+                tracing::warn!(
+                    start_block = current + 1,
+                    header_peer = %header_peer,
+                    %error,
+                    "live header validation failed — retrying from current head"
+                );
+                self.peers.report_invalid_block_data(header_peer, "headers");
+                self.refresh_connectivity_state();
+                continue;
+            }
 
             let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
             let required_block = headers
@@ -511,12 +552,13 @@ impl SyncEngine {
                 let timestamp = header.timestamp();
                 let parent_hash = header.parent_hash();
 
-                if bodies[i].calculate_tx_root() != header.transactions_root() {
+                if let Err(error) = validate_block_pre_execution(header, &bodies[i]) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
                         body_peer = %body_peer,
-                        "block body transaction root mismatch in live sync — retrying from current head"
+                        %error,
+                        "block pre-execution validation failed in live sync — retrying from current head"
                     );
                     self.peers
                         .report_invalid_block_data(body_peer, "block bodies");
@@ -581,6 +623,7 @@ impl SyncEngine {
                 continue;
             }
 
+            self.last_validated_header = headers.last().cloned();
             self.peers.report_valid_serving_peer(body_peer);
             self.peers.report_valid_serving_peer(receipt_peer);
 
@@ -700,6 +743,12 @@ impl SyncEngine {
 
     fn current_block(&self) -> u64 {
         self.sync_cursor().0
+    }
+
+    fn expected_parent_for_validation(&self, expected_start_block: u64) -> Option<&Header> {
+        self.last_validated_header
+            .as_ref()
+            .filter(|header| header.number() + 1 == expected_start_block)
     }
 
     fn known_target_block(&self) -> Option<u64> {

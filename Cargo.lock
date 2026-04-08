@@ -2690,7 +2690,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3269,9 +3269,11 @@ dependencies = [
  "logex-types",
  "rand 0.8.5",
  "reth-chainspec",
+ "reth-consensus",
  "reth-db-models",
  "reth-discv4",
  "reth-eth-wire",
+ "reth-ethereum-consensus",
  "reth-ethereum-forks",
  "reth-ethereum-primitives",
  "reth-network",
@@ -4176,7 +4178,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror",
  "tokio",
  "tracing",
@@ -4213,7 +4215,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -4540,6 +4542,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-consensus-common"
+version = "1.11.3"
+source = "git+https://github.com/paradigmxyz/reth.git?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "reth-chainspec",
+ "reth-consensus",
+ "reth-primitives-traits",
+]
+
+[[package]]
 name = "reth-db-models"
 version = "1.11.3"
 source = "git+https://github.com/paradigmxyz/reth.git?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
@@ -4707,6 +4721,22 @@ dependencies = [
  "reth-primitives-traits",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "reth-ethereum-consensus"
+version = "1.11.3"
+source = "git+https://github.com/paradigmxyz/reth.git?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "reth-chainspec",
+ "reth-consensus",
+ "reth-consensus-common",
+ "reth-execution-types",
+ "reth-primitives-traits",
+ "tracing",
 ]
 
 [[package]]

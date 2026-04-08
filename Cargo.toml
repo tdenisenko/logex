@@ -51,6 +51,8 @@ reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag 
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-db-models = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 
 # Internal crates
 logex-types = { path = "crates/logex-types" }
