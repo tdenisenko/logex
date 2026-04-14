@@ -63,7 +63,7 @@ impl PeerManager {
             self.pending.insert(peer.id, peer);
             self.network.connect_peer_kind(
                 peer.id,
-                PeerKind::Trusted,
+                PeerKind::Basic,
                 peer.tcp_addr(),
                 Some(peer.udp_addr()),
             );
@@ -250,7 +250,9 @@ impl PeerManager {
                 continue;
             };
 
-            info!(
+            self.network
+                .reputation_change(peer_id, ReputationChangeKind::Dropped);
+            debug!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
                 client_version = %peer.client_version,
@@ -279,6 +281,12 @@ impl PeerManager {
             peer.remote_status.latest_block,
             connected_for,
         );
+        let noisy_non_serving_disconnect = reason.is_none() && !peer.is_serving;
+
+        if noisy_non_serving_disconnect {
+            self.network
+                .reputation_change(peer_id, ReputationChangeKind::Dropped);
+        }
 
         if noisy_remote_rejection {
             debug!(
@@ -294,7 +302,7 @@ impl PeerManager {
                 disconnect_note,
                 "peer session closed"
             );
-        } else if reason.is_some() || connected_for <= EARLY_SESSION_DROP_THRESHOLD {
+        } else if reason.is_some() && !noisy_non_serving_disconnect {
             info!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
