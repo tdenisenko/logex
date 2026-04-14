@@ -23,7 +23,7 @@ use reth_network::{
     NetworkEvent, NetworkEventListenerProvider, NetworkHandle, NetworkManager, PeerRequest,
     PeerRequestSender, Peers, PeersConfig, PeersInfo, SessionsConfig,
 };
-use reth_network_peers::{NodeRecord, PeerId, TrustedPeer, mainnet_nodes};
+use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
 use secp256k1::SecretKey;
 use tokio::task::JoinHandle;
 use tokio_stream::Stream;
@@ -119,12 +119,9 @@ impl PeerManager {
     ) -> Result<Self> {
         let productive = seed_productive_peers(&known_peers);
         let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
-        let trusted_nodes: Vec<TrustedPeer> =
-            known_peers.iter().copied().map(TrustedPeer::from).collect();
         let serve_cache = Arc::new(ServeCacheProvider::new());
         let peer_config = PeersConfig::default()
             .with_basic_nodes(basic_nodes)
-            .with_trusted_nodes(trusted_nodes)
             .with_max_outbound(max_peers)
             .with_max_inbound(max_peers.max(16))
             .with_max_concurrent_dials(
