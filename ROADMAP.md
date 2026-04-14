@@ -59,7 +59,8 @@ LogEx should become a canonical Ethereum event-log node that:
 - Query/storage direction is already established:
   - local storage is the source of truth
   - current APIs support row/filter queries
-  - DataFusion remains the planned path for richer SQL
+  - REST `/query` now has a DataFusion-backed path for aggregates, aliases, `ORDER BY`, `LIMIT`, and `latest` without changing the on-disk storage format
+  - gRPC and web UI query unification still remain to be done
 
 ## Explicitly Not Needed
 
@@ -115,13 +116,12 @@ LogEx should become a canonical Ethereum event-log node that:
    - malicious peer mismatch detection
    - bootstrap, restart, shutdown, and resume regressions
 
-6. Replace the current limited SQL gate with a DataFusion-backed query path.
-   - Expose current storage as a `TableProvider`.
-   - Define an Arrow schema for the current log row model.
-   - Convert partition reads into `RecordBatch` output without changing the on-disk storage format.
-   - Add aggregates, ordering, aliases, and better SQL coverage without changing the on-disk storage format.
+6. Finish the DataFusion query migration.
+   - Reuse the new DataFusion-backed REST `/query` path as the base query engine.
+   - Expose current storage through a real `TableProvider` scan path instead of today’s in-memory batching step.
    - Preserve partition pruning and current index advantages.
    - Reuse the existing address/topic/block indexes where the planner can map filters onto them.
+   - Keep the on-disk storage format unchanged.
 
 7. Preserve LogEx-specific query ergonomics while moving to DataFusion.
    - Keep existing row-query behavior working for `SELECT *`, projected columns, `WHERE`, and non-aggregate `ORDER BY`.

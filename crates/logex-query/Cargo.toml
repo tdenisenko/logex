@@ -9,10 +9,13 @@ logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
 alloy-primitives = { workspace = true }
+datafusion = { workspace = true }
 hex = "0.4"
 roaring = "0.10"
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true }
