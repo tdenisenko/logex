@@ -3166,24 +3166,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "logex-ingestion"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "logex-index",
- "logex-storage",
- "logex-types",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "logex-node"
 version = "0.1.0"
 dependencies = [
  "clap",
  "logex-index",
- "logex-ingestion",
  "logex-server",
  "logex-storage",
  "logex-sync",
@@ -3264,7 +3251,6 @@ dependencies = [
  "futures",
  "futures-util",
  "logex-index",
- "logex-ingestion",
  "logex-server",
  "logex-storage",
  "logex-types",

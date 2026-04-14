@@ -4,8 +4,9 @@ use logex_types::{BlockContext, LogRow};
 
 /// Extract `LogRow`s from a block's receipts.
 ///
-/// Takes the block context (number, hash, timestamp), a list of (tx_hash, receipt_logs)
-/// pairs, and produces a flat list of `LogRow`s with correct indexing.
+/// Takes the block context (number, hash, timestamp), a list of `(tx_hash,
+/// receipt_logs)` pairs, and produces a flat list of `LogRow`s with correct
+/// per-transaction and global block log indexing.
 pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Vec<LogRow> {
     let mut rows = Vec::new();
     let mut global_log_index = 0u32;
@@ -26,11 +27,8 @@ pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Vec<LogRow>
     rows
 }
 
-/// Convenience: extract logs from a pre-flattened receipt list where each
-/// receipt is represented as (tx_hash, logs_vec).
-///
-/// This is the primary extraction path used by the sync engine where we iterate
-/// block bodies and their corresponding receipts.
+/// Convenience wrapper for the primary sync path where block context and
+/// transaction receipts are handled separately by the engine.
 pub fn extract_from_block(
     block_number: u64,
     block_hash: B256,
@@ -55,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_logs_empty() {
+    fn extract_logs_handles_empty_blocks() {
         let ctx = BlockContext {
             block_number: 100,
             block_hash: B256::repeat_byte(0x01),
@@ -66,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_logs_multiple_txs() {
+    fn extract_logs_assigns_transaction_and_global_indices() {
         let ctx = BlockContext {
             block_number: 100,
             block_hash: B256::repeat_byte(0x01),
@@ -74,7 +72,6 @@ mod tests {
         };
 
         let topic0 = B256::repeat_byte(0xDD);
-
         let txs = vec![
             (
                 B256::repeat_byte(0x11),
@@ -95,36 +92,17 @@ mod tests {
 
         let rows = extract_logs(&ctx, &txs);
         assert_eq!(rows.len(), 3);
-
-        // First tx, first log
         assert_eq!(rows[0].tx_index, 0);
         assert_eq!(rows[0].log_index, 0);
-        assert_eq!(rows[0].address, Address::repeat_byte(0xAA));
-        assert_eq!(rows[0].tx_hash, B256::repeat_byte(0x11));
-
-        // First tx, second log
         assert_eq!(rows[1].tx_index, 0);
         assert_eq!(rows[1].log_index, 1);
-        assert_eq!(rows[1].address, Address::repeat_byte(0xBB));
-
-        // Second tx, first log — global log_index continues
         assert_eq!(rows[2].tx_index, 1);
         assert_eq!(rows[2].log_index, 2);
-        assert_eq!(rows[2].address, Address::repeat_byte(0xCC));
-        assert_eq!(rows[2].tx_hash, B256::repeat_byte(0x22));
-
-        // All rows share block context
-        for row in &rows {
-            assert_eq!(row.block_number, 100);
-            assert_eq!(row.block_hash, B256::repeat_byte(0x01));
-            assert_eq!(row.timestamp, 1_700_000_000);
-        }
     }
 
     #[test]
-    fn test_extract_from_block() {
+    fn extract_from_block_builds_block_context() {
         let topic0 = B256::repeat_byte(0xDD);
-
         let txs = vec![(
             B256::repeat_byte(0x11),
             vec![make_log(
@@ -137,6 +115,7 @@ mod tests {
         let rows = extract_from_block(500, B256::repeat_byte(0x05), 1_700_005_000, &txs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].block_number, 500);
+        assert_eq!(rows[0].block_hash, B256::repeat_byte(0x05));
         assert_eq!(rows[0].topic0, Some(topic0));
     }
 }

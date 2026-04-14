@@ -12,7 +12,6 @@ path = "src/main.rs"
 logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
-logex-ingestion = { workspace = true }
 logex-server = { workspace = true }
 logex-sync = { workspace = true }
 reth-chainspec = { workspace = true }
