@@ -94,6 +94,8 @@ impl SyncEngine {
                 .last()
                 .map(|header| header.number())
                 .unwrap_or(current + 1);
+            let mut newly_serving_peers = HashSet::new();
+            self.note_serving_peer(header_peer, &mut newly_serving_peers);
 
             let bodies = match cancelable(
                 &mut self.shutdown,
@@ -117,9 +119,7 @@ impl SyncEngine {
                 Some(Ok(_)) | Some(Err(_)) => continue,
                 None => return self.finish_shutdown(),
             };
-
             let mut batch_failed = false;
-            let mut newly_serving_peers = HashSet::new();
             for (i, header) in headers.iter().enumerate() {
                 let block_hash = hashes[i];
                 let block_number = header.number();

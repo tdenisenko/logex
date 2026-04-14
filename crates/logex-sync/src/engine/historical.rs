@@ -200,6 +200,8 @@ impl SyncEngine {
             let mut next_block = current;
             let mut chunk_failed = false;
             let mut last_ingested_head = None;
+            let mut newly_serving_peers = HashSet::new();
+            self.note_serving_peer(header_peer, &mut newly_serving_peers);
 
             for (chunk_headers, chunk_hashes) in headers
                 .chunks(self.config.fetch_batch_size)
@@ -253,7 +255,6 @@ impl SyncEngine {
                     break;
                 }
 
-                let mut newly_serving_peers = HashSet::new();
                 for (i, header) in chunk_headers.iter().enumerate() {
                     let block_hash = chunk_hashes[i];
                     let block_number = header.number();

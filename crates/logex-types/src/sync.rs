@@ -37,7 +37,8 @@ pub struct SyncStatus {
     pub syncing: bool,
     /// Number of currently connected peers.
     pub connected_peers: usize,
-    /// Number of peers that have successfully answered sync requests.
+    /// Number of connected peers that have successfully answered validated
+    /// sync requests such as headers, bodies, or receipts.
     pub serving_peers: usize,
     /// Number of pending peer candidates waiting to be dialed.
     pub pending_peers: usize,
