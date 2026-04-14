@@ -173,14 +173,24 @@ impl PeerManager {
 
         let (mut preferred, mut fallback) = (Vec::with_capacity(peers.len()), Vec::new());
         for peer_id in peers {
-            let prefer = self.peers.get(&peer_id).is_some_and(|peer| {
-                peer_is_preferred_for_block(
-                    peer.is_serving,
-                    peer.remote_status.latest_block,
-                    required_block,
-                )
-            });
-            if prefer {
+            let Some(peer) = self.peers.get(&peer_id) else {
+                continue;
+            };
+
+            if peer
+                .remote_status
+                .earliest_block
+                .is_some_and(|earliest| earliest > required_block)
+            {
+                continue;
+            }
+
+            if peer_is_preferred_for_block(
+                peer.is_serving,
+                peer.remote_status.earliest_block,
+                peer.remote_status.latest_block,
+                required_block,
+            ) {
                 preferred.push(peer_id);
             } else {
                 fallback.push(peer_id);
@@ -409,9 +419,14 @@ pub(super) fn is_bootstrap_node(id: PeerId) -> bool {
 
 pub(super) fn peer_is_preferred_for_block(
     is_serving: bool,
+    earliest_block: Option<u64>,
     latest_block: Option<u64>,
     required_block: u64,
 ) -> bool {
+    if earliest_block.is_some_and(|earliest| earliest > required_block) {
+        return false;
+    }
+
     is_serving || latest_block.is_some_and(|block| block > 0 && block >= required_block)
 }
 
@@ -553,11 +568,23 @@ mod tests {
 
     #[test]
     fn peer_preference_requires_serving_or_sufficient_tip() {
-        assert!(peer_is_preferred_for_block(false, Some(500), 400));
-        assert!(peer_is_preferred_for_block(true, Some(0), 400));
-        assert!(!peer_is_preferred_for_block(false, Some(0), 400));
-        assert!(!peer_is_preferred_for_block(false, Some(399), 400));
-        assert!(!peer_is_preferred_for_block(false, None, 400));
+        assert!(peer_is_preferred_for_block(false, Some(0), Some(500), 400));
+        assert!(peer_is_preferred_for_block(true, Some(350), Some(0), 400));
+        assert!(!peer_is_preferred_for_block(
+            true,
+            Some(450),
+            Some(500),
+            400
+        ));
+        assert!(!peer_is_preferred_for_block(
+            false,
+            Some(450),
+            Some(500),
+            400
+        ));
+        assert!(!peer_is_preferred_for_block(false, Some(0), Some(0), 400));
+        assert!(!peer_is_preferred_for_block(false, Some(0), Some(399), 400));
+        assert!(!peer_is_preferred_for_block(false, None, None, 400));
     }
 
     #[test]
