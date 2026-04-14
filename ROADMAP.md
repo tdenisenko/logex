@@ -32,10 +32,11 @@ LogEx should become a canonical Ethereum event-log node that:
   - They do not directly act as a signature over every beacon block in the way a naive gossip-only design would imply.
 - Therefore the canonicality path should be:
   1. verify beacon light-client updates from a weak subjectivity checkpoint
-  2. extract verified execution anchors from the corresponding beacon data
-  3. fetch raw receipts from EL peers
-  4. reconstruct the receipt trie locally
-  5. require the computed receipts root to match the verified execution anchor
+  2. verify the SSZ Merkle branch that binds the `execution_payload_header` into the light-client header, the same way Helios validates `execution_branch` against the beacon header `body_root`
+  3. treat the `receipts_root` inside that proven execution payload header as the canonical CL-verified receipt commitment for the corresponding execution block hash
+  4. fetch raw receipts from EL peers for that execution block hash
+  5. locally encode those receipts exactly as Ethereum does and rebuild the execution-layer receipt trie (MPT) from them
+  6. require the computed EL receipt-trie root to match the CL-verified `receipts_root` before accepting any logs derived from those receipts
 
 ## Already Done
 
@@ -75,6 +76,7 @@ LogEx should become a canonical Ethereum event-log node that:
    - Add weak subjectivity checkpoint input, persistence, and restart handling.
    - Implement the beacon light-client bootstrap/update/finality flow.
    - Verify sync committee aggregate signatures and committee rotation.
+   - Verify the execution payload inclusion proof inside each accepted light-client header, following the same shape Helios uses for `execution_branch` against the beacon header `body_root`.
    - Persist verified consensus outputs that matter to LogEx:
      - finalized execution block hash
      - optimistic/head execution block hash
@@ -86,13 +88,16 @@ LogEx should become a canonical Ethereum event-log node that:
    - Keep the current Reth-backed devp2p stack.
    - Fetch receipts by block hash for CL-anchored execution blocks.
    - Fetch from multiple EL peers and cross-check for omission or inconsistent receipt sets.
-   - Reconstruct the receipt trie locally and require its root to equal the verified receipts root from CL.
+   - Normalize and encode receipts exactly as Ethereum does on the wire and in trie leaves.
+   - Reconstruct the execution-layer receipt trie locally and require its root to equal the CL-verified `receipts_root` from the proven execution payload header.
+   - Accept logs only as data derived from receipts that passed that root check, never as standalone peer assertions.
    - Distinguish finalized anchors from optimistic/head anchors in persistence and status.
    - Keep comparing the remaining receipt scheduler and retry logic against Reth/geth, because receipts are still the main LogEx-owned sync surface.
 
 3. Add proof-oriented log verification on top of the receipt-root match.
-   - Preserve enough local structure to prove receipt inclusion.
-   - Derive or store the data needed to prove a specific log against its receipt.
+   - Preserve enough local structure to prove receipt inclusion against the verified `receipts_root`.
+   - Make it explicit that the trustless proof boundary is receipt inclusion in the trie plus the log's position inside the proven receipt, not a separate "log Merkle tree".
+   - Derive or store the data needed to prove a specific log from a proven receipt.
    - Make the proof boundary explicit in APIs and docs.
 
 4. Keep improving EL throughput after the trust anchor exists.
@@ -151,9 +156,10 @@ LogEx should eventually be able to say all of the following:
 
 - it bootstrapped from a weak subjectivity checkpoint
 - it verified beacon light-client updates locally
-- it learned the canonical execution block hash and receipts root from that verified CL data
+- it verified the execution payload header against the beacon light-client header with an SSZ Merkle proof
+- it learned the canonical execution block hash and receipts root from that proven CL data
 - it fetched receipts from EL peers over devp2p
-- it recomputed the receipts trie locally
+- it re-encoded those receipts and recomputed the execution-layer receipt trie locally
 - it only accepted logs whose receipts root matches the verified canonical chain
 
 ## Deferred
