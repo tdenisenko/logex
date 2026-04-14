@@ -9,7 +9,6 @@ license.workspace = true
 logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
-logex-ingestion = { workspace = true }
 logex-server = { workspace = true }
 
 # Ethereum primitives
