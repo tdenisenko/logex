@@ -232,6 +232,10 @@ impl PeerManager {
     }
 
     pub(super) fn prune_stale_nonserving_peers(&mut self) {
+        if self.peers.len() < self.max_peers.min(STALE_PEER_PRUNE_FLOOR) {
+            return;
+        }
+
         let stale_peers: Vec<_> = self
             .peers
             .iter()

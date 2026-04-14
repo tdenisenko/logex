@@ -105,6 +105,13 @@ impl ServeCacheProvider {
         }
     }
 
+    pub fn advertised_history_range(&self) -> Option<(u64, u64, B256)> {
+        let state = self.inner.read().expect("serve cache poisoned");
+        let (&earliest, _) = state.number_to_hash.iter().next()?;
+        let (&latest, &latest_hash) = state.number_to_hash.iter().next_back()?;
+        Some((earliest, latest, latest_hash))
+    }
+
     fn chain_info_inner(&self) -> ChainInfo {
         let state = self.inner.read().expect("serve cache poisoned");
         if let Some((&best_number, &best_hash)) = state.number_to_hash.iter().next_back() {
@@ -588,5 +595,21 @@ mod tests {
         assert!(provider.header(hash).unwrap().is_none());
         assert!(provider.block_hash(11).unwrap().is_none());
         assert!(provider.receipts_by_block(hash.into()).unwrap().is_none());
+    }
+
+    #[test]
+    fn advertised_history_range_tracks_cached_window() {
+        let provider = ServeCacheProvider::new();
+        assert_eq!(provider.advertised_history_range(), None);
+
+        let (first_header, first_body) = test_block(11);
+        let (second_header, second_body) = test_block(12);
+        provider.insert_block(first_header.clone(), first_body, &[test_receipt()]);
+        provider.insert_block(second_header.clone(), second_body, &[test_receipt()]);
+
+        assert_eq!(
+            provider.advertised_history_range(),
+            Some((11, 12, second_header.hash_slow()))
+        );
     }
 }

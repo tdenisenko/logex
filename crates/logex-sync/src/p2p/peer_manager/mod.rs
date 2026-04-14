@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use alloy_primitives::B256;
 use eyre::Result;
+use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
 use reth_eth_wire::{
-    DisconnectReason, EthVersion, GetReceipts, GetReceipts70, NetworkPrimitives, Receipts,
-    Receipts69, Receipts70, UnifiedStatus,
+    BlockRangeUpdate, DisconnectReason, EthVersion, GetReceipts, GetReceipts70, NetworkPrimitives,
+    Receipts, Receipts69, Receipts70, UnifiedStatus,
 };
 use reth_ethereum_forks::Head;
 use reth_network::p2p::bodies::client::BodiesClient;
@@ -20,8 +21,8 @@ use reth_network::types::peers::config::PeerBackoffDurations;
 use reth_network::types::{PeerKind, ReputationChangeKind};
 use reth_network::{
     BlockDownloaderProvider, DiscoveredEvent, DiscoveryEvent, FetchClient, NetworkConfigBuilder,
-    NetworkEvent, NetworkEventListenerProvider, NetworkHandle, NetworkManager, PeerRequest,
-    PeerRequestSender, Peers, PeersConfig, PeersInfo, SessionsConfig,
+    NetworkEvent, NetworkEventListenerProvider, NetworkHandle, NetworkManager, NetworkSyncUpdater,
+    PeerRequest, PeerRequestSender, Peers, PeersConfig, PeersInfo, SessionsConfig,
 };
 use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
 use secp256k1::SecretKey;
@@ -57,6 +58,7 @@ const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
 const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 100;
+const STALE_PEER_PRUNE_FLOOR: usize = 8;
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(5),
     medium: Duration::from_secs(30),
@@ -92,6 +94,7 @@ pub struct PeerManager {
     known_peers_path: PathBuf,
     persisted_known_peers: Vec<NodeRecord>,
     serve_cache: Arc<ServeCacheProvider>,
+    max_peers: usize,
 }
 
 #[derive(Clone)]
@@ -144,7 +147,7 @@ impl PeerManager {
         let discovery_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
         let network_head = normalize_network_head(our_head);
 
-        let config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
+        let mut config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
             .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
@@ -155,6 +158,9 @@ impl PeerManager {
             .disable_tx_gossip(true)
             .discovery(discovery)
             .build(Arc::clone(&serve_cache));
+        let (earliest, latest, latest_hash) = advertised_history_range(&serve_cache);
+        config.status.set_history_range(earliest, latest);
+        config.status.blockhash = latest_hash;
 
         let builder = NetworkManager::builder(config)
             .await
@@ -189,6 +195,7 @@ impl PeerManager {
             known_peers_path,
             persisted_known_peers: Vec::new(),
             serve_cache,
+            max_peers,
         };
 
         manager.seed_known_peers();
@@ -209,7 +216,9 @@ impl PeerManager {
     /// Update our local head view and propagate it into Reth's live network
     /// status so newly established sessions see the same canonical tip.
     pub fn set_head(&mut self, head: Head) {
-        self.network.update_status(normalize_network_head(head));
+        let head = normalize_network_head(head);
+        self.network.update_status(head);
+        self.sync_advertised_history_range();
     }
 
     pub fn cache_canonical_block(
@@ -221,9 +230,26 @@ impl PeerManager {
         >],
     ) {
         self.serve_cache.insert_block(header, body, receipts);
+        self.sync_advertised_history_range();
     }
 
     pub fn remove_cached_blocks(&self, reverted_hashes: &[B256]) {
         self.serve_cache.remove_blocks(reverted_hashes);
+        self.sync_advertised_history_range();
     }
+
+    fn sync_advertised_history_range(&self) {
+        let (earliest, latest, latest_hash) = advertised_history_range(&self.serve_cache);
+        self.network.update_block_range(BlockRangeUpdate {
+            earliest,
+            latest,
+            latest_hash,
+        });
+    }
+}
+
+fn advertised_history_range(serve_cache: &ServeCacheProvider) -> (u64, u64, B256) {
+    serve_cache
+        .advertised_history_range()
+        .unwrap_or((0, 0, MAINNET.genesis_hash()))
 }
