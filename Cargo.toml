@@ -25,6 +25,7 @@ thiserror = "2"
 futures = "0.3"
 futures-util = "0.3"
 eyre = "0.6"
+datafusion = "51"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

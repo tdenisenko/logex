@@ -4,8 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json, Response};
 
-use logex_query::{self, SelectItem, is_simple_select};
-use logex_types::LogRow;
+use logex_query::{self, SqlQueryError};
 use serde::Serialize;
 
 use crate::handler::AppState;
@@ -42,29 +41,17 @@ pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> Response {
-    let query = match logex_query::parse(&req.sql) {
-        Ok(q) => q,
-        Err(e) => {
+    let storage = state.storage.read().await;
+    let head_block = storage.head_block();
+    let result = match logex_query::execute_sql(&req.sql, &storage, head_block).await {
+        Ok(r) => r,
+        Err(SqlQueryError::DataFusion(e)) => {
             return ErrorResponse {
-                error: format!("parse error: {e}"),
+                error: format!("query error: {e}"),
             }
             .into_response();
         }
-    };
-
-    if !is_simple_select(&query) {
-        return ErrorResponse {
-            error: "only simple SELECT queries are supported (no aggregation/decode yet)"
-                .to_string(),
-        }
-        .into_response();
-    }
-
-    let storage = state.storage.read().await;
-    let head_block = storage.head_block();
-    let result = match logex_query::execute(&query, &storage, head_block) {
-        Ok(r) => r,
-        Err(e) => {
+        Err(SqlQueryError::Storage(e)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -76,126 +63,13 @@ pub async fn handle_query(
     };
 
     let row_count = result.rows.len();
-    let rows = project_rows(&query.select, &result.rows);
 
     Json(QueryResponse {
-        rows,
+        rows: result.rows,
         total_scanned: result.total_scanned,
         row_count,
     })
     .into_response()
-}
-
-/// Convert a LogRow to a JSON object with hex-encoded fields.
-fn log_row_to_json(row: &LogRow) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "block_number".into(),
-        serde_json::Value::Number(row.block_number.into()),
-    );
-    obj.insert(
-        "block_hash".into(),
-        serde_json::Value::String(format!("0x{}", hex::encode(row.block_hash))),
-    );
-    obj.insert(
-        "timestamp".into(),
-        serde_json::Value::Number(row.timestamp.into()),
-    );
-    obj.insert(
-        "tx_hash".into(),
-        serde_json::Value::String(format!("0x{}", hex::encode(row.tx_hash))),
-    );
-    obj.insert(
-        "tx_index".into(),
-        serde_json::Value::Number(row.tx_index.into()),
-    );
-    obj.insert(
-        "log_index".into(),
-        serde_json::Value::Number(row.log_index.into()),
-    );
-    obj.insert(
-        "address".into(),
-        serde_json::Value::String(format!("0x{}", hex::encode(row.address))),
-    );
-
-    let topics: Vec<serde_json::Value> = [row.topic0, row.topic1, row.topic2, row.topic3]
-        .iter()
-        .filter_map(|t| t.map(|h| serde_json::Value::String(format!("0x{}", hex::encode(h)))))
-        .collect();
-    obj.insert("topics".into(), serde_json::Value::Array(topics));
-
-    obj.insert(
-        "data".into(),
-        serde_json::Value::String(format!("0x{}", hex::encode(&row.data))),
-    );
-    obj.insert(
-        "data_len".into(),
-        serde_json::Value::Number(row.data_len.into()),
-    );
-
-    serde_json::Value::Object(obj)
-}
-
-fn project_rows(select: &[SelectItem], rows: &[LogRow]) -> Vec<serde_json::Value> {
-    let selects_all = select.iter().any(|item| matches!(item, SelectItem::Star));
-    if selects_all {
-        return rows.iter().map(log_row_to_json).collect();
-    }
-
-    rows.iter()
-        .map(|row| {
-            let mut obj = serde_json::Map::new();
-            for item in select {
-                if let SelectItem::Column { name, alias } = item
-                    && let Some((key, value)) = project_column(row, name, alias.as_deref())
-                {
-                    obj.insert(key, value);
-                }
-            }
-            serde_json::Value::Object(obj)
-        })
-        .collect()
-}
-
-fn project_column(
-    row: &LogRow,
-    name: &str,
-    alias: Option<&str>,
-) -> Option<(String, serde_json::Value)> {
-    let key = alias.unwrap_or(name).to_owned();
-    let value = match name {
-        "block_number" => serde_json::Value::Number(row.block_number.into()),
-        "block_hash" => serde_json::Value::String(format!("0x{}", hex::encode(row.block_hash))),
-        "timestamp" => serde_json::Value::Number(row.timestamp.into()),
-        "tx_hash" => serde_json::Value::String(format!("0x{}", hex::encode(row.tx_hash))),
-        "tx_index" => serde_json::Value::Number(row.tx_index.into()),
-        "log_index" => serde_json::Value::Number(row.log_index.into()),
-        "address" => serde_json::Value::String(format!("0x{}", hex::encode(row.address))),
-        "topic0" => optional_hash_json(row.topic0),
-        "topic1" => optional_hash_json(row.topic1),
-        "topic2" => optional_hash_json(row.topic2),
-        "topic3" => optional_hash_json(row.topic3),
-        "topics" => {
-            let topics: Vec<serde_json::Value> = [row.topic0, row.topic1, row.topic2, row.topic3]
-                .iter()
-                .filter_map(|topic| {
-                    topic.map(|hash| serde_json::Value::String(format!("0x{}", hex::encode(hash))))
-                })
-                .collect();
-            serde_json::Value::Array(topics)
-        }
-        "data" => serde_json::Value::String(format!("0x{}", hex::encode(&row.data))),
-        "data_len" => serde_json::Value::Number(row.data_len.into()),
-        "source" => serde_json::Value::Number((row.source as u8).into()),
-        _ => return None,
-    };
-
-    Some((key, value))
-}
-
-fn optional_hash_json(hash: Option<alloy_primitives::B256>) -> serde_json::Value {
-    hash.map(|value| serde_json::Value::String(format!("0x{}", hex::encode(value))))
-        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Handle GET /health.
@@ -398,6 +272,70 @@ mod tests {
         assert_eq!(result.rows[0]["block_number"], 100);
         assert!(result.rows[0].get("address").is_none());
         assert!(result.rows[0].get("emitter").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_post_query_aggregate() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState {
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
+            subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
+        });
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "SELECT COUNT(*) AS total FROM logs WHERE block_number <= latest"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.rows[0]["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_post_query_desc_limit() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState {
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
+            subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
+        });
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "SELECT block_number AS bn FROM logs ORDER BY block_number DESC LIMIT 1"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.rows[0]["bn"], 200);
     }
 
     #[tokio::test]
