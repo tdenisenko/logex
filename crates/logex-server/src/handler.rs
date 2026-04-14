@@ -5,7 +5,7 @@ use axum::response::Json;
 
 use logex_query::{self, QueryResult};
 use logex_storage::PartitionManager;
-use logex_types::SyncStatus;
+use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
 use crate::eth_filter::{AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter, matches_filter};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
@@ -34,7 +34,7 @@ pub async fn handle_jsonrpc(
         "eth_blockNumber" => handle_eth_block_number(&storage, &request),
         "web3_clientVersion" => Ok(JsonRpcResponse::success(
             id.clone(),
-            serde_json::Value::String("LogEx/0.1.0".into()),
+            serde_json::Value::String(LOGEX_CLIENT_VERSION.into()),
         )),
         "net_version" => Ok(JsonRpcResponse::success(
             id.clone(),
@@ -170,7 +170,7 @@ mod tests {
     use alloy_primitives::{Address, B256, bytes};
     use logex_index::IndexBuilder;
     use logex_storage::PartitionManagerConfig;
-    use logex_types::{LogRow, Source};
+    use logex_types::{LOGEX_CLIENT_VERSION, LogRow, Source};
     use tempfile::TempDir;
 
     fn make_test_rows() -> Vec<LogRow> {
@@ -297,5 +297,31 @@ mod tests {
         assert!(response.error.is_none());
         let block = response.result.unwrap();
         assert_eq!(block, "0xc8"); // 200
+    }
+
+    #[tokio::test]
+    async fn test_web3_client_version() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState {
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
+            subscriptions: None,
+            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
+        });
+
+        let req_json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "web3_clientVersion",
+            "params": [],
+            "id": 1
+        });
+
+        let request: JsonRpcRequest = serde_json::from_value(req_json).unwrap();
+        let Json(response) = handle_jsonrpc(State(state), Json(request)).await;
+
+        assert!(response.error.is_none());
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::Value::String(LOGEX_CLIENT_VERSION.into())
+        );
     }
 }

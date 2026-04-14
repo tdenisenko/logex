@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use alloy_primitives::B256;
 use eyre::Result;
+use logex_types::LOGEX_CLIENT_VERSION;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
 use reth_eth_wire::{
-    BlockRangeUpdate, DisconnectReason, EthVersion, GetReceipts, GetReceipts70, NetworkPrimitives,
-    Receipts, Receipts69, Receipts70, UnifiedStatus,
+    BlockRangeUpdate, DisconnectReason, EthVersion, GetReceipts, GetReceipts70, HelloMessage,
+    NetworkPrimitives, Receipts, Receipts69, Receipts70, UnifiedStatus,
 };
 use reth_ethereum_forks::Head;
 use reth_network::p2p::bodies::client::BodiesClient;
@@ -147,7 +148,7 @@ impl PeerManager {
         let discovery_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
         let network_head = normalize_network_head(our_head);
 
-        let mut config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
+        let builder = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
             .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
@@ -156,8 +157,13 @@ impl PeerManager {
             .peer_config(peer_config)
             .mainnet_boot_nodes()
             .disable_tx_gossip(true)
-            .discovery(discovery)
-            .build(Arc::clone(&serve_cache));
+            .discovery(discovery);
+        let peer_id = builder.get_peer_id();
+        let hello = HelloMessage::builder(peer_id)
+            .client_version(LOGEX_CLIENT_VERSION)
+            .build();
+
+        let mut config = builder.hello_message(hello).build(Arc::clone(&serve_cache));
         let (earliest, latest, latest_hash) = advertised_history_range(&serve_cache);
         config.status.set_history_range(earliest, latest);
         config.status.blockhash = latest_hash;
