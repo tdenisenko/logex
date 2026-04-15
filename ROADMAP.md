@@ -55,6 +55,8 @@ LogEx should become a canonical Ethereum event-log node that:
 
 - Weak subjectivity means a fresh client needs one recent trusted beacon checkpoint on first startup.
   - In practice that checkpoint is a recent beacon block root, optionally paired with a slot.
+  - Development note recorded on April 16, 2026: an operator-provided example finalized beacon block root for future bootstrap testing is `0xfc5b0de0b6d9f78f6528ef455a8efddfdf61de272a9abe86441d62a8f63006f9`.
+  - Treat that recorded root as an example `--checkpoint` input, not as a hardcoded protocol constant; it should be refreshed once it ages out of the weak-subjectivity window.
   - LogEx persists the resulting consensus state locally, so restart should not need the operator to re-enter it.
 - CL-backed EL canonicality starts only once execution payloads exist in the beacon chain.
   - That means post-Merge execution blocks are proved by the beacon light-client path.
