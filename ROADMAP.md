@@ -86,6 +86,13 @@ LogEx should become a canonical Ethereum event-log node that:
     - sealed-segment index rebuilds and manifest refresh now stay compatible with compacted storage
   - cross-surface consistency coverage now exists for REST, direct SQL, gRPC typed logs, and `eth_getLogs`
   - a benchmark harness now exists for native log filters and SQL workloads; the remaining benchmark task is feeding it larger realistic datasets and recording target numbers
+  - former roadmap task 3 is complete for the current architecture scope:
+    - native hot/sealed storage, page-oriented sealed-column compaction, manifest-aware reads, and compacted-segment index/query compatibility are in place
+  - former roadmap task 4 is complete for the current architecture scope:
+    - SQL uses native storage through DataFusion
+    - `eth_getLogs` uses the native filter path directly
+    - gRPC exposes both SQL queries and typed log methods
+    - cross-surface consistency coverage is in place
 
 ## Explicitly Not Needed
 
@@ -147,55 +154,12 @@ LogEx should become a canonical Ethereum event-log node that:
      - malformed or incomplete receipt responses are detected and rejected cleanly
      - restart and resume preserve the canonical verified sync position
 
-3. Native Storage Engine Rewrite
-   - What to build:
-     - keep the catalog + hot/sealed segment model
-     - keep manifests and durable sync metadata as the source of truth
-     - keep the column layout aligned with Arrow/DataFusion scans
-     - keep the physical split between raw hot writes and compacted sealed history
-     - replace the current head-distance compaction safety margin with CL-finality-aware compaction once finalized anchors exist
-     - finish the metadata set that still needs to live in storage:
-       - headers or header references needed for APIs and verification
-       - receipt-level metadata needed for proof boundaries
-       - finalized / optimistic sync anchors
-     - keep tuning codec choices and page sizing based on benchmark results rather than guessing permanently upfront
-   - Caveats and tradeoffs:
-     - this is a justified rewrite target, not an area for more bridge code
-     - the format should be specialized for verified log storage, not optimized for pretending to be a generic relational database or a full execution-node database
-     - compression must be page- or chunk-oriented so indexed reads do not force whole-column decompression
-     - hot data and sealed historical data should have different physical treatment
-     - without CL finality, compaction can only be delayed heuristically rather than proven-finalized
-   - Done when:
-     - the old pre-native format can be discarded
-     - the new format supports ingestion, restart/resume, canonical filtering, indexing, and compression as one coherent design
-     - the storage layer exposes primitives that are sufficient for SQL, `eth_getLogs`, gRPC, and proof-related features without special-case side stores
-
-4. Unified Query and API Layer Over Native Storage
-   - What to build:
-     - keep expanding index-aware filter pushdown where sound:
-       - topic1-aware pushdown beyond the current composite cases
-       - data-length and source pushdown where useful
-       - any additional point/range cases that materially improve real workloads
-     - keep DataFusion as the canonical SQL layer for REST `/query`, gRPC SQL-style queries, and the web UI
-     - keep the typed gRPC log methods and SQL gRPC methods aligned with the same canonical results
-     - add Arrow- or batch-oriented SQL result transport only if large-result benchmarks show the JSON SQL transport is a real bottleneck
-     - decide whether `decode(...)` belongs as a SQL UDF or remains explicitly deferred
-   - Caveats and tradeoffs:
-     - the strongest design is one storage/index core with API-specific execution layers, not one forced adapter for every surface
-     - `eth_getLogs` semantics are Ethereum API semantics first, not SQL semantics with a wrapper
-     - typed gRPC logs are already the canonical log transport; SQL-over-gRPC transport should evolve only if measured workloads justify it
-   - Done when:
-     - SQL surfaces no longer depend on the row-materialization bridge
-     - `eth_getLogs` no longer depends on SQL translation
-     - REST, gRPC, web UI, and JSON-RPC all read from the same canonical stored data and produce consistent answers
-
-5. Performance, Correctness, and Documentation Gate
+3. Release Gate
    - What to build:
      - end-to-end validation for weak subjectivity restart, sync committee rotation, finalized/optimistic anchor handling, receipt-root reconstruction, malicious peer detection, bootstrap, shutdown, and resume once the CL path exists
      - run the benchmark harness on realistic ERC-20 / ERC-721-heavy datasets and record target throughput / latency numbers
      - run the benchmark harness on indexed queries, broader SQL queries, and `eth_getLogs`-style workloads
-     - corruption, partial-page decode, and torn-write recovery tests
-     - keep the cross-surface consistency coverage in place as APIs evolve
+     - keep the corruption, partial-page decode, torn-write recovery, and cross-surface consistency coverage in place as APIs evolve
      - README alignment with the actual trust model, runtime model, and verification guarantees
    - Caveats and tradeoffs:
      - this should be treated as a gate, not a cleanup bucket
