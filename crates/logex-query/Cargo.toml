@@ -9,6 +9,7 @@ logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
 alloy-primitives = { workspace = true }
+async-trait = { workspace = true }
 datafusion = { workspace = true }
 hex = "0.4"
 roaring = "0.10"

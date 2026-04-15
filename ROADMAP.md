@@ -58,9 +58,11 @@ LogEx should become a canonical Ethereum event-log node that:
   - UI/runtime state no longer falsely claims sync completion on missing targets
 - Query/storage direction is already established:
   - local storage is the source of truth
-  - current APIs support row/filter queries
-  - REST `/query` now has a DataFusion-backed path for aggregates, aliases, `ORDER BY`, `LIMIT`, and `latest` without changing the on-disk storage format
-  - gRPC and web UI query unification still remain to be done
+  - REST `/query`, gRPC `Query`, and the web UI now share the same DataFusion-backed SQL engine
+  - current storage is exposed to DataFusion through a real `TableProvider` scan path rather than preloading candidate rows into a temporary `MemTable`
+  - LogEx-specific SQL rewrites such as `event'...'`, `address'...'`, and `latest` still work without changing the on-disk storage format
+  - sealed-partition pruning and existing address/topic/block indexes are still reused through the seed-query path
+  - hot-partition queries no longer risk missing fresh rows that were written after the last hot-index rebuild
   - codec scaffolding already exists in the storage crate for dictionary, delta, delta-of-delta, zstd, and lz4, but the active read/write path still writes raw columns today
 
 ## Explicitly Not Needed
@@ -117,24 +119,12 @@ LogEx should become a canonical Ethereum event-log node that:
    - malicious peer mismatch detection
    - bootstrap, restart, shutdown, and resume regressions
 
-6. Finish the DataFusion query migration.
-   - Reuse the new DataFusion-backed REST `/query` path as the base query engine.
-   - Expose current storage through a real `TableProvider` scan path instead of today’s in-memory batching step.
-   - Preserve partition pruning and current index advantages.
-   - Reuse the existing address/topic/block indexes where the planner can map filters onto them.
-   - Keep the on-disk storage format unchanged.
-
-7. Preserve LogEx-specific query ergonomics while moving to DataFusion.
-   - Keep existing row-query behavior working for `SELECT *`, projected columns, `WHERE`, and non-aggregate `ORDER BY`.
-   - Preserve `event'...'`, `address'...'`, and `latest` through rewrites or UDFs.
+6. Benchmark and tune the post-migration SQL path.
+   - Measure common indexed queries after the DataFusion migration so the current fast path does not regress badly.
+   - Decide whether more explicit DataFusion-side filter pushdown is worth the added complexity, or whether the current seed-query approach is sufficient for v1.
    - Decide whether `decode(...)` is part of v1 or remains deferred.
 
-8. Add API compatibility and regression coverage for the richer query path.
-   - REST, gRPC, and web UI should all use the same query engine.
-   - Add tests for aggregates, aliases, mixed filters, ordering, and hot-partition visibility.
-   - Benchmark common indexed queries so the current fast path does not regress badly.
-
-9. Finish the storage compression strategy without harming queryability.
+7. Finish the storage compression strategy without harming queryability.
    - Keep the hot partition append-friendly and mostly uncompressed; compression should primarily happen when a partition is sealed and becomes immutable.
    - Do not compress an entire column file as one giant blob.
    - Add page- or chunk-based compression inside each sealed column so row IDs produced by indexes can be mapped to a small number of compressed pages instead of forcing full-column decompression.
@@ -161,7 +151,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - restart and resume tests across mixed compressed/uncompressed partitions
      - corruption / partial-page decode tests
 
-10. Reconcile the public README with the actual trust model and runtime model.
+8. Reconcile the public README with the actual trust model and runtime model.
    - Make it explicit what is verified today.
    - Make it explicit what the weak subjectivity assumption is.
    - Make it explicit that LogEx is not a full execution node and not a standard EL<->CL pair.
