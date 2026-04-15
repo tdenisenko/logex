@@ -111,11 +111,40 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     } else {
         None
     };
+    let sync_model = if sync.checkpoint.is_some() {
+        "cl_anchored"
+    } else {
+        "el_legacy"
+    };
+    let sync_direction = if sync.checkpoint.is_some() {
+        "checkpoint_outward"
+    } else {
+        "peer_tip_upward"
+    };
+    let canonical_top_block = sync
+        .optimistic_execution_head
+        .map(|anchor| anchor.block_number)
+        .or((sync.target_block > 0).then_some(sync.target_block))
+        .or(head_block);
+    let index_lag_blocks = canonical_top_block
+        .zip(
+            sync.indexed_execution_head
+                .map(|anchor| anchor.block_number),
+        )
+        .map(|(top, indexed)| top.saturating_sub(indexed));
+    let finality_lag_blocks = canonical_top_block
+        .zip(
+            sync.finalized_execution_head
+                .map(|anchor| anchor.block_number),
+        )
+        .map(|(top, finalized)| top.saturating_sub(finalized));
     Json(serde_json::json!({
         "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
         "node_state": sync.node_state,
         "node_state_label": sync.node_state.as_label(),
+        "sync_model": sync_model,
+        "sync_direction": sync_direction,
         "connected_peers": sync.connected_peers,
         "serving_peers": sync.serving_peers,
         "pending_peers": sync.pending_peers,
@@ -132,11 +161,14 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
         "progress_pct": progress_pct,
+        "canonical_top_block": canonical_top_block,
         "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
         "checkpoint_slot": sync.checkpoint.and_then(|checkpoint| checkpoint.beacon_slot),
         "indexed_execution_head": sync.indexed_execution_head,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
+        "index_lag_blocks": index_lag_blocks,
+        "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
     }))
 }
@@ -154,7 +186,9 @@ mod tests {
     use axum::http::Request;
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::{LogRow, NodeState, Source, SyncStatus};
+    use logex_types::{
+        ExecutionAnchor, LogRow, NodeState, Source, SyncStatus, WeakSubjectivityCheckpoint,
+    };
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -461,6 +495,31 @@ mod tests {
                 blocks_per_minute: 120.0,
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
+                checkpoint: Some(WeakSubjectivityCheckpoint {
+                    beacon_root: B256::repeat_byte(0x77),
+                    beacon_slot: Some(123_456),
+                }),
+                indexed_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x01),
+                    beacon_slot: 1,
+                    block_number: 200,
+                    block_hash: B256::repeat_byte(0x02),
+                    receipts_root: B256::repeat_byte(0x03),
+                }),
+                optimistic_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x04),
+                    beacon_slot: 2,
+                    block_number: 500,
+                    block_hash: B256::repeat_byte(0x05),
+                    receipts_root: B256::repeat_byte(0x06),
+                }),
+                finalized_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x07),
+                    beacon_slot: 3,
+                    block_number: 480,
+                    block_hash: B256::repeat_byte(0x08),
+                    receipts_root: B256::repeat_byte(0x09),
+                }),
                 ..Default::default()
             },
         ));
@@ -484,6 +543,11 @@ mod tests {
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");
+        assert_eq!(status["sync_model"], "cl_anchored");
+        assert_eq!(status["sync_direction"], "checkpoint_outward");
+        assert_eq!(status["canonical_top_block"], 500);
+        assert_eq!(status["index_lag_blocks"], 300);
+        assert_eq!(status["finality_lag_blocks"], 20);
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);

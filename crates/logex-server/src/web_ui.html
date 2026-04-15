@@ -23,6 +23,8 @@
   .badge-syncing .dot { background: #d29922; animation: pulse 1.2s infinite; }
   .badge-discovering, .badge-connecting { background: #10213a; color: #58a6ff; }
   .badge-discovering .dot, .badge-connecting .dot { background: #58a6ff; animation: pulse 1.2s infinite; }
+  .badge-waiting { background: #0f2f35; color: #7ee7ff; }
+  .badge-waiting .dot { background: #7ee7ff; animation: pulse 1.2s infinite; }
   .badge-reconnecting { background: #3d2e00; color: #d29922; }
   .badge-reconnecting .dot { background: #d29922; animation: pulse 1.2s infinite; }
   .badge-disconnected { background: #3b1114; color: #f85149; }
@@ -38,6 +40,31 @@
   .progress-meta { font-size: 12px; color: #8b949e; display: flex; gap: 14px; flex-wrap: wrap; }
   .progress-bar { height: 10px; border-radius: 999px; background: #161b22; border: 1px solid #30363d; overflow: hidden; }
   .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #1f6feb, #3fb950); transition: width .35s ease; }
+  .cards-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .meta-card, .rail-card { background: #11161d; border: 1px solid #21262d; border-radius: 10px; padding: 14px 16px; }
+  .card-title { font-size: 14px; font-weight: 700; color: #f0f6fc; margin-bottom: 12px; }
+  .card-grid { display: grid; gap: 12px 16px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .kv { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .kv .k { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .06em; }
+  .kv .v { font-size: 13px; color: #f0f6fc; min-height: 18px; }
+  .hint { margin-top: 12px; font-size: 12px; color: #8b949e; line-height: 1.5; }
+  .marker-rail { position: relative; height: 108px; }
+  .marker-line { position: absolute; top: 52px; left: 0; right: 0; height: 4px; border-radius: 999px; background: linear-gradient(90deg, #58a6ff, #3fb950); opacity: .6; }
+  .marker { position: absolute; width: max-content; max-width: 160px; transform: translateX(-50%); text-align: center; }
+  .marker.top { top: 8px; }
+  .marker.bottom { top: 50px; }
+  .marker-name { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .06em; }
+  .marker-value { font-size: 12px; color: #f0f6fc; }
+  .marker-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #0d1117; margin: 8px auto 0; box-shadow: 0 0 0 2px rgba(13,17,23,.7); }
+  .marker.bottom .marker-dot { margin: 0 auto 8px; }
+  .marker-head .marker-dot { background: #58a6ff; }
+  .marker-checkpoint .marker-dot { background: #f0f6fc; }
+  .marker-optimistic .marker-dot { background: #79c0ff; }
+  .marker-finalized .marker-dot { background: #3fb950; }
+  .marker-indexed .marker-dot { background: #d29922; }
+  .marker-cursor .marker-dot { background: #f78166; }
+  .marker-genesis .marker-dot { background: #8b949e; }
+  .direction-note { margin-top: 10px; display: flex; justify-content: space-between; font-size: 12px; color: #8b949e; }
 
   .query-panel { display: flex; flex-direction: column; gap: 10px; }
   textarea { width: 100%; height: 90px; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; resize: vertical; outline: none; }
@@ -67,12 +94,14 @@
 <header>
   <div class="title">
     <h1>LogEx</h1>
-    <p>Ethereum Log Query Engine</p>
+    <p>Canonical Ethereum Log Verification Dashboard</p>
   </div>
   <div class="status-panel" id="statusPanel">
     <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
-    <span class="stat">Current: <b id="stBlock">--</b></span>
-    <span class="stat">Target: <b id="stTarget">--</b></span>
+    <span class="stat">Mode: <b id="stMode">--</b></span>
+    <span class="stat">Coverage: <b id="stDirection">--</b></span>
+    <span class="stat">Cursor: <b id="stBlock">--</b></span>
+    <span class="stat">Top: <b id="stTarget">--</b></span>
     <span class="stat">Indexed: <b id="stIndexed">--</b></span>
     <span class="stat">Serving: <b id="stServing">--</b></span>
     <span class="stat">Connected: <b id="stPeers">--</b></span>
@@ -91,11 +120,47 @@
     <div class="progress-top">
       <strong id="stProgressPct">--</strong>
       <div class="progress-meta">
-        <span>Remaining blocks: <b id="stRemaining">--</b></span>
-        <span>Network head: <b id="stHead">--</b></span>
+        <span>Model: <b id="stModelMeta">--</b></span>
+        <span>Remaining span: <b id="stRemaining">--</b></span>
+        <span>Canonical top: <b id="stHead">--</b></span>
+        <span>Checkpoint: <b id="stCheckpointShort">--</b></span>
       </div>
     </div>
     <div class="progress-bar"><div class="progress-fill" id="stProgressFill"></div></div>
+  </div>
+  <div class="cards-grid">
+    <div class="meta-card">
+      <div class="card-title">Consensus Markers</div>
+      <div class="card-grid">
+        <div class="kv"><span class="k">Checkpoint Root</span><span class="v mono" id="stCheckpointRoot">--</span></div>
+        <div class="kv"><span class="k">Checkpoint Slot</span><span class="v" id="stCheckpointSlot">--</span></div>
+        <div class="kv"><span class="k">Optimistic Head</span><span class="v" id="stOptimistic">--</span></div>
+        <div class="kv"><span class="k">Finalized Head</span><span class="v" id="stFinalized">--</span></div>
+        <div class="kv"><span class="k">Indexed Head</span><span class="v" id="stIndexedExec">--</span></div>
+        <div class="kv"><span class="k">Index Lag</span><span class="v" id="stIndexLag">--</span></div>
+        <div class="kv"><span class="k">Finality Gap</span><span class="v" id="stFinalityGap">--</span></div>
+        <div class="kv"><span class="k">Execution Head</span><span class="v" id="stExecutionHead">--</span></div>
+      </div>
+      <p class="hint" id="stConsensusHint">--</p>
+    </div>
+    <div class="meta-card">
+      <div class="card-title">Verification Model</div>
+      <div class="card-grid">
+        <div class="kv"><span class="k">Sync Model</span><span class="v" id="stSyncModel">--</span></div>
+        <div class="kv"><span class="k">Coverage</span><span class="v" id="stSyncDirection">--</span></div>
+        <div class="kv"><span class="k">Cursor Block</span><span class="v" id="stCursor">--</span></div>
+        <div class="kv"><span class="k">Stored Logs</span><span class="v" id="stStoredLogsCard">--</span></div>
+        <div class="kv"><span class="k">Session Logs</span><span class="v" id="stSessionLogsCard">--</span></div>
+        <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
+      </div>
+      <p class="hint" id="stDirectionHint">--</p>
+    </div>
+  </div>
+  <div class="rail-card">
+    <div class="card-title">Execution Marker Rail</div>
+    <div class="marker-rail" id="markerRail"></div>
+    <div class="direction-note"><span id="railLeftLabel">Toward Head</span><span id="railRightLabel">Toward Genesis</span></div>
+    <p class="hint" id="stRailHint">--</p>
   </div>
   <div class="query-panel">
     <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
@@ -159,6 +224,8 @@ function stateToBadge(state) {
       return { className: 'status-badge badge-synced', label: 'Synced' };
     case 'syncing':
       return { className: 'status-badge badge-syncing', label: 'Syncing' };
+    case 'waiting_for_consensus':
+      return { className: 'status-badge badge-waiting', label: 'Waiting For Consensus' };
     case 'discovering':
       return { className: 'status-badge badge-discovering', label: 'Discovering' };
     case 'connecting':
@@ -172,21 +239,95 @@ function stateToBadge(state) {
   }
 }
 
+function anchorBlock(anchor) {
+  if (!anchor || anchor.block_number == null) return null;
+  var value = Number(anchor.block_number);
+  return Number.isFinite(value) ? value : null;
+}
+
+function syncModelLabel(model) {
+  return model === 'cl_anchored' ? 'CL anchored' : 'EL legacy';
+}
+
+function syncDirectionLabel(direction) {
+  return direction === 'checkpoint_outward' ? 'Checkpoint outward' : 'Peer tip upward';
+}
+
+function railPosition(block, topBlock) {
+  if (!Number.isFinite(block) || !Number.isFinite(topBlock) || topBlock <= 0) return 0;
+  return Math.max(0, Math.min(100, (1 - (block / topBlock)) * 100));
+}
+
+function renderMarkerRail(data, topBlock, cursorBlock, hasConsensus) {
+  var rail = document.getElementById('markerRail');
+  if (!hasConsensus || !(topBlock > 0)) {
+    rail.innerHTML = '<div class="empty-state">Checkpointed CL mode will populate execution markers here.</div>';
+    document.getElementById('stRailHint').textContent = 'Enable checkpointed consensus sync to see checkpoint-centered execution coverage markers.';
+    return;
+  }
+
+  var checkpointLabel = data.checkpoint_root ? truncHash(data.checkpoint_root) : 'Checkpoint';
+  var markers = [
+    { name: 'Head', value: fmt(topBlock), pos: 0, className: 'marker-head' },
+    { name: 'Checkpoint', value: checkpointLabel, pos: 50, className: 'marker-checkpoint' },
+    { name: 'Optimistic', value: fmt(anchorBlock(data.optimistic_execution_head)), pos: railPosition(anchorBlock(data.optimistic_execution_head), topBlock), className: 'marker-optimistic' },
+    { name: 'Finalized', value: fmt(anchorBlock(data.finalized_execution_head)), pos: railPosition(anchorBlock(data.finalized_execution_head), topBlock), className: 'marker-finalized' },
+    { name: 'Indexed', value: fmt(anchorBlock(data.indexed_execution_head)), pos: railPosition(anchorBlock(data.indexed_execution_head), topBlock), className: 'marker-indexed' },
+    { name: 'Cursor', value: fmt(cursorBlock), pos: railPosition(cursorBlock, topBlock), className: 'marker-cursor' },
+    { name: 'Genesis', value: '0', pos: 100, className: 'marker-genesis' }
+  ].filter(function(marker) {
+    return marker.name === 'Head' || marker.name === 'Genesis' || marker.value !== '--';
+  });
+
+  rail.innerHTML =
+    '<div class="marker-line"></div>' +
+    markers.map(function(marker, idx) {
+      var placement = idx % 2 === 0 ? 'top' : 'bottom';
+      var labelBeforeDot =
+        placement === 'top'
+          ? '<div class="marker-name">' + marker.name + '</div><div class="marker-value">' + marker.value + '</div><div class="marker-dot"></div>'
+          : '<div class="marker-dot"></div><div class="marker-name">' + marker.name + '</div><div class="marker-value">' + marker.value + '</div>';
+      return '<div class="marker ' + placement + ' ' + marker.className + '" style="left:' + marker.pos.toFixed(2) + '%">' + labelBeforeDot + '</div>';
+    }).join('');
+
+  document.getElementById('stRailHint').textContent =
+    'The checkpoint marker is the conceptual origin. Coverage expands from that anchor toward both the live head and genesis.';
+}
+
 function updateStatus(data) {
   var current = Number(data.current_block || 0);
   var target = Number(data.target_block || 0);
   var targetKnown = target > 0;
   var nodeState = data.node_state || 'starting';
+  var syncModel = data.sync_model || 'el_legacy';
+  var syncDirection = data.sync_direction || 'peer_tip_upward';
+  var hasConsensus = syncModel === 'cl_anchored';
+  var canonicalTop = Number(data.canonical_top_block || 0);
+  var indexedExec = anchorBlock(data.indexed_execution_head);
+  var optimisticExec = anchorBlock(data.optimistic_execution_head);
+  var finalizedExec = anchorBlock(data.finalized_execution_head);
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
   var badgeData = stateToBadge(nodeState);
   badge.className = badgeData.className;
   badgeText.textContent = data.node_state_label || badgeData.label;
-  var remaining = targetKnown && target > current ? target - current : null;
-  var pct = targetKnown ? Math.min((current / target) * 100, 100) : 0;
 
+  var remaining = null;
+  var pct = 0;
+  if (hasConsensus) {
+    remaining = indexedExec != null ? indexedExec : (current > 0 ? current : null);
+    if (canonicalTop > 0 && indexedExec != null) {
+      pct = railPosition(indexedExec, canonicalTop);
+    }
+  } else {
+    remaining = targetKnown && target > current ? target - current : null;
+    pct = targetKnown ? Math.min((current / target) * 100, 100) : 0;
+  }
+
+  document.getElementById('stMode').textContent = syncModelLabel(syncModel);
+  document.getElementById('stDirection').textContent = syncDirectionLabel(syncDirection);
   document.getElementById('stBlock').textContent = fmt(current);
-  document.getElementById('stTarget').textContent = targetKnown ? fmt(target) : 'Awaiting tip';
+  document.getElementById('stTarget').textContent = canonicalTop > 0 ? fmt(canonicalTop) : (targetKnown ? fmt(target) : 'Awaiting tip');
   document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
   document.getElementById('stPeers').textContent = fmt(data.connected_peers);
   document.getElementById('stServing').textContent = fmt(data.serving_peers);
@@ -197,20 +338,63 @@ function updateStatus(data) {
   document.getElementById('stSessionLogs').textContent = fmt(data.logs_ingested);
   document.getElementById('stStorageUsed').textContent = fmtBytes(data.storage_used_bytes);
   document.getElementById('stDiskFree').textContent = fmtBytes(data.disk_free_bytes);
-  document.getElementById('stHead').textContent = targetKnown ? fmt(target) : '--';
+  document.getElementById('stModelMeta').textContent = syncModelLabel(syncModel);
+  document.getElementById('stHead').textContent = canonicalTop > 0 ? fmt(canonicalTop) : '--';
+  document.getElementById('stCheckpointShort').textContent = data.checkpoint_root ? truncHash(data.checkpoint_root) : '--';
   document.getElementById('stRemaining').textContent = remaining == null ? '--' : fmt(remaining);
-  if (nodeState === 'syncing' || nodeState === 'synced') {
+
+  document.getElementById('stCheckpointRoot').textContent = data.checkpoint_root || '--';
+  document.getElementById('stCheckpointSlot').textContent = fmt(data.checkpoint_slot);
+  document.getElementById('stOptimistic').textContent = fmt(optimisticExec);
+  document.getElementById('stFinalized').textContent = fmt(finalizedExec);
+  document.getElementById('stIndexedExec').textContent = fmt(indexedExec);
+  document.getElementById('stIndexLag').textContent = fmt(data.index_lag_blocks);
+  document.getElementById('stFinalityGap').textContent = fmt(data.finality_lag_blocks);
+  document.getElementById('stExecutionHead').textContent = canonicalTop > 0 ? fmt(canonicalTop) : '--';
+
+  document.getElementById('stSyncModel').textContent = syncModelLabel(syncModel);
+  document.getElementById('stSyncDirection').textContent = syncDirectionLabel(syncDirection);
+  document.getElementById('stCursor').textContent = fmt(current);
+  document.getElementById('stStoredLogsCard').textContent = fmt(data.total_rows);
+  document.getElementById('stSessionLogsCard').textContent = fmt(data.logs_ingested);
+  document.getElementById('stPeerTip').textContent = targetKnown ? fmt(target) : '--';
+
+  if (hasConsensus) {
+    document.getElementById('stConsensusHint').textContent =
+      'Checkpoint, optimistic, finalized, and indexed execution anchors show the canonical CL view that EL data must match.';
+    document.getElementById('stDirectionHint').textContent =
+      'CL-anchored history proving is checkpoint-centered: verification expands from the weak-subjectivity anchor toward both the live head and genesis.';
+    if (canonicalTop > 0) {
+      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% downward history coverage from the checkpoint model';
+    } else {
+      document.getElementById('stProgressPct').textContent = 'Checkpoint-centered verification, awaiting canonical head marker';
+    }
+  } else if (nodeState === 'syncing' || nodeState === 'synced') {
+    document.getElementById('stConsensusHint').textContent =
+      'Legacy EL mode is active. Checkpointed CL markers appear once consensus-backed sync is configured.';
+    document.getElementById('stDirectionHint').textContent =
+      'Legacy mode still follows peer-advertised EL height upward. The final architecture replaces this with checkpoint-centered verification.';
     if (targetKnown) {
       document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% synced';
     } else {
       document.getElementById('stProgressPct').textContent = 'Syncing, awaiting peer tip';
     }
   } else if (nodeState === 'connecting' && Number(data.connected_peers || 0) > 0) {
+    document.getElementById('stConsensusHint').textContent =
+      'Checkpointed consensus sync is not active yet, so the dashboard is showing legacy EL status only.';
+    document.getElementById('stDirectionHint').textContent =
+      'Connected, waiting for a serving peer that can supply a credible tip.';
     document.getElementById('stProgressPct').textContent = 'Connected, waiting for serving peer';
   } else {
+    document.getElementById('stConsensusHint').textContent =
+      'Consensus-backed markers appear after the node boots from a weak-subjectivity checkpoint.';
+    document.getElementById('stDirectionHint').textContent =
+      'The final trustless model uses a recent checkpoint as the coverage origin and proves both toward the head and toward genesis.';
     document.getElementById('stProgressPct').textContent = badgeText.textContent;
   }
+
   document.getElementById('stProgressFill').style.width = pct.toFixed(1) + '%';
+  renderMarkerRail(data, canonicalTop, current, hasConsensus);
 }
 
 function fetchStatus() {

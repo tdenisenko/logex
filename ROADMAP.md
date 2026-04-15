@@ -60,20 +60,22 @@ LogEx should become a canonical Ethereum event-log node that:
   - That means post-Merge execution blocks are proved by the beacon light-client path.
   - Pre-Merge EL blocks are not proved by the CL and need their own PoW canonicality path.
 - The end-state trustless architecture must cover every block, but it does not need to sync from genesis upward.
-  - LogEx should sync from the top to the bottom.
+  - LogEx should sync outward from the checkpoint block in both directions.
   - Start from a recent weak-subjectivity checkpoint near the current head.
-  - Verify post-Merge canonicality from that checkpoint.
-  - Walk authenticated beacon ancestry downward to the first execution payload and identify the canonical terminal PoW block.
+  - Continuously sync with the live head from that checkpoint while also proving older history toward genesis.
+  - Verify post-Merge canonicality from that checkpoint toward the live head.
+  - At the same time, walk authenticated beacon ancestry downward from that checkpoint to the first execution payload and identify the canonical terminal PoW block.
   - From that terminal PoW block, verify the pre-Merge EL header chain downward to genesis using parent links, PoW rules, and total difficulty.
   - For every block on both sides of the Merge, rebuild receipts locally and require the computed trie root to match the canonical header's `receipts_root`.
+  - Once the genesis-side verification is complete, LogEx should continue as a forward-only live-sync client from then on.
 - Verification depth and stored log depth should be separate operator controls.
   - LogEx should verify canonicality and receipt roots all the way to genesis even when the operator does not want to keep logs for the entire history.
-  - Add a client flag that sets the lowest block whose logs should be saved and indexed while syncing downward from the head.
+  - Add a client flag that sets the lowest block whose logs should be saved and indexed while the downward side of checkpoint-centered history proving moves toward genesis.
   - Example: if the operator sets the flag to `1_000_000`, LogEx should save and index logs only for blocks above that floor, but it must still continue verifying headers and receipt roots from block `1_000_000` down to genesis.
   - If the flag is omitted, it should default to genesis so the full log history is saved.
-- This top-to-bottom design is intentional.
+- This checkpoint-centered design is intentional.
   - Starting from genesis does not remove the weak-subjectivity assumption for PoS Ethereum.
-  - Starting from a recent trusted top and then proving history downward gives full-chain coverage without pretending PoS can bootstrap from arbitrary ancient history with zero trust.
+  - Starting from a recent trusted checkpoint and then proving both toward the head and toward genesis gives full-chain coverage without pretending PoS can bootstrap from arbitrary ancient history with zero trust.
 
 ## Already Done
 
@@ -93,6 +95,9 @@ LogEx should become a canonical Ethereum event-log node that:
   - restart resumes from durable metadata
   - productive peers are persisted
   - UI/runtime state no longer falsely claims sync completion on missing targets
+- The web UI and status surface now reflect the CL-aware roadmap direction:
+  - the dashboard exposes CL checkpoint data, execution anchor markers, and whether the node is in CL-anchored or legacy EL mode
+  - the dashboard frames canonical verification as checkpoint-centered coverage instead of only as a bottom-up peer-tip chase
 - The CL-driven storage and runtime boundary is now materially in place:
   - `WeakSubjectivityCheckpoint`, `ExecutionAnchor`, and `ChainAnchors` are shared types used across runtime, sync, storage, and status surfaces
   - `crates/logex-cl` exists and persists checkpoint state plus ordered execution anchors under the data directory
@@ -228,7 +233,7 @@ LogEx should become a canonical Ethereum event-log node that:
 
 5. Selective Log Retention While Verifying Full History
    - TODO:
-     - add a client flag that sets the lowest block whose logs should be saved and indexed during top-to-bottom sync
+     - add a client flag that sets the lowest block whose logs should be saved and indexed while checkpoint-centered history proving expands toward genesis
      - default that flag to genesis when omitted
      - continue verifying canonical headers and receipt roots below that floor all the way to genesis without persisting those older log rows
      - make status and docs explicit that verification depth and retained log depth are different
@@ -240,7 +245,7 @@ LogEx should become a canonical Ethereum event-log node that:
 6. Mainnet Proving Runs And Failure Handling
    - TODO:
      - run long-lived mainnet sync tests from real weak-subjectivity checkpoints
-     - run full-history proving runs that start near the current head and walk downward across the Merge into pre-Merge history
+     - run full-history proving runs that start from a recent checkpoint and expand both toward the live head and downward across the Merge into pre-Merge history
      - verify restart, shutdown, and resume across optimistic updates, finality advances, and anchor replacements
      - test malicious or incomplete EL responses against CL-driven anchors on real network conditions
      - improve recovery behavior for optimistic reorgs deeper than the persisted recent-header window
@@ -279,7 +284,7 @@ LogEx should eventually be able to say all of the following:
 - it verified beacon light-client updates locally
 - it verified the execution payload header against the beacon light-client header with an SSZ Merkle proof
 - it learned the canonical execution block hash and receipts root from that proven CL data
-- it walked the authenticated chain downward across the Merge and identified the canonical terminal PoW block
+- it expanded verified coverage outward from the checkpoint, including downward across the Merge to the canonical terminal PoW block
 - it verified the pre-Merge PoW header chain from that terminal PoW block down to genesis
 - it fetched receipts from EL peers over devp2p
 - it re-encoded those receipts and recomputed the execution-layer receipt trie locally
