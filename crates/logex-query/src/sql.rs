@@ -859,9 +859,76 @@ fn parse_b256(value: &str) -> Option<B256> {
 }
 
 fn rewrite_legacy_sql(sql: &str, head_block: u64) -> Result<String, SqlQueryError> {
-    let sql = replace_latest_keyword(sql, head_block);
+    let sql = rewrite_missing_select_projection(sql);
+    let sql = replace_latest_keyword(&sql, head_block);
     let sql = rewrite_event_literals(&sql)?;
     rewrite_address_literals(&sql)
+}
+
+fn rewrite_missing_select_projection(sql: &str) -> String {
+    let tokens = match tokenize(sql) {
+        Ok(tokens) => tokens,
+        Err(_) => return sql.to_owned(),
+    };
+
+    if !matches!(tokens.as_slice(), [Token::Select, Token::From, ..]) {
+        return sql.to_owned();
+    }
+
+    let Some(select_end) = find_leading_select_end(sql) else {
+        return sql.to_owned();
+    };
+
+    let mut rewritten = String::with_capacity(sql.len() + 2);
+    rewritten.push_str(&sql[..select_end]);
+    rewritten.push_str(" *");
+    rewritten.push_str(&sql[select_end..]);
+    rewritten
+}
+
+fn find_leading_select_end(sql: &str) -> Option<usize> {
+    let chars: Vec<(usize, char)> = sql.char_indices().collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let (_, ch) = chars[index];
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+
+        if ch == '-' && chars.get(index + 1).is_some_and(|(_, next)| *next == '-') {
+            index += 2;
+            while index < chars.len() && chars[index].1 != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    let start = index;
+    const SELECT: &str = "select";
+    for expected in SELECT.chars() {
+        let (_, actual) = *chars.get(index)?;
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return None;
+        }
+        index += 1;
+    }
+
+    let boundary_ok = start == 0 || !is_identifier_char(chars[start.saturating_sub(1)].1);
+    let next_is_boundary = chars
+        .get(index)
+        .is_none_or(|(_, ch)| !is_identifier_char(*ch));
+
+    (boundary_ok && next_is_boundary).then(|| {
+        chars
+            .get(index)
+            .map(|(offset, _)| *offset)
+            .unwrap_or_else(|| sql.len())
+    })
 }
 
 fn replace_latest_keyword(sql: &str, head_block: u64) -> String {
@@ -1179,6 +1246,33 @@ mod tests {
         assert!(
             rewritten
                 .contains("0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7")
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrites_missing_projection_to_select_star() {
+        let (_tmp, storage) = setup_storage();
+        let sql = "select from logs where block_number = 100";
+        let rewritten = rewrite_legacy_sql(sql, storage.head_block().unwrap_or(0)).unwrap();
+        assert_eq!(rewritten, "select * from logs where block_number = 100");
+    }
+
+    #[tokio::test]
+    async fn executes_missing_projection_shorthand() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql(
+            "select from logs where block_number = 100",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert_eq!(
+            result.rows[0]["address"],
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
     }
 

@@ -340,6 +340,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_post_query_missing_projection_defaults_to_full_rows() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "select from logs where block_number = 100"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert!(result.rows[0].get("tx_hash").is_some());
+    }
+
+    #[tokio::test]
     async fn test_post_query_parse_error() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
