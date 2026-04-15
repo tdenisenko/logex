@@ -610,6 +610,20 @@ mod tests {
     }
 
     #[test]
+    fn test_keywords_are_case_insensitive() {
+        let q = parse(
+            "select block_number, count(*) as total from logs group by block_number order by total desc limit 5",
+        )
+        .unwrap();
+
+        assert_eq!(q.select.len(), 2);
+        assert_eq!(q.group_by, vec!["block_number"]);
+        assert_eq!(q.order_by.len(), 1);
+        assert!(q.order_by[0].desc);
+        assert_eq!(q.limit, Some(5));
+    }
+
+    #[test]
     fn test_function_in_select() {
         let q = parse("SELECT COUNT(*) AS total FROM logs").unwrap();
         match &q.select[0] {

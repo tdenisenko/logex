@@ -351,6 +351,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_post_query_rejects_desc_without_order_by() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({ "sql": "select * from logs desc limit 10;" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("DESC/ASC requires ORDER BY")
+        );
+    }
+
+    #[tokio::test]
     async fn test_health_endpoint() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));

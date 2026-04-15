@@ -112,7 +112,12 @@ pub async fn execute_sql(
     let total_scanned = Arc::new(AtomicU64::new(0));
     let (seed_query, normalized_sql) = match parse(sql) {
         Ok(query) => (seed_query_for(&query), compile_query(&query, head_block)),
-        Err(_) => (full_scan_query(), sql.to_owned()),
+        Err(_) => {
+            if let Some(message) = confusing_sort_shorthand_error(sql) {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
+            }
+            (full_scan_query(), sql.to_owned())
+        }
     };
 
     let table =
@@ -148,6 +153,28 @@ fn full_scan_query() -> Query {
         group_by: vec![],
         order_by: vec![],
         limit: None,
+    }
+}
+
+fn confusing_sort_shorthand_error(sql: &str) -> Option<String> {
+    let normalized = sql
+        .split_whitespace()
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let uses_order_by = normalized.contains(" order by ");
+    let shorthand_desc = normalized.contains(" from logs desc ")
+        || normalized.ends_with(" from logs desc")
+        || normalized.contains(" from logs asc ")
+        || normalized.ends_with(" from logs asc");
+
+    if !uses_order_by && shorthand_desc {
+        Some(
+            "DESC/ASC requires ORDER BY. Use an explicit sort such as ORDER BY block_number DESC, tx_index DESC, log_index DESC LIMIT 10".to_owned(),
+        )
+    } else {
+        None
     }
 }
 
@@ -606,6 +633,56 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["bn"], 200);
+    }
+
+    #[tokio::test]
+    async fn supports_group_by_desc_limit_case_insensitively() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql(
+            "select address, count(*) as total from logs group by address order by total desc limit 1",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .expect("query executes");
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn supports_between_in_latest_and_aliases() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql(
+            "SELECT block_number AS bn FROM logs WHERE block_number BETWEEN 100 AND latest AND block_number IN (100, 200) ORDER BY block_number DESC LIMIT 2",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .expect("query executes");
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0]["bn"], 200);
+        assert_eq!(result.rows[1]["bn"], 100);
+    }
+
+    #[tokio::test]
+    async fn rejects_desc_without_order_by() {
+        let (_tmp, storage) = setup_storage();
+        let error = execute_sql(
+            "select * from logs desc limit 10;",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .expect_err("query should be rejected");
+
+        match error {
+            SqlQueryError::DataFusion(DataFusionError::Plan(message)) => {
+                assert!(message.contains("DESC/ASC requires ORDER BY"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
