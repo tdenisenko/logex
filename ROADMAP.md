@@ -21,6 +21,9 @@ LogEx should become a canonical Ethereum event-log node that:
   - Helios is useful because it already implements a real light-client model.
   - Helios is not a direct fit because its normal Ethereum mode still assumes an execution RPC.
 - Keep the existing query/storage roadmap in scope; canonicality work comes first, but SQL/query improvements are still part of v1.
+- Do not freeze transitional shortcuts into the final architecture.
+  - If a query/storage step is a bridge, call it out explicitly in the roadmap.
+  - The target design should be the strongest direct design LogEx can reasonably support, not merely the fastest incremental patch.
 
 ## Important Clarification
 
@@ -63,6 +66,12 @@ LogEx should become a canonical Ethereum event-log node that:
   - LogEx-specific SQL rewrites such as `event'...'`, `address'...'`, and `latest` still work without changing the on-disk storage format
   - sealed-partition pruning and existing address/topic/block indexes are still reused through the seed-query path
   - hot-partition queries no longer risk missing fresh rows that were written after the last hot-index rebuild
+  - the current DataFusion integration is still a transitional hybrid rather than the strongest end-state:
+    - DataFusion currently receives rows after a LogEx-owned seed scan and Arrow batch materialization step
+    - DataFusion does not yet read partition columns directly from storage
+    - DataFusion does not yet own true projection pushdown or native index-aware filter pushdown into LogEx storage
+    - this was acceptable as an intermediate migration step to unify behavior without changing the on-disk format
+    - it should not be treated as the final query architecture
   - codec scaffolding already exists in the storage crate for dictionary, delta, delta-of-delta, zstd, and lz4, but the active read/write path still writes raw columns today
 
 ## Explicitly Not Needed
@@ -119,9 +128,17 @@ LogEx should become a canonical Ethereum event-log node that:
    - malicious peer mismatch detection
    - bootstrap, restart, shutdown, and resume regressions
 
-6. Benchmark and tune the post-migration SQL path.
-   - Measure common indexed queries after the DataFusion migration so the current fast path does not regress badly.
-   - Decide whether more explicit DataFusion-side filter pushdown is worth the added complexity, or whether the current seed-query approach is sufficient for v1.
+6. Replace the transitional hybrid SQL path with the strongest native design.
+   - Keep the current shared DataFusion engine, but stop treating the seed-query plus in-memory Arrow materialization path as the end-state.
+   - Build a truly native storage-backed DataFusion provider that reads LogEx partitions directly instead of first reconstructing full `LogRow` sets.
+   - Add real projection pushdown so a query that needs only a few columns does not force full-row materialization.
+   - Add real filter pushdown from DataFusion expressions into LogEx planning and indexes wherever those mappings are sound.
+   - Preserve partition pruning and existing address/topic/block indexes, but make them native scan capabilities rather than a sidecar prefilter step.
+   - Improve the hot-partition strategy so it can combine an indexed stable prefix with a direct-scan tail, instead of choosing between possibly stale indexes and a broader scan.
+   - Keep the API surface rich enough that transport choices do not limit SQL semantics.
+     - gRPC should continue to support aggregates, aliases, ordering, and limits.
+     - If needed later, revisit whether row-JSON is sufficient or whether a streaming or Arrow-oriented result transport is the stronger design for large result sets.
+   - Benchmark the final native path on common indexed queries so query richness does not come at the cost of major regressions.
    - Decide whether `decode(...)` is part of v1 or remains deferred.
 
 7. Finish the storage compression strategy without harming queryability.
