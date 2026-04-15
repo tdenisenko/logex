@@ -3,6 +3,7 @@ pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
 pub mod rest;
+mod storage_metrics;
 pub mod ws;
 
 use std::net::SocketAddr;

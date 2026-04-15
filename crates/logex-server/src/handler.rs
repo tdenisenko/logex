@@ -9,6 +9,7 @@ use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
 use crate::eth_filter::{AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter, matches_filter};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use crate::storage_metrics::CachedStorageMetrics;
 
 use crate::ws::SubscriptionManager;
 
@@ -19,6 +20,22 @@ pub struct AppState {
     pub subscriptions: Option<SubscriptionManager>,
     /// Live sync progress, updated by the sync task.
     pub sync_status: Arc<std::sync::Mutex<SyncStatus>>,
+    pub(crate) storage_metrics: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
+}
+
+impl AppState {
+    pub fn new(
+        storage: PartitionManager,
+        subscriptions: Option<SubscriptionManager>,
+        sync_status: SyncStatus,
+    ) -> Self {
+        Self {
+            storage: Arc::new(tokio::sync::RwLock::new(storage)),
+            subscriptions,
+            sync_status: Arc::new(std::sync::Mutex::new(sync_status)),
+            storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
+        }
+    }
 }
 
 /// Handle a JSON-RPC request.
@@ -247,11 +264,7 @@ mod tests {
     #[tokio::test]
     async fn test_eth_get_logs_full() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
         let req_json = serde_json::json!({
@@ -278,11 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_eth_block_number() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",
@@ -302,11 +311,7 @@ mod tests {
     #[tokio::test]
     async fn test_web3_client_version() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",

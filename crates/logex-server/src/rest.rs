@@ -8,6 +8,7 @@ use logex_query::{self, SqlQueryError};
 use serde::Serialize;
 
 use crate::handler::AppState;
+use crate::storage_metrics;
 
 /// Request body for POST /query.
 #[derive(serde::Deserialize)]
@@ -86,7 +87,18 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
-    let storage = state.storage.read().await;
+    let (total_rows, sealed_partitions, head_block, indexed_head_block, data_dir) = {
+        let storage = state.storage.read().await;
+        (
+            storage.total_rows(),
+            storage.sealed_count(),
+            storage.head_block(),
+            storage.indexed_head_block(),
+            storage.data_dir().to_path_buf(),
+        )
+    };
+    let storage_metrics =
+        storage_metrics::load_or_refresh(Arc::clone(&state.storage_metrics), data_dir).await;
     let progress_pct = if sync.target_block > 0 {
         Some((sync.current_block as f64 / sync.target_block as f64 * 100.0).min(100.0))
     } else {
@@ -105,10 +117,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "blocks_per_sec": sync.blocks_per_sec,
         "blocks_per_minute": sync.blocks_per_minute,
         "logs_ingested": sync.logs_ingested,
-        "total_rows": storage.total_rows(),
-        "sealed_partitions": storage.sealed_count(),
-        "head_block": storage.head_block(),
-        "indexed_head_block": storage.indexed_head_block(),
+        "total_rows": total_rows,
+        "sealed_partitions": sealed_partitions,
+        "head_block": head_block,
+        "indexed_head_block": indexed_head_block,
+        "storage_used_bytes": storage_metrics.storage_used_bytes,
+        "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
         "progress_pct": progress_pct,
     }))
@@ -183,11 +197,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "SELECT * FROM logs" });
@@ -212,11 +222,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_with_filter() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -243,11 +249,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_projection() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -277,11 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_aggregate() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -309,11 +307,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_desc_limit() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -341,11 +335,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_parse_error() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "NOT A QUERY" });
@@ -363,11 +353,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_endpoint() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        });
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -393,10 +379,10 @@ mod tests {
         storage
             .record_sync_head(250, B256::repeat_byte(0xFE), 1_650_000_000)
             .unwrap();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
                 node_state: NodeState::Reconnecting,
                 syncing: true,
                 connected_peers: 0,
@@ -408,8 +394,8 @@ mod tests {
                 blocks_per_minute: 120.0,
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
-            })),
-        });
+            },
+        ));
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -433,15 +419,17 @@ mod tests {
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
+        assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
     }
 
     #[tokio::test]
     async fn test_status_endpoint_does_not_mark_disconnected_node_as_synced() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState {
-            storage: Arc::new(tokio::sync::RwLock::new(storage)),
-            subscriptions: None,
-            sync_status: Arc::new(std::sync::Mutex::new(SyncStatus {
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
                 node_state: NodeState::Disconnected,
                 syncing: false,
                 connected_peers: 0,
@@ -453,8 +441,8 @@ mod tests {
                 blocks_per_minute: 0.0,
                 logs_ingested: 0,
                 eta_seconds: None,
-            })),
-        });
+            },
+        ));
         let app = crate::build_router(state);
 
         let req = Request::builder()

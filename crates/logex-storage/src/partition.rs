@@ -131,6 +131,11 @@ pub struct PartitionManager {
 }
 
 impl PartitionManager {
+    /// Return the configured base data directory for this storage instance.
+    pub fn data_dir(&self) -> &Path {
+        &self.config.data_dir
+    }
+
     fn metadata_path(&self) -> PathBuf {
         self.config.data_dir.join(STORAGE_META_FILE)
     }
