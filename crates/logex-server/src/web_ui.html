@@ -154,8 +154,11 @@
         <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
         <div class="kv"><span class="k">CL Discovery</span><span class="v" id="stClSessions">--</span></div>
         <div class="kv"><span class="k">CL Peers</span><span class="v" id="stClDialable">--</span></div>
-        <div class="kv"><span class="k">CL Status</span><span class="v" id="stClBootnodes">--</span></div>
-        <div class="kv"><span class="k">CL Bootstrap</span><span class="v" id="stClNodeId">--</span></div>
+        <div class="kv"><span class="k">CL Status RPC</span><span class="v" id="stClBootnodes">--</span></div>
+        <div class="kv"><span class="k">CL Bootstrap RPC</span><span class="v" id="stClNodeId">--</span></div>
+        <div class="kv"><span class="k">Latest Bootstrap</span><span class="v" id="stClBootstrapPayload">--</span></div>
+        <div class="kv"><span class="k">Latest Finality</span><span class="v" id="stClFinalityPayload">--</span></div>
+        <div class="kv"><span class="k">Latest Optimistic</span><span class="v" id="stClOptimisticPayload">--</span></div>
       </div>
       <p class="hint" id="stDirectionHint">--</p>
     </div>
@@ -257,6 +260,16 @@ function syncDirectionLabel(direction) {
   return direction === 'checkpoint_outward' ? 'Checkpoint outward' : 'Peer tip upward';
 }
 
+function lightClientPayloadLabel(fork, header) {
+  if (!header) return '--';
+  var prefix = fork ? String(fork).replace(/_/g, ' ') : 'decoded';
+  var slot = header.beacon_slot != null ? 'slot ' + fmt(header.beacon_slot) : null;
+  var exec = header.execution && header.execution.block_number != null
+    ? 'EL ' + fmt(header.execution.block_number)
+    : null;
+  return [prefix, slot, exec].filter(Boolean).join(' / ');
+}
+
 function railPosition(block, topBlock) {
   if (!Number.isFinite(block) || !Number.isFinite(topBlock) || topBlock <= 0) return 0;
   return Math.max(0, Math.min(100, (1 - (block / topBlock)) * 100));
@@ -307,6 +320,7 @@ function updateStatus(data) {
   var syncDirection = data.sync_direction || 'peer_tip_upward';
   var hasConsensus = syncModel === 'cl_anchored';
   var clNetwork = data.consensus_network || {};
+  var clLight = data.consensus_light_client || {};
   var canonicalTop = Number(data.canonical_top_block || 0);
   var indexedExec = anchorBlock(data.indexed_execution_head);
   var optimisticExec = anchorBlock(data.optimistic_execution_head);
@@ -367,6 +381,18 @@ function updateStatus(data) {
   document.getElementById('stClDialable').textContent = fmt(clNetwork.connected_peer_sessions);
   document.getElementById('stClBootnodes').textContent = fmt(clNetwork.status_peers);
   document.getElementById('stClNodeId').textContent = fmt(clNetwork.bootstrap_peers);
+  document.getElementById('stClBootstrapPayload').textContent = lightClientPayloadLabel(
+    clLight.bootstrap && clLight.bootstrap.fork,
+    clLight.bootstrap && clLight.bootstrap.header
+  );
+  document.getElementById('stClFinalityPayload').textContent = lightClientPayloadLabel(
+    clLight.finality_update && clLight.finality_update.fork,
+    clLight.finality_update && clLight.finality_update.finalized_header
+  );
+  document.getElementById('stClOptimisticPayload').textContent = lightClientPayloadLabel(
+    clLight.optimistic_update && clLight.optimistic_update.fork,
+    clLight.optimistic_update && clLight.optimistic_update.attested_header
+  );
 
   if (hasConsensus) {
     document.getElementById('stConsensusHint').textContent =

@@ -67,6 +67,7 @@ pub fn run_info(config: PartitionManagerConfig) {
     if let Some(consensus) = consensus {
         let checkpoint = consensus.checkpoint();
         let anchors = consensus.chain_anchors();
+        let light_client = consensus.light_client_status();
         println!("  Checkpoint root:     {}", checkpoint.beacon_root);
         println!(
             "  Checkpoint slot:     {}",
@@ -86,6 +87,24 @@ pub fn run_info(config: PartitionManagerConfig) {
                 .finalized_head
                 .map_or("none".to_string(), |anchor| anchor.block_number.to_string())
         );
+        if let Some(bootstrap) = light_client.bootstrap {
+            println!(
+                "  CL bootstrap:        {:?} @ slot {}",
+                bootstrap.fork, bootstrap.header.beacon_slot
+            );
+        }
+        if let Some(finality) = light_client.finality_update {
+            println!(
+                "  CL finality:         {:?} @ slot {}",
+                finality.fork, finality.finalized_header.beacon_slot
+            );
+        }
+        if let Some(optimistic) = light_client.optimistic_update {
+            println!(
+                "  CL optimistic:       {:?} @ slot {}",
+                optimistic.fork, optimistic.attested_header.beacon_slot
+            );
+        }
     }
 }
 

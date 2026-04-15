@@ -168,6 +168,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
         "consensus_network": sync.consensus_network,
+        "consensus_light_client": sync.consensus_light_client,
         "index_lag_blocks": index_lag_blocks,
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
@@ -188,8 +189,9 @@ mod tests {
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
-        ConsensusNetworkStatus, ExecutionAnchor, LogRow, NodeState, Source, SyncStatus,
-        WeakSubjectivityCheckpoint,
+        ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
+        LightClientBootstrapStatus, LightClientExecutionData, LightClientHeaderSummary, LogRow,
+        NodeState, Source, SyncStatus, WeakSubjectivityCheckpoint,
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -541,6 +543,23 @@ mod tests {
                     optimistic_update_peers: 1,
                     pending_rpc_requests: 4,
                 }),
+                consensus_light_client: Some(ConsensusLightClientStatus {
+                    bootstrap: Some(LightClientBootstrapStatus {
+                        fork: ConsensusDataFork::Electra,
+                        header: LightClientHeaderSummary {
+                            beacon_slot: 123_450,
+                            execution: Some(LightClientExecutionData {
+                                block_number: 500,
+                                block_hash: B256::repeat_byte(0xAA),
+                                receipts_root: B256::repeat_byte(0xBB),
+                            }),
+                        },
+                        current_sync_committee_pubkeys: 512,
+                        current_sync_committee_branch_depth: 6,
+                    }),
+                    finality_update: None,
+                    optimistic_update: None,
+                }),
                 ..Default::default()
             },
         ));
@@ -574,6 +593,11 @@ mod tests {
         assert_eq!(status["pending_peers"], 12);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
         assert_eq!(status["consensus_network"]["dialable_peers"], 13);
+        assert_eq!(status["consensus_light_client"]["bootstrap"]["fork"], "electra");
+        assert_eq!(
+            status["consensus_light_client"]["bootstrap"]["header"]["execution"]["block_number"],
+            500
+        );
         assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
         assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
     }

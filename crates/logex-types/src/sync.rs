@@ -1,4 +1,4 @@
-use crate::{ExecutionAnchor, WeakSubjectivityCheckpoint};
+use crate::{ConsensusLightClientStatus, ExecutionAnchor, WeakSubjectivityCheckpoint};
 use serde::Serialize;
 
 /// High-level runtime state for the node.
@@ -113,4 +113,7 @@ pub struct SyncStatus {
     /// Native consensus-network discovery state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consensus_network: Option<ConsensusNetworkStatus>,
+    /// Decoded native CL light-client payload summaries learned from peers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_light_client: Option<ConsensusLightClientStatus>,
 }

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy-rpc-types-beacon = { version = "1.8.3", features = ["ssz"] }
 alloy-primitives = { workspace = true }
 async-trait = { workspace = true }
 discv5 = { workspace = true, features = ["libp2p"] }
@@ -18,6 +19,8 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 snap = "1.1"
+ssz = { package = "ethereum_ssz", version = "0.9" }
+ssz_derive = { package = "ethereum_ssz_derive", version = "0.9" }
 unsigned-varint = "0.8"
 
 [dev-dependencies]

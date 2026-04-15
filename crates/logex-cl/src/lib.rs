@@ -4,13 +4,21 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use logex_types::{ChainAnchors, ExecutionAnchor, WeakSubjectivityCheckpoint};
+use logex_types::{
+    ChainAnchors, ConsensusLightClientStatus, ExecutionAnchor, LightClientBootstrapStatus,
+    LightClientFinalityUpdateStatus, LightClientOptimisticUpdateStatus,
+    WeakSubjectivityCheckpoint,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod light_client;
 mod network;
 mod rpc;
 
+pub use light_client::{
+    LightClientDecodeError, decode_bootstrap, decode_finality_update, decode_optimistic_update,
+};
 pub use network::{ConsensusNetworkConfig, ConsensusNetworkError, spawn_consensus_network};
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -50,6 +58,8 @@ pub struct ConsensusSnapshot {
     pub anchors: ChainAnchors,
     #[serde(default)]
     pub ordered_anchors: Vec<AnchorRecord>,
+    #[serde(default)]
+    pub light_client: ConsensusLightClientStatus,
 }
 
 #[derive(Debug)]
@@ -103,6 +113,10 @@ impl ConsensusStore {
         self.inner.lock().unwrap().ordered_anchors.clone()
     }
 
+    pub fn light_client_status(&self) -> ConsensusLightClientStatus {
+        self.inner.lock().unwrap().light_client.clone()
+    }
+
     pub fn next_anchor_after(&self, block_number: u64) -> Option<ExecutionAnchor> {
         self.inner
             .lock()
@@ -138,6 +152,30 @@ impl ConsensusStore {
         snapshot.ordered_anchors = normalize_anchor_records(ordered);
         snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
         drop(snapshot);
+        self.persist()
+    }
+
+    pub fn update_bootstrap_status(
+        &self,
+        status: LightClientBootstrapStatus,
+    ) -> Result<(), ConsensusStateError> {
+        self.inner.lock().unwrap().light_client.bootstrap = Some(status);
+        self.persist()
+    }
+
+    pub fn update_finality_update_status(
+        &self,
+        status: LightClientFinalityUpdateStatus,
+    ) -> Result<(), ConsensusStateError> {
+        self.inner.lock().unwrap().light_client.finality_update = Some(status);
+        self.persist()
+    }
+
+    pub fn update_optimistic_update_status(
+        &self,
+        status: LightClientOptimisticUpdateStatus,
+    ) -> Result<(), ConsensusStateError> {
+        self.inner.lock().unwrap().light_client.optimistic_update = Some(status);
         self.persist()
     }
 
@@ -215,6 +253,7 @@ fn load_checkpoint_descriptor(input: &str) -> Result<ConsensusSnapshot, Consensu
             },
             anchors: compute_chain_anchors(&ordered_anchors),
             ordered_anchors,
+            light_client: ConsensusLightClientStatus::default(),
         });
     }
 
@@ -223,6 +262,7 @@ fn load_checkpoint_descriptor(input: &str) -> Result<ConsensusSnapshot, Consensu
         checkpoint,
         anchors: ChainAnchors::default(),
         ordered_anchors: Vec::new(),
+        light_client: ConsensusLightClientStatus::default(),
     })
 }
 

@@ -21,6 +21,9 @@ use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::{
+    ConsensusStore, decode_bootstrap, decode_finality_update, decode_optimistic_update,
+};
 use crate::rpc::{
     Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse,
     StatusMessage, build_rpc_behaviour,
@@ -83,10 +86,11 @@ struct PersistedPeer {
 
 pub fn spawn_consensus_network(
     config: ConsensusNetworkConfig,
+    consensus: Arc<ConsensusStore>,
     sync_status: Arc<Mutex<SyncStatus>>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<JoinHandle<()>, ConsensusNetworkError> {
-    let network = ConsensusNetwork::new(config, sync_status)?;
+    let network = ConsensusNetwork::new(config, consensus, sync_status)?;
     Ok(tokio::spawn(async move {
         if let Err(error) = network.run(shutdown).await {
             tracing::error!(%error, "consensus discovery task exited with an error");
@@ -96,6 +100,7 @@ pub fn spawn_consensus_network(
 
 struct ConsensusNetwork {
     config: ConsensusNetworkConfig,
+    consensus: Arc<ConsensusStore>,
     sync_status: Arc<Mutex<SyncStatus>>,
     discv5: Discv5,
     swarm: Swarm<Eth2RpcBehaviour>,
@@ -145,6 +150,7 @@ struct PendingRpc {
 impl ConsensusNetwork {
     fn new(
         config: ConsensusNetworkConfig,
+        consensus: Arc<ConsensusStore>,
         sync_status: Arc<Mutex<SyncStatus>>,
     ) -> Result<Self, ConsensusNetworkError> {
         let bootnodes = mainnet_bootnodes()?;
@@ -199,6 +205,7 @@ impl ConsensusNetwork {
 
         Ok(Self {
             config,
+            consensus,
             sync_status,
             discv5,
             swarm,
@@ -453,35 +460,102 @@ impl ConsensusNetwork {
                 RpcRequestKind::LightClientBootstrap,
                 Eth2RpcResponse::LightClientBootstrap(payload),
             ) => {
-                tracing::info!(
-                    %peer,
-                    bytes = payload.bytes.len(),
-                    checkpoint_root = %self.config.checkpoint.beacon_root,
-                    "received light-client bootstrap payload"
-                );
-                self.bootstrap_peers.insert(peer);
+                match decode_bootstrap(&payload.bytes) {
+                    Ok(summary) => {
+                        tracing::info!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            checkpoint_root = %self.config.checkpoint.beacon_root,
+                            fork = ?summary.fork,
+                            beacon_slot = summary.header.beacon_slot,
+                            execution_block =
+                                summary.header.execution.map(|execution| execution.block_number),
+                            "received and decoded light-client bootstrap payload"
+                        );
+                        self.bootstrap_peers.insert(peer);
+                        if let Err(error) = self.consensus.update_bootstrap_status(summary) {
+                            tracing::warn!(%peer, %error, "failed to persist decoded bootstrap payload");
+                        }
+                        self.drive_rpc_requests();
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            %error,
+                            "failed to decode light-client bootstrap payload"
+                        );
+                    }
+                }
             }
             (
                 RpcRequestKind::LightClientFinalityUpdate,
                 Eth2RpcResponse::LightClientFinalityUpdate(payload),
             ) => {
-                tracing::info!(
-                    %peer,
-                    bytes = payload.bytes.len(),
-                    "received light-client finality update payload"
-                );
-                self.finality_update_peers.insert(peer);
+                match decode_finality_update(&payload.bytes) {
+                    Ok(summary) => {
+                        tracing::info!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            fork = ?summary.fork,
+                            attested_slot = summary.attested_header.beacon_slot,
+                            finalized_slot = summary.finalized_header.beacon_slot,
+                            execution_block = summary
+                                .finalized_header
+                                .execution
+                                .map(|execution| execution.block_number),
+                            participants = summary.sync_committee_participants,
+                            "received and decoded light-client finality update payload"
+                        );
+                        self.finality_update_peers.insert(peer);
+                        if let Err(error) = self.consensus.update_finality_update_status(summary) {
+                            tracing::warn!(%peer, %error, "failed to persist decoded finality update");
+                        }
+                        self.drive_rpc_requests();
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            %error,
+                            "failed to decode light-client finality update payload"
+                        );
+                    }
+                }
             }
             (
                 RpcRequestKind::LightClientOptimisticUpdate,
                 Eth2RpcResponse::LightClientOptimisticUpdate(payload),
             ) => {
-                tracing::info!(
-                    %peer,
-                    bytes = payload.bytes.len(),
-                    "received light-client optimistic update payload"
-                );
-                self.optimistic_update_peers.insert(peer);
+                match decode_optimistic_update(&payload.bytes) {
+                    Ok(summary) => {
+                        tracing::info!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            fork = ?summary.fork,
+                            attested_slot = summary.attested_header.beacon_slot,
+                            execution_block = summary
+                                .attested_header
+                                .execution
+                                .map(|execution| execution.block_number),
+                            participants = summary.sync_committee_participants,
+                            "received and decoded light-client optimistic update payload"
+                        );
+                        self.optimistic_update_peers.insert(peer);
+                        if let Err(error) = self.consensus.update_optimistic_update_status(summary) {
+                            tracing::warn!(%peer, %error, "failed to persist decoded optimistic update");
+                        }
+                        self.drive_rpc_requests();
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %peer,
+                            bytes = payload.bytes.len(),
+                            %error,
+                            "failed to decode light-client optimistic update payload"
+                        );
+                    }
+                }
             }
             (kind, Eth2RpcResponse::Error(error)) => {
                 tracing::debug!(
@@ -652,6 +726,7 @@ impl ConsensusNetwork {
 
     fn refresh_status(&self) {
         let table_entries = self.discv5.table_entries_enr();
+        let light_client = self.consensus.light_client_status();
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
@@ -671,7 +746,9 @@ impl ConsensusNetwork {
             optimistic_update_peers: self.optimistic_update_peers.len(),
             pending_rpc_requests: self.pending_requests.len(),
         };
-        self.sync_status.lock().unwrap().consensus_network = Some(status);
+        let mut sync_status = self.sync_status.lock().unwrap();
+        sync_status.consensus_network = Some(status);
+        sync_status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
     }
 
     fn persist_known_peers(&mut self) -> Result<(), ConsensusNetworkError> {

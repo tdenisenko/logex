@@ -3,7 +3,11 @@ mod log_row;
 mod partition;
 mod sync;
 
-pub use consensus::{ChainAnchors, ExecutionAnchor, WeakSubjectivityCheckpoint};
+pub use consensus::{
+    ChainAnchors, ConsensusDataFork, ConsensusLightClientStatus, ExecutionAnchor,
+    LightClientBootstrapStatus, LightClientExecutionData, LightClientFinalityUpdateStatus,
+    LightClientHeaderSummary, LightClientOptimisticUpdateStatus, WeakSubjectivityCheckpoint,
+};
 pub use log_row::{BlockContext, LogRow, Source};
 pub use partition::PartitionMeta;
 pub use sync::{ConsensusNetworkStatus, NodeState, SyncStatus};

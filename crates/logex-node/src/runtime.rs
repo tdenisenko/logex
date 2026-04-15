@@ -151,6 +151,7 @@ pub async fn run_sync(
                 p2p_port: cl_p2p_port,
                 max_peers: cl_max_peers,
             },
+            Arc::clone(consensus),
             Arc::clone(&state.sync_status),
             shutdown_rx.clone(),
         )
@@ -289,6 +290,8 @@ fn initial_sync_status(
         status.checkpoint = Some(consensus.checkpoint());
         status.optimistic_execution_head = anchors.optimistic_head;
         status.finalized_execution_head = anchors.finalized_head;
+        let light_client = consensus.light_client_status();
+        status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
         if let Some(anchor) = anchors.optimistic_head {
             status.target_block = anchor.block_number;
         }
