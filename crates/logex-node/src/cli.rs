@@ -34,7 +34,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the node: sync blocks from the P2P network and serve queries.
     Sync {
-        /// HTTP server port (Web UI + LogSQL + JSON-RPC).
+        /// HTTP server port (Web UI + SQL + JSON-RPC).
         #[arg(long, default_value = "8577")]
         http_port: u16,
 

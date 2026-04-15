@@ -13,7 +13,7 @@ use crate::storage_metrics;
 /// Request body for POST /query.
 #[derive(serde::Deserialize)]
 pub struct QueryRequest {
-    /// LogSQL query string.
+    /// SQL query string.
     pub sql: String,
 }
 
@@ -37,7 +37,7 @@ impl IntoResponse for ErrorResponse {
     }
 }
 
-/// Handle POST /query — execute a LogSQL query.
+/// Handle POST /query — execute a SQL query.
 pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
@@ -47,6 +47,12 @@ pub async fn handle_query(
     let result = match logex_query::execute_sql(&req.sql, &storage, head_block).await {
         Ok(r) => r,
         Err(SqlQueryError::DataFusion(e)) => {
+            return ErrorResponse {
+                error: format!("query error: {e}"),
+            }
+            .into_response();
+        }
+        Err(SqlQueryError::LegacySyntax(e)) => {
             return ErrorResponse {
                 error: format!("query error: {e}"),
             }
@@ -187,6 +193,7 @@ mod tests {
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
             partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
         };
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();

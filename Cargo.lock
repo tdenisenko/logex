@@ -4403,6 +4403,7 @@ dependencies = [
  "logex-index",
  "logex-storage",
  "logex-types",
+ "parking_lot",
  "roaring",
  "serde_json",
  "tempfile",

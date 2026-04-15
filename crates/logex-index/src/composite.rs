@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use logex_storage::ColumnReader;
+use logex_storage::SegmentReader;
 
 use crate::btree::{BTreeIndex, BTreeIndexReader};
 
@@ -40,8 +40,9 @@ impl CompositeIndexBuilder {
     /// Build (address, topic0) composite index.
     /// Only indexes rows where topic0 is present.
     fn build_address_topic0(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let addresses = ColumnReader::read_address(partition_dir, None)?;
-        let topic0s = ColumnReader::read_nullable_b256(partition_dir, "topic0", None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let addresses = reader.read_address(None)?;
+        let topic0s = reader.read_nullable_b256("topic0", None)?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_KEY_SIZE];
@@ -64,9 +65,10 @@ impl CompositeIndexBuilder {
     /// Build (address, topic0, block_number) composite index.
     /// Only indexes rows where topic0 is present.
     fn build_address_topic0_block(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let addresses = ColumnReader::read_address(partition_dir, None)?;
-        let topic0s = ColumnReader::read_nullable_b256(partition_dir, "topic0", None)?;
-        let blocks = ColumnReader::read_u64(partition_dir, "block_number.col", None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let addresses = reader.read_address(None)?;
+        let topic0s = reader.read_nullable_b256("topic0", None)?;
+        let blocks = reader.read_u64("block_number", None)?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_BLOCK_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_BLOCK_KEY_SIZE];
@@ -95,8 +97,9 @@ impl CompositeIndexBuilder {
     /// Build (topic0, topic1) composite index.
     /// Only indexes rows where both topic0 and topic1 are present.
     fn build_topic0_topic1(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let topic0s = ColumnReader::read_nullable_b256(partition_dir, "topic0", None)?;
-        let topic1s = ColumnReader::read_nullable_b256(partition_dir, "topic1", None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let topic0s = reader.read_nullable_b256("topic0", None)?;
+        let topic1s = reader.read_nullable_b256("topic1", None)?;
         let mut index = BTreeIndex::new(TOPIC0_TOPIC1_KEY_SIZE);
 
         let mut key = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
