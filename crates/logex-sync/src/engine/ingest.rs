@@ -24,12 +24,26 @@ impl SyncEngine {
                 .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
             let sealed_after = storage.sealed_count();
 
-            for partition in &storage.sealed_partitions()[sealed_before..sealed_after] {
-                if let Err(e) = IndexBuilder::build_all_indexes(&partition.meta.path) {
+            let sealed_segments: Vec<_> = storage.sealed_partitions()[sealed_before..sealed_after]
+                .iter()
+                .map(|partition| (partition.meta.id, partition.meta.path.clone()))
+                .collect();
+
+            for (segment_id, segment_path) in sealed_segments {
+                if let Err(e) = IndexBuilder::build_all_indexes(&segment_path) {
                     tracing::warn!(
                         error = %e,
-                        partition_id = partition.meta.id,
+                        partition_id = segment_id,
                         "failed to build indexes for sealed partition"
+                    );
+                    continue;
+                }
+
+                if let Err(e) = storage.refresh_segment_indexes(segment_id) {
+                    tracing::warn!(
+                        error = %e,
+                        partition_id = segment_id,
+                        "failed to refresh segment manifest after index build"
                     );
                 }
             }

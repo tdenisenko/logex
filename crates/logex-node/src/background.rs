@@ -39,6 +39,16 @@ pub async fn run_background_indexer(
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
             {
                 Ok(Ok(())) => {
+                    {
+                        let mut storage = state.storage.write().await;
+                        if let Err(e) = storage.refresh_segment_indexes(current.partition_id) {
+                            tracing::warn!(
+                                error = %e,
+                                partition_id = current.partition_id,
+                                "failed to refresh segment manifest after hot index rebuild"
+                            );
+                        }
+                    }
                     tracing::debug!(
                         partition_id = current.partition_id,
                         rows = current.row_count,
@@ -51,6 +61,22 @@ pub async fn run_background_indexer(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "index build task panicked");
+                }
+            }
+        }
+
+        {
+            let mut storage = state.storage.write().await;
+            match storage.compact_eligible_segments() {
+                Ok(0) => {}
+                Ok(compacted) => {
+                    tracing::info!(
+                        segments = compacted,
+                        "compacted sealed segments behind the safety margin"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to compact eligible sealed segments");
                 }
             }
         }

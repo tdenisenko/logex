@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
+use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
 /// `eth_getLogs` filter parameter — compatible with the Ethereum JSON-RPC spec.
@@ -22,12 +23,54 @@ pub struct EthFilter {
     pub block_hash: Option<B256>,
 }
 
+impl EthFilter {
+    /// Convert this RPC filter into the native storage filter shape that the
+    /// rewritten storage/query layer should execute directly.
+    pub fn to_native_filter(&self, head_block: u64) -> NativeLogFilter {
+        let mut filter = NativeLogFilter::new();
+
+        if self.block_hash.is_none() {
+            filter.from_block = self
+                .from_block
+                .as_ref()
+                .map(|id| resolve_block_id(id, head_block));
+            filter.to_block = self.to_block.as_ref().map(|id| resolve_block_id(id, head_block));
+        }
+
+        filter.block_hash = self.block_hash;
+        filter.addresses = match &self.address {
+            AddressFilter::Any => Vec::new(),
+            AddressFilter::Single(addr) => vec![*addr],
+            AddressFilter::Multiple(addrs) => addrs.clone(),
+        };
+
+        for (idx, topic_filter) in self.topics.iter().enumerate().take(4) {
+            if let Some(topic_filter) = topic_filter {
+                filter.topics[idx] = match topic_filter {
+                    TopicFilter::Single(hash) => TopicConstraint::One(*hash),
+                    TopicFilter::Multiple(hashes) => TopicConstraint::AnyOf(hashes.clone()),
+                };
+            }
+        }
+
+        filter
+    }
+}
+
 /// A block identifier: hex number or named tag.
 #[derive(Debug, Clone)]
 pub enum BlockId {
     Number(u64),
     Latest,
     Earliest,
+}
+
+fn resolve_block_id(id: &BlockId, head_block: u64) -> u64 {
+    match id {
+        BlockId::Number(n) => *n,
+        BlockId::Latest => head_block,
+        BlockId::Earliest => 0,
+    }
 }
 
 impl<'de> Deserialize<'de> for BlockId {
@@ -355,5 +398,39 @@ mod tests {
         assert!(matches!(filter.from_block, Some(BlockId::Number(256))));
         assert!(matches!(filter.to_block, Some(BlockId::Latest)));
         assert!(matches!(filter.address, AddressFilter::Single(_)));
+    }
+
+    #[test]
+    fn test_native_filter_conversion() {
+        let filter = EthFilter {
+            from_block: Some(BlockId::Number(100)),
+            to_block: Some(BlockId::Latest),
+            address: AddressFilter::Multiple(vec![
+                Address::repeat_byte(0xAA),
+                Address::repeat_byte(0xBB),
+            ]),
+            topics: vec![
+                Some(TopicFilter::Single(B256::repeat_byte(0x11))),
+                None,
+                Some(TopicFilter::Multiple(vec![
+                    B256::repeat_byte(0x22),
+                    B256::repeat_byte(0x33),
+                ])),
+            ],
+            block_hash: None,
+        };
+
+        let native = filter.to_native_filter(500);
+        assert_eq!(native.from_block, Some(100));
+        assert_eq!(native.to_block, Some(500));
+        assert_eq!(native.addresses.len(), 2);
+        assert!(matches!(
+            native.topics[0],
+            TopicConstraint::One(hash) if hash == B256::repeat_byte(0x11)
+        ));
+        assert!(matches!(
+            native.topics[2],
+            TopicConstraint::AnyOf(ref hashes) if hashes.len() == 2
+        ));
     }
 }

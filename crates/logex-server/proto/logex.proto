@@ -3,11 +3,17 @@ syntax = "proto3";
 package logex;
 
 service LogExService {
-  // Execute a LogSQL query and return JSON rows plus scan metadata.
+  // Execute a SQL query and return JSON rows plus scan metadata.
   rpc Query(QueryRequest) returns (QueryResponse);
 
   // Get the current head block number.
   rpc GetHeadBlock(Empty) returns (HeadBlockResponse);
+
+  // Execute an Ethereum-style log filter and return typed log rows.
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+
+  // Stream typed log rows for large result sets.
+  rpc StreamLogs(GetLogsRequest) returns (stream LogEntry);
 }
 
 message Empty {}
@@ -28,4 +34,39 @@ message QueryRow {
 
 message HeadBlockResponse {
   uint64 block_number = 1;
+}
+
+message GetLogsRequest {
+  optional uint64 from_block = 1;
+  optional uint64 to_block = 2;
+  bytes block_hash = 3;
+  repeated bytes addresses = 4;
+  repeated TopicFilter topics = 5;
+  optional bool canonical_only = 6;
+  optional bool descending = 7;
+  optional uint64 limit = 8;
+}
+
+message TopicFilter {
+  bool match_any = 1;
+  repeated bytes any_of = 2;
+}
+
+message GetLogsResponse {
+  repeated LogEntry logs = 1;
+  uint64 row_count = 2;
+}
+
+message LogEntry {
+  uint64 block_number = 1;
+  bytes block_hash = 2;
+  uint64 timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 tx_index = 5;
+  uint32 log_index = 6;
+  bytes address = 7;
+  repeated bytes topics = 8;
+  bytes data = 9;
+  uint32 data_len = 10;
+  uint32 source = 11;
 }

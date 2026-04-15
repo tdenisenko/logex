@@ -3,11 +3,11 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::response::Json;
 
-use logex_query::{self, QueryResult};
+use logex_query::{self};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
-use crate::eth_filter::{AddressFilter, BlockId, EthFilter, RpcLog, TopicFilter, matches_filter};
+use crate::eth_filter::{EthFilter, RpcLog};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 use crate::storage_metrics::CachedStorageMetrics;
 
@@ -85,24 +85,10 @@ fn handle_eth_get_logs(
         return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
     }
 
-    // Convert eth_getLogs filter to a LogSQL query
-    let sql = filter_to_logsql(&filter, storage);
-    tracing::debug!(sql = %sql, "eth_getLogs query");
-
-    let query = logex_query::parse(&sql).map_err(|e| format!("query parse error: {e}"))?;
-
-    let head_block = storage.head_block();
-    let result: QueryResult =
-        logex_query::execute(&query, storage, head_block).map_err(|e| e.to_string())?;
-
-    // Apply eth_getLogs topic/address filters that go beyond what the index supports
-    // (e.g., multi-address, topic1-3 filters)
-    let logs: Vec<RpcLog> = result
-        .rows
-        .iter()
-        .filter(|row| matches_filter(row, &filter))
-        .map(RpcLog::from)
-        .collect();
+    let native_filter = filter.to_native_filter(storage.head_block().unwrap_or(0));
+    let rows =
+        logex_query::execute_log_filter(storage, &native_filter).map_err(|error| error.to_string())?;
+    let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
 
     let json = serde_json::to_value(&logs).map_err(|e| e.to_string())?;
     Ok(JsonRpcResponse::success(id, json))
@@ -119,68 +105,6 @@ fn handle_eth_block_number(
     ))
 }
 
-/// Convert an `eth_getLogs` filter into a LogSQL WHERE clause.
-fn filter_to_logsql(filter: &EthFilter, storage: &PartitionManager) -> String {
-    let mut conditions = Vec::new();
-
-    // Block range
-    match (&filter.from_block, &filter.to_block) {
-        (Some(from), Some(to)) => {
-            let from_num = resolve_block_id(from, storage);
-            let to_num = resolve_block_id(to, storage);
-            conditions.push(format!("block_number BETWEEN {from_num} AND {to_num}"));
-        }
-        (Some(from), None) => {
-            let from_num = resolve_block_id(from, storage);
-            conditions.push(format!("block_number >= {from_num}"));
-        }
-        (None, Some(to)) => {
-            let to_num = resolve_block_id(to, storage);
-            conditions.push(format!("block_number <= {to_num}"));
-        }
-        (None, None) => {}
-    }
-
-    // Address — push single-address to index, multi-address handled via residual
-    match &filter.address {
-        AddressFilter::Any => {}
-        AddressFilter::Single(addr) => {
-            conditions.push(format!("address = '0x{}'", hex::encode(addr)));
-        }
-        AddressFilter::Multiple(_) => {
-            // Multi-address filter is handled post-query via matches_filter
-        }
-    }
-
-    // Topic0 — push single value to index
-    if let Some(Some(tf)) = filter.topics.first()
-        && let TopicFilter::Single(hash) = tf
-    {
-        conditions.push(format!("topic0 = '0x{}'", hex::encode(hash)));
-    }
-    // Multi-topic0 handled via matches_filter
-
-    if let Some(block_hash) = filter.block_hash {
-        conditions.push(format!("block_hash = '0x{}'", hex::encode(block_hash)));
-    }
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
-
-    format!("SELECT * FROM logs{where_clause}")
-}
-
-fn resolve_block_id(id: &BlockId, storage: &PartitionManager) -> u64 {
-    match id {
-        BlockId::Number(n) => *n,
-        BlockId::Latest => storage.head_block().unwrap_or(0),
-        BlockId::Earliest => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +113,8 @@ mod tests {
     use logex_storage::PartitionManagerConfig;
     use logex_types::{LOGEX_CLIENT_VERSION, LogRow, Source};
     use tempfile::TempDir;
+
+    use crate::eth_filter::{AddressFilter, BlockId};
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -232,33 +158,27 @@ mod tests {
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
             partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
         };
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
+        mgr.refresh_segment_indexes(mgr.hot_partition().meta.id).unwrap();
         (tmp, mgr)
     }
 
     #[test]
-    fn test_filter_to_logsql_basic() {
-        let (_tmp, storage) = setup_storage();
+    fn test_eth_filter_converts_to_native_filter() {
         let filter = EthFilter {
             from_block: Some(BlockId::Number(100)),
             to_block: Some(BlockId::Number(200)),
             address: AddressFilter::Single(Address::repeat_byte(0xAA)),
             ..Default::default()
         };
-        let sql = filter_to_logsql(&filter, &storage);
-        assert!(sql.contains("block_number BETWEEN 100 AND 200"));
-        assert!(sql.contains("address = '0x"));
-    }
-
-    #[test]
-    fn test_filter_to_logsql_no_filter() {
-        let (_tmp, storage) = setup_storage();
-        let filter = EthFilter::default();
-        let sql = filter_to_logsql(&filter, &storage);
-        assert_eq!(sql, "SELECT * FROM logs");
+        let native = filter.to_native_filter(250);
+        assert_eq!(native.from_block, Some(100));
+        assert_eq!(native.to_block, Some(200));
+        assert_eq!(native.addresses, vec![Address::repeat_byte(0xAA)]);
     }
 
     #[tokio::test]
