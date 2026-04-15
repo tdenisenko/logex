@@ -75,6 +75,9 @@ LogEx should become a canonical Ethereum event-log node that:
     - DataFusion does not yet own true projection pushdown or native index-aware filter pushdown into LogEx storage
     - this was acceptable as an intermediate migration step to unify behavior without changing the on-disk format
     - it should not be treated as the final query architecture
+  - the current API/query layering is also still transitional:
+    - `eth_getLogs` is still translated into LogSQL plus residual filtering, which is acceptable as a bridge but not the right end-state
+    - gRPC currently returns JSON rows for flexible SQL results, which is acceptable as a bridge but not necessarily the final transport design
   - codec scaffolding already exists in the storage crate for dictionary, delta, delta-of-delta, zstd, and lz4, but the active read/write path still writes raw columns today
 
 ## Explicitly Not Needed
@@ -86,146 +89,122 @@ LogEx should become a canonical Ethereum event-log node that:
 - An external consensus RPC URL in the final design
 - Engine API compatibility with a standard beacon node as the primary canonicality path
 
-## Prioritized TODO
+## Current Architecture Decisions
 
-1. Build the CL light-client foundation first.
-   - Add weak subjectivity checkpoint input, persistence, and restart handling.
-   - Implement the beacon light-client bootstrap/update/finality flow.
-   - Verify sync committee aggregate signatures and committee rotation.
-   - Verify the execution payload inclusion proof inside each accepted light-client header, following the same shape Helios uses for `execution_branch` against the beacon header `body_root`.
-   - Persist verified consensus outputs that matter to LogEx:
-     - finalized execution block hash
-     - optimistic/head execution block hash
-     - block number
-     - receipts root
-   - Expose these verified anchors in node status and storage metadata.
+- Keep using Reth crates for EL networking where they give us production-grade devp2p behavior.
+  - Discovery, session handling, peer management, and request/response transport should stay as close to Reth as practical.
+  - LogEx should not spend engineering effort re-creating networking machinery that Reth already solves well.
+- Do not adopt Reth's full execution/storage stack.
+  - LogEx is intentionally not a full execution client.
+  - The storage and query engine should be rewritten for log-centric verified ingestion rather than bent around a generic execution-node database.
+- Keep DataFusion as the SQL engine, but not as the storage engine.
+  - DataFusion should plan and execute SQL over native LogEx storage.
+  - DataFusion should not be fed by a permanent row-materialization bridge.
+- Use one canonical storage/index core, but not one forced execution path for every API.
+  - SQL surfaces should use DataFusion over the native storage provider.
+  - `eth_getLogs` should become a dedicated native execution path over the same storage and indexes, not a permanent SQL translation layer.
+  - gRPC should expose the same canonical data, but its transport can be specialized for typed log streams, SQL result sets, or Arrow-oriented responses as needed.
+- Treat the current hybrid DataFusion and `eth_getLogs` paths as temporary bridges.
+  - Only fix correctness bugs in those bridges.
+  - Do not keep layering new permanent features onto them.
+- It is acceptable to rewrite the storage format incompatibly before v1 and require a full resync.
 
-2. Adapt EL receipt syncing to consume verified CL anchors.
-   - Keep the current Reth-backed devp2p stack.
-   - Fetch receipts by block hash for CL-anchored execution blocks.
-   - Fetch from multiple EL peers and cross-check for omission or inconsistent receipt sets.
-   - Normalize and encode receipts exactly as Ethereum does on the wire and in trie leaves.
-   - Reconstruct the execution-layer receipt trie locally and require its root to equal the CL-verified `receipts_root` from the proven execution payload header.
-   - Accept logs only as data derived from receipts that passed that root check, never as standalone peer assertions.
-   - Distinguish finalized anchors from optimistic/head anchors in persistence and status.
-   - Keep comparing the remaining receipt scheduler and retry logic against Reth/geth, because receipts are still the main LogEx-owned sync surface.
+## Remaining Work
 
-3. Add proof-oriented log verification on top of the receipt-root match.
-   - Preserve enough local structure to prove receipt inclusion against the verified `receipts_root`.
-   - Make it explicit that the trustless proof boundary is receipt inclusion in the trie plus the log's position inside the proven receipt, not a separate "log Merkle tree".
-   - Derive or store the data needed to prove a specific log from a proven receipt.
-   - Make the proof boundary explicit in APIs and docs.
+1. Canonical Trust Anchor
+   - What to build:
+     - add weak subjectivity checkpoint input, persistence, and restart handling
+     - implement the beacon light-client bootstrap, update, and finality flow
+     - verify sync committee signatures and committee rotation
+     - verify the execution payload inclusion proof against the beacon header body root, following the Helios-style light-client model
+     - persist finalized and optimistic execution anchors, including block hash, block number, and receipts root
+   - Caveats and tradeoffs:
+     - this is the hardest cryptographic and protocol part of the project
+     - it is worth reusing mature SSZ, BLS, and consensus-side primitives where available, but the architecture must stay LogEx-native rather than turning into a full CL node
+     - this is the non-negotiable correctness foundation; performance work before this has limited value
+   - Done when:
+     - LogEx can restart from a stored weak subjectivity checkpoint state
+     - LogEx can track finalized and optimistic execution anchors from CL light-client updates
+     - the node can point to a CL-verified receipts root for each accepted execution block
 
-4. Keep improving EL throughput after the trust anchor exists.
-   - Better peer fanout for receipts.
-   - Better batching and fallback for large receipt responses.
-   - Better blank-dir bootstrap and serving-peer conversion.
-   - Better peer scoring for omission or malformed receipt behavior.
-   - Revisit batch sizing and fallback behavior for huge receipt/body responses so honest peers are not penalized when soft response limits are hit.
+2. Canonical EL Receipt Ingestion
+   - What to build:
+     - keep the current Reth-backed EL network stack
+     - fetch receipts by CL-anchored block hash
+     - encode receipts exactly as Ethereum does
+     - rebuild the receipt trie locally and require the computed root to match the CL-verified receipts root
+     - persist whatever receipt-level and header-level metadata is required for canonical log storage and future proof APIs
+     - continue improving peer selection, batch sizing, fallback behavior, and retry logic around receipts
+   - Caveats and tradeoffs:
+     - multi-peer comparison is primarily a liveness and robustness tool; correctness comes from matching the locally rebuilt trie root against the CL-verified root
+     - LogEx should not store generic transaction/state data it does not need, but it must store enough receipt-adjacent metadata to keep the proof boundary honest
+   - Done when:
+     - logs are accepted only from receipts whose rebuilt trie root matches the CL-verified root
+     - malformed or incomplete receipt responses are detected and rejected cleanly
+     - restart and resume preserve the canonical verified sync position
 
-5. Add end-to-end validation coverage for the new trust model.
-   - weak subjectivity restart
-   - sync committee rotation
-   - finalized/optimistic anchor updates
-   - receipt-root reconstruction
-   - malicious peer mismatch detection
-   - bootstrap, restart, shutdown, and resume regressions
+3. Native Storage Engine Rewrite
+   - What to build:
+     - rewrite the current storage layout into the final hot-and-sealed segment model instead of incrementally patching the current format
+     - keep an append-friendly hot store for active sync and immutable sealed segments for historical data
+     - store data in a columnar layout aligned with Arrow/DataFusion scan patterns
+     - make segment metadata first-class:
+       - block range
+       - segment id / generation
+       - row count
+       - canonicality metadata
+       - codec and page metadata
+       - index metadata
+       - verification / sync anchors needed by LogEx
+     - define exactly which non-log metadata lives in storage in v1:
+       - headers or header references needed for APIs and verification
+       - receipt-level metadata needed for proof boundaries
+       - finalized / optimistic sync anchors
+     - build the final index strategy and final compression format into this rewrite rather than treating them as add-ons
+   - Caveats and tradeoffs:
+     - this is a justified rewrite target, not an area for more bridge code
+     - the format should be specialized for verified log storage, not optimized for pretending to be a generic relational database or a full execution-node database
+     - compression must be page- or chunk-oriented so indexed reads do not force whole-column decompression
+     - hot data and sealed historical data should have different physical treatment
+   - Done when:
+     - the old pre-v1 format can be discarded
+     - the new format supports ingestion, restart/resume, canonical filtering, indexing, and compression as one coherent design
+     - the storage layer exposes primitives that are sufficient for SQL, `eth_getLogs`, gRPC, and proof-related features without special-case side stores
 
-6. Build the final v1 storage and query architecture as one system.
-   - Stop treating storage, SQL, `eth_getLogs`, gRPC, and compression as separate side topics; design them together around one native LogEx storage engine.
-   - Prefer a LogEx-native storage format over bolting on an external database backend.
-     - The goal is not “PostgreSQL-compatible storage”.
-     - The goal is a storage engine that is fully queryable with modern SQL through DataFusion, serves `eth_getLogs` correctly, serves gRPC correctly, compresses well, and is efficient for long-running sync.
-   - It is acceptable to replace the current storage layout incompatibly before v1 if that yields a materially better end-state.
+4. Unified Query and API Layer Over Native Storage
+   - What to build:
+     - replace the current hybrid DataFusion bridge with a native DataFusion provider over the rewritten storage engine
+     - implement real projection pushdown, partition pruning, and index-aware filter pushdown where sound
+     - keep DataFusion as the canonical SQL layer for REST `/query`, gRPC SQL-style queries, and the web UI
+     - replace the current `eth_getLogs` LogSQL translation with a dedicated native execution path over the same storage and index primitives
+     - decide the final gRPC shape:
+       - typed log-oriented methods where that is the right abstraction
+       - SQL result methods where that is the right abstraction
+       - Arrow- or batch-oriented transport if large result sets need it
+     - decide whether `decode(...)` belongs in v1 as a UDF or remains explicitly deferred
+   - Caveats and tradeoffs:
+     - the strongest design is one storage/index core with API-specific execution layers, not one forced adapter for every surface
+     - `eth_getLogs` semantics are Ethereum API semantics first, not SQL semantics with a wrapper
+     - gRPC JSON rows are flexible but not necessarily the best final transport for large query results
+   - Done when:
+     - SQL surfaces no longer depend on the row-materialization bridge
+     - `eth_getLogs` no longer depends on LogSQL translation
+     - REST, gRPC, web UI, and JSON-RPC all read from the same canonical stored data and produce consistent answers
 
-7. Define the final on-disk storage model.
-   - Keep an append-friendly hot store for active sync and immutable sealed segments for historical data.
-   - Store logs in a columnar layout aligned with DataFusion/Arrow-style scan patterns rather than a row-materialization-first layout.
-   - Make segment metadata first-class and durable:
-     - block range
-     - segment id / generation
-     - row count
-     - canonicality metadata
-     - codec and page metadata
-     - index metadata
-     - sync / verification anchors needed by LogEx
-   - Preserve enough surrounding metadata to support canonical log serving, restart/resume, proof-related features, and future verified APIs.
-   - Decide explicitly which non-log metadata must live alongside logs in v1 so the storage engine is not boxed in later.
-     - block headers or header references needed for verification and APIs
-     - receipt-level metadata needed for proof boundaries and API shaping
-     - sync status / finalized / optimistic anchors
-
-8. Make DataFusion the canonical SQL layer over native storage.
-   - Keep DataFusion as the main SQL engine for REST, gRPC query endpoints, and the web UI.
-   - Build a truly native storage-backed DataFusion provider that reads LogEx partitions directly instead of first reconstructing full `LogRow` sets.
-   - Add real projection pushdown so queries that read a few columns do not force full-row materialization.
-   - Add real filter pushdown from DataFusion expressions into LogEx planning and indexes wherever those mappings are sound.
-   - Preserve partition pruning and existing address/topic/block indexes, but make them native scan capabilities rather than a sidecar prefilter step.
-   - Support modern SQL behavior through DataFusion rather than by maintaining a narrow allowlist.
-     - aggregates
-     - aliases
-     - ordering
-     - grouping
-     - limits
-     - richer predicates and expressions where DataFusion supports them
-   - Decide whether `decode(...)` belongs in v1 as a UDF or remains explicitly deferred.
-
-9. Make API compatibility a first-class storage requirement.
-   - `eth_getLogs` must be served from the same canonical local storage and indexes, with correct Ethereum semantics:
-     - block range and block hash filtering
-     - address filtering
-     - topic filtering including OR semantics and positional rules
-     - canonical-only results
-     - deterministic ordering
-   - gRPC should not become a second-class API because of transport limitations.
-     - keep rich query semantics available
-     - revisit row-JSON versus a stronger streaming or Arrow-oriented transport for large result sets if needed
-   - REST and web UI should remain thin clients over the same canonical query/storage layer, not separate execution paths.
-
-10. Finish the final index and hot/cold query strategy.
-   - Keep primary access paths for:
-     - block_number
-     - block_hash
-     - address
-     - topic0
-     - useful composites such as address+topic0 and any other combinations justified by real workloads
-   - Revisit whether additional indexes are needed for proof support, transaction-oriented lookups, or common operational queries.
-   - Improve the hot-partition strategy so it can combine an indexed stable prefix with a direct-scan tail, instead of choosing between possibly stale indexes and a broader scan.
-   - Ensure indexes remain cheap to maintain during sync and cheap to use during API and SQL queries.
-
-11. Finish the storage compression strategy without harming queryability.
-   - Keep the hot store append-friendly and mostly uncompressed; compression should primarily happen when a segment is sealed and immutable.
-   - Do not compress an entire column file as one giant blob.
-   - Add page- or chunk-based compression inside each sealed column so row IDs produced by indexes can be mapped to a small number of compressed pages instead of forcing full-column decompression.
-   - Extend the column format so each compressed column records:
-     - codec
-     - page boundaries / row ranges
-     - byte offsets for each compressed page
-     - any codec-specific metadata needed to decode a page independently
-   - Teach the reader to dispatch on the stored codec and only decompress the pages needed for the requested row IDs.
-   - Keep indexes, null bitmaps, and canonical bitmaps independently readable so query planning and canonical filtering stay cheap.
-   - Start with per-column codecs that match the current schema:
-     - `block_number`: delta
-     - `timestamp`: delta-of-delta
-     - `topic0`: dictionary when page cardinality is favorable
-     - `address`: adaptive dictionary or zstd depending on page cardinality
-     - `block_hash`, `tx_hash`, `topic1`, `topic2`, `topic3`: zstd
-     - `data`: lz4 first for fast reads, with the option to benchmark zstd for colder partitions
-   - Decide whether older sealed segments should be rewritten by a background compaction job once the final format is stable.
-   - Add corruption detection and recovery expectations to the format, not just happy-path compression.
-
-12. Validate the final storage/query design with performance and correctness tests.
-   - Benchmark realistic ERC-20 / ERC-721-heavy datasets.
-   - Benchmark common indexed queries and broader SQL queries after the native DataFusion path lands.
-   - Benchmark `eth_getLogs`-style workloads separately from ad hoc SQL workloads.
-   - Test restart and resume across hot/sealed/compressed segment mixes.
-   - Test corruption, partial-page decode, and torn-write recovery behavior.
-   - Test that API results from REST, gRPC, SQL, and `eth_getLogs` remain consistent over the same stored data.
-
-13. Reconcile the public README with the actual trust model and runtime model.
-   - Make it explicit what is verified today.
-   - Make it explicit what the weak subjectivity assumption is.
-   - Make it explicit that LogEx is not a full execution node and not a standard EL<->CL pair.
+5. Performance, Correctness, and Documentation Gate
+   - What to build:
+     - end-to-end validation for weak subjectivity restart, sync committee rotation, finalized/optimistic anchor handling, receipt-root reconstruction, malicious peer detection, bootstrap, shutdown, and resume
+     - benchmarks for realistic ERC-20 / ERC-721-heavy datasets
+     - benchmarks for indexed queries, broader SQL queries, and `eth_getLogs` workloads
+     - corruption, partial-page decode, and torn-write recovery tests
+     - consistency tests that compare REST, gRPC, SQL, and `eth_getLogs` results over the same stored data
+     - README alignment with the actual trust model, runtime model, and verification guarantees
+   - Caveats and tradeoffs:
+     - this should be treated as a gate, not a cleanup bucket
+     - if the rewritten storage/query architecture does not pass this gate, the architecture is not done
+   - Done when:
+     - the node can sync, restart, query, and serve logs from the rewritten architecture with measured performance and correctness coverage
+     - the public docs describe the real guarantees rather than the intended ones
 
 ## Sequencing Decision
 
