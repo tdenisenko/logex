@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, proofs};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
+use logex_types::ExecutionAnchor;
 use reth_chainspec::{ChainSpec, MAINNET};
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_ethereum_consensus::EthBeaconConsensus;
@@ -35,6 +36,13 @@ pub enum HeaderValidationError {
     AgainstParent(ConsensusError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorValidationError {
+    BlockNumberMismatch { expected: u64, got: u64 },
+    BlockHashMismatch { expected: B256, got: B256 },
+    ReceiptsRootMismatch { expected: B256, got: B256 },
+}
+
 impl fmt::Display for HeaderValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -48,6 +56,63 @@ impl fmt::Display for HeaderValidationError {
             Self::AgainstParent(error) => write!(f, "{error}"),
         }
     }
+}
+
+impl fmt::Display for AnchorValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BlockNumberMismatch { expected, got } => {
+                write!(
+                    f,
+                    "anchored block number mismatch: expected {expected}, got {got}"
+                )
+            }
+            Self::BlockHashMismatch { expected, got } => {
+                write!(
+                    f,
+                    "anchored block hash mismatch: expected {expected}, got {got}"
+                )
+            }
+            Self::ReceiptsRootMismatch { expected, got } => {
+                write!(
+                    f,
+                    "anchored receipts root mismatch: expected {expected}, got {got}"
+                )
+            }
+        }
+    }
+}
+
+pub fn validate_header_matches_anchor<H>(
+    anchor: &ExecutionAnchor,
+    header: &H,
+    actual_block_hash: B256,
+) -> Result<(), AnchorValidationError>
+where
+    H: BlockHeader,
+{
+    if header.number() != anchor.block_number {
+        return Err(AnchorValidationError::BlockNumberMismatch {
+            expected: anchor.block_number,
+            got: header.number(),
+        });
+    }
+
+    if actual_block_hash != anchor.block_hash {
+        return Err(AnchorValidationError::BlockHashMismatch {
+            expected: anchor.block_hash,
+            got: actual_block_hash,
+        });
+    }
+
+    if header.receipts_root() != anchor.receipts_root {
+        return Err(AnchorValidationError::ReceiptsRootMismatch {
+            expected: anchor.receipts_root,
+            got: header.receipts_root(),
+        });
+    }
+
+    Ok(())
 }
 
 pub fn validate_downloaded_headers(
@@ -253,6 +318,35 @@ mod tests {
         assert!(matches!(
             validate_receipts_for_header(&header, &tampered),
             Err(ReceiptValidationError::GasUsedMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn anchored_header_must_match_consensus_anchor() {
+        let header = Header {
+            number: 11,
+            receipts_root: B256::repeat_byte(0x55),
+            ..Default::default()
+        };
+        let anchor = ExecutionAnchor {
+            beacon_root: B256::repeat_byte(0x11),
+            beacon_slot: 999,
+            block_number: 11,
+            block_hash: header.hash_slow(),
+            receipts_root: B256::repeat_byte(0x55),
+        };
+        assert_eq!(
+            validate_header_matches_anchor(&anchor, &header, header.hash_slow()),
+            Ok(())
+        );
+
+        let wrong_anchor = ExecutionAnchor {
+            receipts_root: B256::repeat_byte(0x66),
+            ..anchor
+        };
+        assert!(matches!(
+            validate_header_matches_anchor(&wrong_anchor, &header, header.hash_slow()),
+            Err(AnchorValidationError::ReceiptsRootMismatch { .. })
         ));
     }
 

@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
+    /// Weak-subjectivity checkpoint root or descriptor file path.
+    #[arg(long, global = true)]
+    pub checkpoint: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -53,6 +57,18 @@ pub enum Command {
         /// Maximum peer connections.
         #[arg(long, default_value = "50")]
         max_peers: usize,
+
+        /// Consensus-layer discovery port (reserved for native CL networking).
+        #[arg(long, default_value = "9000")]
+        cl_discovery_port: u16,
+
+        /// Consensus-layer listener port (reserved for native CL networking).
+        #[arg(long, default_value = "9000")]
+        cl_p2p_port: u16,
+
+        /// Maximum CL peer connections (reserved for native CL networking).
+        #[arg(long, default_value = "32")]
+        cl_max_peers: usize,
     },
 
     /// Build or rebuild indexes on the hot partition.
@@ -71,6 +87,8 @@ pub struct Config {
     pub log_level: Option<String>,
     #[serde(default)]
     pub partition_target_rows: Option<u64>,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 impl Config {

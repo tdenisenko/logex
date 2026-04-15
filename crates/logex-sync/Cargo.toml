@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 # Internal
 logex-types = { workspace = true }
+logex-cl = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
 logex-server = { workspace = true }

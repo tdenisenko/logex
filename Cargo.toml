@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
+members = ["crates/logex-types", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
 resolver = "2"
 
 [workspace.package]
@@ -58,6 +58,7 @@ reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag
 
 # Internal crates
 logex-types = { path = "crates/logex-types" }
+logex-cl = { path = "crates/logex-cl" }
 logex-storage = { path = "crates/logex-storage" }
 logex-index = { path = "crates/logex-index" }
 logex-query = { path = "crates/logex-query" }

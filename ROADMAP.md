@@ -62,6 +62,15 @@ LogEx should become a canonical Ethereum event-log node that:
   - restart resumes from durable metadata
   - productive peers are persisted
   - UI/runtime state no longer falsely claims sync completion on missing targets
+- The CL-driven storage and runtime boundary is now materially in place:
+  - `WeakSubjectivityCheckpoint`, `ExecutionAnchor`, and `ChainAnchors` are shared types used across runtime, sync, storage, and status surfaces
+  - `crates/logex-cl` exists and persists checkpoint state plus ordered execution anchors under the data directory
+  - the node now accepts `--checkpoint`, persists consensus state on first startup, reloads it on restart, and exposes checkpoint/finality/optimistic/indexed-head status through CLI `info` and `/status`
+  - fresh data directories now require a checkpoint before they can start canonical sync
+  - storage now persists execution-facing chain anchors separately from log rows
+  - finalized-head-aware compaction is live whenever finalized CL anchors exist
+  - the anchored EL sync path now fetches headers by block hash, validates the fetched header against the CL-derived execution anchor, validates body/receipts locally, and only then ingests logs
+  - anchored sync now rewinds indexed canonical state on optimistic anchor replacement within the persisted recent-header window instead of silently continuing on stale canonical data
 - Query/storage direction is already established:
   - local storage is the source of truth
   - REST `/query`, gRPC `Query`, and the web UI share the same DataFusion-backed SQL engine
@@ -73,7 +82,7 @@ LogEx should become a canonical Ethereum event-log node that:
     - sealed segments are compacted into page-oriented encoded columns with per-column codec and page-index metadata
     - sealed-segment reads are manifest-aware, so indexed lookups do not require whole-column decompression
     - startup now performs a lightweight integrity check over the recent canonical header window and segment metadata/page decode boundaries so obvious local corruption is detected early
-    - permanent compaction of sealed history is delayed behind a safety margin from the current head; this is an interim anti-reorg rule that should later be replaced by real CL finality
+    - permanent compaction now follows the finalized execution head when CL finality is available; the old safety-margin rule remains only as a fallback for legacy non-checkpointed storage
   - DataFusion now reads projected columns directly from native segment files
     - the old row-materialization seed scan is no longer used by REST `/query`, gRPC `Query`, or the web UI
     - projection pushdown is live
@@ -93,6 +102,21 @@ LogEx should become a canonical Ethereum event-log node that:
     - `eth_getLogs` uses the native filter path directly
     - gRPC exposes both SQL queries and typed log methods
     - cross-surface consistency coverage is in place
+
+## Status Right Now
+
+- LogEx now has the correct CL-owned persistence model and the correct EL verification boundary:
+  - EL peers no longer decide canonical order once consensus state exists
+  - ordered execution anchors decide which EL blocks are eligible for ingestion
+  - LogEx persists optimistic, finalized, and indexed execution heads explicitly
+- The main blocker is no longer the EL receipt pipeline.
+  - The remaining blocker is live production of those execution anchors from a verified beacon light client.
+- In other words:
+  - anchored EL verification is implemented
+  - checkpoint persistence is implemented
+  - anchor rewind on optimistic reorg is implemented
+  - native CL networking and real light-client update verification are not implemented yet
+- This means the current branch is a real architectural shift, but not yet the full end-to-end canonical system.
 
 ## Explicitly Not Needed
 
@@ -120,53 +144,61 @@ LogEx should become a canonical Ethereum event-log node that:
   - gRPC should expose the same canonical data through typed log methods and SQL query methods; Arrow-style SQL transport can be added later only if benchmarks justify it.
 - It is acceptable to rewrite the storage format incompatibly at this stage and require a full resync.
 
-## Remaining Work
+## Remaining Work And Clear TODOs
 
-1. Canonical Trust Anchor
-   - What to build:
-     - add weak subjectivity checkpoint input, persistence, and restart handling
-     - implement the beacon light-client bootstrap, update, and finality flow
-     - verify sync committee signatures and committee rotation
-     - verify the execution payload inclusion proof against the beacon header body root, following the Helios-style light-client model
-     - persist finalized and optimistic execution anchors, including block hash, block number, and receipts root
-   - Caveats and tradeoffs:
-     - this is the hardest cryptographic and protocol part of the project
-     - it is worth reusing mature SSZ, BLS, and consensus-side primitives where available, but the architecture must stay LogEx-native rather than turning into a full CL node
-     - this is the non-negotiable correctness foundation; performance work before this has limited value
+1. Native Beacon Light Client
+   - TODO:
+     - implement native CL discovery, peer management, and req/resp for light-client bootstrap, updates-by-range, finality updates, optimistic updates, and beacon block fetches
+     - implement fork-aware SSZ decoding for the post-merge beacon light-client objects LogEx needs
+     - verify sync committee signatures, committee rotation, and weak-subjectivity bootstrap state exactly enough to match the Helios-style trust model
+     - verify `execution_branch` against the beacon header `body_root` for every trusted light-client header
+   - Why this is still blocking:
+     - the node can persist and consume execution anchors, but it cannot yet generate them itself from a live verified CL network
+     - until this lands, checkpointed CL state must be imported rather than learned live
    - Done when:
-     - LogEx can restart from a stored weak subjectivity checkpoint state
-     - LogEx can track finalized and optimistic execution anchors from CL light-client updates
-     - the node can point to a CL-verified receipts root for each accepted execution block
+     - a fresh mainnet sync can start from a weak-subjectivity checkpoint and produce verified optimistic/finalized execution anchors without any external consensus RPC
 
-2. Canonical EL Receipt Ingestion
-   - What to build:
-     - keep the current Reth-backed EL network stack
-     - fetch receipts by CL-anchored block hash
-     - encode receipts exactly as Ethereum does
-     - rebuild the receipt trie locally and require the computed root to match the CL-verified receipts root
-     - persist whatever receipt-level and header-level metadata is required for canonical log storage and future proof APIs
-     - continue improving peer selection, batch sizing, fallback behavior, and retry logic around receipts
-   - Caveats and tradeoffs:
-     - multi-peer comparison is primarily a liveness and robustness tool; correctness comes from matching the locally rebuilt trie root against the CL-verified root
-     - LogEx should not store generic transaction/state data it does not need, but it must store enough receipt-adjacent metadata to keep the proof boundary honest
+2. Beacon Block Segment Authentication
+   - TODO:
+     - fetch full beacon blocks between trusted light-client headers
+     - verify each full block body against its signed beacon header by recomputing `body_root`
+     - walk parent roots backward from trusted endpoints so every emitted execution anchor is authenticated, ordered, and contiguous
+     - derive execution payload headers from the verified block bodies rather than trusting imported execution anchor files forever
+   - Why this is still blocking:
+     - the current anchor store can hold per-block execution anchors, but LogEx still needs the beacon-side segment walker that creates those anchors from verified CL data
    - Done when:
-     - logs are accepted only from receipts whose rebuilt trie root matches the CL-verified root
-     - malformed or incomplete receipt responses are detected and rejected cleanly
-     - restart and resume preserve the canonical verified sync position
+     - every execution anchor used by EL ingestion can be traced back to verified beacon blocks bounded by verified light-client headers
 
-3. Release Gate
-   - What to build:
-     - end-to-end validation for weak subjectivity restart, sync committee rotation, finalized/optimistic anchor handling, receipt-root reconstruction, malicious peer detection, bootstrap, shutdown, and resume once the CL path exists
+3. Remove Transitional Consensus Shortcuts
+   - TODO:
+     - delete the remaining operator-facing language that treats CL networking ports as merely reserved
+     - delete the remaining legacy EL-only startup path once live CL anchor production is in place
+     - stop relying on imported checkpoint descriptor files as the normal way to feed execution anchors into the node
+     - tighten storage/runtime assumptions so checkpointed canonical sync is the only steady-state ingestion path
+   - Why this is still blocking:
+     - the final architecture should not leave a half-canonical fallback path around after the real CL path exists
+   - Done when:
+     - canonical sync always means CL-driven sync, not a mix of CL mode and legacy EL-only mode
+
+4. Mainnet Proving Runs And Failure Handling
+   - TODO:
+     - run long-lived mainnet sync tests from real weak-subjectivity checkpoints
+     - verify restart, shutdown, and resume across optimistic updates, finality advances, and anchor replacements
+     - test malicious or incomplete EL responses against CL-driven anchors on real network conditions
+     - improve recovery behavior for optimistic reorgs deeper than the persisted recent-header window
+   - Why this is still blocking:
+     - the current code now rewinds correctly within the stored recent-header window, but a deeper optimistic reorg still requires stronger recovery logic or an explicit resync path
+   - Done when:
+     - LogEx can survive realistic mainnet churn and either recover safely or fail loudly with a precise operator action
+
+5. Release Gate
+   - TODO:
+     - keep the current receipt-root, restart, corruption-detection, and cross-surface consistency coverage green as the native CL path lands
+     - add end-to-end fixtures for checkpoint bootstrap, light-client updates, beacon blocks, execution anchors, EL headers, bodies, and receipts
      - run the benchmark harness on realistic ERC-20 / ERC-721-heavy datasets and record target throughput / latency numbers
-     - run the benchmark harness on indexed queries, broader SQL queries, and `eth_getLogs`-style workloads
-     - keep the corruption, partial-page decode, torn-write recovery, and cross-surface consistency coverage in place as APIs evolve
-     - README alignment with the actual trust model, runtime model, and verification guarantees
-   - Caveats and tradeoffs:
-     - this should be treated as a gate, not a cleanup bucket
-     - if the rewritten storage/query architecture does not pass this gate, the architecture is not done
+     - align README and operator docs with the actual guarantees once the native CL path is complete
    - Done when:
-      - the node can sync, restart, query, and serve logs from the rewritten architecture with measured performance and correctness coverage
-      - the public docs describe the real guarantees rather than the intended ones
+     - the node can sync, restart, query, and serve logs from the final CL-driven architecture with measured performance and truthful documentation
 
 ## Sequencing Decision
 

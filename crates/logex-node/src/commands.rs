@@ -1,3 +1,6 @@
+use std::path::Path;
+
+use logex_cl::ConsensusStore;
 use logex_index::IndexBuilder;
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 
@@ -28,6 +31,12 @@ pub fn run_build_indexes(config: PartitionManagerConfig) {
 }
 
 pub fn run_info(config: PartitionManagerConfig) {
+    let consensus_state_path = consensus_state_path(&config.data_dir);
+    let consensus = if consensus_state_path.exists() {
+        ConsensusStore::open(&config.data_dir, None).ok()
+    } else {
+        None
+    };
     let storage = match PartitionManager::open(config) {
         Ok(s) => s,
         Err(e) => {
@@ -55,4 +64,31 @@ pub fn run_info(config: PartitionManagerConfig) {
         "  Hot partition rows:  {}",
         storage.hot_partition().meta.row_count
     );
+    if let Some(consensus) = consensus {
+        let checkpoint = consensus.checkpoint();
+        let anchors = consensus.chain_anchors();
+        println!("  Checkpoint root:     {}", checkpoint.beacon_root);
+        println!(
+            "  Checkpoint slot:     {}",
+            checkpoint
+                .beacon_slot
+                .map_or("none".to_string(), |slot| slot.to_string())
+        );
+        println!(
+            "  Optimistic head:     {}",
+            anchors
+                .optimistic_head
+                .map_or("none".to_string(), |anchor| anchor.block_number.to_string())
+        );
+        println!(
+            "  Finalized head:      {}",
+            anchors
+                .finalized_head
+                .map_or("none".to_string(), |anchor| anchor.block_number.to_string())
+        );
+    }
+}
+
+fn consensus_state_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("cl").join("consensus_state.json")
 }

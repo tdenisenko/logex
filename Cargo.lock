@@ -4361,6 +4361,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "logex-cl"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "logex-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "logex-index"
 version = "0.1.0"
 dependencies = [
@@ -4377,6 +4391,7 @@ name = "logex-node"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "logex-cl",
  "logex-index",
  "logex-server",
  "logex-storage",
@@ -4463,6 +4478,7 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
+ "logex-cl",
  "logex-index",
  "logex-server",
  "logex-storage",

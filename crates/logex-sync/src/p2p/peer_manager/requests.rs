@@ -1,3 +1,4 @@
+use alloy_eips::BlockHashOrNumber;
 use eyre::bail;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -25,6 +26,36 @@ impl PeerManager {
         let (peer_id, headers) = response.split();
         self.note_peer_success(peer_id);
         Ok((peer_id, headers))
+    }
+
+    /// Request a single block header by hash or number.
+    pub async fn get_header(
+        &mut self,
+        id: BlockHashOrNumber,
+    ) -> Result<(
+        PeerId,
+        Option<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        self.drain_events_now();
+
+        let response = timeout(REQUEST_TIMEOUT, self.fetch_client.get_header(id))
+            .await
+            .map_err(|_| eyre::eyre!("header request timed out"))?
+            .map_err(|error| eyre::eyre!("header request failed: {error}"))?;
+        let (peer_id, header) = response.split();
+        self.note_peer_success(peer_id);
+        Ok((peer_id, header))
+    }
+
+    /// Request a single block header by hash.
+    pub async fn get_header_by_hash(
+        &mut self,
+        hash: B256,
+    ) -> Result<(
+        PeerId,
+        Option<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        self.get_header(BlockHashOrNumber::Hash(hash)).await
     }
 
     /// Request block bodies for the given block hashes.

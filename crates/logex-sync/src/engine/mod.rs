@@ -1,6 +1,7 @@
 use alloy_consensus::{BlockHeader, Header, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{B256, Log};
 use eyre::Result;
+use logex_cl::ConsensusStore;
 use reth_ethereum_forks::Head;
 use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
@@ -22,6 +23,7 @@ use crate::validation::{
     validate_receipts_for_header,
 };
 
+mod anchored;
 mod helpers;
 mod historical;
 mod ingest;
@@ -36,6 +38,7 @@ const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
 const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
 const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 4;
+const RECENT_HEADER_WINDOW: usize = 8_192;
 
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {
@@ -44,6 +47,7 @@ pub struct SyncEngine {
     storage: Arc<RwLock<PartitionManager>>,
     subscriptions: Option<SubscriptionManager>,
     sync_status: Arc<std::sync::Mutex<SyncStatus>>,
+    consensus: Option<Arc<ConsensusStore>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
     connected_once: bool,
@@ -58,6 +62,7 @@ impl SyncEngine {
         storage: Arc<RwLock<PartitionManager>>,
         subscriptions: Option<SubscriptionManager>,
         sync_status: Arc<std::sync::Mutex<SyncStatus>>,
+        consensus: Option<Arc<ConsensusStore>>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));
@@ -67,7 +72,8 @@ impl SyncEngine {
             storage,
             subscriptions,
             sync_status,
-            head_tracker: HeadTracker::new(256),
+            consensus,
+            head_tracker: HeadTracker::new(RECENT_HEADER_WINDOW),
             progress,
             connected_once: false,
             last_validated_header: None,

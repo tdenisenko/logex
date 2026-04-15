@@ -1,7 +1,9 @@
+mod consensus;
 mod log_row;
 mod partition;
 mod sync;
 
+pub use consensus::{ChainAnchors, ExecutionAnchor, WeakSubjectivityCheckpoint};
 pub use log_row::{BlockContext, LogRow, Source};
 pub use partition::PartitionMeta;
 pub use sync::{NodeState, SyncStatus};

@@ -1,6 +1,7 @@
 use super::*;
 use crate::extract;
 use logex_index::IndexBuilder;
+use logex_types::ExecutionAnchor;
 
 impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
@@ -10,6 +11,7 @@ impl SyncEngine {
         block_hash: B256,
         txs: &[(B256, Vec<Log>)],
         recent_headers: &[Header],
+        anchor: Option<&ExecutionAnchor>,
     ) -> Result<u64> {
         let block_number = header.number();
         let timestamp = header.timestamp();
@@ -52,9 +54,14 @@ impl SyncEngine {
                 subs.notify(&rows);
             }
         }
-        storage
-            .record_canonical_state(header, recent_headers)
-            .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
+        match anchor {
+            Some(anchor) => storage
+                .record_verified_canonical_state(anchor, header, recent_headers)
+                .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?,
+            None => storage
+                .record_canonical_state(header, recent_headers)
+                .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?,
+        }
 
         Ok(count)
     }

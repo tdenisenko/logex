@@ -179,7 +179,7 @@ impl SyncEngine {
                 self.peers
                     .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
                 let log_count = self
-                    .ingest_block(header, block_hash, &txs, &recent_headers)
+                    .ingest_block(header, block_hash, &txs, &recent_headers, None)
                     .await?;
                 self.progress.record_block(block_number, log_count);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);

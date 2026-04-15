@@ -93,13 +93,14 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
-    let (total_rows, sealed_partitions, head_block, indexed_head_block, data_dir) = {
+    let (total_rows, sealed_partitions, head_block, indexed_head_block, chain_anchors, data_dir) = {
         let storage = state.storage.read().await;
         (
             storage.total_rows(),
             storage.sealed_count(),
             storage.head_block(),
             storage.indexed_head_block(),
+            storage.chain_anchors(),
             storage.data_dir().to_path_buf(),
         )
     };
@@ -131,6 +132,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
         "progress_pct": progress_pct,
+        "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
+        "checkpoint_slot": sync.checkpoint.and_then(|checkpoint| checkpoint.beacon_slot),
+        "indexed_execution_head": sync.indexed_execution_head,
+        "optimistic_execution_head": sync.optimistic_execution_head,
+        "finalized_execution_head": sync.finalized_execution_head,
+        "storage_chain_anchors": chain_anchors,
     }))
 }
 
@@ -454,6 +461,7 @@ mod tests {
                 blocks_per_minute: 120.0,
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
+                ..Default::default()
             },
         ));
         let app = crate::build_router(state);
@@ -501,6 +509,7 @@ mod tests {
                 blocks_per_minute: 0.0,
                 logs_ingested: 0,
                 eta_seconds: None,
+                ..Default::default()
             },
         ));
         let app = crate::build_router(state);

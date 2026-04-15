@@ -1,3 +1,4 @@
+use crate::{ExecutionAnchor, WeakSubjectivityCheckpoint};
 use serde::Serialize;
 
 /// High-level runtime state for the node.
@@ -9,6 +10,7 @@ pub enum NodeState {
     Discovering,
     Connecting,
     Syncing,
+    WaitingForConsensus,
     Synced,
     Disconnected,
     Reconnecting,
@@ -21,6 +23,7 @@ impl NodeState {
             Self::Discovering => "Discovering",
             Self::Connecting => "Connecting",
             Self::Syncing => "Syncing",
+            Self::WaitingForConsensus => "Waiting For Consensus",
             Self::Synced => "Synced",
             Self::Disconnected => "Disconnected",
             Self::Reconnecting => "Reconnecting",
@@ -54,4 +57,16 @@ pub struct SyncStatus {
     pub logs_ingested: u64,
     /// Estimated seconds remaining to reach target.
     pub eta_seconds: Option<f64>,
+    /// Weak-subjectivity checkpoint the node bootstrapped from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<WeakSubjectivityCheckpoint>,
+    /// Highest indexed execution anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_execution_head: Option<ExecutionAnchor>,
+    /// Highest optimistic execution anchor known from CL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimistic_execution_head: Option<ExecutionAnchor>,
+    /// Highest finalized execution anchor known from CL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_execution_head: Option<ExecutionAnchor>,
 }
