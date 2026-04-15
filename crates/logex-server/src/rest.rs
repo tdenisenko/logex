@@ -167,6 +167,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "indexed_execution_head": sync.indexed_execution_head,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
+        "consensus_network": sync.consensus_network,
         "index_lag_blocks": index_lag_blocks,
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
@@ -187,7 +188,8 @@ mod tests {
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
-        ExecutionAnchor, LogRow, NodeState, Source, SyncStatus, WeakSubjectivityCheckpoint,
+        ConsensusNetworkStatus, ExecutionAnchor, LogRow, NodeState, Source, SyncStatus,
+        WeakSubjectivityCheckpoint,
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -520,6 +522,18 @@ mod tests {
                     block_hash: B256::repeat_byte(0x08),
                     receipts_root: B256::repeat_byte(0x09),
                 }),
+                consensus_network: Some(ConsensusNetworkStatus {
+                    local_enr: Some("enr:test".to_string()),
+                    local_node_id: Some("node:test".to_string()),
+                    discovery_port: 9_000,
+                    p2p_port: 9_000,
+                    max_peers: 32,
+                    bootnode_count: 14,
+                    discovered_peers: 21,
+                    dialable_peers: 13,
+                    routing_table_peers: 11,
+                    active_sessions: 3,
+                }),
                 ..Default::default()
             },
         ));
@@ -551,6 +565,8 @@ mod tests {
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
+        assert_eq!(status["consensus_network"]["active_sessions"], 3);
+        assert_eq!(status["consensus_network"]["dialable_peers"], 13);
         assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
         assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
     }

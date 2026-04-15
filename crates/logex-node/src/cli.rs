@@ -58,15 +58,15 @@ pub enum Command {
         #[arg(long, default_value = "50")]
         max_peers: usize,
 
-        /// Consensus-layer discovery port (reserved for native CL networking).
+        /// Consensus-layer discv5 discovery port (UDP).
         #[arg(long, default_value = "9000")]
         cl_discovery_port: u16,
 
-        /// Consensus-layer listener port (reserved for native CL networking).
+        /// Consensus-layer libp2p port advertised in the local ENR.
         #[arg(long, default_value = "9000")]
         cl_p2p_port: u16,
 
-        /// Maximum CL peer connections (reserved for native CL networking).
+        /// Maximum dialable CL peers to retain from discovery.
         #[arg(long, default_value = "32")]
         cl_max_peers: usize,
     },

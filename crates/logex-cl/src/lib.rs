@@ -8,6 +8,10 @@ use logex_types::{ChainAnchors, ExecutionAnchor, WeakSubjectivityCheckpoint};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod network;
+
+pub use network::{ConsensusNetworkConfig, ConsensusNetworkError, spawn_consensus_network};
+
 const CONSENSUS_STATE_DIR: &str = "cl";
 const CONSENSUS_STATE_FILE: &str = "consensus_state.json";
 

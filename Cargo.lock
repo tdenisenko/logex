@@ -4365,11 +4365,13 @@ name = "logex-cl"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "discv5",
  "logex-types",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
 ]

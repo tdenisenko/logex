@@ -31,6 +31,32 @@ impl NodeState {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ConsensusNetworkStatus {
+    /// Base64-encoded local ENR advertised on the consensus network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_enr: Option<String>,
+    /// Local discovery node id, derived from the ENR public key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_node_id: Option<String>,
+    /// UDP discovery port bound for discv5.
+    pub discovery_port: u16,
+    /// TCP libp2p port advertised in the ENR for future req/resp and gossip sessions.
+    pub p2p_port: u16,
+    /// Maximum retained dialable consensus peers.
+    pub max_peers: usize,
+    /// Number of configured bootnodes.
+    pub bootnode_count: usize,
+    /// Number of unique peers observed by discovery in this run.
+    pub discovered_peers: usize,
+    /// Number of discovered peers that advertise a TCP port and are eligible as dial candidates.
+    pub dialable_peers: usize,
+    /// Number of ENRs currently stored in the discovery routing table.
+    pub routing_table_peers: usize,
+    /// Number of active UDP discovery sessions currently established.
+    pub active_sessions: usize,
+}
+
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SyncStatus {
@@ -69,4 +95,7 @@ pub struct SyncStatus {
     /// Highest finalized execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_execution_head: Option<ExecutionAnchor>,
+    /// Native consensus-network discovery state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_network: Option<ConsensusNetworkStatus>,
 }

@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
 
-use logex_cl::{ConsensusStateError, ConsensusStore};
+use logex_cl::{
+    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, spawn_consensus_network,
+};
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
@@ -140,6 +142,27 @@ pub async fn run_sync(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    let consensus_network_handle = consensus.as_ref().map(|_| {
+        spawn_consensus_network(
+            ConsensusNetworkConfig {
+                data_dir: data_dir.clone(),
+                discovery_port: cl_discovery_port,
+                p2p_port: cl_p2p_port,
+                max_peers: cl_max_peers,
+            },
+            Arc::clone(&state.sync_status),
+            shutdown_rx.clone(),
+        )
+    });
+    let consensus_network_handle = match consensus_network_handle {
+        Some(Ok(handle)) => Some(handle),
+        Some(Err(error)) => {
+            tracing::error!(%error, "failed to start consensus discovery");
+            std::process::exit(1);
+        }
+        None => None,
+    };
+
     let http_addr: SocketAddr = ([0, 0, 0, 0], http_port).into();
     let http_state = Arc::clone(&state);
     let http_shutdown = shutdown_rx.clone();
@@ -242,6 +265,9 @@ pub async fn run_sync(
     log_task_exit("HTTP server", http_handle).await;
     log_task_exit("gRPC server", grpc_handle).await;
     log_task_exit("background indexer", index_handle).await;
+    if let Some(handle) = consensus_network_handle {
+        log_task_exit("consensus discovery", handle).await;
+    }
     tracing::info!("shutting down");
 }
 

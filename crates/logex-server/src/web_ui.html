@@ -152,6 +152,10 @@
         <div class="kv"><span class="k">Stored Logs</span><span class="v" id="stStoredLogsCard">--</span></div>
         <div class="kv"><span class="k">Session Logs</span><span class="v" id="stSessionLogsCard">--</span></div>
         <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
+        <div class="kv"><span class="k">CL Sessions</span><span class="v" id="stClSessions">--</span></div>
+        <div class="kv"><span class="k">CL Dialable</span><span class="v" id="stClDialable">--</span></div>
+        <div class="kv"><span class="k">CL Bootnodes</span><span class="v" id="stClBootnodes">--</span></div>
+        <div class="kv"><span class="k">CL Node ID</span><span class="v mono" id="stClNodeId">--</span></div>
       </div>
       <p class="hint" id="stDirectionHint">--</p>
     </div>
@@ -302,6 +306,7 @@ function updateStatus(data) {
   var syncModel = data.sync_model || 'el_legacy';
   var syncDirection = data.sync_direction || 'peer_tip_upward';
   var hasConsensus = syncModel === 'cl_anchored';
+  var clNetwork = data.consensus_network || {};
   var canonicalTop = Number(data.canonical_top_block || 0);
   var indexedExec = anchorBlock(data.indexed_execution_head);
   var optimisticExec = anchorBlock(data.optimistic_execution_head);
@@ -358,12 +363,16 @@ function updateStatus(data) {
   document.getElementById('stStoredLogsCard').textContent = fmt(data.total_rows);
   document.getElementById('stSessionLogsCard').textContent = fmt(data.logs_ingested);
   document.getElementById('stPeerTip').textContent = targetKnown ? fmt(target) : '--';
+  document.getElementById('stClSessions').textContent = fmt(clNetwork.active_sessions);
+  document.getElementById('stClDialable').textContent = fmt(clNetwork.dialable_peers);
+  document.getElementById('stClBootnodes').textContent = fmt(clNetwork.bootnode_count);
+  document.getElementById('stClNodeId').textContent = clNetwork.local_node_id ? truncHash(clNetwork.local_node_id) : '--';
 
   if (hasConsensus) {
     document.getElementById('stConsensusHint').textContent =
       'Checkpoint, optimistic, finalized, and indexed execution anchors show the canonical CL view that EL data must match.';
     document.getElementById('stDirectionHint').textContent =
-      'CL-anchored history proving is checkpoint-centered: verification expands from the weak-subjectivity anchor toward both the live head and genesis.';
+      'CL-anchored history proving is checkpoint-centered: discovery tracks native consensus peers while verification expands from the weak-subjectivity anchor toward both the live head and genesis.';
     if (canonicalTop > 0) {
       document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% downward history coverage from the checkpoint model';
     } else {
