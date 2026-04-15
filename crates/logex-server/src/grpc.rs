@@ -1,12 +1,9 @@
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use logex_query::{self, is_simple_select};
-use logex_types::LogRow;
+use logex_query::{self, SqlQueryError};
 
 use crate::handler::AppState;
 
@@ -15,7 +12,7 @@ pub mod pb {
 }
 
 use pb::log_ex_service_server::{LogExService, LogExServiceServer};
-use pb::{Empty, HeadBlockResponse, LogEntry, QueryRequest};
+use pb::{Empty, HeadBlockResponse, QueryRequest, QueryResponse, QueryRow};
 
 /// gRPC service implementation.
 pub struct LogExGrpcService {
@@ -28,37 +25,42 @@ impl LogExGrpcService {
     }
 }
 
-type LogStream = Pin<Box<dyn Stream<Item = Result<LogEntry, Status>> + Send>>;
-
 #[tonic::async_trait]
 impl LogExService for LogExGrpcService {
-    type QueryStream = LogStream;
-
     async fn query(
         &self,
         request: Request<QueryRequest>,
-    ) -> Result<Response<Self::QueryStream>, Status> {
+    ) -> Result<Response<QueryResponse>, Status> {
         let sql = &request.get_ref().sql;
         tracing::debug!(sql = %sql, "gRPC query");
 
-        let query = logex_query::parse(sql)
-            .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
-
-        if !is_simple_select(&query) {
-            return Err(Status::unimplemented(
-                "only simple SELECT queries are supported",
-            ));
-        }
-
         let storage = self.state.storage.read().await;
         let head_block = storage.head_block();
-        let result = logex_query::execute(&query, &storage, head_block)
-            .map_err(|e| Status::internal(format!("execution error: {e}")))?;
+        let result = match logex_query::execute_sql(sql, &storage, head_block).await {
+            Ok(result) => result,
+            Err(SqlQueryError::DataFusion(err)) => {
+                return Err(Status::invalid_argument(format!("query error: {err}")));
+            }
+            Err(SqlQueryError::Storage(err)) => {
+                return Err(Status::internal(format!("execution error: {err}")));
+            }
+        };
 
-        let entries: Vec<LogEntry> = result.rows.iter().map(log_row_to_entry).collect();
+        let row_count = result.rows.len() as u64;
+        let rows = result
+            .rows
+            .into_iter()
+            .map(|row| QueryRow {
+                json: serde_json::to_string(&row)
+                    .unwrap_or_else(|_| String::from("{\"error\":\"row serialization failed\"}")),
+            })
+            .collect();
 
-        let stream = tokio_stream::iter(entries.into_iter().map(Ok));
-        Ok(Response::new(Box::pin(stream)))
+        Ok(Response::new(QueryResponse {
+            rows,
+            total_scanned: result.total_scanned,
+            row_count,
+        }))
     }
 
     async fn get_head_block(
@@ -68,34 +70,6 @@ impl LogExService for LogExGrpcService {
         let storage = self.state.storage.read().await;
         let block_number = storage.head_block().unwrap_or(0);
         Ok(Response::new(HeadBlockResponse { block_number }))
-    }
-}
-
-fn log_row_to_entry(row: &LogRow) -> LogEntry {
-    let mut topics = Vec::with_capacity(4);
-    if let Some(t) = &row.topic0 {
-        topics.push(t.as_slice().to_vec());
-    }
-    if let Some(t) = &row.topic1 {
-        topics.push(t.as_slice().to_vec());
-    }
-    if let Some(t) = &row.topic2 {
-        topics.push(t.as_slice().to_vec());
-    }
-    if let Some(t) = &row.topic3 {
-        topics.push(t.as_slice().to_vec());
-    }
-
-    LogEntry {
-        block_number: row.block_number,
-        block_hash: row.block_hash.as_slice().to_vec(),
-        timestamp: row.timestamp,
-        tx_hash: row.tx_hash.as_slice().to_vec(),
-        tx_index: row.tx_index,
-        log_index: row.log_index,
-        address: row.address.as_slice().to_vec(),
-        topics,
-        data: row.data.to_vec(),
     }
 }
 
@@ -129,9 +103,8 @@ mod tests {
     use alloy_primitives::{Address, B256, bytes};
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::{Source, SyncStatus};
+    use logex_types::{LogRow, Source, SyncStatus};
     use tempfile::TempDir;
-    use tokio_stream::StreamExt;
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -193,16 +166,13 @@ mod tests {
         });
 
         let response = service.query(request).await.unwrap();
-        let mut stream = response.into_inner();
+        let response = response.into_inner();
 
-        let mut entries = Vec::new();
-        while let Some(entry) = stream.next().await {
-            entries.push(entry.unwrap());
-        }
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].block_number, 100);
-        assert_eq!(entries[1].block_number, 200);
+        assert_eq!(response.row_count, 2);
+        let first: serde_json::Value = serde_json::from_str(&response.rows[0].json).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&response.rows[1].json).unwrap();
+        assert_eq!(first["block_number"], 100);
+        assert_eq!(second["block_number"], 200);
     }
 
     #[tokio::test]
@@ -217,15 +187,46 @@ mod tests {
         });
 
         let response = service.query(request).await.unwrap();
-        let mut stream = response.into_inner();
+        let response = response.into_inner();
 
-        let mut entries = Vec::new();
-        while let Some(entry) = stream.next().await {
-            entries.push(entry.unwrap());
-        }
+        assert_eq!(response.row_count, 1);
+        let row: serde_json::Value = serde_json::from_str(&response.rows[0].json).unwrap();
+        assert_eq!(
+            row["address"],
+            format!("0x{}", hex::encode(Address::repeat_byte(0xAA)))
+        );
+    }
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].address, Address::repeat_byte(0xAA).as_slice());
+    #[tokio::test]
+    async fn test_grpc_query_aggregate() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let service = LogExGrpcService::new(state);
+
+        let request = Request::new(QueryRequest {
+            sql: "SELECT COUNT(*) AS total FROM logs WHERE block_number <= latest".into(),
+        });
+
+        let response = service.query(request).await.unwrap().into_inner();
+        assert_eq!(response.row_count, 1);
+        let row: serde_json::Value = serde_json::from_str(&response.rows[0].json).unwrap();
+        assert_eq!(row["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_query_desc_limit() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let service = LogExGrpcService::new(state);
+
+        let request = Request::new(QueryRequest {
+            sql: "SELECT block_number AS bn FROM logs ORDER BY block_number DESC LIMIT 1".into(),
+        });
+
+        let response = service.query(request).await.unwrap().into_inner();
+        assert_eq!(response.row_count, 1);
+        let row: serde_json::Value = serde_json::from_str(&response.rows[0].json).unwrap();
+        assert_eq!(row["bn"], 200);
     }
 
     #[tokio::test]

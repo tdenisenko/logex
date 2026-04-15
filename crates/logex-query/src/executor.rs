@@ -4,9 +4,9 @@ use roaring::RoaringBitmap;
 
 use logex_index::{BTreeIndexReader, CompositeQuery};
 use logex_storage::{ColumnReader, PartitionManager};
-use logex_types::LogRow;
+use logex_types::{LogRow, PartitionMeta};
 
-use crate::ast::{BinOp, Expr, OrderByItem, Query, SelectItem};
+use crate::ast::{BinOp, Expr, OrderByItem, Query};
 use crate::planner::{self, QueryPlan};
 
 /// Query execution result.
@@ -16,6 +16,34 @@ pub struct QueryResult {
     pub total_scanned: u64,
 }
 
+/// Read-only view of storage metadata used by the query engine.
+#[derive(Debug, Clone, Default)]
+pub struct StorageSnapshot {
+    sealed_partitions: Vec<PartitionMeta>,
+    hot_partition: Option<PartitionMeta>,
+}
+
+impl StorageSnapshot {
+    /// Capture the current partition layout without holding a storage borrow.
+    pub fn from_storage(storage: &PartitionManager) -> Self {
+        let sealed_partitions = storage
+            .sealed_partitions()
+            .iter()
+            .map(|partition| partition.meta.clone())
+            .collect();
+
+        let hot_partition = {
+            let hot = storage.hot_partition();
+            (hot.meta.row_count > 0).then(|| hot.meta.clone())
+        };
+
+        Self {
+            sealed_partitions,
+            hot_partition,
+        }
+    }
+}
+
 /// Execute a parsed query against the storage engine.
 pub fn execute(
     query: &Query,
@@ -23,6 +51,16 @@ pub fn execute(
     head_block: Option<u64>,
 ) -> std::io::Result<QueryResult> {
     let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
+    let snapshot = StorageSnapshot::from_storage(storage);
+    execute_snapshot(query, &snapshot, head_block)
+}
+
+/// Execute a parsed query against a read-only storage snapshot.
+pub fn execute_snapshot(
+    query: &Query,
+    snapshot: &StorageSnapshot,
+    head_block: u64,
+) -> std::io::Result<QueryResult> {
     let mut plan = match &query.where_clause {
         Some(expr) => planner::plan_where(expr),
         None => QueryPlan::default(),
@@ -37,25 +75,26 @@ pub fn execute(
     let mut total_scanned = 0u64;
 
     // Scan sealed partitions
-    for partition in storage.sealed_partitions() {
-        if !partition_matches_range(&partition.meta, &plan) {
+    for partition in &snapshot.sealed_partitions {
+        if !partition_matches_range(partition, &plan) {
             continue;
         }
-        let rows = scan_partition(&partition.meta.path, &plan)?;
+        let rows = scan_partition(&partition.path, &plan, true)?;
         total_scanned += rows.len() as u64;
         all_rows.extend(rows);
     }
 
-    // Scan hot partition
-    let hot = storage.hot_partition();
-    if hot.meta.row_count > 0 && partition_matches_range(&hot.meta, &plan) {
-        let rows = scan_partition(&hot.meta.path, &plan)?;
+    // Scan the hot partition without relying on its indexes. The hot partition
+    // is append-heavy and its background indexes can lag behind fresh writes.
+    if let Some(hot) = &snapshot.hot_partition
+        && partition_matches_range(hot, &plan)
+    {
+        let rows = scan_partition(&hot.path, &plan, false)?;
         total_scanned += rows.len() as u64;
         all_rows.extend(rows);
     }
 
-    // Apply the full WHERE clause after index lookups. This keeps query results
-    // correct even when a hot partition has not been re-indexed yet.
+    // Apply the full WHERE clause after index lookups.
     if let Some(expr) = &query.where_clause {
         all_rows.retain(|row| eval_filter(expr, row, head_block));
     }
@@ -92,14 +131,17 @@ fn partition_matches_range(meta: &logex_types::PartitionMeta, plan: &QueryPlan) 
 }
 
 /// Scan a single partition using available indexes, then read matching rows.
-fn scan_partition(dir: &Path, plan: &QueryPlan) -> std::io::Result<Vec<LogRow>> {
+fn scan_partition(dir: &Path, plan: &QueryPlan, use_indexes: bool) -> std::io::Result<Vec<LogRow>> {
     let row_count = ColumnReader::read_row_count(dir)?;
     if row_count == 0 {
         return Ok(Vec::new());
     }
 
-    // Try to use indexes to narrow down rows
-    let bitmap = build_index_bitmap(dir, plan, row_count)?;
+    let bitmap = if use_indexes {
+        build_index_bitmap(dir, plan, row_count)?
+    } else {
+        (0..row_count as u32).collect()
+    };
 
     let row_ids: Vec<u32> = bitmap.iter().collect();
     if row_ids.is_empty() {
@@ -469,15 +511,6 @@ fn compare_ordering(ordering: std::cmp::Ordering, op: BinOp) -> bool {
     }
 }
 
-/// Check if a query is a simple SELECT * (no aggregation, no decode).
-pub fn is_simple_select(query: &Query) -> bool {
-    query
-        .select
-        .iter()
-        .all(|item| matches!(item, SelectItem::Star | SelectItem::Column { .. }))
-        && query.group_by.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +744,38 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].block_number, 300);
+    }
+
+    #[test]
+    fn test_hot_partition_query_sees_rows_written_after_indexes() {
+        let (_tmp, mut storage) = setup_storage();
+        storage
+            .write_batch(&[LogRow {
+                block_number: 400,
+                block_hash: B256::repeat_byte(0x04),
+                timestamp: 1_700_003_600,
+                tx_hash: B256::repeat_byte(0x44),
+                tx_index: 0,
+                log_index: 0,
+                address: Address::repeat_byte(0xAA),
+                topic0: Some(B256::repeat_byte(0xDD)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: bytes!("f00d"),
+                data_len: 2,
+                source: Source::Receipt,
+            }])
+            .unwrap();
+
+        let addr_hex = hex::encode(Address::repeat_byte(0xAA).as_slice());
+        let q = parse(&format!(
+            "SELECT * FROM logs WHERE address = '0x{addr_hex}' ORDER BY block_number"
+        ))
+        .unwrap();
+        let result = execute(&q, &storage, None).unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[2].block_number, 400);
     }
 }

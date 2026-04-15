@@ -4397,6 +4397,7 @@ name = "logex-query"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "async-trait",
  "datafusion",
  "hex",
  "logex-index",

@@ -1,20 +1,32 @@
+use std::any::Any;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray,
     ListArray, ListBuilder, StringArray, StringBuilder, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::MemTable;
-use datafusion::error::DataFusionError;
+use datafusion::catalog::Session;
+use datafusion::datasource::TableProvider;
+use datafusion::datasource::memory::MemorySourceConfig;
+use datafusion::datasource::source::DataSourceExec;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::logical_expr::{Expr as DataFusionExpr, TableType};
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use serde_json::{Map, Value};
 
 use logex_storage::PartitionManager;
 use logex_types::LogRow;
 
-use crate::{BinOp, Expr, Query, SelectItem, execute as execute_legacy, parse};
+use crate::{
+    BinOp, Expr, Query, SelectItem,
+    executor::{StorageSnapshot, execute_snapshot},
+    parse,
+};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 
@@ -32,45 +44,79 @@ pub struct SqlQueryResult {
     pub total_scanned: u64,
 }
 
+#[derive(Debug)]
+struct LogexTableProvider {
+    schema: Arc<Schema>,
+    snapshot: StorageSnapshot,
+    seed_query: Query,
+    head_block: u64,
+    total_scanned: Arc<AtomicU64>,
+}
+
+impl LogexTableProvider {
+    fn new(
+        snapshot: StorageSnapshot,
+        seed_query: Query,
+        head_block: u64,
+        total_scanned: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            schema: Arc::new(log_rows_schema()),
+            snapshot,
+            seed_query,
+            head_block,
+            total_scanned,
+        }
+    }
+}
+
+#[async_trait]
+impl TableProvider for LogexTableProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[DataFusionExpr],
+        _limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let result = execute_snapshot(&self.seed_query, &self.snapshot, self.head_block)?;
+        self.total_scanned
+            .store(result.total_scanned, Ordering::Relaxed);
+
+        let partitions = vec![rows_to_batches(self.schema(), &result.rows)?];
+        let source = MemorySourceConfig::try_new(&partitions, self.schema(), projection.cloned())?;
+
+        Ok(DataSourceExec::from_data_source(source))
+    }
+}
+
 pub async fn execute_sql(
     sql: &str,
     storage: &PartitionManager,
     head_block: Option<u64>,
 ) -> Result<SqlQueryResult, SqlQueryError> {
     let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
-
-    let (candidate_rows, total_scanned, normalized_sql) = match parse(sql) {
-        Ok(query) => {
-            let seed_query = Query {
-                select: vec![SelectItem::Star],
-                where_clause: query.where_clause.clone(),
-                group_by: vec![],
-                order_by: vec![],
-                limit: None,
-            };
-            let seed_result = execute_legacy(&seed_query, storage, Some(head_block))?;
-            (
-                seed_result.rows,
-                seed_result.total_scanned,
-                compile_query(&query, head_block),
-            )
-        }
-        Err(_) => {
-            let seed_query = Query {
-                select: vec![SelectItem::Star],
-                where_clause: None,
-                group_by: vec![],
-                order_by: vec![],
-                limit: None,
-            };
-            let seed_result = execute_legacy(&seed_query, storage, Some(head_block))?;
-            (seed_result.rows, seed_result.total_scanned, sql.to_owned())
-        }
+    let snapshot = StorageSnapshot::from_storage(storage);
+    let total_scanned = Arc::new(AtomicU64::new(0));
+    let (seed_query, normalized_sql) = match parse(sql) {
+        Ok(query) => (seed_query_for(&query), compile_query(&query, head_block)),
+        Err(_) => (full_scan_query(), sql.to_owned()),
     };
 
-    let schema = Arc::new(log_rows_schema());
-    let batches = rows_to_batches(Arc::clone(&schema), &candidate_rows)?;
-    let table = MemTable::try_new(schema, vec![batches])?;
+    let table =
+        LogexTableProvider::new(snapshot, seed_query, head_block, Arc::clone(&total_scanned));
 
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(table))?;
@@ -81,8 +127,28 @@ pub async fn execute_sql(
 
     Ok(SqlQueryResult {
         rows,
-        total_scanned,
+        total_scanned: total_scanned.load(Ordering::Relaxed),
     })
+}
+
+fn seed_query_for(query: &Query) -> Query {
+    Query {
+        select: vec![SelectItem::Star],
+        where_clause: query.where_clause.clone(),
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+    }
+}
+
+fn full_scan_query() -> Query {
+    Query {
+        select: vec![SelectItem::Star],
+        where_clause: None,
+        group_by: vec![],
+        order_by: vec![],
+        limit: None,
+    }
 }
 
 fn log_rows_schema() -> Schema {
@@ -540,5 +606,40 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["bn"], 200);
+    }
+
+    #[tokio::test]
+    async fn sees_hot_partition_rows_written_after_indexes() {
+        let (_tmp, mut storage) = setup_storage();
+        storage
+            .write_batch(&[LogRow {
+                block_number: 300,
+                block_hash: B256::repeat_byte(0x03),
+                timestamp: 1_700_002_400,
+                tx_hash: B256::repeat_byte(0x33),
+                tx_index: 0,
+                log_index: 0,
+                address: Address::repeat_byte(0xAA),
+                topic0: Some(B256::repeat_byte(0xDD)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: bytes!("beef"),
+                data_len: 2,
+                source: Source::Receipt,
+            }])
+            .expect("row persists");
+
+        let addr = hex::encode(Address::repeat_byte(0xAA));
+        let result = execute_sql(
+            &format!("SELECT COUNT(*) AS total FROM logs WHERE address = '0x{addr}'"),
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .expect("query executes");
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["total"], 2);
     }
 }
