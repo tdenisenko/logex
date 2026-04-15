@@ -54,11 +54,11 @@ pub async fn run_sync(
         "storage ready"
     );
 
-    let state = Arc::new(AppState {
-        storage: Arc::new(tokio::sync::RwLock::new(storage)),
-        subscriptions: Some(SubscriptionManager::new()),
-        sync_status: Arc::new(std::sync::Mutex::new(initial_sync_status(resume_block))),
-    });
+    let state = Arc::new(AppState::new(
+        storage,
+        Some(SubscriptionManager::new()),
+        initial_sync_status(resume_block),
+    ));
 
     let known_peers = match load_known_peers(&known_peers_file) {
         Ok(peers) => peers,

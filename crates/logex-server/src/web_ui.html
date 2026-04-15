@@ -81,6 +81,8 @@
     <span class="stat">ETA: <b id="stEta">--</b></span>
     <span class="stat">Stored logs: <b id="stStoredLogs">--</b></span>
     <span class="stat">New this run: <b id="stSessionLogs">--</b></span>
+    <span class="stat">Storage used: <b id="stStorageUsed">--</b></span>
+    <span class="stat">Disk free: <b id="stDiskFree">--</b></span>
   </div>
 </header>
 
@@ -120,6 +122,20 @@
 function fmt(n) {
   if (n == null) return '--';
   return Number(n).toLocaleString();
+}
+
+function fmtBytes(bytes) {
+  if (bytes == null) return '--';
+  var value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '--';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  var digits = unit === 0 ? 0 : (value >= 100 ? 0 : (value >= 10 ? 1 : 2));
+  return value.toFixed(digits) + ' ' + units[unit];
 }
 
 function truncHash(h) {
@@ -179,6 +195,8 @@ function updateStatus(data) {
   document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
   document.getElementById('stStoredLogs').textContent = fmt(data.total_rows);
   document.getElementById('stSessionLogs').textContent = fmt(data.logs_ingested);
+  document.getElementById('stStorageUsed').textContent = fmtBytes(data.storage_used_bytes);
+  document.getElementById('stDiskFree').textContent = fmtBytes(data.disk_free_bytes);
   document.getElementById('stHead').textContent = targetKnown ? fmt(target) : '--';
   document.getElementById('stRemaining').textContent = remaining == null ? '--' : fmt(remaining);
   if (nodeState === 'syncing' || nodeState === 'synced') {

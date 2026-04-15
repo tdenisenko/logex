@@ -4417,6 +4417,7 @@ dependencies = [
  "alloy-primitives",
  "axum",
  "hex",
+ "libc",
  "logex-index",
  "logex-query",
  "logex-storage",
