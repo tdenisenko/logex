@@ -61,6 +61,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - current APIs support row/filter queries
   - REST `/query` now has a DataFusion-backed path for aggregates, aliases, `ORDER BY`, `LIMIT`, and `latest` without changing the on-disk storage format
   - gRPC and web UI query unification still remain to be done
+  - codec scaffolding already exists in the storage crate for dictionary, delta, delta-of-delta, zstd, and lz4, but the active read/write path still writes raw columns today
 
 ## Explicitly Not Needed
 
@@ -133,7 +134,34 @@ LogEx should become a canonical Ethereum event-log node that:
    - Add tests for aggregates, aliases, mixed filters, ordering, and hot-partition visibility.
    - Benchmark common indexed queries so the current fast path does not regress badly.
 
-9. Reconcile the public README with the actual trust model and runtime model.
+9. Finish the storage compression strategy without harming queryability.
+   - Keep the hot partition append-friendly and mostly uncompressed; compression should primarily happen when a partition is sealed and becomes immutable.
+   - Do not compress an entire column file as one giant blob.
+   - Add page- or chunk-based compression inside each sealed column so row IDs produced by indexes can be mapped to a small number of compressed pages instead of forcing full-column decompression.
+   - Extend the column format so each compressed column records:
+     - codec
+     - page boundaries / row ranges
+     - byte offsets for each compressed page
+     - any codec-specific metadata needed to decode a page independently
+   - Teach the reader to dispatch on the stored codec and only decompress the pages needed for the requested row IDs.
+   - Keep indexes, null bitmaps, and canonical bitmaps independently readable so query planning and canonical filtering stay cheap.
+   - Start with per-column codecs that match the current schema:
+     - `block_number`: delta
+     - `timestamp`: delta-of-delta
+     - `topic0`: dictionary when page cardinality is favorable
+     - `address`: adaptive dictionary or zstd depending on page cardinality
+     - `block_hash`, `tx_hash`, `topic1`, `topic2`, `topic3`: zstd
+     - `data`: lz4 first for fast reads, with the option to benchmark zstd for colder partitions
+   - Apply compression to sealed partitions first, then decide whether old sealed partitions should be rewritten by a background compaction job.
+   - Avoid rewriting the hot partition during active sync except for a deliberate maintenance or compaction pass.
+   - Add compatibility handling so old uncompressed partitions and new compressed partitions can coexist during migration.
+   - Validate the design with:
+     - storage-size benchmarks on realistic ERC-20 / ERC-721-heavy datasets
+     - indexed query latency benchmarks
+     - restart and resume tests across mixed compressed/uncompressed partitions
+     - corruption / partial-page decode tests
+
+10. Reconcile the public README with the actual trust model and runtime model.
    - Make it explicit what is verified today.
    - Make it explicit what the weak subjectivity assumption is.
    - Make it explicit that LogEx is not a full execution node and not a standard EL<->CL pair.
