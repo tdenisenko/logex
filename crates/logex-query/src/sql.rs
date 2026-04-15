@@ -25,6 +25,7 @@ use logex_types::LogRow;
 use crate::{
     BinOp, Expr, Query, SelectItem,
     executor::{StorageSnapshot, execute_snapshot},
+    lexer::{Token, tokenize},
     parse,
 };
 
@@ -113,7 +114,7 @@ pub async fn execute_sql(
     let (seed_query, normalized_sql) = match parse(sql) {
         Ok(query) => (seed_query_for(&query), compile_query(&query, head_block)),
         Err(_) => {
-            if let Some(message) = confusing_sort_shorthand_error(sql) {
+            if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
                 return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
             }
             (full_scan_query(), sql.to_owned())
@@ -156,25 +157,22 @@ fn full_scan_query() -> Query {
     }
 }
 
-fn confusing_sort_shorthand_error(sql: &str) -> Option<String> {
-    let normalized = sql
-        .split_whitespace()
-        .map(|part| part.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn unsupported_from_alias_sort_shorthand(sql: &str) -> Option<String> {
+    let tokens = tokenize(sql).ok()?;
+    let from_pos = tokens.iter().position(|token| *token == Token::From)?;
+    let table = tokens.get(from_pos + 1)?;
+    let next = tokens.get(from_pos + 2)?;
+    let has_order_by = tokens.iter().any(|token| *token == Token::OrderBy);
 
-    let uses_order_by = normalized.contains(" order by ");
-    let shorthand_desc = normalized.contains(" from logs desc ")
-        || normalized.ends_with(" from logs desc")
-        || normalized.contains(" from logs asc ")
-        || normalized.ends_with(" from logs asc");
+    if !matches!(table, Token::Ident(name) if name.eq_ignore_ascii_case("logs")) || has_order_by {
+        return None;
+    }
 
-    if !uses_order_by && shorthand_desc {
-        Some(
-            "DESC/ASC requires ORDER BY. Use an explicit sort such as ORDER BY block_number DESC, tx_index DESC, log_index DESC LIMIT 10".to_owned(),
-        )
-    } else {
-        None
+    match next {
+        Token::Desc | Token::Asc => Some(
+            "unexpected ASC/DESC after FROM logs; use ORDER BY block_number DESC, tx_index DESC, log_index DESC".to_owned(),
+        ),
+        _ => None,
     }
 }
 
@@ -667,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_desc_without_order_by() {
+    async fn invalid_desc_without_order_by_is_rejected() {
         let (_tmp, storage) = setup_storage();
         let error = execute_sql(
             "select * from logs desc limit 10;",
@@ -679,7 +677,7 @@ mod tests {
 
         match error {
             SqlQueryError::DataFusion(DataFusionError::Plan(message)) => {
-                assert!(message.contains("DESC/ASC requires ORDER BY"));
+                assert!(message.contains("use ORDER BY"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

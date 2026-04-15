@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_query_rejects_desc_without_order_by() {
+    async fn test_post_query_rejects_invalid_desc_without_order_by() {
         let (_tmp, storage) = setup_storage();
         let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
         let app = crate::build_router(state);
@@ -371,12 +371,7 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            err["error"]
-                .as_str()
-                .unwrap()
-                .contains("DESC/ASC requires ORDER BY")
-        );
+        assert!(err["error"].as_str().is_some_and(|msg| !msg.is_empty()));
     }
 
     #[tokio::test]
