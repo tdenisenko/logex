@@ -28,6 +28,7 @@ futures-util = "0.3"
 eyre = "0.6"
 datafusion = "51"
 discv5 = "0.10.4"
+libp2p = { version = "0.56.0", default-features = false, features = ["macros", "noise", "request-response", "tcp", "tokio", "yamux"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

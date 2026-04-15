@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod network;
+mod rpc;
 
 pub use network::{ConsensusNetworkConfig, ConsensusNetworkError, spawn_consensus_network};
 

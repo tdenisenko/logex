@@ -152,10 +152,10 @@
         <div class="kv"><span class="k">Stored Logs</span><span class="v" id="stStoredLogsCard">--</span></div>
         <div class="kv"><span class="k">Session Logs</span><span class="v" id="stSessionLogsCard">--</span></div>
         <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
-        <div class="kv"><span class="k">CL Sessions</span><span class="v" id="stClSessions">--</span></div>
-        <div class="kv"><span class="k">CL Dialable</span><span class="v" id="stClDialable">--</span></div>
-        <div class="kv"><span class="k">CL Bootnodes</span><span class="v" id="stClBootnodes">--</span></div>
-        <div class="kv"><span class="k">CL Node ID</span><span class="v mono" id="stClNodeId">--</span></div>
+        <div class="kv"><span class="k">CL Discovery</span><span class="v" id="stClSessions">--</span></div>
+        <div class="kv"><span class="k">CL Peers</span><span class="v" id="stClDialable">--</span></div>
+        <div class="kv"><span class="k">CL Status</span><span class="v" id="stClBootnodes">--</span></div>
+        <div class="kv"><span class="k">CL Bootstrap</span><span class="v" id="stClNodeId">--</span></div>
       </div>
       <p class="hint" id="stDirectionHint">--</p>
     </div>
@@ -364,9 +364,9 @@ function updateStatus(data) {
   document.getElementById('stSessionLogsCard').textContent = fmt(data.logs_ingested);
   document.getElementById('stPeerTip').textContent = targetKnown ? fmt(target) : '--';
   document.getElementById('stClSessions').textContent = fmt(clNetwork.active_sessions);
-  document.getElementById('stClDialable').textContent = fmt(clNetwork.dialable_peers);
-  document.getElementById('stClBootnodes').textContent = fmt(clNetwork.bootnode_count);
-  document.getElementById('stClNodeId').textContent = clNetwork.local_node_id ? truncHash(clNetwork.local_node_id) : '--';
+  document.getElementById('stClDialable').textContent = fmt(clNetwork.connected_peer_sessions);
+  document.getElementById('stClBootnodes').textContent = fmt(clNetwork.status_peers);
+  document.getElementById('stClNodeId').textContent = fmt(clNetwork.bootstrap_peers);
 
   if (hasConsensus) {
     document.getElementById('stConsensusHint').textContent =

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -7,23 +7,36 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::hex;
-use discv5::enr::{CombinedKey, NodeId};
+use discv5::enr::{CombinedKey, EnrPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
-use logex_types::{ConsensusNetworkStatus, SyncStatus};
+use futures::StreamExt;
+use libp2p::identity;
+use libp2p::multiaddr::Protocol;
+use libp2p::request_response;
+use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
+use logex_types::{ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use crate::rpc::{
+    Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse,
+    StatusMessage, build_rpc_behaviour,
+};
 
 const CONSENSUS_STATE_DIR: &str = "cl";
 const DISCOVERY_SECRET_FILE: &str = "discovery-secret";
 const KNOWN_PEERS_FILE: &str = "known-peers.json";
 const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
+const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct ConsensusNetworkConfig {
     pub data_dir: PathBuf,
+    pub checkpoint: WeakSubjectivityCheckpoint,
     pub discovery_port: u16,
     pub p2p_port: u16,
     pub max_peers: usize,
@@ -47,12 +60,20 @@ pub enum ConsensusNetworkError {
     InvalidBootnode(String),
     #[error("built-in mainnet bootnodes did not expose an eth2 fork id")]
     MissingBootnodeForkId,
+    #[error("built-in mainnet bootnodes exposed an invalid eth2 fork id")]
+    InvalidBootnodeForkId,
     #[error("failed to construct consensus discovery service: {0}")]
     ConstructDiscovery(String),
     #[error("failed to start consensus discovery service: {0}")]
     StartDiscovery(String),
     #[error("failed to open consensus discovery event stream: {0}")]
     EventStream(String),
+    #[error("failed to construct consensus libp2p transport: {0}")]
+    ConstructRpcTransport(String),
+    #[error("failed to bind consensus libp2p listener: {0}")]
+    ListenRpcTransport(String),
+    #[error("failed to derive libp2p identity from consensus secret key: {0}")]
+    Libp2pIdentity(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,10 +98,48 @@ struct ConsensusNetwork {
     config: ConsensusNetworkConfig,
     sync_status: Arc<Mutex<SyncStatus>>,
     discv5: Discv5,
+    swarm: Swarm<Eth2RpcBehaviour>,
     bootnode_count: usize,
+    fork_digest: [u8; 4],
     known_peers_path: PathBuf,
     last_persisted: Vec<PersistedPeer>,
     observed: BTreeSet<String>,
+    dialable_peers: HashMap<PeerId, Vec<Multiaddr>>,
+    connected_peers: HashSet<PeerId>,
+    status_peers: HashSet<PeerId>,
+    ping_peers: HashSet<PeerId>,
+    bootstrap_peers: HashSet<PeerId>,
+    finality_update_peers: HashSet<PeerId>,
+    optimistic_update_peers: HashSet<PeerId>,
+    pending_requests: HashMap<Eth2OutboundRequestId, PendingRpc>,
+    pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RpcRequestKind {
+    Status,
+    Ping,
+    LightClientBootstrap,
+    LightClientFinalityUpdate,
+    LightClientOptimisticUpdate,
+}
+
+impl RpcRequestKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Ping => "ping",
+            Self::LightClientBootstrap => "light_client_bootstrap",
+            Self::LightClientFinalityUpdate => "light_client_finality_update",
+            Self::LightClientOptimisticUpdate => "light_client_optimistic_update",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingRpc {
+    peer: PeerId,
+    kind: RpcRequestKind,
 }
 
 impl ConsensusNetwork {
@@ -90,10 +149,12 @@ impl ConsensusNetwork {
     ) -> Result<Self, ConsensusNetworkError> {
         let bootnodes = mainnet_bootnodes()?;
         let fork_id = current_eth2_fork_id(&bootnodes)?;
+        let fork_digest = current_fork_digest(&fork_id)?;
         let secret_path = discovery_secret_path(&config.data_dir);
         let known_peers_path = known_peers_path(&config.data_dir);
         let enr_key = load_or_create_secret_key(&secret_path)?;
         let local_enr = build_local_enr(&enr_key, &fork_id, config.discovery_port, config.p2p_port);
+        let local_keypair = build_libp2p_keypair(&enr_key)?;
         let listen_config =
             ListenConfig::from_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.discovery_port);
         let discovery_config = ConfigBuilder::new(listen_config)
@@ -103,11 +164,13 @@ impl ConsensusNetwork {
             .map_err(|error| ConsensusNetworkError::ConstructDiscovery(error.to_string()))?;
 
         let known_peers = load_known_peers(&known_peers_path)?;
+        let mut dialable_peers = HashMap::new();
 
         for enr in &bootnodes {
             if let Err(error) = discv5.add_enr(enr.clone()) {
                 tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
             }
+            observe_dialable_peer(&mut dialable_peers, enr);
         }
 
         for peer in &known_peers {
@@ -120,6 +183,7 @@ impl ConsensusNetwork {
                             "skipping cached consensus peer that could not be inserted"
                         );
                     }
+                    observe_dialable_peer(&mut dialable_peers, &enr);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -131,14 +195,27 @@ impl ConsensusNetwork {
             }
         }
 
+        let swarm = build_rpc_swarm(local_keypair)?;
+
         Ok(Self {
             config,
             sync_status,
             discv5,
+            swarm,
             bootnode_count: bootnodes.len(),
+            fork_digest,
             known_peers_path,
             last_persisted: known_peers,
             observed: BTreeSet::new(),
+            dialable_peers,
+            connected_peers: HashSet::new(),
+            status_peers: HashSet::new(),
+            ping_peers: HashSet::new(),
+            bootstrap_peers: HashSet::new(),
+            finality_update_peers: HashSet::new(),
+            optimistic_update_peers: HashSet::new(),
+            pending_requests: HashMap::new(),
+            pending_peer_kinds: HashSet::new(),
         })
     }
 
@@ -150,6 +227,12 @@ impl ConsensusNetwork {
             .start()
             .await
             .map_err(|error| ConsensusNetworkError::StartDiscovery(error.to_string()))?;
+        let listen_addr = Multiaddr::empty()
+            .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
+            .with(Protocol::Tcp(self.config.p2p_port));
+        self.swarm
+            .listen_on(listen_addr)
+            .map_err(|error| ConsensusNetworkError::ListenRpcTransport(error.to_string()))?;
         let mut event_stream = self
             .discv5
             .event_stream()
@@ -162,8 +245,9 @@ impl ConsensusNetwork {
             node_id = %local_enr.node_id(),
             discovery_port = self.config.discovery_port,
             p2p_port = self.config.p2p_port,
+            local_peer_id = %self.swarm.local_peer_id(),
             bootnodes = self.bootnode_count,
-            "consensus discovery started"
+            "consensus network started"
         );
         self.refresh_status();
 
@@ -171,15 +255,21 @@ impl ConsensusNetwork {
         query_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut persist_interval = tokio::time::interval(KNOWN_PEER_PERSIST_INTERVAL);
         persist_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut rpc_interval = tokio::time::interval(RPC_REQUEST_INTERVAL);
+        rpc_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 _ = wait_for_shutdown(&mut shutdown) => {
-                    tracing::info!("consensus discovery shutting down");
+                    tracing::info!("consensus network shutting down");
                     break;
                 }
                 _ = query_interval.tick() => {
                     self.drive_discovery_queries().await;
+                    self.refresh_status();
+                }
+                _ = rpc_interval.tick() => {
+                    self.drive_rpc_requests();
                     self.refresh_status();
                 }
                 _ = persist_interval.tick() => {
@@ -199,6 +289,10 @@ impl ConsensusNetwork {
                             break;
                         }
                     }
+                }
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event);
+                    self.refresh_status();
                 }
             }
         }
@@ -252,9 +346,308 @@ impl ConsensusNetwork {
     }
 
     fn observe_enr(&mut self, enr: &Enr) {
-        self.observed.insert(
-            enr.node_id().to_string(),
-        );
+        self.observed.insert(enr.node_id().to_string());
+        observe_dialable_peer(&mut self.dialable_peers, enr);
+    }
+
+    fn handle_swarm_event(&mut self, event: SwarmEvent<Eth2RpcEvent>) {
+        match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                tracing::info!(%address, "consensus libp2p listening");
+            }
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                tracing::debug!(%peer_id, endpoint = ?endpoint, "consensus libp2p connection established");
+                self.connected_peers.insert(peer_id);
+                self.drive_rpc_requests();
+            }
+            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                tracing::debug!(%peer_id, cause = ?cause, "consensus libp2p connection closed");
+                self.connected_peers.remove(&peer_id);
+                self.clear_pending_requests_for_peer(peer_id);
+            }
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                tracing::debug!(peer_id = peer_id.map(|peer| peer.to_string()), %error, "consensus libp2p dial failed");
+                if let Some(peer_id) = peer_id {
+                    self.clear_pending_requests_for_peer(peer_id);
+                }
+            }
+            SwarmEvent::Behaviour(event) => self.handle_rpc_event(event),
+            _ => {}
+        }
+    }
+
+    fn handle_rpc_event(&mut self, event: Eth2RpcEvent) {
+        match event {
+            request_response::Event::Message { peer, message, .. } => match message {
+                request_response::Message::Request { request, .. } => {
+                    tracing::debug!(%peer, ?request, "ignoring unexpected inbound consensus RPC request");
+                }
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                } => self.handle_rpc_response(peer, request_id, response),
+            },
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                let pending = self.take_pending_request(request_id);
+                tracing::debug!(
+                    %peer,
+                    request = pending
+                        .map(|pending| pending.kind.as_str())
+                        .unwrap_or("unknown"),
+                    %error,
+                    "consensus RPC request failed"
+                );
+            }
+            request_response::Event::InboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                tracing::debug!(%peer, ?request_id, %error, "consensus RPC inbound failure");
+            }
+            request_response::Event::ResponseSent {
+                peer,
+                request_id,
+                ..
+            } => {
+                tracing::debug!(%peer, ?request_id, "consensus RPC response sent");
+            }
+        }
+    }
+
+    fn handle_rpc_response(
+        &mut self,
+        peer: PeerId,
+        request_id: Eth2OutboundRequestId,
+        response: Eth2RpcResponse,
+    ) {
+        let Some(pending) = self.take_pending_request(request_id) else {
+            tracing::warn!(%peer, ?request_id, "received consensus RPC response for an unknown request");
+            return;
+        };
+
+        match (pending.kind, response) {
+            (RpcRequestKind::Status, Eth2RpcResponse::Status(status)) => {
+                if status.fork_digest != self.fork_digest {
+                    tracing::debug!(
+                        %peer,
+                        local = hex::encode(self.fork_digest),
+                        remote = hex::encode(status.fork_digest),
+                        "consensus peer replied with a different fork digest"
+                    );
+                }
+                self.status_peers.insert(peer);
+                self.drive_rpc_requests();
+            }
+            (RpcRequestKind::Ping, Eth2RpcResponse::Ping(seq_number)) => {
+                tracing::debug!(%peer, seq_number, "received consensus ping response");
+                self.ping_peers.insert(peer);
+            }
+            (
+                RpcRequestKind::LightClientBootstrap,
+                Eth2RpcResponse::LightClientBootstrap(payload),
+            ) => {
+                tracing::info!(
+                    %peer,
+                    bytes = payload.bytes.len(),
+                    checkpoint_root = %self.config.checkpoint.beacon_root,
+                    "received light-client bootstrap payload"
+                );
+                self.bootstrap_peers.insert(peer);
+            }
+            (
+                RpcRequestKind::LightClientFinalityUpdate,
+                Eth2RpcResponse::LightClientFinalityUpdate(payload),
+            ) => {
+                tracing::info!(
+                    %peer,
+                    bytes = payload.bytes.len(),
+                    "received light-client finality update payload"
+                );
+                self.finality_update_peers.insert(peer);
+            }
+            (
+                RpcRequestKind::LightClientOptimisticUpdate,
+                Eth2RpcResponse::LightClientOptimisticUpdate(payload),
+            ) => {
+                tracing::info!(
+                    %peer,
+                    bytes = payload.bytes.len(),
+                    "received light-client optimistic update payload"
+                );
+                self.optimistic_update_peers.insert(peer);
+            }
+            (kind, Eth2RpcResponse::Error(error)) => {
+                tracing::debug!(
+                    %peer,
+                    request = kind.as_str(),
+                    error_code = error.code,
+                    message = %String::from_utf8_lossy(&error.message),
+                    "consensus peer returned an RPC error"
+                );
+            }
+            (kind, response) => {
+                tracing::warn!(
+                    %peer,
+                    request = kind.as_str(),
+                    ?response,
+                    "consensus peer returned an unexpected RPC response"
+                );
+            }
+        }
+    }
+
+    fn drive_rpc_requests(&mut self) {
+        let mut dialable = self
+            .dialable_peers
+            .iter()
+            .map(|(peer, addrs)| (*peer, addrs.clone()))
+            .collect::<Vec<_>>();
+        dialable.sort_by(|(left, _), (right, _)| left.to_string().cmp(&right.to_string()));
+
+        let connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
+        for peer in connected {
+            if !self.status_peers.contains(&peer) && !self.has_pending_request_for_peer(peer) {
+                self.ensure_request(peer, Vec::new(), RpcRequestKind::Status);
+            }
+        }
+
+        for (peer, addrs) in &dialable {
+            if !self.status_peers.contains(peer) || self.has_pending_request_for_peer(*peer) {
+                continue;
+            }
+            if !self.bootstrap_peers.contains(peer) {
+                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::LightClientBootstrap);
+            } else if !self.finality_update_peers.contains(peer) {
+                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::LightClientFinalityUpdate);
+            } else if !self.optimistic_update_peers.contains(peer) {
+                self.ensure_request(
+                    *peer,
+                    addrs.clone(),
+                    RpcRequestKind::LightClientOptimisticUpdate,
+                );
+            } else if !self.ping_peers.contains(peer) {
+                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::Ping);
+            }
+        }
+
+        let mut active_targets = self.connected_peers.len() + self.pending_status_requests();
+        for (peer, addrs) in dialable {
+            if self.status_peers.contains(&peer)
+                || self.is_request_pending(peer, RpcRequestKind::Status)
+            {
+                continue;
+            }
+            if self.config.max_peers > 0 && active_targets >= self.config.max_peers {
+                break;
+            }
+            self.ensure_request(peer, addrs, RpcRequestKind::Status);
+            active_targets += 1;
+        }
+    }
+
+    fn ensure_request(
+        &mut self,
+        peer: PeerId,
+        addrs: Vec<Multiaddr>,
+        kind: RpcRequestKind,
+    ) {
+        if self.is_request_satisfied(peer, kind) || self.is_request_pending(peer, kind) {
+            return;
+        }
+
+        let request = self.build_request(kind);
+        let request_id = if addrs.is_empty() {
+            self.swarm.behaviour_mut().send_request(&peer, request)
+        } else {
+            self.swarm
+                .behaviour_mut()
+                .send_request_with_addresses(&peer, request, addrs)
+        };
+        self.pending_requests
+            .insert(request_id, PendingRpc { peer, kind });
+        self.pending_peer_kinds.insert((peer, kind));
+    }
+
+    fn build_request(&self, kind: RpcRequestKind) -> Eth2RpcRequest {
+        match kind {
+            RpcRequestKind::Status => Eth2RpcRequest::Status(self.local_status_message()),
+            RpcRequestKind::Ping => Eth2RpcRequest::Ping(0),
+            RpcRequestKind::LightClientBootstrap => {
+                Eth2RpcRequest::LightClientBootstrap(self.config.checkpoint.beacon_root)
+            }
+            RpcRequestKind::LightClientFinalityUpdate => Eth2RpcRequest::LightClientFinalityUpdate,
+            RpcRequestKind::LightClientOptimisticUpdate => {
+                Eth2RpcRequest::LightClientOptimisticUpdate
+            }
+        }
+    }
+
+    fn local_status_message(&self) -> StatusMessage {
+        match self.config.checkpoint.beacon_slot {
+            Some(slot) => StatusMessage {
+                fork_digest: self.fork_digest,
+                finalized_root: self.config.checkpoint.beacon_root,
+                finalized_epoch: slot / 32,
+                head_root: self.config.checkpoint.beacon_root,
+                head_slot: slot,
+            },
+            None => StatusMessage::genesis(self.fork_digest),
+        }
+    }
+
+    fn take_pending_request(&mut self, request_id: Eth2OutboundRequestId) -> Option<PendingRpc> {
+        let pending = self.pending_requests.remove(&request_id)?;
+        self.pending_peer_kinds.remove(&(pending.peer, pending.kind));
+        Some(pending)
+    }
+
+    fn clear_pending_requests_for_peer(&mut self, peer: PeerId) {
+        let stale = self
+            .pending_requests
+            .iter()
+            .filter_map(|(request_id, pending)| (pending.peer == peer).then_some(*request_id))
+            .collect::<Vec<_>>();
+        for request_id in stale {
+            let _ = self.take_pending_request(request_id);
+        }
+    }
+
+    fn is_request_pending(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
+        self.pending_peer_kinds.contains(&(peer, kind))
+    }
+
+    fn has_pending_request_for_peer(&self, peer: PeerId) -> bool {
+        self.pending_requests
+            .values()
+            .any(|pending| pending.peer == peer)
+    }
+
+    fn is_request_satisfied(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
+        match kind {
+            RpcRequestKind::Status => self.status_peers.contains(&peer),
+            RpcRequestKind::Ping => self.ping_peers.contains(&peer),
+            RpcRequestKind::LightClientBootstrap => self.bootstrap_peers.contains(&peer),
+            RpcRequestKind::LightClientFinalityUpdate => {
+                self.finality_update_peers.contains(&peer)
+            }
+            RpcRequestKind::LightClientOptimisticUpdate => {
+                self.optimistic_update_peers.contains(&peer)
+            }
+        }
+    }
+
+    fn pending_status_requests(&self) -> usize {
+        self.pending_requests
+            .values()
+            .filter(|pending| pending.kind == RpcRequestKind::Status)
+            .count()
     }
 
     fn refresh_status(&self) {
@@ -264,15 +657,19 @@ impl ConsensusNetwork {
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
             discovery_port: self.config.discovery_port,
             p2p_port: self.config.p2p_port,
+            local_peer_id: Some(self.swarm.local_peer_id().to_string()),
             max_peers: self.config.max_peers,
             bootnode_count: self.bootnode_count,
             discovered_peers: self.observed.len(),
-            dialable_peers: table_entries
-                .iter()
-                .filter(|enr| enr.tcp4().is_some() || enr.tcp6().is_some())
-                .count(),
+            dialable_peers: self.dialable_peers.len(),
             routing_table_peers: table_entries.len(),
             active_sessions: self.discv5.connected_peers(),
+            connected_peer_sessions: self.connected_peers.len(),
+            status_peers: self.status_peers.len(),
+            bootstrap_peers: self.bootstrap_peers.len(),
+            finality_update_peers: self.finality_update_peers.len(),
+            optimistic_update_peers: self.optimistic_update_peers.len(),
+            pending_rpc_requests: self.pending_requests.len(),
         };
         self.sync_status.lock().unwrap().consensus_network = Some(status);
     }
@@ -319,6 +716,32 @@ fn build_local_enr(
         .expect("local consensus ENR should always be constructible")
 }
 
+fn build_libp2p_keypair(
+    enr_key: &CombinedKey,
+) -> Result<identity::Keypair, ConsensusNetworkError> {
+    let mut secret_bytes = enr_key.encode();
+    let secret = identity::secp256k1::SecretKey::try_from_bytes(&mut secret_bytes)
+        .map_err(|error| ConsensusNetworkError::Libp2pIdentity(error.to_string()))?;
+    let keypair = identity::secp256k1::Keypair::from(secret);
+    Ok(identity::Keypair::from(keypair))
+}
+
+fn build_rpc_swarm(
+    keypair: identity::Keypair,
+) -> Result<Swarm<Eth2RpcBehaviour>, ConsensusNetworkError> {
+    SwarmBuilder::with_existing_identity(keypair)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default().nodelay(true),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
+        .with_behaviour(|_| build_rpc_behaviour())
+        .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
+        .map(|builder| builder.build())
+}
+
 fn discovery_secret_path(data_dir: &Path) -> PathBuf {
     data_dir
         .join(CONSENSUS_STATE_DIR)
@@ -327,6 +750,12 @@ fn discovery_secret_path(data_dir: &Path) -> PathBuf {
 
 fn known_peers_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONSENSUS_STATE_DIR).join(KNOWN_PEERS_FILE)
+}
+
+fn observe_dialable_peer(peers: &mut HashMap<PeerId, Vec<Multiaddr>>, enr: &Enr) {
+    if let Some((peer_id, addrs)) = enr_multiaddrs(enr) {
+        peers.insert(peer_id, addrs);
+    }
 }
 
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
@@ -438,6 +867,52 @@ fn current_eth2_fork_id(bootnodes: &[Enr]) -> Result<Vec<u8>, ConsensusNetworkEr
         .ok_or(ConsensusNetworkError::MissingBootnodeForkId)
 }
 
+fn current_fork_digest(fork_id: &[u8]) -> Result<[u8; 4], ConsensusNetworkError> {
+    fork_id
+        .get(0..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(ConsensusNetworkError::InvalidBootnodeForkId)
+}
+
+fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
+    let peer_id = match peer_id_from_enr(enr) {
+        Ok(peer_id) => peer_id,
+        Err(error) => {
+            tracing::debug!(%error, enr = %enr, "failed to derive libp2p peer id from consensus ENR");
+            return None;
+        }
+    };
+
+    let mut addrs = Vec::new();
+    if let (Some(ip), Some(port)) = (enr.ip4(), enr.tcp4()) {
+        addrs.push(multiaddr_from_ip(IpAddr::V4(ip), port, peer_id));
+    }
+    if let (Some(ip), Some(port)) = (enr.ip6(), enr.tcp6()) {
+        addrs.push(multiaddr_from_ip(IpAddr::V6(ip), port, peer_id));
+    }
+    if addrs.is_empty() {
+        return None;
+    }
+
+    Some((peer_id, addrs))
+}
+
+fn peer_id_from_enr(enr: &Enr) -> Result<PeerId, String> {
+    let public_key = identity::secp256k1::PublicKey::try_from_bytes(&enr.public_key().encode())
+        .map_err(|error| error.to_string())?;
+    Ok(identity::PublicKey::from(public_key).to_peer_id())
+}
+
+fn multiaddr_from_ip(ip: IpAddr, port: u16, peer_id: PeerId) -> Multiaddr {
+    let addr = match ip {
+        IpAddr::V4(ipv4) => Multiaddr::empty().with(Protocol::Ip4(ipv4)),
+        IpAddr::V6(ipv6) => Multiaddr::empty().with(Protocol::Ip6(ipv6)),
+    }
+    .with(Protocol::Tcp(port));
+    addr.with_p2p(peer_id)
+        .expect("newly built multiaddr should always accept a peer id")
+}
+
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     while !*shutdown.borrow_and_update() {
         if shutdown.changed().await.is_err() {
@@ -505,5 +980,21 @@ mod tests {
         assert!(bootnodes.len() >= 10);
         assert!(bootnodes.iter().all(|enr| enr.udp4().is_some()));
         assert_eq!(current_eth2_fork_id(&bootnodes).unwrap().len(), 16);
+        assert_eq!(
+            current_fork_digest(&current_eth2_fork_id(&bootnodes).unwrap()).unwrap().len(),
+            4
+        );
+    }
+
+    #[test]
+    fn bootnode_enr_yields_dialable_multiaddr() {
+        let enr = MAINNET_BOOTNODES[0].parse::<Enr>().unwrap();
+        let (peer_id, addrs) = enr_multiaddrs(&enr).unwrap();
+
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| addr.to_string().contains("/tcp/")));
+        assert!(addrs
+            .iter()
+            .all(|addr| addr.to_string().contains(&peer_id.to_string())));
     }
 }

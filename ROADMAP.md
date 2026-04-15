@@ -103,7 +103,10 @@ LogEx should become a canonical Ethereum event-log node that:
 - The native consensus-network foundation is now partially live:
   - LogEx now starts an embedded mainnet discv5 discovery service whenever checkpointed consensus mode is active
   - the node persists a CL discovery identity and a CL dialable-peer cache under the data directory
-  - `/status` and the dashboard now expose native CL discovery state such as the local node id, active discovery sessions, dialable peers, and bootnode seeding
+  - `/status` and the dashboard now expose native CL discovery state such as the local node id, local libp2p peer id, active discovery sessions, dialable peers, live libp2p peer sessions, and first light-client RPC responder counts
+  - native libp2p peer-session management now runs on top of discovered ENRs
+  - the first outbound single-response CL req/resp transport is wired for `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate`
+  - mainnet smoke runs from the recorded example checkpoint have already observed live native CL discovery, live libp2p peer sessions, and successful `Status` responses from consensus peers
 - The CL-driven storage and runtime boundary is now materially in place:
   - `WeakSubjectivityCheckpoint`, `ExecutionAnchor`, and `ChainAnchors` are shared types used across runtime, sync, storage, and status surfaces
   - `crates/logex-cl` exists and persists checkpoint state plus ordered execution anchors under the data directory
@@ -158,7 +161,10 @@ LogEx should become a canonical Ethereum event-log node that:
   - checkpoint persistence is implemented
   - anchor rewind on optimistic reorg is implemented
   - native CL discovery is implemented
-  - real light-client req/resp, gossip, and update verification are not implemented yet
+  - native CL libp2p peer sessions are implemented
+  - the first raw single-response CL req/resp transport is implemented
+  - reliable acquisition, typed SSZ decoding, and cryptographic verification of light-client bootstrap/finality/optimistic payloads are not implemented yet
+  - multi-chunk CL req/resp (`LightClientUpdatesByRange`, beacon block fetches) and CL gossip are not implemented yet
 - The current branch also does not yet implement the pre-Merge PoW canonicality path.
 - This means the current branch is a real architectural shift, but not yet the full end-to-end canonical system.
 
@@ -191,16 +197,20 @@ LogEx should become a canonical Ethereum event-log node that:
 ## Remaining Work And Clear TODOs
 
 1. Native Beacon Light Client
+   - Done so far:
+     - native libp2p peer dialing and stream management now run on top of discovered CL ENRs
+     - outbound single-response req/resp transport is wired for `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate`
+     - live mainnet smoke runs from the recorded example checkpoint have already observed discovery, libp2p peer sessions, and `Status` responses
    - TODO:
-     - implement libp2p peer dialing and stream management on top of the discovered CL ENRs
-     - implement native CL req/resp for light-client bootstrap, updates-by-range, finality updates, optimistic updates, and beacon block fetches
+     - harden mainnet interoperability for `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are landing reliably enough to drive the live light-client store
+     - implement native CL req/resp for `LightClientUpdatesByRange` and beacon block fetches
      - implement the consensus gossip subscriptions needed for timely head tracking after the verified req/resp bootstrap path exists
      - implement fork-aware SSZ decoding for the post-merge beacon light-client objects LogEx needs
      - verify sync committee signatures, committee rotation, and weak-subjectivity bootstrap state exactly enough to match the Helios-style trust model
      - verify `execution_branch` against the beacon header `body_root` for every trusted light-client header
    - Why this is still blocking:
-     - the node can now discover and retain native CL peers, but it still cannot speak the light-client protocols that turn those peers into verified execution anchors
-     - until this lands, checkpointed CL state must be imported rather than learned live
+     - the node can now discover and dial native CL peers and exchange `Status`, but it still cannot reliably turn those peers into verified light-client payloads and execution anchors
+     - until bootstrap/finality/optimistic payloads are acquired reliably, decoded, and verified, checkpointed CL state must still be imported rather than learned live
    - Done when:
      - a fresh mainnet sync can start from a weak-subjectivity checkpoint, discover peers natively, and produce verified optimistic/finalized execution anchors without any external consensus RPC
 

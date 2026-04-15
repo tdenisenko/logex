@@ -142,10 +142,11 @@ pub async fn run_sync(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let consensus_network_handle = consensus.as_ref().map(|_| {
+    let consensus_network_handle = consensus.as_ref().map(|consensus| {
         spawn_consensus_network(
             ConsensusNetworkConfig {
                 data_dir: data_dir.clone(),
+                checkpoint: consensus.checkpoint(),
                 discovery_port: cl_discovery_port,
                 p2p_port: cl_p2p_port,
                 max_peers: cl_max_peers,
@@ -157,7 +158,7 @@ pub async fn run_sync(
     let consensus_network_handle = match consensus_network_handle {
         Some(Ok(handle)) => Some(handle),
         Some(Err(error)) => {
-            tracing::error!(%error, "failed to start consensus discovery");
+            tracing::error!(%error, "failed to start consensus network");
             std::process::exit(1);
         }
         None => None,
@@ -266,7 +267,7 @@ pub async fn run_sync(
     log_task_exit("gRPC server", grpc_handle).await;
     log_task_exit("background indexer", index_handle).await;
     if let Some(handle) = consensus_network_handle {
-        log_task_exit("consensus discovery", handle).await;
+        log_task_exit("consensus network", handle).await;
     }
     tracing::info!("shutting down");
 }

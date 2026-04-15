@@ -43,6 +43,9 @@ pub struct ConsensusNetworkStatus {
     pub discovery_port: u16,
     /// TCP libp2p port advertised in the ENR for future req/resp and gossip sessions.
     pub p2p_port: u16,
+    /// Local libp2p peer id derived from the consensus networking key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_peer_id: Option<String>,
     /// Maximum retained dialable consensus peers.
     pub max_peers: usize,
     /// Number of configured bootnodes.
@@ -55,6 +58,18 @@ pub struct ConsensusNetworkStatus {
     pub routing_table_peers: usize,
     /// Number of active UDP discovery sessions currently established.
     pub active_sessions: usize,
+    /// Number of libp2p consensus peers currently connected over TCP.
+    pub connected_peer_sessions: usize,
+    /// Number of peers that answered the initial Status req/resp handshake.
+    pub status_peers: usize,
+    /// Number of peers that served a light-client bootstrap payload.
+    pub bootstrap_peers: usize,
+    /// Number of peers that served a light-client finality update payload.
+    pub finality_update_peers: usize,
+    /// Number of peers that served a light-client optimistic update payload.
+    pub optimistic_update_peers: usize,
+    /// Number of outbound light-client RPC requests currently in flight.
+    pub pending_rpc_requests: usize,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.
