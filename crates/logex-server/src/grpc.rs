@@ -1,9 +1,14 @@
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use alloy_primitives::{Address, B256};
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 use logex_query::{self, SqlQueryError};
+use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
+use logex_types::LogRow;
 
 use crate::handler::AppState;
 
@@ -12,7 +17,12 @@ pub mod pb {
 }
 
 use pb::log_ex_service_server::{LogExService, LogExServiceServer};
-use pb::{Empty, HeadBlockResponse, QueryRequest, QueryResponse, QueryRow};
+use pb::{
+    Empty, GetLogsRequest, GetLogsResponse, HeadBlockResponse, LogEntry, QueryRequest,
+    QueryResponse, QueryRow,
+};
+
+type BoxStatus = Box<Status>;
 
 /// gRPC service implementation.
 pub struct LogExGrpcService {
@@ -27,6 +37,8 @@ impl LogExGrpcService {
 
 #[tonic::async_trait]
 impl LogExService for LogExGrpcService {
+    type StreamLogsStream = Pin<Box<dyn Stream<Item = Result<LogEntry, Status>> + Send>>;
+
     async fn query(
         &self,
         request: Request<QueryRequest>,
@@ -39,6 +51,9 @@ impl LogExService for LogExGrpcService {
         let result = match logex_query::execute_sql(sql, &storage, head_block).await {
             Ok(result) => result,
             Err(SqlQueryError::DataFusion(err)) => {
+                return Err(Status::invalid_argument(format!("query error: {err}")));
+            }
+            Err(SqlQueryError::LegacySyntax(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));
             }
             Err(SqlQueryError::Storage(err)) => {
@@ -71,6 +86,40 @@ impl LogExService for LogExGrpcService {
         let block_number = storage.head_block().unwrap_or(0);
         Ok(Response::new(HeadBlockResponse { block_number }))
     }
+
+    async fn get_logs(
+        &self,
+        request: Request<GetLogsRequest>,
+    ) -> Result<Response<GetLogsResponse>, Status> {
+        let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
+
+        let storage = self.state.storage.read().await;
+        let rows = logex_query::execute_log_filter(&storage, &filter)
+            .map_err(|err| Status::internal(format!("execution error: {err}")))?;
+        let row_count = rows.len() as u64;
+        let logs = rows.into_iter().map(log_row_to_proto).collect();
+
+        Ok(Response::new(GetLogsResponse { logs, row_count }))
+    }
+
+    async fn stream_logs(
+        &self,
+        request: Request<GetLogsRequest>,
+    ) -> Result<Response<Self::StreamLogsStream>, Status> {
+        let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
+
+        let storage = self.state.storage.read().await;
+        let rows = logex_query::execute_log_filter(&storage, &filter)
+            .map_err(|err| Status::internal(format!("execution error: {err}")))?;
+        let entries: Vec<Result<LogEntry, Status>> = rows
+            .into_iter()
+            .map(log_row_to_proto)
+            .map(Ok::<_, Status>)
+            .collect();
+        let stream = tokio_stream::iter(entries);
+
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 /// Start the gRPC server on the given address.
@@ -97,6 +146,139 @@ async fn grpc_shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
     tracing::info!("gRPC server shutting down");
 }
 
+fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFilter, BoxStatus> {
+    if !request.block_hash.is_empty()
+        && (request.from_block.is_some() || request.to_block.is_some())
+    {
+        return Err(Box::new(Status::invalid_argument(
+            "block_hash is mutually exclusive with from_block/to_block",
+        )));
+    }
+
+    if request.topics.len() > 4 {
+        return Err(Box::new(Status::invalid_argument(
+            "at most four topic positions are supported",
+        )));
+    }
+
+    let mut filter = NativeLogFilter::new();
+    filter.from_block = request.from_block;
+    filter.to_block = request.to_block;
+    filter.block_hash = parse_optional_b256(&request.block_hash, "block_hash")?;
+    filter.addresses = request
+        .addresses
+        .iter()
+        .map(|address| parse_address(address, "addresses"))
+        .collect::<Result<Vec<_>, _>>()?;
+    filter.canonical_only = request.canonical_only.unwrap_or(true);
+    filter.order = if request.descending.unwrap_or(false) {
+        LogOrder::Descending
+    } else {
+        LogOrder::Ascending
+    };
+    filter.limit = request
+        .limit
+        .map(|limit| {
+            usize::try_from(limit)
+                .map_err(|_| Box::new(Status::invalid_argument("limit is too large")))
+        })
+        .transpose()?;
+
+    for (index, topic) in request.topics.iter().enumerate() {
+        filter.topics[index] = parse_topic_constraint(topic, index)?;
+    }
+
+    Ok(filter)
+}
+
+fn parse_optional_b256(bytes: &[u8], field: &str) -> Result<Option<B256>, BoxStatus> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() != 32 {
+        return Err(Box::new(Status::invalid_argument(format!(
+            "{field} must be exactly 32 bytes"
+        ))));
+    }
+    Ok(Some(B256::from_slice(bytes)))
+}
+
+fn parse_address(bytes: &[u8], field: &str) -> Result<Address, BoxStatus> {
+    if bytes.len() != 20 {
+        return Err(Box::new(Status::invalid_argument(format!(
+            "{field} entries must be exactly 20 bytes"
+        ))));
+    }
+    Ok(Address::from_slice(bytes))
+}
+
+fn parse_topic_constraint(
+    topic: &pb::TopicFilter,
+    index: usize,
+) -> Result<TopicConstraint, BoxStatus> {
+    if topic.match_any {
+        if !topic.any_of.is_empty() {
+            return Err(Box::new(Status::invalid_argument(format!(
+                "topic position {index} cannot set match_any and any_of together"
+            ))));
+        }
+        return Ok(TopicConstraint::Any);
+    }
+
+    if topic.any_of.is_empty() {
+        return Ok(TopicConstraint::Any);
+    }
+
+    let hashes = topic
+        .any_of
+        .iter()
+        .map(|value| {
+            if value.len() != 32 {
+                return Err(Box::new(Status::invalid_argument(format!(
+                    "topic position {index} values must be exactly 32 bytes"
+                ))));
+            }
+            Ok(B256::from_slice(value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(if hashes.len() == 1 {
+        TopicConstraint::One(hashes[0])
+    } else {
+        TopicConstraint::AnyOf(hashes)
+    })
+}
+
+fn log_row_to_proto(row: LogRow) -> LogEntry {
+    let mut topics = Vec::with_capacity(4);
+    if let Some(topic) = row.topic0 {
+        topics.push(topic.as_slice().to_vec());
+    }
+    if let Some(topic) = row.topic1 {
+        topics.push(topic.as_slice().to_vec());
+    }
+    if let Some(topic) = row.topic2 {
+        topics.push(topic.as_slice().to_vec());
+    }
+    if let Some(topic) = row.topic3 {
+        topics.push(topic.as_slice().to_vec());
+    }
+
+    LogEntry {
+        block_number: row.block_number,
+        block_hash: row.block_hash.as_slice().to_vec(),
+        timestamp: row.timestamp,
+        tx_hash: row.tx_hash.as_slice().to_vec(),
+        tx_index: row.tx_index,
+        log_index: row.log_index,
+        address: row.address.as_slice().to_vec(),
+        topics,
+        data: row.data.to_vec(),
+        data_len: row.data_len,
+        source: row.source as u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +287,7 @@ mod tests {
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{LogRow, Source, SyncStatus};
     use tempfile::TempDir;
+    use tokio_stream::StreamExt;
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -148,6 +331,7 @@ mod tests {
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
             partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
         };
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();
@@ -255,5 +439,88 @@ mod tests {
         let result = service.query(request).await;
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_get_logs() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let service = LogExGrpcService::new(state);
+
+        let request = Request::new(GetLogsRequest {
+            from_block: Some(0),
+            to_block: Some(250),
+            block_hash: Vec::new(),
+            addresses: vec![Address::repeat_byte(0xAA).as_slice().to_vec()],
+            topics: vec![pb::TopicFilter {
+                match_any: false,
+                any_of: vec![B256::repeat_byte(0xDD).as_slice().to_vec()],
+            }],
+            canonical_only: None,
+            descending: None,
+            limit: None,
+        });
+
+        let response = service.get_logs(request).await.unwrap().into_inner();
+        assert_eq!(response.row_count, 1);
+        assert_eq!(response.logs[0].block_number, 100);
+        assert_eq!(
+            response.logs[0].address,
+            Address::repeat_byte(0xAA).as_slice()
+        );
+        assert_eq!(response.logs[0].topics.len(), 1);
+        assert_eq!(
+            response.logs[0].topics[0],
+            B256::repeat_byte(0xDD).as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grpc_stream_logs_descending() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let service = LogExGrpcService::new(state);
+
+        let request = Request::new(GetLogsRequest {
+            from_block: Some(0),
+            to_block: Some(250),
+            block_hash: Vec::new(),
+            addresses: Vec::new(),
+            topics: Vec::new(),
+            canonical_only: Some(true),
+            descending: Some(true),
+            limit: Some(2),
+        });
+
+        let mut stream = service.stream_logs(request).await.unwrap().into_inner();
+        let first = stream.next().await.unwrap().unwrap();
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.block_number, 200);
+        assert_eq!(second.block_number, 100);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_grpc_get_logs_rejects_invalid_address() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let service = LogExGrpcService::new(state);
+
+        let request = Request::new(GetLogsRequest {
+            from_block: None,
+            to_block: None,
+            block_hash: Vec::new(),
+            addresses: vec![vec![0x01, 0x02]],
+            topics: Vec::new(),
+            canonical_only: None,
+            descending: None,
+            limit: None,
+        });
+
+        let error = service
+            .get_logs(request)
+            .await
+            .expect_err("invalid address must fail");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 }

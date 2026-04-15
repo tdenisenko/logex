@@ -233,6 +233,12 @@ function renderTable(rows) {
   }
 
   var keys = Object.keys(rows[0]);
+  if (keys.length === 0) {
+    table.style.display = 'none';
+    empty.style.display = 'flex';
+    empty.textContent = 'Query returned rows but no columns were projected. Try SELECT * FROM logs ...';
+    return;
+  }
   var cols = COLUMNS.filter(function(c) { return keys.indexOf(c) !== -1; });
   keys.forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
 

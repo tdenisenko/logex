@@ -13,7 +13,7 @@ use crate::storage_metrics;
 /// Request body for POST /query.
 #[derive(serde::Deserialize)]
 pub struct QueryRequest {
-    /// LogSQL query string.
+    /// SQL query string.
     pub sql: String,
 }
 
@@ -37,7 +37,7 @@ impl IntoResponse for ErrorResponse {
     }
 }
 
-/// Handle POST /query — execute a LogSQL query.
+/// Handle POST /query — execute a SQL query.
 pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
@@ -47,6 +47,12 @@ pub async fn handle_query(
     let result = match logex_query::execute_sql(&req.sql, &storage, head_block).await {
         Ok(r) => r,
         Err(SqlQueryError::DataFusion(e)) => {
+            return ErrorResponse {
+                error: format!("query error: {e}"),
+            }
+            .into_response();
+        }
+        Err(SqlQueryError::LegacySyntax(e)) => {
             return ErrorResponse {
                 error: format!("query error: {e}"),
             }
@@ -187,6 +193,7 @@ mod tests {
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
             partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
         };
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();
@@ -330,6 +337,35 @@ mod tests {
 
         assert_eq!(result.row_count, 1);
         assert_eq!(result.rows[0]["bn"], 200);
+    }
+
+    #[tokio::test]
+    async fn test_post_query_missing_projection_defaults_to_full_rows() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "select from logs where block_number = 100"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert!(result.rows[0].get("tx_hash").is_some());
     }
 
     #[tokio::test]

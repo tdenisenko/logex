@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use logex_storage::ColumnReader;
+use logex_storage::SegmentReader;
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
@@ -25,13 +25,15 @@ impl IndexBuilder {
         Self::build_address_index(partition_dir, &index_dir)?;
         Self::build_topic0_index(partition_dir, &index_dir)?;
         Self::build_block_number_index(partition_dir, &index_dir)?;
+        Self::build_block_hash_index(partition_dir, &index_dir)?;
 
         Ok(())
     }
 
     /// Build address index: Address (20 bytes) -> RoaringBitmap of row IDs.
     fn build_address_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let addresses = ColumnReader::read_address(partition_dir, None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let addresses = reader.read_address(None)?;
         let mut index = BTreeIndex::new(20);
 
         for (row_id, addr) in addresses.iter().enumerate() {
@@ -46,7 +48,8 @@ impl IndexBuilder {
     /// Build topic0 index: B256 (32 bytes) -> RoaringBitmap of row IDs.
     /// Only indexes rows where topic0 is present (non-null).
     fn build_topic0_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let topics = ColumnReader::read_nullable_b256(partition_dir, "topic0", None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let topics = reader.read_nullable_b256("topic0", None)?;
         let mut index = BTreeIndex::new(32);
 
         for (row_id, topic) in topics.iter().enumerate() {
@@ -63,7 +66,8 @@ impl IndexBuilder {
     /// Build block_number index: u64 as big-endian 8 bytes -> RoaringBitmap of row IDs.
     /// Uses big-endian so lexicographic ordering matches numeric ordering (for range scans).
     fn build_block_number_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let blocks = ColumnReader::read_u64(partition_dir, "block_number.col", None)?;
+        let reader = SegmentReader::open(partition_dir)?;
+        let blocks = reader.read_u64("block_number", None)?;
         let mut index = BTreeIndex::new(8);
 
         for (row_id, &block) in blocks.iter().enumerate() {
@@ -72,6 +76,21 @@ impl IndexBuilder {
 
         index.write_to_file(&index_dir.join("block_number.bptree"))?;
         tracing::debug!(keys = index.key_count(), "built block_number index");
+        Ok(())
+    }
+
+    /// Build block_hash index: B256 (32 bytes) -> RoaringBitmap of row IDs.
+    fn build_block_hash_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+        let reader = SegmentReader::open(partition_dir)?;
+        let hashes = reader.read_b256("block_hash", None)?;
+        let mut index = BTreeIndex::new(32);
+
+        for (row_id, hash) in hashes.iter().enumerate() {
+            index.insert(hash.as_slice(), row_id as u32);
+        }
+
+        index.write_to_file(&index_dir.join("block_hash.bptree"))?;
+        tracing::debug!(keys = index.key_count(), "built block_hash index");
         Ok(())
     }
 }
@@ -181,6 +200,14 @@ mod tests {
         let b200 = block_idx.get(&200u64.to_be_bytes()).unwrap();
         assert!(b200.contains(2));
         assert_eq!(b200.len(), 1);
+
+        // Verify block_hash index
+        let hash_idx = BTreeIndexReader::open(&dir.join("indexes/block_hash.bptree")).unwrap();
+        assert_eq!(hash_idx.key_count(), 2);
+        let hash_1 = hash_idx.get(B256::repeat_byte(0x01).as_slice()).unwrap();
+        assert!(hash_1.contains(0));
+        assert!(hash_1.contains(1));
+        assert_eq!(hash_1.len(), 2);
     }
 
     #[test]

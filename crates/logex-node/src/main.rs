@@ -41,6 +41,8 @@ fn main() {
     let pm_config = PartitionManagerConfig {
         data_dir,
         partition_target_rows,
+        compaction_safety_margin_blocks: PartitionManagerConfig::default()
+            .compaction_safety_margin_blocks,
     };
 
     match cli.command {
