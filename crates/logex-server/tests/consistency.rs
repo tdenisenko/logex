@@ -145,9 +145,7 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
         .method("POST")
         .uri("/query")
         .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::json!({ "sql": sql }).to_string(),
-        ))
+        .body(Body::from(serde_json::json!({ "sql": sql }).to_string()))
         .unwrap();
     let rest_response = app.clone().oneshot(rest_request).await.unwrap();
     let rest_bytes = axum::body::to_bytes(rest_response.into_body(), 1024 * 1024)

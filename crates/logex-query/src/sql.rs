@@ -14,10 +14,10 @@ use datafusion::catalog::Session;
 use datafusion::common::ScalarValue;
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::logical_expr::{
-    BinaryExpr, Between, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
-};
 use datafusion::logical_expr::expr::InList;
+use datafusion::logical_expr::{
+    Between, BinaryExpr, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
 use datafusion::prelude::SessionContext;
@@ -28,8 +28,8 @@ use serde_json::{Map, Value};
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
 
-use crate::native::{StorageSnapshot, candidate_row_ids, partition_matches_filter};
 use crate::lexer::{Token, tokenize};
+use crate::native::{StorageSnapshot, candidate_row_ids, partition_matches_filter};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 
@@ -130,12 +130,14 @@ impl TableProvider for LogexTableProvider {
                 remaining_limit = Some(limit.saturating_sub(row_ids.len()));
             }
 
-            generators.push(Arc::new(parking_lot::RwLock::new(LogSegmentBatchGenerator::new(
-                partition.path.clone(),
-                projected_schema.clone(),
-                projected_columns.clone(),
-                row_ids,
-            ))));
+            generators.push(Arc::new(parking_lot::RwLock::new(
+                LogSegmentBatchGenerator::new(
+                    partition.path.clone(),
+                    projected_schema.clone(),
+                    projected_columns.clone(),
+                    row_ids,
+                ),
+            )));
 
             if remaining_limit == Some(0) {
                 break;
@@ -144,10 +146,10 @@ impl TableProvider for LogexTableProvider {
 
         self.total_scanned.store(scanned_rows, Ordering::Relaxed);
 
-        Ok(Arc::new(
-            LazyMemoryExec::try_new(projected_schema, generators)
-                .map_err(DataFusionError::from)?,
-        ))
+        Ok(Arc::new(LazyMemoryExec::try_new(
+            projected_schema,
+            generators,
+        )?))
     }
 }
 
@@ -220,7 +222,10 @@ pub async fn execute_sql(
     let sql = rewrite_legacy_sql(sql, head_block)?;
     enforce_read_only_sql(&sql)?;
     let total_scanned = Arc::new(AtomicU64::new(0));
-    let table = LogexTableProvider::new(StorageSnapshot::from_storage(storage), Arc::clone(&total_scanned));
+    let table = LogexTableProvider::new(
+        StorageSnapshot::from_storage(storage),
+        Arc::clone(&total_scanned),
+    );
 
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(table))?;
@@ -264,7 +269,7 @@ fn unsupported_from_alias_sort_shorthand(sql: &str) -> Option<String> {
     let from_pos = tokens.iter().position(|token| *token == Token::From)?;
     let table = tokens.get(from_pos + 1)?;
     let next = tokens.get(from_pos + 2)?;
-    let has_order_by = tokens.iter().any(|token| *token == Token::OrderBy);
+    let has_order_by = tokens.contains(&Token::OrderBy);
 
     if !matches!(table, Token::Ident(name) if name.eq_ignore_ascii_case("logs")) || has_order_by {
         return None;
@@ -318,7 +323,11 @@ fn projected_column_names(schema: SchemaRef, projection: Option<&Vec<usize>>) ->
             .iter()
             .map(|index| schema.field(*index).name().clone())
             .collect(),
-        None => schema.fields().iter().map(|field| field.name().clone()).collect(),
+        None => schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect(),
     }
 }
 
@@ -350,70 +359,86 @@ fn read_column_as_array(
     column: &str,
 ) -> std::io::Result<ArrayRef> {
     let array: ArrayRef = match column {
-        "block_number" => Arc::new(UInt64Array::from(reader.read_u64("block_number", Some(row_ids))?)),
+        "block_number" => Arc::new(UInt64Array::from(
+            reader.read_u64("block_number", Some(row_ids))?,
+        )),
         "block_hash" => Arc::new(StringArray::from_iter_values(
-            reader.read_b256("block_hash", Some(row_ids))?
+            reader
+                .read_b256("block_hash", Some(row_ids))?
                 .into_iter()
                 .map(to_hex_hash),
         )),
-        "timestamp" => Arc::new(UInt64Array::from(reader.read_u64("timestamp", Some(row_ids))?)),
+        "timestamp" => Arc::new(UInt64Array::from(
+            reader.read_u64("timestamp", Some(row_ids))?,
+        )),
         "tx_hash" => Arc::new(StringArray::from_iter_values(
-            reader.read_b256("tx_hash", Some(row_ids))?
+            reader
+                .read_b256("tx_hash", Some(row_ids))?
                 .into_iter()
                 .map(to_hex_hash),
         )),
         "tx_index" => Arc::new(UInt64Array::from_iter_values(
-            reader.read_u32("tx_index", Some(row_ids))?
+            reader
+                .read_u32("tx_index", Some(row_ids))?
                 .into_iter()
                 .map(|value| value as u64),
         )),
         "log_index" => Arc::new(UInt64Array::from_iter_values(
-            reader.read_u32("log_index", Some(row_ids))?
+            reader
+                .read_u32("log_index", Some(row_ids))?
                 .into_iter()
                 .map(|value| value as u64),
         )),
         "address" => Arc::new(StringArray::from_iter_values(
-            reader.read_address(Some(row_ids))?
+            reader
+                .read_address(Some(row_ids))?
                 .into_iter()
                 .map(|address| to_hex_address(address.as_slice())),
         )),
         "topic0" => Arc::new(StringArray::from(
-            reader.read_nullable_b256("topic0", Some(row_ids))?
+            reader
+                .read_nullable_b256("topic0", Some(row_ids))?
                 .into_iter()
                 .map(|topic| topic.map(to_hex_hash))
                 .collect::<Vec<_>>(),
         )),
         "topic1" => Arc::new(StringArray::from(
-            reader.read_nullable_b256("topic1", Some(row_ids))?
+            reader
+                .read_nullable_b256("topic1", Some(row_ids))?
                 .into_iter()
                 .map(|topic| topic.map(to_hex_hash))
                 .collect::<Vec<_>>(),
         )),
         "topic2" => Arc::new(StringArray::from(
-            reader.read_nullable_b256("topic2", Some(row_ids))?
+            reader
+                .read_nullable_b256("topic2", Some(row_ids))?
                 .into_iter()
                 .map(|topic| topic.map(to_hex_hash))
                 .collect::<Vec<_>>(),
         )),
         "topic3" => Arc::new(StringArray::from(
-            reader.read_nullable_b256("topic3", Some(row_ids))?
+            reader
+                .read_nullable_b256("topic3", Some(row_ids))?
                 .into_iter()
                 .map(|topic| topic.map(to_hex_hash))
                 .collect::<Vec<_>>(),
         )),
         "topics" => build_topics_array(reader, row_ids)?,
         "data" => Arc::new(StringArray::from_iter_values(
-            reader.read_var_bytes("data", Some(row_ids))?
+            reader
+                .read_var_bytes("data", Some(row_ids))?
                 .into_iter()
                 .map(|bytes| to_hex_bytes(&bytes)),
         )),
         "data_len" => Arc::new(UInt64Array::from_iter_values(
-            reader.read_u32("data_len", Some(row_ids))?
+            reader
+                .read_u32("data_len", Some(row_ids))?
                 .into_iter()
                 .map(|value| value as u64),
         )),
         "source" => Arc::new(UInt64Array::from_iter_values(
-            reader.read_u8("source", Some(row_ids))?
+            reader
+                .read_u8("source", Some(row_ids))?
                 .into_iter()
                 .map(|value| value as u64),
         )),
@@ -421,7 +446,7 @@ fn read_column_as_array(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("unsupported projected column: {other}"),
-            ))
+            ));
         }
     };
 
@@ -464,9 +489,15 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
 
     match column.as_str() {
         "block_number" => numeric_scalar(literal).is_some(),
-        "block_hash" if !reversed => matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some(),
-        "address" if !reversed => matches!(binary.op, Operator::Eq) && parse_address_scalar(literal).is_some(),
-        "topic0" if !reversed => matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some(),
+        "block_hash" if !reversed => {
+            matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some()
+        }
+        "address" if !reversed => {
+            matches!(binary.op, Operator::Eq) && parse_address_scalar(literal).is_some()
+        }
+        "topic0" if !reversed => {
+            matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some()
+        }
         _ => false,
     }
 }
@@ -474,8 +505,12 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
 fn supports_between_pushdown(between: &Between) -> bool {
     matches!(between.expr.as_ref(), DataFusionExpr::Column(column) if column.name == "block_number")
         && !between.negated
-        && scalar_literal(between.low.as_ref()).and_then(numeric_scalar).is_some()
-        && scalar_literal(between.high.as_ref()).and_then(numeric_scalar).is_some()
+        && scalar_literal(between.low.as_ref())
+            .and_then(numeric_scalar)
+            .is_some()
+        && scalar_literal(between.high.as_ref())
+            .and_then(numeric_scalar)
+            .is_some()
 }
 
 fn supports_in_list_pushdown(in_list: &InList) -> bool {
@@ -487,8 +522,15 @@ fn supports_in_list_pushdown(in_list: &InList) -> bool {
     };
 
     match column.name.as_str() {
-        "address" => in_list.list.iter().all(|expr| scalar_literal(expr).and_then(parse_address_scalar).is_some()),
-        "topic0" => in_list.list.iter().all(|expr| scalar_literal(expr).and_then(parse_b256_scalar).is_some()),
+        "address" => in_list.list.iter().all(|expr| {
+            scalar_literal(expr)
+                .and_then(parse_address_scalar)
+                .is_some()
+        }),
+        "topic0" => in_list
+            .list
+            .iter()
+            .all(|expr| scalar_literal(expr).and_then(parse_b256_scalar).is_some()),
         _ => false,
     }
 }
@@ -536,17 +578,18 @@ fn apply_binary_pushdown(
             apply_block_number_constraint(filter, binary.op, value, reversed);
         }
         "block_hash" if !reversed && binary.op == Operator::Eq => {
-            filter.block_hash = Some(
-                parse_b256_scalar(literal)
-                    .ok_or_else(|| DataFusionError::Plan("invalid block_hash literal".to_owned()))?,
-            );
+            filter.block_hash =
+                Some(parse_b256_scalar(literal).ok_or_else(|| {
+                    DataFusionError::Plan("invalid block_hash literal".to_owned())
+                })?);
         }
         "address" if !reversed && binary.op == Operator::Eq => {
             merge_addresses(
                 filter,
                 vec![
-                    parse_address_scalar(literal)
-                        .ok_or_else(|| DataFusionError::Plan("invalid address literal".to_owned()))?,
+                    parse_address_scalar(literal).ok_or_else(|| {
+                        DataFusionError::Plan("invalid address literal".to_owned())
+                    })?,
                 ],
             );
         }
@@ -554,8 +597,9 @@ fn apply_binary_pushdown(
             merge_topic_constraint(
                 &mut filter.topics[0],
                 TopicConstraint::One(
-                    parse_b256_scalar(literal)
-                        .ok_or_else(|| DataFusionError::Plan("invalid topic0 literal".to_owned()))?,
+                    parse_b256_scalar(literal).ok_or_else(|| {
+                        DataFusionError::Plan("invalid topic0 literal".to_owned())
+                    })?,
                 ),
             );
         }
@@ -565,15 +609,16 @@ fn apply_binary_pushdown(
     Ok(())
 }
 
-fn apply_between_pushdown(
-    filter: &mut NativeLogFilter,
-    between: &Between,
-) -> DataFusionResult<()> {
+fn apply_between_pushdown(filter: &mut NativeLogFilter, between: &Between) -> DataFusionResult<()> {
     let DataFusionExpr::Column(column) = between.expr.as_ref() else {
-        return Err(DataFusionError::Plan("between pushdown requires a column".to_owned()));
+        return Err(DataFusionError::Plan(
+            "between pushdown requires a column".to_owned(),
+        ));
     };
     if column.name != "block_number" || between.negated {
-        return Err(DataFusionError::Plan("unsupported BETWEEN pushdown".to_owned()));
+        return Err(DataFusionError::Plan(
+            "unsupported BETWEEN pushdown".to_owned(),
+        ));
     }
 
     let low = scalar_literal(between.low.as_ref())
@@ -583,31 +628,44 @@ fn apply_between_pushdown(
         .and_then(numeric_scalar)
         .ok_or_else(|| DataFusionError::Plan("invalid BETWEEN high bound".to_owned()))?;
 
-    filter.from_block = Some(filter.from_block.map(|current| current.max(low)).unwrap_or(low));
-    filter.to_block = Some(filter.to_block.map(|current| current.min(high)).unwrap_or(high));
+    filter.from_block = Some(
+        filter
+            .from_block
+            .map(|current| current.max(low))
+            .unwrap_or(low),
+    );
+    filter.to_block = Some(
+        filter
+            .to_block
+            .map(|current| current.min(high))
+            .unwrap_or(high),
+    );
     Ok(())
 }
 
-fn apply_in_list_pushdown(
-    filter: &mut NativeLogFilter,
-    in_list: &InList,
-) -> DataFusionResult<()> {
+fn apply_in_list_pushdown(filter: &mut NativeLogFilter, in_list: &InList) -> DataFusionResult<()> {
     let DataFusionExpr::Column(column) = in_list.expr.as_ref() else {
-        return Err(DataFusionError::Plan("IN pushdown requires a column".to_owned()));
+        return Err(DataFusionError::Plan(
+            "IN pushdown requires a column".to_owned(),
+        ));
     };
     if in_list.negated {
-        return Err(DataFusionError::Plan("NOT IN pushdown is unsupported".to_owned()));
+        return Err(DataFusionError::Plan(
+            "NOT IN pushdown is unsupported".to_owned(),
+        ));
     }
 
     match column.name.as_str() {
         "address" => {
             let mut addresses = Vec::with_capacity(in_list.list.len());
             for expr in &in_list.list {
-                let literal = scalar_literal(expr)
-                    .ok_or_else(|| DataFusionError::Plan("address IN requires string literals".to_owned()))?;
+                let literal = scalar_literal(expr).ok_or_else(|| {
+                    DataFusionError::Plan("address IN requires string literals".to_owned())
+                })?;
                 addresses.push(
-                    parse_address_scalar(literal)
-                        .ok_or_else(|| DataFusionError::Plan("invalid address literal".to_owned()))?,
+                    parse_address_scalar(literal).ok_or_else(|| {
+                        DataFusionError::Plan("invalid address literal".to_owned())
+                    })?,
                 );
             }
             merge_addresses(filter, addresses);
@@ -615,11 +673,13 @@ fn apply_in_list_pushdown(
         "topic0" => {
             let mut topics = Vec::with_capacity(in_list.list.len());
             for expr in &in_list.list {
-                let literal = scalar_literal(expr)
-                    .ok_or_else(|| DataFusionError::Plan("topic0 IN requires string literals".to_owned()))?;
+                let literal = scalar_literal(expr).ok_or_else(|| {
+                    DataFusionError::Plan("topic0 IN requires string literals".to_owned())
+                })?;
                 topics.push(
-                    parse_b256_scalar(literal)
-                        .ok_or_else(|| DataFusionError::Plan("invalid topic0 literal".to_owned()))?,
+                    parse_b256_scalar(literal).ok_or_else(|| {
+                        DataFusionError::Plan("invalid topic0 literal".to_owned())
+                    })?,
                 );
             }
             merge_topic_constraint(&mut filter.topics[0], TopicConstraint::AnyOf(topics));
@@ -638,22 +698,52 @@ fn apply_block_number_constraint(
 ) {
     match (operator, reversed) {
         (Operator::Eq, false) | (Operator::Eq, true) => {
-            filter.from_block = Some(filter.from_block.map(|current| current.max(value)).unwrap_or(value));
-            filter.to_block = Some(filter.to_block.map(|current| current.min(value)).unwrap_or(value));
+            filter.from_block = Some(
+                filter
+                    .from_block
+                    .map(|current| current.max(value))
+                    .unwrap_or(value),
+            );
+            filter.to_block = Some(
+                filter
+                    .to_block
+                    .map(|current| current.min(value))
+                    .unwrap_or(value),
+            );
         }
         (Operator::Gt, false) | (Operator::Lt, true) => {
             let bound = value.saturating_add(1);
-            filter.from_block = Some(filter.from_block.map(|current| current.max(bound)).unwrap_or(bound));
+            filter.from_block = Some(
+                filter
+                    .from_block
+                    .map(|current| current.max(bound))
+                    .unwrap_or(bound),
+            );
         }
         (Operator::GtEq, false) | (Operator::LtEq, true) => {
-            filter.from_block = Some(filter.from_block.map(|current| current.max(value)).unwrap_or(value));
+            filter.from_block = Some(
+                filter
+                    .from_block
+                    .map(|current| current.max(value))
+                    .unwrap_or(value),
+            );
         }
         (Operator::Lt, false) | (Operator::Gt, true) => {
             let bound = value.saturating_sub(1);
-            filter.to_block = Some(filter.to_block.map(|current| current.min(bound)).unwrap_or(bound));
+            filter.to_block = Some(
+                filter
+                    .to_block
+                    .map(|current| current.min(bound))
+                    .unwrap_or(bound),
+            );
         }
         (Operator::LtEq, false) | (Operator::GtEq, true) => {
-            filter.to_block = Some(filter.to_block.map(|current| current.min(value)).unwrap_or(value));
+            filter.to_block = Some(
+                filter
+                    .to_block
+                    .map(|current| current.min(value))
+                    .unwrap_or(value),
+            );
         }
         _ => {}
     }
@@ -1086,7 +1176,10 @@ mod tests {
         let sql =
             "SELECT * FROM logs WHERE topic1 = address'0xdAC17F958D2ee523a2206206994597C13D831ec7'";
         let rewritten = rewrite_legacy_sql(sql, storage.head_block().unwrap_or(0)).unwrap();
-        assert!(rewritten.contains("0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7"));
+        assert!(
+            rewritten
+                .contains("0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7")
+        );
     }
 
     #[tokio::test]

@@ -8,14 +8,14 @@ use logex_types::LogRow;
 
 use crate::column::ColumnFile;
 use crate::page::{
-    PageIndexEntry, encode_fixed_width_page, encode_u32_page, encode_u64_page, encode_u8_page,
+    PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
     encode_var_bytes_page, write_page_index,
 };
 use crate::reader::ColumnReader;
 
 use super::catalog::{
-    ColumnDescriptor, CompressionCodec, IndexDescriptor, IndexKind, SegmentDescriptor,
-    SegmentKind, SegmentManifest, StorageCatalogPaths,
+    ColumnDescriptor, CompressionCodec, IndexDescriptor, IndexKind, SegmentDescriptor, SegmentKind,
+    SegmentManifest, StorageCatalogPaths,
 };
 
 const DEFAULT_PAGE_ROWS: u32 = 16_384;
@@ -107,69 +107,22 @@ pub(crate) fn compact_segment(
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(segment_dir.join("columns"))?;
 
-    let mut columns = Vec::with_capacity(14);
-    columns.push(compact_address_column(&segment_dir)?);
-    columns.push(compact_u64_column(
-        &segment_dir,
-        "block_number",
-        CompressionCodec::Delta,
-    )?);
-    columns.push(compact_b256_column(
-        &segment_dir,
-        "block_hash",
-        CompressionCodec::None,
-    )?);
-    columns.push(compact_u64_column(
-        &segment_dir,
-        "timestamp",
-        CompressionCodec::DeltaOfDelta,
-    )?);
-    columns.push(compact_b256_column(
-        &segment_dir,
-        "tx_hash",
-        CompressionCodec::None,
-    )?);
-    columns.push(compact_u32_column(
-        &segment_dir,
-        "tx_index",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_u32_column(
-        &segment_dir,
-        "log_index",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_u32_column(
-        &segment_dir,
-        "data_len",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_u8_column(
-        &segment_dir,
-        "source",
-        CompressionCodec::Dictionary,
-    )?);
-    columns.push(compact_nullable_b256_column(
-        &segment_dir,
-        "topic0",
-        CompressionCodec::Dictionary,
-    )?);
-    columns.push(compact_nullable_b256_column(
-        &segment_dir,
-        "topic1",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_nullable_b256_column(
-        &segment_dir,
-        "topic2",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_nullable_b256_column(
-        &segment_dir,
-        "topic3",
-        CompressionCodec::Zstd,
-    )?);
-    columns.push(compact_data_column(&segment_dir, CompressionCodec::Lz4)?);
+    let columns = vec![
+        compact_address_column(&segment_dir)?,
+        compact_u64_column(&segment_dir, "block_number", CompressionCodec::Delta)?,
+        compact_b256_column(&segment_dir, "block_hash", CompressionCodec::None)?,
+        compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)?,
+        compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::None)?,
+        compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd)?,
+        compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd)?,
+        compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd)?,
+        compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary)?,
+        compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::Dictionary)?,
+        compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::Zstd)?,
+        compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::Zstd)?,
+        compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::Zstd)?,
+        compact_data_column(&segment_dir, CompressionCodec::Lz4)?,
+    ];
 
     persist_segment_manifest_with_columns(paths, descriptor, columns)?;
     remove_raw_hot_files(&segment_dir)?;
@@ -185,7 +138,11 @@ pub(crate) fn compact_segment(
 
 fn segment_is_compacted(paths: &StorageCatalogPaths, segment_id: u64) -> std::io::Result<bool> {
     Ok(existing_columns(paths, segment_id)?
-        .map(|columns| columns.iter().all(|column| column.page_index_path.is_some()))
+        .map(|columns| {
+            columns
+                .iter()
+                .all(|column| column.page_index_path.is_some())
+        })
         .unwrap_or(false))
 }
 
@@ -262,7 +219,13 @@ fn compact_address_column(segment_dir: &Path) -> std::io::Result<ColumnDescripto
         "address",
         CompressionCodec::Dictionary,
         raw.len() / 20,
-        |range| encode_fixed_width_page(&raw[range.start * 20..range.end * 20], 20, CompressionCodec::Dictionary),
+        |range| {
+            encode_fixed_width_page(
+                &raw[range.start * 20..range.end * 20],
+                20,
+                CompressionCodec::Dictionary,
+            )
+        },
     )
 }
 
@@ -301,7 +264,10 @@ fn compact_nullable_b256_column(
         })?;
 
     let null_rel = format!("columns/{name}.null");
-    fs::copy(segment_dir.join(format!("{name}.null")), segment_dir.join(&null_rel))?;
+    fs::copy(
+        segment_dir.join(format!("{name}.null")),
+        segment_dir.join(&null_rel),
+    )?;
     descriptor.null_bitmap_path = Some(null_rel);
     Ok(descriptor)
 }
@@ -312,7 +278,9 @@ fn compact_u64_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u64(segment_dir, &format!("{name}.col"), None)?;
-    write_typed_pages(segment_dir, name, codec, &values, |slice| encode_u64_page(slice, codec))
+    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+        encode_u64_page(slice, codec)
+    })
 }
 
 fn compact_u32_column(
@@ -321,7 +289,9 @@ fn compact_u32_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u32(segment_dir, &format!("{name}.col"), None)?;
-    write_typed_pages(segment_dir, name, codec, &values, |slice| encode_u32_page(slice, codec))
+    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+        encode_u32_page(slice, codec)
+    })
 }
 
 fn compact_u8_column(
@@ -330,7 +300,9 @@ fn compact_u8_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u8(segment_dir, &format!("{name}.col"), None)?;
-    write_typed_pages(segment_dir, name, codec, &values, |slice| encode_u8_page(slice, codec))
+    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+        encode_u8_page(slice, codec)
+    })
 }
 
 fn compact_data_column(
@@ -354,7 +326,7 @@ where
     F: FnMut(Range<usize>) -> std::io::Result<Vec<u8>>,
 {
     let (data_path, index_path, page_rows) =
-        write_pages(segment_dir, name, row_count, |range| encode_page(range))?;
+        write_pages(segment_dir, name, row_count, &mut encode_page)?;
     Ok(ColumnDescriptor {
         name: name.to_owned(),
         codec,
@@ -376,9 +348,10 @@ where
     T: Clone,
     F: FnMut(&[T]) -> std::io::Result<Vec<u8>>,
 {
-    let (data_path, index_path, page_rows) = write_pages(segment_dir, name, values.len(), |range| {
-        encode_page(&values[range])
-    })?;
+    let (data_path, index_path, page_rows) =
+        write_pages(segment_dir, name, values.len(), |range| {
+            encode_page(&values[range])
+        })?;
     Ok(ColumnDescriptor {
         name: name.to_owned(),
         codec,

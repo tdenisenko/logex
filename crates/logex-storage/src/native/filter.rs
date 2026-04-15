@@ -7,17 +7,12 @@ pub enum LogOrder {
     Descending,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TopicConstraint {
+    #[default]
     Any,
     One(B256),
     AnyOf(Vec<B256>),
-}
-
-impl Default for TopicConstraint {
-    fn default() -> Self {
-        Self::Any
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

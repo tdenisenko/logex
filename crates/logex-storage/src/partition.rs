@@ -99,7 +99,8 @@ impl PartitionManager {
         block_hash: B256,
         timestamp: u64,
     ) -> std::io::Result<()> {
-        self.inner.record_sync_head(block_number, block_hash, timestamp)
+        self.inner
+            .record_sync_head(block_number, block_hash, timestamp)
     }
 
     /// Return the most recently persisted sync head, if any.

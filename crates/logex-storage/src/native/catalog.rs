@@ -170,7 +170,9 @@ pub struct NativeStorageCatalog {
 }
 
 impl NativeStorageCatalog {
-    pub fn open_or_create(config: &NativeStorageConfig) -> std::io::Result<(Self, StorageCatalogPaths)> {
+    pub fn open_or_create(
+        config: &NativeStorageConfig,
+    ) -> std::io::Result<(Self, StorageCatalogPaths)> {
         let paths = StorageCatalogPaths::new(config.data_dir.clone());
         paths.ensure_base_dirs()?;
 
@@ -271,7 +273,8 @@ mod tests {
         assert_eq!(paths.segments_dir(), root.join(SEGMENTS_DIR));
         assert_eq!(
             paths.segment_manifest_path(7),
-            root.join(SEGMENTS_DIR).join("s_0000000000000007/segment.json")
+            root.join(SEGMENTS_DIR)
+                .join("s_0000000000000007/segment.json")
         );
     }
 }

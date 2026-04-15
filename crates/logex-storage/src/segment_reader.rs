@@ -7,7 +7,7 @@ use logex_types::{LogRow, Source};
 
 use crate::native::{ColumnDescriptor, SegmentManifest};
 use crate::page::{
-    PageIndexEntry, decode_fixed_width_page, decode_u32_page, decode_u64_page, decode_u8_page,
+    PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
     decode_var_bytes_page, read_page_index,
 };
 use crate::{ColumnReader, NullBitmap};
@@ -70,7 +70,7 @@ impl SegmentReader {
         let mut result = Vec::with_capacity(values.len());
         match row_ids {
             Some(ids) => {
-                for (idx, bytes) in ids.iter().zip(values.into_iter()) {
+                for (idx, bytes) in ids.iter().zip(values) {
                     if nulls.is_present(*idx as u64) {
                         result.push(Some(B256::from_slice(&bytes)));
                     } else {
@@ -127,9 +127,8 @@ impl SegmentReader {
             .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
             .unwrap_or_else(|| self.dir.join("canonical.bitmap"));
         let data = fs::read(path)?;
-        NullBitmap::read_from(&data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
-        })
+        NullBitmap::read_from(&data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
     }
 
     pub fn read_row_count(&self) -> io::Result<u64> {
@@ -198,9 +197,9 @@ impl SegmentReader {
         item_size: usize,
         row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<Vec<u8>>> {
-        let descriptor = self
-            .compacted_column(column)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted"))?;
+        let descriptor = self.compacted_column(column).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
+        })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
         let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
@@ -214,8 +213,10 @@ impl SegmentReader {
                         item_size,
                         descriptor.codec,
                     )?;
-                    for (local_row, output_position) in
-                        selection.local_rows.iter().zip(selection.output_positions.iter())
+                    for (local_row, output_position) in selection
+                        .local_rows
+                        .iter()
+                        .zip(selection.output_positions.iter())
                     {
                         let start = local_row * item_size;
                         let end = start + item_size;
@@ -241,9 +242,9 @@ impl SegmentReader {
     }
 
     fn read_u64_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
-        let descriptor = self
-            .compacted_column(column)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted"))?;
+        let descriptor = self.compacted_column(column).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
+        })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
         let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
@@ -257,9 +258,9 @@ impl SegmentReader {
     }
 
     fn read_u32_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
-        let descriptor = self
-            .compacted_column(column)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted"))?;
+        let descriptor = self.compacted_column(column).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
+        })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
         let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
@@ -273,9 +274,9 @@ impl SegmentReader {
     }
 
     fn read_u8_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
-        let descriptor = self
-            .compacted_column(column)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted"))?;
+        let descriptor = self.compacted_column(column).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
+        })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
         let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
@@ -293,9 +294,9 @@ impl SegmentReader {
         column: &str,
         row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<Bytes>> {
-        let descriptor = self
-            .compacted_column(column)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted"))?;
+        let descriptor = self.compacted_column(column).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
+        })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
         let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
@@ -324,7 +325,10 @@ impl SegmentReader {
         descriptor: &ColumnDescriptor,
     ) -> io::Result<Vec<PageIndexEntry>> {
         let path = descriptor.page_index_path.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "compacted column is missing a page index")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted column is missing a page index",
+            )
         })?;
         let data = fs::read(self.dir.join(path))?;
         read_page_index(&data)
@@ -334,7 +338,10 @@ impl SegmentReader {
         let start = entry.offset as usize;
         let end = start + entry.encoded_len as usize;
         data.get(start..end).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "compacted page is out of bounds")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted page is out of bounds",
+            )
         })
     }
 }
@@ -364,7 +371,10 @@ fn load_manifest(dir: &Path) -> io::Result<Option<SegmentManifest>> {
     Ok(Some(manifest))
 }
 
-fn build_selections(row_ids: &[u32], page_index: &[PageIndexEntry]) -> io::Result<Vec<PageSelection>> {
+fn build_selections(
+    row_ids: &[u32],
+    page_index: &[PageIndexEntry],
+) -> io::Result<Vec<PageSelection>> {
     if row_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -381,7 +391,10 @@ fn build_selections(row_ids: &[u32], page_index: &[PageIndexEntry]) -> io::Resul
         }
 
         let entry = page_index.get(page_cursor).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "requested row is outside the page index")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "requested row is outside the page index",
+            )
         })?;
         if (row_id as u64) < entry.first_row {
             return Err(io::Error::new(
@@ -422,8 +435,10 @@ where
             let mut result = vec![None; ids.len()];
             for selection in build_selections(ids, page_index)? {
                 let page = decode_page(&selection.entry)?;
-                for (local_row, output_position) in
-                    selection.local_rows.iter().zip(selection.output_positions.iter())
+                for (local_row, output_position) in selection
+                    .local_rows
+                    .iter()
+                    .zip(selection.output_positions.iter())
                 {
                     result[*output_position] = Some(page[*local_row].clone());
                 }

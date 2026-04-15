@@ -7,15 +7,15 @@ use alloy_primitives::B256;
 use logex_types::PartitionMeta;
 use serde::{Deserialize, Serialize};
 
+use crate::SegmentReader;
 use crate::state::SyncHead;
 use crate::wal::WriteAheadLog;
-use crate::SegmentReader;
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, StorageCatalogPaths,
 };
 use super::segment::{
-    apply_rows_to_descriptor, append_rows, compact_segment, persist_segment_manifest,
+    append_rows, apply_rows_to_descriptor, compact_segment, persist_segment_manifest,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -208,7 +208,11 @@ impl NativeStorage {
     }
 
     pub fn total_rows(&self) -> u64 {
-        self.catalog.segments.iter().map(|segment| segment.row_count).sum()
+        self.catalog
+            .segments
+            .iter()
+            .map(|segment| segment.row_count)
+            .sum()
     }
 
     pub fn sealed_count(&self) -> usize {
@@ -280,7 +284,11 @@ impl NativeStorage {
             .catalog
             .active_hot_segment
             .ok_or_else(|| std::io::Error::other("missing hot segment"))?;
-        if let Some(descriptor) = self.catalog.segments.iter_mut().find(|segment| segment.id == hot_id)
+        if let Some(descriptor) = self
+            .catalog
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == hot_id)
         {
             descriptor.kind = SegmentKind::Sealed;
             persist_segment_manifest(&self.paths, descriptor)?;
@@ -365,9 +373,7 @@ impl NativeStorage {
             return false;
         };
 
-        max_block
-            .saturating_add(self.config.compaction_safety_margin_blocks)
-            <= head_block
+        max_block.saturating_add(self.config.compaction_safety_margin_blocks) <= head_block
     }
 
     fn verify_integrity(&self) -> io::Result<()> {
@@ -410,7 +416,10 @@ impl NativeStorage {
             if descriptor.min_block.is_some() || descriptor.max_block.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("segment {} is empty but still has block metadata", descriptor.id),
+                    format!(
+                        "segment {} is empty but still has block metadata",
+                        descriptor.id
+                    ),
                 ));
             }
             return Ok(());
@@ -441,7 +450,10 @@ impl NativeStorage {
         if block_numbers.len() != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("segment {} failed to read boundary block numbers", descriptor.id),
+                format!(
+                    "segment {} failed to read boundary block numbers",
+                    descriptor.id
+                ),
             ));
         }
 
@@ -617,7 +629,10 @@ mod tests {
             compaction_safety_margin_blocks: 2_048,
         })
         .unwrap();
-        assert_eq!(reloaded.sync_head().map(|head| head.block_number), Some(123));
+        assert_eq!(
+            reloaded.sync_head().map(|head| head.block_number),
+            Some(123)
+        );
     }
 
     #[test]
@@ -674,7 +689,11 @@ mod tests {
         assert!(!sealed_path.join("columns/address.pages").exists());
 
         storage
-            .record_sync_head(sealed.max_block.unwrap() + 200, B256::repeat_byte(0xAA), 999)
+            .record_sync_head(
+                sealed.max_block.unwrap() + 200,
+                B256::repeat_byte(0xAA),
+                999,
+            )
             .unwrap();
         assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
         assert!(!sealed_path.join("address.col").exists());

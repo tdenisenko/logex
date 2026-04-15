@@ -85,9 +85,10 @@ pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {
         })?);
         cursor += 8;
 
-        let encoded_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(
-            |_| io::Error::new(io::ErrorKind::InvalidData, "truncated page index entry"),
-        )?);
+        let encoded_len =
+            u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated page index entry")
+            })?);
         cursor += 4;
 
         entries.push(PageIndexEntry {
@@ -106,7 +107,7 @@ pub fn encode_fixed_width_page(
     item_size: usize,
     codec: CompressionCodec,
 ) -> io::Result<Vec<u8>> {
-    if item_size == 0 || raw_values.len() % item_size != 0 {
+    if item_size == 0 || !raw_values.len().is_multiple_of(item_size) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "fixed-width page has invalid item size",
@@ -143,7 +144,7 @@ pub fn decode_fixed_width_page(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported fixed-width codec: {other:?}"),
-            ))
+            ));
         }
     };
 
@@ -224,7 +225,7 @@ pub fn decode_u32_page(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported u32 codec: {other:?}"),
-            ))
+            ));
         }
     };
     decode_plain_u32_page(&raw, row_count)
@@ -260,7 +261,7 @@ pub fn decode_u8_page(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported u8 codec: {other:?}"),
-            ))
+            ));
         }
     };
 
@@ -308,7 +309,7 @@ pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Res
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported bytes codec: {other:?}"),
-            ))
+            ));
         }
     };
 
@@ -320,7 +321,10 @@ pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Res
     }
 
     let row_count = u32::from_le_bytes(raw[..4].try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "bytes page row-count is truncated")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bytes page row-count is truncated",
+        )
     })?) as usize;
     let offsets_start = 4;
     let offsets_len = (row_count + 1) * 8;
@@ -336,9 +340,9 @@ pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Res
     for index in 0..=row_count {
         let start = offsets_start + index * 8;
         let end = start + 8;
-        offsets.push(u64::from_le_bytes(raw[start..end].try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "bytes page offset is truncated")
-        })?));
+        offsets.push(u64::from_le_bytes(raw[start..end].try_into().map_err(
+            |_| io::Error::new(io::ErrorKind::InvalidData, "bytes page offset is truncated"),
+        )?));
     }
 
     let blob = &raw[blob_start..];

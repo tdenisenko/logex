@@ -8,9 +8,8 @@ use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};
 
 const TRANSFER_TOPIC0: B256 = B256::new([
-    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d,
-    0xaa, 0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23,
-    0xb3, 0xef,
+    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
+    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
 ]);
 
 fn benchmark_row_count() -> usize {
@@ -33,7 +32,11 @@ fn make_transfer_like_rows(count: usize) -> Vec<LogRow> {
     (0..count)
         .map(|index| {
             let block_number = 15_000_000 + (index / 4) as u64;
-            let token = if index % 5 == 0 { cold_token } else { hot_token };
+            let token = if index % 5 == 0 {
+                cold_token
+            } else {
+                hot_token
+            };
             let from = padded_topic_address((index % 251) as u8);
             let to = padded_topic_address(((index + 17) % 251) as u8);
             let data = if index % 3 == 0 {
@@ -70,7 +73,9 @@ fn setup_storage(count: usize) -> tempfile::TempDir {
         compaction_safety_margin_blocks: 2_048,
     };
     let mut storage = PartitionManager::open(config).unwrap();
-    storage.write_batch(&make_transfer_like_rows(count)).unwrap();
+    storage
+        .write_batch(&make_transfer_like_rows(count))
+        .unwrap();
 
     let sealed: Vec<_> = storage
         .sealed_partitions()

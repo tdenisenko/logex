@@ -5,8 +5,8 @@ mod storage;
 
 pub use catalog::{
     ColumnDescriptor, CompressionCodec, ExecutionAnchor, IndexKind, NativeStorageCatalog,
-    NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest, StorageCatalogPaths,
-    STORAGE_FORMAT_VERSION,
+    NativeStorageConfig, STORAGE_FORMAT_VERSION, SegmentDescriptor, SegmentKind, SegmentManifest,
+    StorageCatalogPaths,
 };
 pub use filter::{LogOrder, NativeLogFilter, TopicConstraint};
 #[cfg(test)]

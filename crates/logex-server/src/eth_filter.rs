@@ -34,7 +34,10 @@ impl EthFilter {
                 .from_block
                 .as_ref()
                 .map(|id| resolve_block_id(id, head_block));
-            filter.to_block = self.to_block.as_ref().map(|id| resolve_block_id(id, head_block));
+            filter.to_block = self
+                .to_block
+                .as_ref()
+                .map(|id| resolve_block_id(id, head_block));
         }
 
         filter.block_hash = self.block_hash;

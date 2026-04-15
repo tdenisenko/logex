@@ -86,8 +86,8 @@ fn handle_eth_get_logs(
     }
 
     let native_filter = filter.to_native_filter(storage.head_block().unwrap_or(0));
-    let rows =
-        logex_query::execute_log_filter(storage, &native_filter).map_err(|error| error.to_string())?;
+    let rows = logex_query::execute_log_filter(storage, &native_filter)
+        .map_err(|error| error.to_string())?;
     let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
 
     let json = serde_json::to_value(&logs).map_err(|e| e.to_string())?;
@@ -163,7 +163,8 @@ mod tests {
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
-        mgr.refresh_segment_indexes(mgr.hot_partition().meta.id).unwrap();
+        mgr.refresh_segment_indexes(mgr.hot_partition().meta.id)
+            .unwrap();
         (tmp, mgr)
     }
 

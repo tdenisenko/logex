@@ -68,7 +68,7 @@ pub fn execute_log_filter(
         partition_rows.retain(|row| matches_native_filter(row, filter));
 
         if matches!(filter.order, LogOrder::Descending) {
-            partition_rows.sort_by(|left, right| native_log_sort_key(right).cmp(&native_log_sort_key(left)));
+            partition_rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
         }
 
         rows.extend(partition_rows);
@@ -84,7 +84,7 @@ pub fn execute_log_filter(
     if matches!(filter.order, LogOrder::Ascending) {
         rows.sort_by_key(native_log_sort_key);
     } else {
-        rows.sort_by(|left, right| native_log_sort_key(right).cmp(&native_log_sort_key(left)));
+        rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
     }
 
     if let Some(limit) = filter.limit {
@@ -96,7 +96,8 @@ pub fn execute_log_filter(
 
 pub fn partition_matches_filter(meta: &PartitionMeta, filter: &NativeLogFilter) -> bool {
     if let Some(block_hash) = filter.block_hash {
-        return meta.row_count > 0 && (meta.min_block <= meta.max_block || block_hash != B256::ZERO);
+        return meta.row_count > 0
+            && (meta.min_block <= meta.max_block || block_hash != B256::ZERO);
     }
     if let Some(from) = filter.from_block
         && meta.max_block < from
@@ -243,7 +244,10 @@ fn build_candidate_bitmap(
         _ => {}
     }
 
-    if let (Some(topic0), Some(topic1)) = (single_topic(&filter.topics[0]), single_topic(&filter.topics[1])) {
+    if let (Some(topic0), Some(topic1)) = (
+        single_topic(&filter.topics[0]),
+        single_topic(&filter.topics[1]),
+    ) {
         let composite_path = index_dir.join("topic0_topic1.bptree");
         if composite_path.exists() {
             let reader = BTreeIndexReader::open(&composite_path)?;
@@ -284,10 +288,7 @@ fn build_candidate_bitmap(
         if block_path.exists() {
             let reader = BTreeIndexReader::open(&block_path)?;
             let from = filter.from_block.unwrap_or(0);
-            let to_exclusive = filter
-                .to_block
-                .unwrap_or(u64::MAX - 1)
-                .saturating_add(1);
+            let to_exclusive = filter.to_block.unwrap_or(u64::MAX - 1).saturating_add(1);
             let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
             result = Some(intersect_optional(result, bitmap));
         }
@@ -331,7 +332,7 @@ fn intersect_optional(existing: Option<RoaringBitmap>, new: RoaringBitmap) -> Ro
 }
 
 fn single_address(addresses: &[Address]) -> Option<[u8; 20]> {
-    (addresses.len() == 1).then(|| addresses[0].0 .0)
+    (addresses.len() == 1).then(|| addresses[0].0.0)
 }
 
 fn single_topic(constraint: &TopicConstraint) -> Option<[u8; 32]> {

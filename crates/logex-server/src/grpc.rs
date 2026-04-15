@@ -22,6 +22,8 @@ use pb::{
     QueryResponse, QueryRow,
 };
 
+type BoxStatus = Box<Status>;
+
 /// gRPC service implementation.
 pub struct LogExGrpcService {
     state: Arc<AppState>,
@@ -89,7 +91,7 @@ impl LogExService for LogExGrpcService {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
-        let filter = proto_filter_to_native_filter(request.get_ref())?;
+        let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
         let storage = self.state.storage.read().await;
         let rows = logex_query::execute_log_filter(&storage, &filter)
@@ -104,12 +106,17 @@ impl LogExService for LogExGrpcService {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
-        let filter = proto_filter_to_native_filter(request.get_ref())?;
+        let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
         let storage = self.state.storage.read().await;
         let rows = logex_query::execute_log_filter(&storage, &filter)
             .map_err(|err| Status::internal(format!("execution error: {err}")))?;
-        let stream = tokio_stream::iter(rows.into_iter().map(|row| Ok(log_row_to_proto(row))));
+        let entries: Vec<Result<LogEntry, Status>> = rows
+            .into_iter()
+            .map(log_row_to_proto)
+            .map(Ok::<_, Status>)
+            .collect();
+        let stream = tokio_stream::iter(entries);
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -139,17 +146,19 @@ async fn grpc_shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
     tracing::info!("gRPC server shutting down");
 }
 
-fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFilter, Status> {
-    if !request.block_hash.is_empty() && (request.from_block.is_some() || request.to_block.is_some()) {
-        return Err(Status::invalid_argument(
+fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFilter, BoxStatus> {
+    if !request.block_hash.is_empty()
+        && (request.from_block.is_some() || request.to_block.is_some())
+    {
+        return Err(Box::new(Status::invalid_argument(
             "block_hash is mutually exclusive with from_block/to_block",
-        ));
+        )));
     }
 
     if request.topics.len() > 4 {
-        return Err(Status::invalid_argument(
+        return Err(Box::new(Status::invalid_argument(
             "at most four topic positions are supported",
-        ));
+        )));
     }
 
     let mut filter = NativeLogFilter::new();
@@ -169,7 +178,10 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
     };
     filter.limit = request
         .limit
-        .map(|limit| usize::try_from(limit).map_err(|_| Status::invalid_argument("limit is too large")))
+        .map(|limit| {
+            usize::try_from(limit)
+                .map_err(|_| Box::new(Status::invalid_argument("limit is too large")))
+        })
         .transpose()?;
 
     for (index, topic) in request.topics.iter().enumerate() {
@@ -179,33 +191,36 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
     Ok(filter)
 }
 
-fn parse_optional_b256(bytes: &[u8], field: &str) -> Result<Option<B256>, Status> {
+fn parse_optional_b256(bytes: &[u8], field: &str) -> Result<Option<B256>, BoxStatus> {
     if bytes.is_empty() {
         return Ok(None);
     }
     if bytes.len() != 32 {
-        return Err(Status::invalid_argument(format!(
+        return Err(Box::new(Status::invalid_argument(format!(
             "{field} must be exactly 32 bytes"
-        )));
+        ))));
     }
     Ok(Some(B256::from_slice(bytes)))
 }
 
-fn parse_address(bytes: &[u8], field: &str) -> Result<Address, Status> {
+fn parse_address(bytes: &[u8], field: &str) -> Result<Address, BoxStatus> {
     if bytes.len() != 20 {
-        return Err(Status::invalid_argument(format!(
+        return Err(Box::new(Status::invalid_argument(format!(
             "{field} entries must be exactly 20 bytes"
-        )));
+        ))));
     }
     Ok(Address::from_slice(bytes))
 }
 
-fn parse_topic_constraint(topic: &pb::TopicFilter, index: usize) -> Result<TopicConstraint, Status> {
+fn parse_topic_constraint(
+    topic: &pb::TopicFilter,
+    index: usize,
+) -> Result<TopicConstraint, BoxStatus> {
     if topic.match_any {
         if !topic.any_of.is_empty() {
-            return Err(Status::invalid_argument(format!(
+            return Err(Box::new(Status::invalid_argument(format!(
                 "topic position {index} cannot set match_any and any_of together"
-            )));
+            ))));
         }
         return Ok(TopicConstraint::Any);
     }
@@ -219,9 +234,9 @@ fn parse_topic_constraint(topic: &pb::TopicFilter, index: usize) -> Result<Topic
         .iter()
         .map(|value| {
             if value.len() != 32 {
-                return Err(Status::invalid_argument(format!(
+                return Err(Box::new(Status::invalid_argument(format!(
                     "topic position {index} values must be exactly 32 bytes"
-                )));
+                ))));
             }
             Ok(B256::from_slice(value))
         })
@@ -449,9 +464,15 @@ mod tests {
         let response = service.get_logs(request).await.unwrap().into_inner();
         assert_eq!(response.row_count, 1);
         assert_eq!(response.logs[0].block_number, 100);
-        assert_eq!(response.logs[0].address, Address::repeat_byte(0xAA).as_slice());
+        assert_eq!(
+            response.logs[0].address,
+            Address::repeat_byte(0xAA).as_slice()
+        );
         assert_eq!(response.logs[0].topics.len(), 1);
-        assert_eq!(response.logs[0].topics[0], B256::repeat_byte(0xDD).as_slice());
+        assert_eq!(
+            response.logs[0].topics[0],
+            B256::repeat_byte(0xDD).as_slice()
+        );
     }
 
     #[tokio::test]
@@ -496,7 +517,10 @@ mod tests {
             limit: None,
         });
 
-        let error = service.get_logs(request).await.expect_err("invalid address must fail");
+        let error = service
+            .get_logs(request)
+            .await
+            .expect_err("invalid address must fail");
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 }
