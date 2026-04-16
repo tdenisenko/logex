@@ -2172,17 +2172,17 @@ fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
     };
 
     let mut addrs = Vec::new();
-    if let (Some(ip), Some(port)) = (enr.ip4(), enr.tcp4()) {
-        addrs.push(multiaddr_from_ip(IpAddr::V4(ip), port, peer_id));
-    }
     if let (Some(ip), Some(port)) = (enr.ip4(), enr_quic4(enr)) {
         addrs.push(multiaddr_from_ip_quic(IpAddr::V4(ip), port, peer_id));
     }
-    if let (Some(ip), Some(port)) = (enr.ip6(), enr.tcp6()) {
-        addrs.push(multiaddr_from_ip(IpAddr::V6(ip), port, peer_id));
-    }
     if let (Some(ip), Some(port)) = (enr.ip6(), enr_quic6(enr)) {
         addrs.push(multiaddr_from_ip_quic(IpAddr::V6(ip), port, peer_id));
+    }
+    if let (Some(ip), Some(port)) = (enr.ip4(), enr.tcp4()) {
+        addrs.push(multiaddr_from_ip(IpAddr::V4(ip), port, peer_id));
+    }
+    if let (Some(ip), Some(port)) = (enr.ip6(), enr.tcp6()) {
+        addrs.push(multiaddr_from_ip(IpAddr::V6(ip), port, peer_id));
     }
     if addrs.is_empty() {
         return None;

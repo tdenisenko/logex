@@ -111,6 +111,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - `Status v2` and `MetaData v3` are now encoded and decoded correctly for current post-Fulu peers, while still keeping `Status v1`, `MetaData v2`, and `MetaData v1` fallback support
   - mainnet consensus chain constants are now explicit inside LogEx for handshake and future verification work, including the real beacon genesis block root and genesis validators root
   - ENR-to-libp2p peer-id derivation now follows the same secp256k1 conversion path used by Lighthouse, removing a concrete identity-mismatch risk from CL peer dialing
+  - ENR-derived CL dial targets now prioritize QUIC ahead of TCP, matching Lighthouse's peer-dial ordering instead of treating TCP as the first choice
   - `Goodbye v1` is now implemented so LogEx can rotate bad peers using the consensus RPC instead of only dropping TCP sessions
   - the CL request scheduler now keeps peer-state counters honest by clearing them on disconnect, treats `Status` as the first handshake to finish before light-client fetches, and counts inbound `Status` as a completed handshake instead of waiting for a redundant round-trip
   - the CL request scheduler now respects a per-protocol in-flight request cap instead of blasting every connected peer at once
