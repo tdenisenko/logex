@@ -1,4 +1,4 @@
-use alloy_primitives::{b256, B256};
+use alloy_primitives::{B256, b256};
 
 /// Mainnet consensus constants that LogEx needs for peer interop and light-client verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

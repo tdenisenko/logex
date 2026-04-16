@@ -27,14 +27,18 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::rpc::{
-    Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse,
-    GOODBYE_V1_PROTOCOL_ID, LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
+    BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID, BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID,
+    BeaconBlocksByRangeRequest, Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent,
+    Eth2RpcRequest, Eth2RpcResponse, GOODBYE_V1_PROTOCOL_ID, LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
     LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID,
+    LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID, LightClientUpdatesByRangeRequest,
     METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID, METADATA_V3_PROTOCOL_ID, MetaData,
     PING_PROTOCOL_ID, STATUS_V1_PROTOCOL_ID, STATUS_V2_PROTOCOL_ID, StatusMessage,
+    build_beacon_blocks_by_range_behaviour, build_beacon_blocks_by_root_behaviour,
     build_goodbye_behaviour, build_light_client_bootstrap_behaviour,
     build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
-    build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, resource_unavailable,
+    build_light_client_updates_by_range_behaviour, build_metadata_behaviour, build_ping_behaviour,
+    build_status_behaviour, resource_unavailable,
 };
 use crate::{
     ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, decode_bootstrap, decode_finality_update,
@@ -123,8 +127,11 @@ struct ConsensusBehaviour {
     metadata_rpc: MetadataRpcBehaviour,
     ping_rpc: PingRpcBehaviour,
     light_client_bootstrap_rpc: LightClientBootstrapRpcBehaviour,
+    light_client_updates_by_range_rpc: LightClientUpdatesByRangeRpcBehaviour,
     light_client_finality_update_rpc: LightClientFinalityUpdateRpcBehaviour,
     light_client_optimistic_update_rpc: LightClientOptimisticUpdateRpcBehaviour,
+    beacon_blocks_by_range_rpc: BeaconBlocksByRangeRpcBehaviour,
+    beacon_blocks_by_root_rpc: BeaconBlocksByRootRpcBehaviour,
 }
 
 #[derive(Debug)]
@@ -136,8 +143,11 @@ enum ConsensusBehaviourEvent {
     MetadataRpc(Eth2RpcEvent),
     PingRpc(Eth2RpcEvent),
     LightClientBootstrapRpc(Eth2RpcEvent),
+    LightClientUpdatesByRangeRpc(Eth2RpcEvent),
     LightClientFinalityUpdateRpc(Eth2RpcEvent),
     LightClientOptimisticUpdateRpc(Eth2RpcEvent),
+    BeaconBlocksByRangeRpc(Eth2RpcEvent),
+    BeaconBlocksByRootRpc(Eth2RpcEvent),
 }
 
 impl From<identify::Event> for ConsensusBehaviourEvent {
@@ -258,6 +268,27 @@ impl From<LightClientBootstrapRpcWrappedEvent> for ConsensusBehaviourEvent {
 }
 
 #[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "LightClientUpdatesByRangeRpcWrappedEvent")]
+struct LightClientUpdatesByRangeRpcBehaviour {
+    inner: Eth2RpcBehaviour,
+}
+
+#[derive(Debug)]
+struct LightClientUpdatesByRangeRpcWrappedEvent(Eth2RpcEvent);
+
+impl From<Eth2RpcEvent> for LightClientUpdatesByRangeRpcWrappedEvent {
+    fn from(event: Eth2RpcEvent) -> Self {
+        Self(event)
+    }
+}
+
+impl From<LightClientUpdatesByRangeRpcWrappedEvent> for ConsensusBehaviourEvent {
+    fn from(event: LightClientUpdatesByRangeRpcWrappedEvent) -> Self {
+        ConsensusBehaviourEvent::LightClientUpdatesByRangeRpc(event.0)
+    }
+}
+
+#[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "LightClientFinalityUpdateRpcWrappedEvent")]
 struct LightClientFinalityUpdateRpcBehaviour {
     inner: Eth2RpcBehaviour,
@@ -296,6 +327,48 @@ impl From<Eth2RpcEvent> for LightClientOptimisticUpdateRpcWrappedEvent {
 impl From<LightClientOptimisticUpdateRpcWrappedEvent> for ConsensusBehaviourEvent {
     fn from(event: LightClientOptimisticUpdateRpcWrappedEvent) -> Self {
         ConsensusBehaviourEvent::LightClientOptimisticUpdateRpc(event.0)
+    }
+}
+
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "BeaconBlocksByRangeRpcWrappedEvent")]
+struct BeaconBlocksByRangeRpcBehaviour {
+    inner: Eth2RpcBehaviour,
+}
+
+#[derive(Debug)]
+struct BeaconBlocksByRangeRpcWrappedEvent(Eth2RpcEvent);
+
+impl From<Eth2RpcEvent> for BeaconBlocksByRangeRpcWrappedEvent {
+    fn from(event: Eth2RpcEvent) -> Self {
+        Self(event)
+    }
+}
+
+impl From<BeaconBlocksByRangeRpcWrappedEvent> for ConsensusBehaviourEvent {
+    fn from(event: BeaconBlocksByRangeRpcWrappedEvent) -> Self {
+        ConsensusBehaviourEvent::BeaconBlocksByRangeRpc(event.0)
+    }
+}
+
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "BeaconBlocksByRootRpcWrappedEvent")]
+struct BeaconBlocksByRootRpcBehaviour {
+    inner: Eth2RpcBehaviour,
+}
+
+#[derive(Debug)]
+struct BeaconBlocksByRootRpcWrappedEvent(Eth2RpcEvent);
+
+impl From<Eth2RpcEvent> for BeaconBlocksByRootRpcWrappedEvent {
+    fn from(event: Eth2RpcEvent) -> Self {
+        Self(event)
+    }
+}
+
+impl From<BeaconBlocksByRootRpcWrappedEvent> for ConsensusBehaviourEvent {
+    fn from(event: BeaconBlocksByRootRpcWrappedEvent) -> Self {
+        ConsensusBehaviourEvent::BeaconBlocksByRootRpc(event.0)
     }
 }
 
@@ -340,8 +413,11 @@ struct ConsensusNetwork {
     metadata_peers: HashSet<PeerId>,
     ping_peers: HashSet<PeerId>,
     bootstrap_peers: HashSet<PeerId>,
+    updates_by_range_peers: HashSet<PeerId>,
     finality_update_peers: HashSet<PeerId>,
     optimistic_update_peers: HashSet<PeerId>,
+    beacon_blocks_by_range_peers: HashSet<PeerId>,
+    beacon_blocks_by_root_peers: HashSet<PeerId>,
     pending_requests: HashMap<PendingRequestKey, PeerId>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
     request_failures: RpcFailureCounts,
@@ -370,8 +446,11 @@ enum RpcRequestKind {
     MetaData,
     Ping,
     LightClientBootstrap,
+    LightClientUpdatesByRange,
     LightClientFinalityUpdate,
     LightClientOptimisticUpdate,
+    BeaconBlocksByRange,
+    BeaconBlocksByRoot,
 }
 
 impl RpcRequestKind {
@@ -382,8 +461,11 @@ impl RpcRequestKind {
             Self::MetaData => "metadata",
             Self::Ping => "ping",
             Self::LightClientBootstrap => "light_client_bootstrap",
+            Self::LightClientUpdatesByRange => "light_client_updates_by_range",
             Self::LightClientFinalityUpdate => "light_client_finality_update",
             Self::LightClientOptimisticUpdate => "light_client_optimistic_update",
+            Self::BeaconBlocksByRange => "beacon_blocks_by_range",
+            Self::BeaconBlocksByRoot => "beacon_blocks_by_root",
         }
     }
 }
@@ -395,8 +477,11 @@ struct RpcFailureCounts {
     metadata: u64,
     ping: u64,
     bootstrap: u64,
+    updates_by_range: u64,
     finality_update: u64,
     optimistic_update: u64,
+    beacon_blocks_by_range: u64,
+    beacon_blocks_by_root: u64,
 }
 
 impl RpcFailureCounts {
@@ -407,8 +492,11 @@ impl RpcFailureCounts {
             RpcRequestKind::MetaData => self.metadata += 1,
             RpcRequestKind::Ping => self.ping += 1,
             RpcRequestKind::LightClientBootstrap => self.bootstrap += 1,
+            RpcRequestKind::LightClientUpdatesByRange => self.updates_by_range += 1,
             RpcRequestKind::LightClientFinalityUpdate => self.finality_update += 1,
             RpcRequestKind::LightClientOptimisticUpdate => self.optimistic_update += 1,
+            RpcRequestKind::BeaconBlocksByRange => self.beacon_blocks_by_range += 1,
+            RpcRequestKind::BeaconBlocksByRoot => self.beacon_blocks_by_root += 1,
         }
     }
 }
@@ -420,8 +508,11 @@ struct PeerFailureCounts {
     metadata: u32,
     ping: u32,
     bootstrap: u32,
+    updates_by_range: u32,
     finality_update: u32,
     optimistic_update: u32,
+    beacon_blocks_by_range: u32,
+    beacon_blocks_by_root: u32,
 }
 
 impl PeerFailureCounts {
@@ -447,6 +538,10 @@ impl PeerFailureCounts {
                 self.bootstrap += 1;
                 self.bootstrap
             }
+            RpcRequestKind::LightClientUpdatesByRange => {
+                self.updates_by_range += 1;
+                self.updates_by_range
+            }
             RpcRequestKind::LightClientFinalityUpdate => {
                 self.finality_update += 1;
                 self.finality_update
@@ -454,6 +549,14 @@ impl PeerFailureCounts {
             RpcRequestKind::LightClientOptimisticUpdate => {
                 self.optimistic_update += 1;
                 self.optimistic_update
+            }
+            RpcRequestKind::BeaconBlocksByRange => {
+                self.beacon_blocks_by_range += 1;
+                self.beacon_blocks_by_range
+            }
+            RpcRequestKind::BeaconBlocksByRoot => {
+                self.beacon_blocks_by_root += 1;
+                self.beacon_blocks_by_root
             }
         }
     }
@@ -465,8 +568,11 @@ impl PeerFailureCounts {
             RpcRequestKind::MetaData => self.metadata = 0,
             RpcRequestKind::Ping => self.ping = 0,
             RpcRequestKind::LightClientBootstrap => self.bootstrap = 0,
+            RpcRequestKind::LightClientUpdatesByRange => self.updates_by_range = 0,
             RpcRequestKind::LightClientFinalityUpdate => self.finality_update = 0,
             RpcRequestKind::LightClientOptimisticUpdate => self.optimistic_update = 0,
+            RpcRequestKind::BeaconBlocksByRange => self.beacon_blocks_by_range = 0,
+            RpcRequestKind::BeaconBlocksByRoot => self.beacon_blocks_by_root = 0,
         }
     }
 }
@@ -478,8 +584,11 @@ struct PeerRpcSupport {
     metadata: bool,
     ping: bool,
     light_client_bootstrap: bool,
+    light_client_updates_by_range: bool,
     light_client_finality_update: bool,
     light_client_optimistic_update: bool,
+    beacon_blocks_by_range: bool,
+    beacon_blocks_by_root: bool,
 }
 
 impl PeerRpcSupport {
@@ -494,12 +603,17 @@ impl PeerRpcSupport {
                 }
                 PING_PROTOCOL_ID => support.ping = true,
                 LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID => support.light_client_bootstrap = true,
+                LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID => {
+                    support.light_client_updates_by_range = true;
+                }
                 LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID => {
                     support.light_client_finality_update = true;
                 }
                 LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID => {
                     support.light_client_optimistic_update = true;
                 }
+                BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID => support.beacon_blocks_by_range = true,
+                BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID => support.beacon_blocks_by_root = true,
                 _ => {}
             }
         }
@@ -513,21 +627,30 @@ impl PeerRpcSupport {
             RpcRequestKind::MetaData => self.metadata,
             RpcRequestKind::Ping => self.ping,
             RpcRequestKind::LightClientBootstrap => self.light_client_bootstrap,
+            RpcRequestKind::LightClientUpdatesByRange => self.light_client_updates_by_range,
             RpcRequestKind::LightClientFinalityUpdate => self.light_client_finality_update,
             RpcRequestKind::LightClientOptimisticUpdate => self.light_client_optimistic_update,
+            RpcRequestKind::BeaconBlocksByRange => self.beacon_blocks_by_range,
+            RpcRequestKind::BeaconBlocksByRoot => self.beacon_blocks_by_root,
         }
     }
 
     const fn supports_light_client(self) -> bool {
         self.light_client_bootstrap
+            && self.light_client_updates_by_range
             && self.light_client_finality_update
             && self.light_client_optimistic_update
     }
 
     const fn supports_any_light_client(self) -> bool {
         self.light_client_bootstrap
+            || self.light_client_updates_by_range
             || self.light_client_finality_update
             || self.light_client_optimistic_update
+    }
+
+    const fn supports_history_backfill(self) -> bool {
+        self.beacon_blocks_by_range || self.beacon_blocks_by_root
     }
 }
 
@@ -609,8 +732,11 @@ impl ConsensusNetwork {
             metadata_peers: HashSet::new(),
             ping_peers: HashSet::new(),
             bootstrap_peers: HashSet::new(),
+            updates_by_range_peers: HashSet::new(),
             finality_update_peers: HashSet::new(),
             optimistic_update_peers: HashSet::new(),
+            beacon_blocks_by_range_peers: HashSet::new(),
+            beacon_blocks_by_root_peers: HashSet::new(),
             pending_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
             request_failures: RpcFailureCounts::default(),
@@ -820,6 +946,9 @@ impl ConsensusNetwork {
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::LightClientBootstrapRpc(event)) => {
                 self.handle_rpc_event(RpcRequestKind::LightClientBootstrap, event);
             }
+            SwarmEvent::Behaviour(ConsensusBehaviourEvent::LightClientUpdatesByRangeRpc(event)) => {
+                self.handle_rpc_event(RpcRequestKind::LightClientUpdatesByRange, event);
+            }
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::LightClientFinalityUpdateRpc(event)) => {
                 self.handle_rpc_event(RpcRequestKind::LightClientFinalityUpdate, event);
             }
@@ -827,6 +956,12 @@ impl ConsensusNetwork {
                 event,
             )) => {
                 self.handle_rpc_event(RpcRequestKind::LightClientOptimisticUpdate, event);
+            }
+            SwarmEvent::Behaviour(ConsensusBehaviourEvent::BeaconBlocksByRangeRpc(event)) => {
+                self.handle_rpc_event(RpcRequestKind::BeaconBlocksByRange, event);
+            }
+            SwarmEvent::Behaviour(ConsensusBehaviourEvent::BeaconBlocksByRootRpc(event)) => {
+                self.handle_rpc_event(RpcRequestKind::BeaconBlocksByRoot, event);
             }
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::Identify(event)) => {
                 self.handle_identify_event(*event);
@@ -895,11 +1030,7 @@ impl ConsensusNetwork {
                     .swarm
                     .behaviour_mut()
                     .gossip
-                    .report_message_validation_result(
-                        &message_id,
-                        &propagation_source,
-                        acceptance,
-                    )
+                    .report_message_validation_result(&message_id, &propagation_source, acceptance)
                 {
                     tracing::debug!(
                         %propagation_source,
@@ -1034,8 +1165,11 @@ impl ConsensusNetwork {
                             resource_unavailable("goodbye must use the goodbye RPC family")
                         }
                         Eth2RpcRequest::LightClientBootstrap(_)
+                        | Eth2RpcRequest::LightClientUpdatesByRange(_)
                         | Eth2RpcRequest::LightClientFinalityUpdate
-                        | Eth2RpcRequest::LightClientOptimisticUpdate => {
+                        | Eth2RpcRequest::LightClientOptimisticUpdate
+                        | Eth2RpcRequest::BeaconBlocksByRange(_)
+                        | Eth2RpcRequest::BeaconBlocksByRoot(_) => {
                             resource_unavailable("light-client data is not yet served by LogEx")
                         }
                     };
@@ -1327,6 +1461,19 @@ impl ConsensusNetwork {
                 }
             },
             (
+                RpcRequestKind::LightClientUpdatesByRange,
+                Eth2RpcResponse::LightClientUpdatesByRange(chunks),
+            ) => {
+                let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
+                tracing::info!(
+                    %peer,
+                    chunks = chunks.len(),
+                    total_bytes,
+                    "received light-client updates by range response stream"
+                );
+                self.updates_by_range_peers.insert(peer);
+            }
+            (
                 RpcRequestKind::LightClientFinalityUpdate,
                 Eth2RpcResponse::LightClientFinalityUpdate(payload),
             ) => match decode_finality_update(&payload.bytes) {
@@ -1391,6 +1538,26 @@ impl ConsensusNetwork {
                     );
                 }
             },
+            (RpcRequestKind::BeaconBlocksByRange, Eth2RpcResponse::BeaconBlocksByRange(chunks)) => {
+                let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
+                tracing::info!(
+                    %peer,
+                    chunks = chunks.len(),
+                    total_bytes,
+                    "received beacon blocks by range response stream"
+                );
+                self.beacon_blocks_by_range_peers.insert(peer);
+            }
+            (RpcRequestKind::BeaconBlocksByRoot, Eth2RpcResponse::BeaconBlocksByRoot(chunks)) => {
+                let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
+                tracing::info!(
+                    %peer,
+                    chunks = chunks.len(),
+                    total_bytes,
+                    "received beacon blocks by root response stream"
+                );
+                self.beacon_blocks_by_root_peers.insert(peer);
+            }
             (kind, Eth2RpcResponse::Error(error)) => {
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
@@ -1496,13 +1663,24 @@ impl ConsensusNetwork {
                 continue;
             };
 
-            if !support.supports_any_light_client() {
+            if !support.supports_any_light_client() && !support.supports_history_backfill() {
                 tracing::debug!(
                     %peer,
-                    "disconnecting consensus peer that does not advertise any useful light-client RPCs"
+                    "disconnecting consensus peer that does not advertise useful light-client or checkpoint-history RPCs"
                 );
                 self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
                 continue;
+            }
+
+            if support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
+                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
+            {
+                self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
+            } else if self.history_request_slot().is_some()
+                && support.supports_request(RpcRequestKind::BeaconBlocksByRange)
+                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
+            {
+                self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
             }
 
             if bootstrap_needed {
@@ -1514,6 +1692,12 @@ impl ConsensusNetwork {
                 continue;
             }
 
+            if self.history_request_slot().is_some()
+                && support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
+                && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
+            {
+                self.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
+            }
             if support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
             {
@@ -1569,6 +1753,12 @@ impl ConsensusNetwork {
                 .light_client_bootstrap_rpc
                 .inner
                 .send_response(channel, response),
+            RpcRequestKind::LightClientUpdatesByRange => self
+                .swarm
+                .behaviour_mut()
+                .light_client_updates_by_range_rpc
+                .inner
+                .send_response(channel, response),
             RpcRequestKind::LightClientFinalityUpdate => self
                 .swarm
                 .behaviour_mut()
@@ -1579,6 +1769,18 @@ impl ConsensusNetwork {
                 .swarm
                 .behaviour_mut()
                 .light_client_optimistic_update_rpc
+                .inner
+                .send_response(channel, response),
+            RpcRequestKind::BeaconBlocksByRange => self
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_range_rpc
+                .inner
+                .send_response(channel, response),
+            RpcRequestKind::BeaconBlocksByRoot => self
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_root_rpc
                 .inner
                 .send_response(channel, response),
         }
@@ -1640,6 +1842,12 @@ impl ConsensusNetwork {
                 .light_client_bootstrap_rpc
                 .inner
                 .send_request(&peer, request),
+            RpcRequestKind::LightClientUpdatesByRange => self
+                .swarm
+                .behaviour_mut()
+                .light_client_updates_by_range_rpc
+                .inner
+                .send_request(&peer, request),
             RpcRequestKind::LightClientFinalityUpdate => self
                 .swarm
                 .behaviour_mut()
@@ -1650,6 +1858,18 @@ impl ConsensusNetwork {
                 .swarm
                 .behaviour_mut()
                 .light_client_optimistic_update_rpc
+                .inner
+                .send_request(&peer, request),
+            RpcRequestKind::BeaconBlocksByRange => self
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_range_rpc
+                .inner
+                .send_request(&peer, request),
+            RpcRequestKind::BeaconBlocksByRoot => self
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_root_rpc
                 .inner
                 .send_request(&peer, request),
         };
@@ -1667,9 +1887,30 @@ impl ConsensusNetwork {
             RpcRequestKind::LightClientBootstrap => {
                 Eth2RpcRequest::LightClientBootstrap(self.consensus.checkpoint().beacon_root)
             }
+            RpcRequestKind::LightClientUpdatesByRange => {
+                let start_period = self
+                    .history_request_slot()
+                    .map(sync_committee_period_for_slot)
+                    .unwrap_or_default();
+                Eth2RpcRequest::LightClientUpdatesByRange(LightClientUpdatesByRangeRequest {
+                    start_period,
+                    count: 1,
+                })
+            }
             RpcRequestKind::LightClientFinalityUpdate => Eth2RpcRequest::LightClientFinalityUpdate,
             RpcRequestKind::LightClientOptimisticUpdate => {
                 Eth2RpcRequest::LightClientOptimisticUpdate
+            }
+            RpcRequestKind::BeaconBlocksByRange => {
+                let start_slot = self.history_request_slot().unwrap_or_default();
+                Eth2RpcRequest::BeaconBlocksByRange(BeaconBlocksByRangeRequest {
+                    start_slot,
+                    count: 1,
+                    step: 1,
+                })
+            }
+            RpcRequestKind::BeaconBlocksByRoot => {
+                Eth2RpcRequest::BeaconBlocksByRoot(vec![self.consensus.checkpoint().beacon_root])
             }
         }
     }
@@ -1686,6 +1927,16 @@ impl ConsensusNetwork {
 
     fn local_metadata(&self) -> MetaData {
         MetaData::empty()
+    }
+
+    fn history_request_slot(&self) -> Option<u64> {
+        let checkpoint_slot = self.consensus.checkpoint().beacon_slot;
+        let bootstrap_slot = self
+            .consensus
+            .light_client_status()
+            .bootstrap
+            .map(|bootstrap| bootstrap.header.beacon_slot);
+        checkpoint_slot.or(bootstrap_slot)
     }
 
     fn identify_timed_out(&self, peer: PeerId) -> bool {
@@ -1772,8 +2023,11 @@ impl ConsensusNetwork {
         self.metadata_peers.remove(&peer);
         self.ping_peers.remove(&peer);
         self.bootstrap_peers.remove(&peer);
+        self.updates_by_range_peers.remove(&peer);
         self.finality_update_peers.remove(&peer);
         self.optimistic_update_peers.remove(&peer);
+        self.beacon_blocks_by_range_peers.remove(&peer);
+        self.beacon_blocks_by_root_peers.remove(&peer);
     }
 
     fn is_request_pending(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
@@ -1787,10 +2041,17 @@ impl ConsensusNetwork {
             RpcRequestKind::MetaData => self.metadata_peers.contains(&peer),
             RpcRequestKind::Ping => self.ping_peers.contains(&peer),
             RpcRequestKind::LightClientBootstrap => self.bootstrap_peers.contains(&peer),
+            RpcRequestKind::LightClientUpdatesByRange => {
+                self.updates_by_range_peers.contains(&peer)
+            }
             RpcRequestKind::LightClientFinalityUpdate => self.finality_update_peers.contains(&peer),
             RpcRequestKind::LightClientOptimisticUpdate => {
                 self.optimistic_update_peers.contains(&peer)
             }
+            RpcRequestKind::BeaconBlocksByRange => {
+                self.beacon_blocks_by_range_peers.contains(&peer)
+            }
+            RpcRequestKind::BeaconBlocksByRoot => self.beacon_blocks_by_root_peers.contains(&peer),
         }
     }
 
@@ -1825,6 +2086,11 @@ impl ConsensusNetwork {
             .values()
             .filter(|support| support.light_client_bootstrap)
             .count();
+        let updates_by_range_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.light_client_updates_by_range)
+            .count();
         let finality_update_capable_peers = self
             .peer_support
             .values()
@@ -1834,6 +2100,16 @@ impl ConsensusNetwork {
             .peer_support
             .values()
             .filter(|support| support.light_client_optimistic_update)
+            .count();
+        let beacon_blocks_by_range_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.beacon_blocks_by_range)
+            .count();
+        let beacon_blocks_by_root_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.beacon_blocks_by_root)
             .count();
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
@@ -1852,27 +2128,42 @@ impl ConsensusNetwork {
             status_capable_peers,
             metadata_capable_peers,
             bootstrap_capable_peers,
+            updates_by_range_capable_peers,
             finality_update_capable_peers,
             optimistic_update_capable_peers,
+            beacon_blocks_by_range_capable_peers,
+            beacon_blocks_by_root_capable_peers,
             status_peers: self.status_peers.len(),
             metadata_peers: self.metadata_peers.len(),
             bootstrap_peers: self.bootstrap_peers.len(),
+            updates_by_range_peers: self.updates_by_range_peers.len(),
             finality_update_peers: self.finality_update_peers.len(),
             optimistic_update_peers: self.optimistic_update_peers.len(),
+            beacon_blocks_by_range_peers: self.beacon_blocks_by_range_peers.len(),
+            beacon_blocks_by_root_peers: self.beacon_blocks_by_root_peers.len(),
             pending_rpc_requests: self.pending_requests.len(),
             pending_status_requests: self.pending_requests_for_kind(RpcRequestKind::Status),
             pending_metadata_requests: self.pending_requests_for_kind(RpcRequestKind::MetaData),
             pending_bootstrap_requests: self
                 .pending_requests_for_kind(RpcRequestKind::LightClientBootstrap),
+            pending_updates_by_range_requests: self
+                .pending_requests_for_kind(RpcRequestKind::LightClientUpdatesByRange),
             pending_finality_update_requests: self
                 .pending_requests_for_kind(RpcRequestKind::LightClientFinalityUpdate),
             pending_optimistic_update_requests: self
                 .pending_requests_for_kind(RpcRequestKind::LightClientOptimisticUpdate),
+            pending_beacon_blocks_by_range_requests: self
+                .pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRange),
+            pending_beacon_blocks_by_root_requests: self
+                .pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRoot),
             status_request_failures: self.request_failures.status,
             metadata_request_failures: self.request_failures.metadata,
             bootstrap_request_failures: self.request_failures.bootstrap,
+            updates_by_range_request_failures: self.request_failures.updates_by_range,
             finality_update_request_failures: self.request_failures.finality_update,
             optimistic_update_request_failures: self.request_failures.optimistic_update,
+            beacon_blocks_by_range_request_failures: self.request_failures.beacon_blocks_by_range,
+            beacon_blocks_by_root_request_failures: self.request_failures.beacon_blocks_by_root,
             gossip_subscriptions: self.gossip_subscriptions.len(),
             finality_update_gossip_messages: self.gossip_counts.finality_update,
             optimistic_update_gossip_messages: self.gossip_counts.optimistic_update,
@@ -1981,11 +2272,20 @@ fn build_rpc_swarm(
                 light_client_bootstrap_rpc: LightClientBootstrapRpcBehaviour {
                     inner: build_light_client_bootstrap_behaviour(),
                 },
+                light_client_updates_by_range_rpc: LightClientUpdatesByRangeRpcBehaviour {
+                    inner: build_light_client_updates_by_range_behaviour(),
+                },
                 light_client_finality_update_rpc: LightClientFinalityUpdateRpcBehaviour {
                     inner: build_light_client_finality_update_behaviour(),
                 },
                 light_client_optimistic_update_rpc: LightClientOptimisticUpdateRpcBehaviour {
                     inner: build_light_client_optimistic_update_behaviour(),
+                },
+                beacon_blocks_by_range_rpc: BeaconBlocksByRangeRpcBehaviour {
+                    inner: build_beacon_blocks_by_range_behaviour(),
+                },
+                beacon_blocks_by_root_rpc: BeaconBlocksByRootRpcBehaviour {
+                    inner: build_beacon_blocks_by_root_behaviour(),
                 },
             })
         })
@@ -2194,10 +2494,9 @@ fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
 fn peer_id_from_enr(enr: &Enr) -> Result<PeerId, String> {
     let public_key = match enr.public_key() {
         CombinedPublicKey::Secp256k1(public_key) => {
-            let public_key = identity::secp256k1::PublicKey::try_from_bytes(
-                &public_key.to_sec1_bytes(),
-            )
-            .map_err(|error| error.to_string())?;
+            let public_key =
+                identity::secp256k1::PublicKey::try_from_bytes(&public_key.to_sec1_bytes())
+                    .map_err(|error| error.to_string())?;
             identity::PublicKey::from(public_key)
         }
         CombinedPublicKey::Ed25519(public_key) => {
@@ -2236,6 +2535,12 @@ fn enr_quic4(enr: &Enr) -> Option<u16> {
 
 fn enr_quic6(enr: &Enr) -> Option<u16> {
     enr.get_decodable("quic6").and_then(Result::ok)
+}
+
+fn sync_committee_period_for_slot(slot: u64) -> u64 {
+    const SLOTS_PER_EPOCH: u64 = 32;
+    const EPOCHS_PER_SYNC_COMMITTEE_PERIOD: u64 = 256;
+    slot / (SLOTS_PER_EPOCH * EPOCHS_PER_SYNC_COMMITTEE_PERIOD)
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -2334,7 +2639,10 @@ mod tests {
         let enr = Enr::builder().build(&enr_key).unwrap();
         let libp2p_keypair = build_libp2p_keypair(&enr_key).unwrap();
 
-        assert_eq!(peer_id_from_enr(&enr).unwrap(), libp2p_keypair.public().to_peer_id());
+        assert_eq!(
+            peer_id_from_enr(&enr).unwrap(),
+            libp2p_keypair.public().to_peer_id()
+        );
     }
 
     #[test]
@@ -2349,8 +2657,11 @@ mod tests {
                 StreamProtocol::new(GOODBYE_V1_PROTOCOL_ID),
                 StreamProtocol::new(METADATA_V1_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID),
+                StreamProtocol::new(LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID),
+                StreamProtocol::new(BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID),
+                StreamProtocol::new(BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID),
             ],
             observed_addr: Multiaddr::empty(),
             signed_peer_record: None,
@@ -2364,8 +2675,11 @@ mod tests {
         assert!(support.supports_light_client());
         assert!(support.supports_request(RpcRequestKind::MetaData));
         assert!(support.supports_request(RpcRequestKind::LightClientBootstrap));
+        assert!(support.supports_request(RpcRequestKind::LightClientUpdatesByRange));
         assert!(support.supports_request(RpcRequestKind::LightClientFinalityUpdate));
         assert!(support.supports_request(RpcRequestKind::LightClientOptimisticUpdate));
+        assert!(support.supports_request(RpcRequestKind::BeaconBlocksByRange));
+        assert!(support.supports_request(RpcRequestKind::BeaconBlocksByRoot));
     }
 
     #[test]
@@ -2388,5 +2702,12 @@ mod tests {
         assert!(!support.supports_light_client());
         assert!(support.supports_request(RpcRequestKind::LightClientFinalityUpdate));
         assert!(!support.supports_request(RpcRequestKind::LightClientBootstrap));
+    }
+
+    #[test]
+    fn sync_committee_period_uses_mainnet_slot_scale() {
+        assert_eq!(sync_committee_period_for_slot(0), 0);
+        assert_eq!(sync_committee_period_for_slot(8191), 0);
+        assert_eq!(sync_committee_period_for_slot(8192), 1);
     }
 }

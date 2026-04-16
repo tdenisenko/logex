@@ -68,20 +68,32 @@ pub struct ConsensusNetworkStatus {
     pub metadata_capable_peers: usize,
     /// Number of identified peers that advertise the light-client bootstrap RPC.
     pub bootstrap_capable_peers: usize,
+    /// Number of identified peers that advertise the light-client updates-by-range RPC.
+    pub updates_by_range_capable_peers: usize,
     /// Number of identified peers that advertise the light-client finality update RPC.
     pub finality_update_capable_peers: usize,
     /// Number of identified peers that advertise the light-client optimistic update RPC.
     pub optimistic_update_capable_peers: usize,
+    /// Number of identified peers that advertise the beacon-blocks-by-range RPC.
+    pub beacon_blocks_by_range_capable_peers: usize,
+    /// Number of identified peers that advertise the beacon-blocks-by-root RPC.
+    pub beacon_blocks_by_root_capable_peers: usize,
     /// Number of peers that answered the initial Status req/resp handshake.
     pub status_peers: usize,
     /// Number of peers that answered the MetaData req/resp handshake.
     pub metadata_peers: usize,
     /// Number of peers that served a light-client bootstrap payload.
     pub bootstrap_peers: usize,
+    /// Number of peers that served a light-client updates-by-range response stream.
+    pub updates_by_range_peers: usize,
     /// Number of peers that served a light-client finality update payload.
     pub finality_update_peers: usize,
     /// Number of peers that served a light-client optimistic update payload.
     pub optimistic_update_peers: usize,
+    /// Number of peers that served beacon-blocks-by-range response streams.
+    pub beacon_blocks_by_range_peers: usize,
+    /// Number of peers that served beacon-blocks-by-root response streams.
+    pub beacon_blocks_by_root_peers: usize,
     /// Number of outbound light-client RPC requests currently in flight.
     pub pending_rpc_requests: usize,
     /// Number of in-flight Status requests.
@@ -90,20 +102,32 @@ pub struct ConsensusNetworkStatus {
     pub pending_metadata_requests: usize,
     /// Number of in-flight light-client bootstrap requests.
     pub pending_bootstrap_requests: usize,
+    /// Number of in-flight light-client updates-by-range requests.
+    pub pending_updates_by_range_requests: usize,
     /// Number of in-flight light-client finality-update requests.
     pub pending_finality_update_requests: usize,
     /// Number of in-flight light-client optimistic-update requests.
     pub pending_optimistic_update_requests: usize,
+    /// Number of in-flight beacon-blocks-by-range requests.
+    pub pending_beacon_blocks_by_range_requests: usize,
+    /// Number of in-flight beacon-blocks-by-root requests.
+    pub pending_beacon_blocks_by_root_requests: usize,
     /// Number of failed Status request attempts since startup.
     pub status_request_failures: u64,
     /// Number of failed MetaData request attempts since startup.
     pub metadata_request_failures: u64,
     /// Number of failed light-client bootstrap request attempts since startup.
     pub bootstrap_request_failures: u64,
+    /// Number of failed light-client updates-by-range request attempts since startup.
+    pub updates_by_range_request_failures: u64,
     /// Number of failed light-client finality-update request attempts since startup.
     pub finality_update_request_failures: u64,
     /// Number of failed light-client optimistic-update request attempts since startup.
     pub optimistic_update_request_failures: u64,
+    /// Number of failed beacon-blocks-by-range request attempts since startup.
+    pub beacon_blocks_by_range_request_failures: u64,
+    /// Number of failed beacon-blocks-by-root request attempts since startup.
+    pub beacon_blocks_by_root_request_failures: u64,
     /// Number of active CL gossipsub topic subscriptions.
     pub gossip_subscriptions: usize,
     /// Number of light-client finality-update gossip messages observed since startup.
