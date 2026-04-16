@@ -625,12 +625,27 @@ impl ConsensusNetwork {
             .start()
             .await
             .map_err(|error| ConsensusNetworkError::StartDiscovery(error.to_string()))?;
-        let listen_addr = Multiaddr::empty()
+        let tcp_listen_addr = Multiaddr::empty()
             .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
             .with(Protocol::Tcp(self.config.p2p_port));
         self.swarm
-            .listen_on(listen_addr)
+            .listen_on(tcp_listen_addr)
             .map_err(|error| ConsensusNetworkError::ListenRpcTransport(error.to_string()))?;
+        if self.config.discovery_port != self.config.p2p_port {
+            let quic_listen_addr = Multiaddr::empty()
+                .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
+                .with(Protocol::Udp(self.config.p2p_port))
+                .with(Protocol::QuicV1);
+            self.swarm
+                .listen_on(quic_listen_addr)
+                .map_err(|error| ConsensusNetworkError::ListenRpcTransport(error.to_string()))?;
+        } else {
+            tracing::info!(
+                discovery_port = self.config.discovery_port,
+                p2p_port = self.config.p2p_port,
+                "skipping inbound QUIC listener because consensus discovery and p2p share the same UDP port"
+            );
+        }
         let mut event_stream = self
             .discv5
             .event_stream()
@@ -1876,7 +1891,12 @@ impl ConsensusNetwork {
             .discv5
             .table_entries_enr()
             .into_iter()
-            .filter(|enr| enr.tcp4().is_some() || enr.tcp6().is_some())
+            .filter(|enr| {
+                enr.tcp4().is_some()
+                    || enr.tcp6().is_some()
+                    || enr_quic4(enr).is_some()
+                    || enr_quic6(enr).is_some()
+            })
             .map(|enr| PersistedPeer {
                 enr: enr.to_base64(),
             })
@@ -1904,9 +1924,11 @@ fn build_local_enr(
     p2p_port: u16,
 ) -> Enr {
     let mut builder = Enr::builder();
+    builder.udp4(discovery_port).tcp4(p2p_port);
+    if discovery_port != p2p_port {
+        builder.add_value("quic", &p2p_port);
+    }
     builder
-        .udp4(discovery_port)
-        .tcp4(p2p_port)
         .add_value("eth2", &fork_id)
         .add_value("attnets", &ATTESTATION_SUBNET_BITFIELD)
         .add_value("syncnets", &SYNCNET_BITFIELD);
@@ -1935,6 +1957,7 @@ fn build_rpc_swarm(
             (yamux::Config::default, mplex::Config::default),
         )
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
+        .with_quic()
         .with_behaviour(move |_| {
             let gossip = build_gossip_behaviour()?;
             let identify = identify::Behaviour::new(
@@ -2154,8 +2177,14 @@ fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
     if let (Some(ip), Some(port)) = (enr.ip4(), enr.tcp4()) {
         addrs.push(multiaddr_from_ip(IpAddr::V4(ip), port, peer_id));
     }
+    if let (Some(ip), Some(port)) = (enr.ip4(), enr_quic4(enr)) {
+        addrs.push(multiaddr_from_ip_quic(IpAddr::V4(ip), port, peer_id));
+    }
     if let (Some(ip), Some(port)) = (enr.ip6(), enr.tcp6()) {
         addrs.push(multiaddr_from_ip(IpAddr::V6(ip), port, peer_id));
+    }
+    if let (Some(ip), Some(port)) = (enr.ip6(), enr_quic6(enr)) {
+        addrs.push(multiaddr_from_ip_quic(IpAddr::V6(ip), port, peer_id));
     }
     if addrs.is_empty() {
         return None;
@@ -2178,6 +2207,25 @@ fn multiaddr_from_ip(ip: IpAddr, port: u16, peer_id: PeerId) -> Multiaddr {
     .with(Protocol::Tcp(port));
     addr.with_p2p(peer_id)
         .expect("newly built multiaddr should always accept a peer id")
+}
+
+fn multiaddr_from_ip_quic(ip: IpAddr, port: u16, peer_id: PeerId) -> Multiaddr {
+    let addr = match ip {
+        IpAddr::V4(ipv4) => Multiaddr::empty().with(Protocol::Ip4(ipv4)),
+        IpAddr::V6(ipv6) => Multiaddr::empty().with(Protocol::Ip6(ipv6)),
+    }
+    .with(Protocol::Udp(port))
+    .with(Protocol::QuicV1);
+    addr.with_p2p(peer_id)
+        .expect("newly built multiaddr should always accept a peer id")
+}
+
+fn enr_quic4(enr: &Enr) -> Option<u16> {
+    enr.get_decodable("quic").and_then(Result::ok)
+}
+
+fn enr_quic6(enr: &Enr) -> Option<u16> {
+    enr.get_decodable("quic6").and_then(Result::ok)
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {

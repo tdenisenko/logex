@@ -121,6 +121,8 @@ LogEx should become a canonical Ethereum event-log node that:
     - `LightClientOptimisticUpdate` for Capella and Deneb-or-later payload layouts
   - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard so live consensus progress is inspectable even before cryptographic verification is finished
   - the local consensus ENR now advertises zeroed `attnets` and `syncnets` bitfields in addition to the mainnet `eth2` fork id, so LogEx presents a more standards-conformant CL identity on discovery
+  - the CL swarm now supports QUIC transport in addition to TCP and keeps QUIC multiaddrs learned from peer ENRs instead of discarding them
+  - when the operator uses the same UDP port for CL discovery and CL p2p, LogEx now skips the inbound QUIC listener instead of crashing on a port bind conflict; outbound QUIC dialing still remains available in that configuration
   - LogEx now subscribes to the `light_client_finality_update` and `light_client_optimistic_update` gossip topics for the current fork digest and exposes gossip subscription / decode counters through `/status`
   - consensus gossip payloads are now decompressed with the spec's snappy-block rule and decoded into persisted light-client summaries, but LogEx still intentionally does not forward them as validated canonical data until sync-committee verification exists
   - restart behavior for checkpoints is stricter and more honest:
@@ -191,6 +193,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - peers that do not advertise the full light-client req/resp set are now disconnected immediately after identify, and peers that repeatedly fail `Status` are rotated out instead of being held forever
   - typed SSZ decoding and persisted status summaries for light-client bootstrap/finality/optimistic payloads are implemented for current post-Merge fork layouts
   - light-client gossip subscriptions are implemented for finality and optimistic updates, and `/status` now shows gossip subscription / decode counters
+  - outbound QUIC transport is implemented and peer ENRs are now harvested for both TCP and QUIC dial addresses
   - the current scheduler once again behaves like a light client should:
     - `Status` is sent first on new peer sessions, even before identify finishes
     - a genesis-style `Status` message is used while bootstrap is still missing
@@ -249,10 +252,12 @@ LogEx should become a canonical Ethereum event-log node that:
      - fork-aware typed SSZ decoding now exists for current post-Merge `LightClientBootstrap`, `LightClientFinalityUpdate`, and `LightClientOptimisticUpdate` payloads
      - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard
      - the local consensus ENR now includes `attnets` / `syncnets`, and LogEx now subscribes to the light-client finality / optimistic gossip topics for the current fork digest
+     - the consensus transport now includes outbound QUIC dialing, peer ENRs are harvested for QUIC addresses as well as TCP, and shared discovery/p2p UDP ports no longer crash the node when QUIC is enabled
      - restarting with the same checkpoint root plus a newly supplied slot now enriches the persisted checkpoint instead of forcing a fresh data directory, while conflicting checkpoint roots still fail loudly
    - TODO:
      - finish the remaining mainnet interop gap: live smoke now reaches discovery, outbound `Status`, outbound bootstrap attempts, and live gossip subscriptions, but stable `Status` round-trips still do not land reliably on useful light-client peers
      - diagnose and fix the remaining peer-retention failure so `Status` can land first and stay landed long enough for bootstrap to succeed; without that, bootstrap/finality/optimistic cannot become reliable
+     - determine whether the remaining peer-retention gap is primarily missing protocol surface, remaining wire-detail mismatch, or the current lack of a dedicated inbound QUIC listen port when discovery and p2p share UDP
      - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1`, including any request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
      - once `Status` is landing reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
@@ -261,7 +266,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - verify sync committee signatures, committee rotation, and weak-subjectivity bootstrap state exactly enough to match the Helios-style trust model
      - verify `execution_branch` against the beacon header `body_root` for every trusted light-client header
    - Why this is still blocking:
-     - the node can now discover and dial native CL peers, maintain libp2p sessions, speak version-aware per-method req/resp, advertise a more standards-conformant ENR, subscribe to light-client gossip, and decode live light-client payloads once received, but current mainnet smoke runs still stall before reliable `Status` / bootstrap responses arrive
+     - the node can now discover and dial native CL peers over TCP and QUIC, maintain libp2p sessions, speak version-aware per-method req/resp, advertise a more standards-conformant ENR, subscribe to light-client gossip, and decode live light-client payloads once received, but current mainnet smoke runs still stall before reliable `Status` / bootstrap responses arrive
      - until bootstrap/finality/optimistic payloads are acquired reliably and then cryptographically verified, checkpointed CL state must still be imported rather than learned live
    - Done when:
      - a fresh mainnet sync can start from a weak-subjectivity checkpoint, discover peers natively, and produce verified optimistic/finalized execution anchors without any external consensus RPC
