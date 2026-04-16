@@ -575,6 +575,16 @@ mod tests {
                     finality_update_gossip_messages: 4,
                     optimistic_update_gossip_messages: 9,
                     gossip_decode_failures: 1,
+                    last_connection_event: Some("connected peer=peer1 endpoint=Dialer".to_string()),
+                    last_identify_event: Some(
+                        "peer=peer1 agent=lighthouse protocols=12 status=true metadata=true bootstrap=false updates_by_range=false finality=false optimistic=false blocks_by_range=true blocks_by_root=true preview=[/eth2/beacon_chain/req/status/2/ssz_snappy]".to_string(),
+                    ),
+                    last_rpc_failure: Some(
+                        "peer=peer1 request=status failure=connection closed".to_string(),
+                    ),
+                    last_response_send_failure: Some(
+                        "peer=peer2 request=status response=Status(..)".to_string(),
+                    ),
                 }),
                 consensus_light_client: Some(ConsensusLightClientStatus {
                     bootstrap: Some(LightClientBootstrapStatus {

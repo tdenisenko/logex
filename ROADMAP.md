@@ -116,7 +116,15 @@ LogEx should become a canonical Ethereum event-log node that:
   - the CL request scheduler now keeps peer-state counters honest by clearing them on disconnect, treats `Status` as the first handshake to finish before light-client fetches, and counts inbound `Status` as a completed handshake instead of waiting for a redundant round-trip
   - the CL request scheduler now respects a per-protocol in-flight request cap instead of blasting every connected peer at once
   - native CL status surfaces now expose identified-peer counts, protocol-capability counts, per-kind in-flight requests, and per-kind request-failure counters so live mainnet interop failures are inspectable instead of guesswork
+  - `/status` now also records the most recent identify summary, most recent transport event, and most recent RPC failure so live mainnet interop debugging can distinguish peer-advertisement problems from raw transport churn
   - peers that do not advertise the full light-client req/resp set are now disconnected as soon as identify proves they are not useful for the light-client path, and peers that repeatedly fail `Status` are rotated out instead of being retained indefinitely
+  - LogEx now advertises light-client history-fetch protocols honestly:
+    - `LightClientBootstrap`, `LightClientUpdatesByRange`, `LightClientFinalityUpdate`, `LightClientOptimisticUpdate`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot` are now outbound-only until LogEx can actually serve verified history to peers
+    - `BeaconBlocksByRange` and `BeaconBlocksByRoot` now negotiate both v1 and v2 protocol ids instead of assuming only the latest variant
+  - the CL handshake is now identify-gated:
+    - new peer sessions are allowed to identify first
+    - `Status` is now sent only to peers that actually advertise the `Status` RPC in identify
+    - peers that identify without `Status` are treated as irrelevant and disconnected instead of being probed blindly
   - mainnet smoke runs from the recorded example checkpoint have already observed live native CL discovery and live libp2p peer sessions, but they still do not produce reliable CL req/resp round-trips yet
   - fork-aware typed SSZ decoding is now implemented for current post-Merge light-client payloads:
     - `LightClientBootstrap` for Capella, Deneb, and Electra
@@ -198,12 +206,13 @@ LogEx should become a canonical Ethereum event-log node that:
   - light-client gossip subscriptions are implemented for finality and optimistic updates, and `/status` now shows gossip subscription / decode counters
   - outbound QUIC transport is implemented and peer ENRs are now harvested for both TCP and QUIC dial addresses
   - the current scheduler once again behaves like a light client should:
-    - `Status` is sent first on new peer sessions, even before identify finishes
+    - identify is now the first admission gate on new peer sessions
+    - `Status` is sent only after identify confirms that the peer actually advertises the `Status` RPC
     - while LogEx is not yet serving verified light-client history to peers, it now uses a genesis-style `Status` message that follows the spec more closely: the head side is anchored to the real mainnet beacon genesis block root while the finalized checkpoint remains the canonical zero root for epoch 0, instead of advertising checkpoint-rooted availability it cannot serve
     - bootstrap is prioritized before finality / optimistic requests, instead of blasting every light-client method at once
   - reliable live acquisition of light-client bootstrap/finality/optimistic payloads is still not implemented yet
   - cryptographic verification of those payloads is still not implemented yet
-  - multi-chunk CL req/resp (`LightClientUpdatesByRange`, beacon block fetches) is still not implemented yet
+  - multi-chunk CL req/resp (`LightClientUpdatesByRange`, beacon block fetches) is implemented, but not yet upgraded into verified decoded light-client store updates and authenticated beacon-history segments
   - current gossip subscriptions decode payloads for observability, but they still do not perform sync-committee validation or feed canonical anchor production yet
   - recent mainnet smokes are healthier than before the latest interop fixes:
     - pre-bootstrap `Status` now uses the genesis head / zero finalized-checkpoint form expected by the spec
@@ -247,14 +256,15 @@ LogEx should become a canonical Ethereum event-log node that:
      - outbound req/resp is now split into per-method protocol families so `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` no longer negotiate against the wrong protocol id on the wire
      - `Status v2` and `MetaData v3` are now implemented for current post-Fulu peers, while preserving `Status v1`, `MetaData v2`, and `MetaData v1` fallback compatibility
      - `Goodbye v1` is now implemented so peer rotation can use the consensus RPC instead of only dropping TCP sessions
-     - the CL scheduler now treats `Status` as the first-class handshake, sends it even before identify data arrives, and only fans out follow-up work after the peer is considered handshaked
+     - the CL scheduler now treats identify as the first admission gate and only sends `Status` after a peer explicitly advertises the `Status` RPC
      - inbound peer `Status` requests now count as handshake progress instead of being ignored after the response is sent
      - peer success counters are now cleared on disconnect so `/status` reflects live CL session health rather than stale historical responders
      - the CL scheduler now caps in-flight requests per protocol kind to the consensus req/resp concurrency limit instead of blasting every connected peer at once
      - the CL scheduler now keeps bootstrap ahead of finality / optimistic requests until a real bootstrap payload has landed, which is closer to the light-client sync process than firing every request type in parallel
-     - `/status` now exposes identified peers, protocol-capability counts, per-kind in-flight requests, and per-kind request-failure counters for native CL debugging
+     - `/status` now exposes identified peers, protocol-capability counts, per-kind in-flight requests, per-kind request-failure counters, and the latest identify/transport/RPC breadcrumbs for native CL debugging
      - `/status` now also exposes light-client gossip subscription counts plus finality / optimistic gossip decode counters
      - peers that do not advertise the full light-client req/resp set are now disconnected as soon as identify proves they are not useful for the light-client path, and peers that repeatedly fail `Status` are rotated out instead of being kept forever
+     - light-client and beacon-history fetch methods are now advertised outbound-only until LogEx can actually serve verified history, and beacon-block fetches now negotiate both v1 and v2 protocol ids
      - live mainnet smoke runs from the recorded example checkpoint have already observed discovery and libp2p peer sessions
      - fork-aware typed SSZ decoding now exists for current post-Merge `LightClientBootstrap`, `LightClientFinalityUpdate`, and `LightClientOptimisticUpdate` payloads
      - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard
@@ -266,7 +276,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - the CL scheduler now treats checkpoint-history fetches as first-class work: it will try to fetch the checkpoint beacon block by root, fall back to slot-based block range fetches when the checkpoint slot is known, and request one sync-committee-period update window once the slot context exists
    - TODO:
      - finish the remaining mainnet interop gap: live smoke now reaches discovery, outbound `Status`, outbound bootstrap attempts, and live gossip subscriptions, but stable `Status` round-trips still do not land reliably on useful light-client peers
-     - diagnose and fix the remaining peer-retention failure so `Status` can land first and stay landed long enough for bootstrap to succeed; without that, bootstrap/finality/optimistic cannot become reliable
+     - diagnose and fix the remaining peer-retention failure so identified useful peers stay connected long enough for `Status` and then bootstrap to succeed; without that, bootstrap/finality/optimistic cannot become reliable
      - determine whether the remaining peer-retention gap is now primarily remaining wire-detail mismatch, peer-lifecycle policy, or the current lack of a dedicated inbound QUIC listen port when discovery and p2p share UDP
      - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1` and the newly landed multi-chunk methods, including any remaining request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
      - once `Status` is landing reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store

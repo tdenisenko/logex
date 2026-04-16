@@ -136,6 +136,18 @@ pub struct ConsensusNetworkStatus {
     pub optimistic_update_gossip_messages: u64,
     /// Number of malformed or undecodable light-client gossip payloads observed since startup.
     pub gossip_decode_failures: u64,
+    /// Most recent noteworthy consensus connection event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_connection_event: Option<String>,
+    /// Most recent identify record observed from a connected consensus peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_identify_event: Option<String>,
+    /// Most recent consensus RPC failure or error response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_rpc_failure: Option<String>,
+    /// Most recent failure to send an inbound consensus RPC response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_response_send_failure: Option<String>,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.

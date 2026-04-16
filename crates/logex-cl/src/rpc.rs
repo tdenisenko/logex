@@ -22,9 +22,13 @@ pub(crate) const LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID: &str =
     "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy";
 pub(crate) const LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID: &str =
     "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy";
-pub(crate) const BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID: &str =
+pub(crate) const BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID: &str =
+    "/eth2/beacon_chain/req/beacon_blocks_by_range/1/ssz_snappy";
+pub(crate) const BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID: &str =
     "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy";
-pub(crate) const BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID: &str =
+pub(crate) const BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID: &str =
+    "/eth2/beacon_chain/req/beacon_blocks_by_root/1/ssz_snappy";
+pub(crate) const BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID: &str =
     "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
 const SUCCESS_CODE: u8 = 0;
@@ -47,7 +51,9 @@ pub enum Eth2RpcProtocol {
     LightClientUpdatesByRangeV1,
     LightClientFinalityUpdateV1,
     LightClientOptimisticUpdateV1,
+    BeaconBlocksByRangeV1,
     BeaconBlocksByRangeV2,
+    BeaconBlocksByRootV1,
     BeaconBlocksByRootV2,
 }
 
@@ -65,8 +71,10 @@ impl AsRef<str> for Eth2RpcProtocol {
             Self::LightClientUpdatesByRangeV1 => LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID,
             Self::LightClientFinalityUpdateV1 => LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
             Self::LightClientOptimisticUpdateV1 => LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID,
-            Self::BeaconBlocksByRangeV2 => BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID,
-            Self::BeaconBlocksByRootV2 => BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID,
+            Self::BeaconBlocksByRangeV1 => BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID,
+            Self::BeaconBlocksByRangeV2 => BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID,
+            Self::BeaconBlocksByRootV1 => BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID,
+            Self::BeaconBlocksByRootV2 => BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID,
         }
     }
 }
@@ -211,40 +219,55 @@ pub fn build_ping_behaviour() -> Eth2RpcBehaviour {
 pub fn build_light_client_bootstrap_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientBootstrapV1,
-        ProtocolSupport::Full,
+        ProtocolSupport::Outbound,
     )])
 }
 
 pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientUpdatesByRangeV1,
-        ProtocolSupport::Full,
+        ProtocolSupport::Outbound,
     )])
 }
 
 pub fn build_light_client_finality_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientFinalityUpdateV1,
-        ProtocolSupport::Full,
+        ProtocolSupport::Outbound,
     )])
 }
 
 pub fn build_light_client_optimistic_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientOptimisticUpdateV1,
-        ProtocolSupport::Full,
+        ProtocolSupport::Outbound,
     )])
 }
 
 pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(
-        Eth2RpcProtocol::BeaconBlocksByRangeV2,
-        ProtocolSupport::Full,
-    )])
+    build_rpc_behaviour([
+        (
+            Eth2RpcProtocol::BeaconBlocksByRangeV2,
+            ProtocolSupport::Outbound,
+        ),
+        (
+            Eth2RpcProtocol::BeaconBlocksByRangeV1,
+            ProtocolSupport::Outbound,
+        ),
+    ])
 }
 
 pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(Eth2RpcProtocol::BeaconBlocksByRootV2, ProtocolSupport::Full)])
+    build_rpc_behaviour([
+        (
+            Eth2RpcProtocol::BeaconBlocksByRootV2,
+            ProtocolSupport::Outbound,
+        ),
+        (
+            Eth2RpcProtocol::BeaconBlocksByRootV1,
+            ProtocolSupport::Outbound,
+        ),
+    ])
 }
 
 #[async_trait]
@@ -338,12 +361,14 @@ fn encode_request(protocol: &Eth2RpcProtocol, request: Eth2RpcRequest) -> io::Re
             Eth2RpcProtocol::LightClientOptimisticUpdateV1,
             Eth2RpcRequest::LightClientOptimisticUpdate,
         ) => Ok(Vec::new()),
-        (Eth2RpcProtocol::BeaconBlocksByRangeV2, Eth2RpcRequest::BeaconBlocksByRange(request)) => {
-            encode_beacon_blocks_by_range_request(request)
-        }
-        (Eth2RpcProtocol::BeaconBlocksByRootV2, Eth2RpcRequest::BeaconBlocksByRoot(roots)) => {
-            encode_beacon_blocks_by_root_request(&roots)
-        }
+        (
+            Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2,
+            Eth2RpcRequest::BeaconBlocksByRange(request),
+        ) => encode_beacon_blocks_by_range_request(request),
+        (
+            Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2,
+            Eth2RpcRequest::BeaconBlocksByRoot(roots),
+        ) => encode_beacon_blocks_by_root_request(&roots),
         _ => Err(invalid_data(format!(
             "request {request_label} is not valid for protocol {}",
             protocol.as_ref()
@@ -414,10 +439,10 @@ fn decode_request(protocol: &Eth2RpcProtocol, payload: &[u8]) -> io::Result<Eth2
                 ))
             }
         }
-        Eth2RpcProtocol::BeaconBlocksByRangeV2 => {
+        Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2 => {
             decode_beacon_blocks_by_range_request(payload).map(Eth2RpcRequest::BeaconBlocksByRange)
         }
-        Eth2RpcProtocol::BeaconBlocksByRootV2 => {
+        Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2 => {
             decode_beacon_blocks_by_root_request(payload).map(Eth2RpcRequest::BeaconBlocksByRoot)
         }
     }
@@ -433,7 +458,7 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
                 StreamedRpcResponse::Error(error) => Ok(Eth2RpcResponse::Error(error)),
             };
         }
-        Eth2RpcProtocol::BeaconBlocksByRangeV2 => {
+        Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2 => {
             return match decode_stream_response(protocol, bytes)? {
                 StreamedRpcResponse::Success(chunks) => {
                     Ok(Eth2RpcResponse::BeaconBlocksByRange(chunks))
@@ -441,7 +466,7 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
                 StreamedRpcResponse::Error(error) => Ok(Eth2RpcResponse::Error(error)),
             };
         }
-        Eth2RpcProtocol::BeaconBlocksByRootV2 => {
+        Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2 => {
             return match decode_stream_response(protocol, bytes)? {
                 StreamedRpcResponse::Success(chunks) => {
                     Ok(Eth2RpcResponse::BeaconBlocksByRoot(chunks))
@@ -516,7 +541,9 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
             }),
         ),
         Eth2RpcProtocol::LightClientUpdatesByRangeV1
+        | Eth2RpcProtocol::BeaconBlocksByRangeV1
         | Eth2RpcProtocol::BeaconBlocksByRangeV2
+        | Eth2RpcProtocol::BeaconBlocksByRootV1
         | Eth2RpcProtocol::BeaconBlocksByRootV2 => {
             unreachable!("multi-chunk protocols are handled before the single-response path")
         }
@@ -898,7 +925,9 @@ fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
         | Eth2RpcProtocol::MetadataV1
         | Eth2RpcProtocol::MetadataV2
         | Eth2RpcProtocol::MetadataV3
-        | Eth2RpcProtocol::PingV1 => 0,
+        | Eth2RpcProtocol::PingV1
+        | Eth2RpcProtocol::BeaconBlocksByRangeV1
+        | Eth2RpcProtocol::BeaconBlocksByRootV1 => 0,
     }
 }
 
@@ -1139,5 +1168,39 @@ mod tests {
         let decoded = decode_request(&Eth2RpcProtocol::BeaconBlocksByRootV2, &payload).unwrap();
 
         assert_eq!(decoded, Eth2RpcRequest::BeaconBlocksByRoot(roots));
+    }
+
+    #[test]
+    fn beacon_blocks_by_root_v1_request_round_trip() {
+        let roots = vec![B256::repeat_byte(0xaa), B256::repeat_byte(0xbb)];
+
+        let encoded = encode_request(
+            &Eth2RpcProtocol::BeaconBlocksByRootV1,
+            Eth2RpcRequest::BeaconBlocksByRoot(roots.clone()),
+        )
+        .unwrap();
+        let payload = decode_ssz_snappy_payload(&encoded).unwrap();
+        let decoded = decode_request(&Eth2RpcProtocol::BeaconBlocksByRootV1, &payload).unwrap();
+
+        assert_eq!(decoded, Eth2RpcRequest::BeaconBlocksByRoot(roots));
+    }
+
+    #[test]
+    fn beacon_blocks_by_range_v1_response_round_trip_has_no_context_bytes() {
+        let response = Eth2RpcResponse::BeaconBlocksByRange(vec![RawRpcResponse {
+            context_bytes: None,
+            bytes: vec![1, 2, 3, 4],
+        }]);
+
+        let encoded = encode_response(&Eth2RpcProtocol::BeaconBlocksByRangeV1, response).unwrap();
+        let decoded = decode_response(&Eth2RpcProtocol::BeaconBlocksByRangeV1, &encoded).unwrap();
+
+        assert_eq!(
+            decoded,
+            Eth2RpcResponse::BeaconBlocksByRange(vec![RawRpcResponse {
+                context_bytes: None,
+                bytes: vec![1, 2, 3, 4],
+            }])
+        );
     }
 }

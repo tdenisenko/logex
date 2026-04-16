@@ -27,7 +27,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::rpc::{
-    BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID, BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID,
+    BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID,
+    BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID,
     BeaconBlocksByRangeRequest, Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent,
     Eth2RpcRequest, Eth2RpcResponse, GOODBYE_V1_PROTOCOL_ID, LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
     LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID,
@@ -399,6 +400,7 @@ struct ConsensusNetwork {
     discv5: Discv5,
     swarm: Swarm<ConsensusBehaviour>,
     bootnode_count: usize,
+    expected_fork_id: Vec<u8>,
     fork_digest: [u8; 4],
     known_peers_path: PathBuf,
     last_persisted: Vec<PersistedPeer>,
@@ -407,6 +409,7 @@ struct ConsensusNetwork {
     dialing_peers: HashSet<PeerId>,
     connected_peers: HashSet<PeerId>,
     connected_since: HashMap<PeerId, Instant>,
+    peer_endpoints: HashMap<PeerId, String>,
     peer_support: HashMap<PeerId, PeerRpcSupport>,
     peer_failures: HashMap<PeerId, PeerFailureCounts>,
     status_peers: HashSet<PeerId>,
@@ -424,6 +427,10 @@ struct ConsensusNetwork {
     gossip_topics: ConsensusGossipTopics,
     gossip_counts: GossipMessageCounts,
     gossip_subscriptions: HashSet<gossipsub::TopicHash>,
+    last_connection_event: Option<String>,
+    last_identify_event: Option<String>,
+    last_rpc_failure: Option<String>,
+    last_response_send_failure: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -612,8 +619,12 @@ impl PeerRpcSupport {
                 LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID => {
                     support.light_client_optimistic_update = true;
                 }
-                BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID => support.beacon_blocks_by_range = true,
-                BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID => support.beacon_blocks_by_root = true,
+                BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID | BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID => {
+                    support.beacon_blocks_by_range = true;
+                }
+                BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID | BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID => {
+                    support.beacon_blocks_by_root = true;
+                }
                 _ => {}
             }
         }
@@ -651,6 +662,14 @@ impl PeerRpcSupport {
 
     const fn supports_history_backfill(self) -> bool {
         self.beacon_blocks_by_range || self.beacon_blocks_by_root
+    }
+
+    const fn supports_bootstrap_sync(self) -> bool {
+        self.status && self.light_client_bootstrap
+    }
+
+    const fn supports_any_post_bootstrap_work(self) -> bool {
+        self.supports_light_client() || self.supports_history_backfill()
     }
 }
 
@@ -718,6 +737,7 @@ impl ConsensusNetwork {
             discv5,
             swarm,
             bootnode_count: bootnodes.len(),
+            expected_fork_id: fork_id.clone(),
             fork_digest,
             known_peers_path,
             last_persisted: known_peers,
@@ -726,6 +746,7 @@ impl ConsensusNetwork {
             dialing_peers: HashSet::new(),
             connected_peers: HashSet::new(),
             connected_since: HashMap::new(),
+            peer_endpoints: HashMap::new(),
             peer_support: HashMap::new(),
             peer_failures: HashMap::new(),
             status_peers: HashSet::new(),
@@ -743,6 +764,10 @@ impl ConsensusNetwork {
             gossip_topics,
             gossip_counts: GossipMessageCounts::default(),
             gossip_subscriptions: HashSet::new(),
+            last_connection_event: None,
+            last_identify_event: None,
+            last_rpc_failure: None,
+            last_response_send_failure: None,
         })
     }
 
@@ -897,6 +922,13 @@ impl ConsensusNetwork {
     }
 
     fn observe_enr(&mut self, enr: &Enr) {
+        if !enr_matches_fork_id(enr, &self.expected_fork_id) {
+            tracing::debug!(
+                node_id = %enr.node_id(),
+                "ignoring discovered consensus ENR that does not match the expected eth2 fork id"
+            );
+            return;
+        }
         self.observed.insert(enr.node_id().to_string());
         observe_dialable_peer(&mut self.dialable_peers, enr);
     }
@@ -910,15 +942,20 @@ impl ConsensusNetwork {
                 peer_id, endpoint, ..
             } => {
                 tracing::debug!(%peer_id, endpoint = ?endpoint, "consensus libp2p connection established");
+                let endpoint = format!("{endpoint:?}");
+                self.last_connection_event =
+                    Some(format!("connected peer={peer_id} endpoint={endpoint}"));
                 self.dialing_peers.remove(&peer_id);
                 self.connected_peers.insert(peer_id);
                 self.connected_since
                     .entry(peer_id)
                     .or_insert_with(Instant::now);
+                self.peer_endpoints.insert(peer_id, endpoint);
                 self.drive_rpc_requests();
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 tracing::debug!(%peer_id, cause = ?cause, "consensus libp2p connection closed");
+                self.last_connection_event = Some(format!("closed peer={peer_id} cause={cause:?}"));
                 self.dialing_peers.remove(&peer_id);
                 self.connected_peers.remove(&peer_id);
                 self.clear_peer_state(peer_id);
@@ -926,6 +963,12 @@ impl ConsensusNetwork {
             }
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 tracing::debug!(peer_id = peer_id.map(|peer| peer.to_string()), %error, "consensus libp2p dial failed");
+                self.last_connection_event = Some(format!(
+                    "dial_error peer={} error={error}",
+                    peer_id
+                        .map(|peer| peer.to_string())
+                        .unwrap_or_else(|| "unknown".to_owned())
+                ));
                 if let Some(peer_id) = peer_id {
                     self.dialing_peers.remove(&peer_id);
                     self.clear_pending_requests_for_peer(peer_id);
@@ -977,6 +1020,13 @@ impl ConsensusNetwork {
         match event {
             identify::Event::Received { peer_id, info, .. } => {
                 let support = PeerRpcSupport::from_identify_info(&info);
+                let advertised_protocols = info
+                    .protocols
+                    .iter()
+                    .take(6)
+                    .map(|protocol| protocol.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 tracing::debug!(
                     %peer_id,
                     protocol_version = %info.protocol_version,
@@ -987,6 +1037,20 @@ impl ConsensusNetwork {
                     supports_any_light_client = support.supports_any_light_client(),
                     "received consensus identify info"
                 );
+                self.last_identify_event = Some(format!(
+                    "peer={peer_id} agent={} protocols={} status={} metadata={} bootstrap={} updates_by_range={} finality={} optimistic={} blocks_by_range={} blocks_by_root={} preview=[{}]",
+                    info.agent_version,
+                    info.protocols.len(),
+                    support.status,
+                    support.metadata,
+                    support.light_client_bootstrap,
+                    support.light_client_updates_by_range,
+                    support.light_client_finality_update,
+                    support.light_client_optimistic_update,
+                    support.beacon_blocks_by_range,
+                    support.beacon_blocks_by_root,
+                    advertised_protocols
+                ));
                 self.peer_support.insert(peer_id, support);
                 self.drive_rpc_requests();
             }
@@ -1152,7 +1216,6 @@ impl ConsensusNetwork {
                                     "consensus peer requested status with a different fork digest"
                                 );
                             }
-                            self.status_peers.insert(peer);
                             Eth2RpcResponse::Status(self.local_status_message())
                         }
                         Eth2RpcRequest::MetaData => {
@@ -1174,6 +1237,11 @@ impl ConsensusNetwork {
                         }
                     };
                     if let Err(response) = self.send_rpc_response(kind, channel, response) {
+                        let peer_context = self.peer_context(peer);
+                        self.last_response_send_failure = Some(format!(
+                            "{peer_context} request={} response={response:?}",
+                            kind.as_str()
+                        ));
                         tracing::warn!(
                             %peer,
                             error = ?response,
@@ -1195,10 +1263,18 @@ impl ConsensusNetwork {
                 let _ = self.take_pending_request(kind, request_id);
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
+                let peer_context = self.peer_context(peer);
+                self.last_rpc_failure = Some(format!(
+                    "{peer_context} request={} failure={error}",
+                    kind.as_str()
+                ));
                 match kind {
                     RpcRequestKind::LightClientBootstrap
+                    | RpcRequestKind::LightClientUpdatesByRange
                     | RpcRequestKind::LightClientFinalityUpdate
-                    | RpcRequestKind::LightClientOptimisticUpdate => {
+                    | RpcRequestKind::LightClientOptimisticUpdate
+                    | RpcRequestKind::BeaconBlocksByRange
+                    | RpcRequestKind::BeaconBlocksByRoot => {
                         tracing::info!(
                             %peer,
                             request = kind.as_str(),
@@ -1239,6 +1315,7 @@ impl ConsensusNetwork {
             } => {
                 tracing::debug!(%peer, request = kind.as_str(), ?request_id, "consensus RPC response sent");
                 if kind == RpcRequestKind::Status {
+                    self.status_peers.insert(peer);
                     self.drive_rpc_requests();
                 }
             }
@@ -1263,6 +1340,10 @@ impl ConsensusNetwork {
                         .inner
                         .send_response(channel, response)
                     {
+                        let peer_context = self.peer_context(peer);
+                        self.last_response_send_failure = Some(format!(
+                            "{peer_context} request=goodbye response={response:?}"
+                        ));
                         tracing::warn!(
                             %peer,
                             error = ?response,
@@ -1311,6 +1392,9 @@ impl ConsensusNetwork {
             } => {
                 let _ = self.take_pending_request(RpcRequestKind::Goodbye, request_id);
                 self.request_failures.increment(RpcRequestKind::Goodbye);
+                let peer_context = self.peer_context(peer);
+                self.last_rpc_failure =
+                    Some(format!("{peer_context} request=goodbye failure={error}"));
                 tracing::debug!(%peer, ?request_id, %error, "consensus goodbye RPC request failed");
                 self.disconnect_now(peer);
             }
@@ -1352,6 +1436,10 @@ impl ConsensusNetwork {
                         .inner
                         .send_response(channel, response)
                     {
+                        let peer_context = self.peer_context(peer);
+                        self.last_response_send_failure = Some(format!(
+                            "{peer_context} request=metadata response={response:?}"
+                        ));
                         tracing::warn!(
                             %peer,
                             error = ?response,
@@ -1373,6 +1461,9 @@ impl ConsensusNetwork {
                 let _ = self.take_pending_request(RpcRequestKind::MetaData, request_id);
                 self.request_failures.increment(RpcRequestKind::MetaData);
                 self.record_peer_failure(peer, RpcRequestKind::MetaData);
+                let peer_context = self.peer_context(peer);
+                self.last_rpc_failure =
+                    Some(format!("{peer_context} request=metadata failure={error}"));
                 tracing::debug!(%peer, ?request_id, %error, "consensus metadata RPC request failed");
             }
             request_response::Event::InboundFailure {
@@ -1562,10 +1653,19 @@ impl ConsensusNetwork {
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
                 let message = String::from_utf8_lossy(&error.message);
+                let peer_context = self.peer_context(peer);
+                self.last_rpc_failure = Some(format!(
+                    "{peer_context} request={} error_code={} message={message}",
+                    kind.as_str(),
+                    error.code
+                ));
                 match kind {
                     RpcRequestKind::LightClientBootstrap
+                    | RpcRequestKind::LightClientUpdatesByRange
                     | RpcRequestKind::LightClientFinalityUpdate
-                    | RpcRequestKind::LightClientOptimisticUpdate => {
+                    | RpcRequestKind::LightClientOptimisticUpdate
+                    | RpcRequestKind::BeaconBlocksByRange
+                    | RpcRequestKind::BeaconBlocksByRoot => {
                         tracing::info!(
                             %peer,
                             request = kind.as_str(),
@@ -1596,6 +1696,11 @@ impl ConsensusNetwork {
                 }
             }
             (kind, response) => {
+                let peer_context = self.peer_context(peer);
+                self.last_rpc_failure = Some(format!(
+                    "{peer_context} request={} unexpected_response={response:?}",
+                    kind.as_str()
+                ));
                 tracing::warn!(
                     %peer,
                     request = kind.as_str(),
@@ -1636,6 +1741,26 @@ impl ConsensusNetwork {
             let identify_ready = support.is_some();
             let identify_timed_out = self.identify_timed_out(peer);
 
+            let Some(support) = support else {
+                if identify_timed_out {
+                    tracing::debug!(
+                        %peer,
+                        "disconnecting consensus peer that never identified after connect"
+                    );
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+                }
+                continue;
+            };
+
+            if !support.status {
+                tracing::debug!(
+                    %peer,
+                    "disconnecting consensus peer that identified without advertising the Status RPC"
+                );
+                self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                continue;
+            }
+
             if !self.status_peers.contains(&peer) {
                 if self.can_issue_request(RpcRequestKind::Status) {
                     self.ensure_request(peer, RpcRequestKind::Status);
@@ -1644,31 +1769,36 @@ impl ConsensusNetwork {
             }
 
             if identify_ready
-                && support
-                    .map(|support| support.supports_request(RpcRequestKind::MetaData))
-                    .unwrap_or(false)
+                && support.supports_request(RpcRequestKind::MetaData)
                 && self.can_issue_request(RpcRequestKind::MetaData)
             {
                 self.ensure_request(peer, RpcRequestKind::MetaData);
             }
 
-            let Some(support) = support else {
-                if identify_timed_out {
-                    tracing::debug!(
-                        %peer,
-                        "disconnecting consensus peer that never identified after status"
-                    );
-                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
-                }
-                continue;
-            };
-
-            if !support.supports_any_light_client() && !support.supports_history_backfill() {
+            if bootstrap_needed && !support.supports_bootstrap_sync() {
                 tracing::debug!(
                     %peer,
-                    "disconnecting consensus peer that does not advertise useful light-client or checkpoint-history RPCs"
+                    "disconnecting consensus peer that cannot serve bootstrap during bootstrap phase"
                 );
                 self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                continue;
+            }
+
+            if !bootstrap_needed && !support.supports_any_post_bootstrap_work() {
+                tracing::debug!(
+                    %peer,
+                    "disconnecting consensus peer that does not advertise useful post-bootstrap consensus RPCs"
+                );
+                self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                continue;
+            }
+
+            if bootstrap_needed {
+                if support.supports_request(RpcRequestKind::LightClientBootstrap)
+                    && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
+                {
+                    self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
+                }
                 continue;
             }
 
@@ -1681,15 +1811,6 @@ impl ConsensusNetwork {
                 && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
             {
                 self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
-            }
-
-            if bootstrap_needed {
-                if support.supports_request(RpcRequestKind::LightClientBootstrap)
-                    && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
-                {
-                    self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
-                }
-                continue;
             }
 
             if self.history_request_slot().is_some()
@@ -2017,6 +2138,7 @@ impl ConsensusNetwork {
 
     fn clear_peer_state(&mut self, peer: PeerId) {
         self.connected_since.remove(&peer);
+        self.peer_endpoints.remove(&peer);
         self.peer_support.remove(&peer);
         self.peer_failures.remove(&peer);
         self.status_peers.remove(&peer);
@@ -2060,6 +2182,13 @@ impl ConsensusNetwork {
             .keys()
             .filter(|key| key.kind == kind)
             .count()
+    }
+
+    fn peer_context(&self, peer: PeerId) -> String {
+        match self.peer_endpoints.get(&peer) {
+            Some(endpoint) => format!("peer={peer} endpoint={endpoint}"),
+            None => format!("peer={peer}"),
+        }
     }
 
     fn can_issue_request(&self, kind: RpcRequestKind) -> bool {
@@ -2168,6 +2297,10 @@ impl ConsensusNetwork {
             finality_update_gossip_messages: self.gossip_counts.finality_update,
             optimistic_update_gossip_messages: self.gossip_counts.optimistic_update,
             gossip_decode_failures: self.gossip_counts.decode_failures,
+            last_connection_event: self.last_connection_event.clone(),
+            last_identify_event: self.last_identify_event.clone(),
+            last_rpc_failure: self.last_rpc_failure.clone(),
+            last_response_send_failure: self.last_response_send_failure.clone(),
         };
         let mut sync_status = self.sync_status.lock().unwrap();
         sync_status.checkpoint = Some(checkpoint);
@@ -2462,6 +2595,13 @@ fn current_fork_digest(fork_id: &[u8]) -> Result<[u8; 4], ConsensusNetworkError>
         .ok_or(ConsensusNetworkError::InvalidBootnodeForkId)
 }
 
+#[allow(deprecated)]
+fn enr_matches_fork_id(enr: &Enr, expected_fork_id: &[u8]) -> bool {
+    enr.get("eth2")
+        .map(|fork_id| fork_id.as_ref() == expected_fork_id)
+        .unwrap_or(false)
+}
+
 fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
     let peer_id = match peer_id_from_enr(enr) {
         Ok(peer_id) => peer_id,
@@ -2646,6 +2786,21 @@ mod tests {
     }
 
     #[test]
+    fn enr_fork_filter_accepts_matching_bootnode_and_rejects_other_fork_id() {
+        let bootnodes = mainnet_bootnodes().unwrap();
+        let expected_fork_id = current_eth2_fork_id(&bootnodes).unwrap();
+        let matching = &bootnodes[0];
+
+        let enr_key = CombinedKey::generate_secp256k1();
+        let mut builder = Enr::builder();
+        builder.add_value("eth2", &[0u8; 16]);
+        let mismatched = builder.build(&enr_key).unwrap();
+
+        assert!(enr_matches_fork_id(matching, &expected_fork_id));
+        assert!(!enr_matches_fork_id(&mismatched, &expected_fork_id));
+    }
+
+    #[test]
     fn identify_support_recognizes_light_client_protocols() {
         let info = identify::Info {
             public_key: identity::Keypair::generate_ed25519().public(),
@@ -2660,8 +2815,8 @@ mod tests {
                 StreamProtocol::new(LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID),
-                StreamProtocol::new(BEACON_BLOCKS_BY_RANGE_PROTOCOL_ID),
-                StreamProtocol::new(BEACON_BLOCKS_BY_ROOT_PROTOCOL_ID),
+                StreamProtocol::new(BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID),
+                StreamProtocol::new(BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID),
             ],
             observed_addr: Multiaddr::empty(),
             signed_peer_record: None,
