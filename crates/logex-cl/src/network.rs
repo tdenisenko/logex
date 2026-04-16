@@ -370,6 +370,7 @@ impl ConsensusNetwork {
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 tracing::debug!(%peer_id, cause = ?cause, "consensus libp2p connection closed");
                 self.connected_peers.remove(&peer_id);
+                self.clear_peer_state(peer_id);
                 self.clear_pending_requests_for_peer(peer_id);
             }
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -401,14 +402,29 @@ impl ConsensusNetwork {
                 ..
             } => {
                 let pending = self.take_pending_request(request_id);
-                tracing::debug!(
-                    %peer,
-                    request = pending
-                        .map(|pending| pending.kind.as_str())
-                        .unwrap_or("unknown"),
-                    %error,
-                    "consensus RPC request failed"
-                );
+                let request = pending
+                    .map(|pending| pending.kind)
+                    .unwrap_or(RpcRequestKind::Status);
+                match request {
+                    RpcRequestKind::LightClientBootstrap
+                    | RpcRequestKind::LightClientFinalityUpdate
+                    | RpcRequestKind::LightClientOptimisticUpdate => {
+                        tracing::info!(
+                            %peer,
+                            request = request.as_str(),
+                            %error,
+                            "consensus light-client RPC request failed"
+                        );
+                    }
+                    _ => {
+                        tracing::debug!(
+                            %peer,
+                            request = request.as_str(),
+                            %error,
+                            "consensus RPC request failed"
+                        );
+                    }
+                }
             }
             request_response::Event::InboundFailure {
                 peer,
@@ -558,13 +574,29 @@ impl ConsensusNetwork {
                 }
             }
             (kind, Eth2RpcResponse::Error(error)) => {
-                tracing::debug!(
-                    %peer,
-                    request = kind.as_str(),
-                    error_code = error.code,
-                    message = %String::from_utf8_lossy(&error.message),
-                    "consensus peer returned an RPC error"
-                );
+                let message = String::from_utf8_lossy(&error.message);
+                match kind {
+                    RpcRequestKind::LightClientBootstrap
+                    | RpcRequestKind::LightClientFinalityUpdate
+                    | RpcRequestKind::LightClientOptimisticUpdate => {
+                        tracing::info!(
+                            %peer,
+                            request = kind.as_str(),
+                            error_code = error.code,
+                            message = %message,
+                            "consensus peer returned a light-client RPC error"
+                        );
+                    }
+                    _ => {
+                        tracing::debug!(
+                            %peer,
+                            request = kind.as_str(),
+                            error_code = error.code,
+                            message = %message,
+                            "consensus peer returned an RPC error"
+                        );
+                    }
+                }
             }
             (kind, response) => {
                 tracing::warn!(
@@ -587,27 +619,16 @@ impl ConsensusNetwork {
 
         let connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
         for peer in connected {
-            if !self.status_peers.contains(&peer) && !self.has_pending_request_for_peer(peer) {
-                self.ensure_request(peer, Vec::new(), RpcRequestKind::Status);
+            if !self.status_peers.contains(&peer) {
+                if !self.is_request_pending(peer, RpcRequestKind::Status) {
+                    self.ensure_request(peer, Vec::new(), RpcRequestKind::Status);
+                }
             }
-        }
-
-        for (peer, addrs) in &dialable {
-            if !self.status_peers.contains(peer) || self.has_pending_request_for_peer(*peer) {
-                continue;
-            }
-            if !self.bootstrap_peers.contains(peer) {
-                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::LightClientBootstrap);
-            } else if !self.finality_update_peers.contains(peer) {
-                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::LightClientFinalityUpdate);
-            } else if !self.optimistic_update_peers.contains(peer) {
-                self.ensure_request(
-                    *peer,
-                    addrs.clone(),
-                    RpcRequestKind::LightClientOptimisticUpdate,
-                );
-            } else if !self.ping_peers.contains(peer) {
-                self.ensure_request(*peer, addrs.clone(), RpcRequestKind::Ping);
+            self.ensure_request(peer, Vec::new(), RpcRequestKind::LightClientFinalityUpdate);
+            self.ensure_request(peer, Vec::new(), RpcRequestKind::LightClientOptimisticUpdate);
+            self.ensure_request(peer, Vec::new(), RpcRequestKind::LightClientBootstrap);
+            if self.status_peers.contains(&peer) {
+                self.ensure_request(peer, Vec::new(), RpcRequestKind::Ping);
             }
         }
 
@@ -693,14 +714,16 @@ impl ConsensusNetwork {
         }
     }
 
-    fn is_request_pending(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
-        self.pending_peer_kinds.contains(&(peer, kind))
+    fn clear_peer_state(&mut self, peer: PeerId) {
+        self.status_peers.remove(&peer);
+        self.ping_peers.remove(&peer);
+        self.bootstrap_peers.remove(&peer);
+        self.finality_update_peers.remove(&peer);
+        self.optimistic_update_peers.remove(&peer);
     }
 
-    fn has_pending_request_for_peer(&self, peer: PeerId) -> bool {
-        self.pending_requests
-            .values()
-            .any(|pending| pending.peer == peer)
+    fn is_request_pending(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
+        self.pending_peer_kinds.contains(&(peer, kind))
     }
 
     fn is_request_satisfied(&self, peer: PeerId, kind: RpcRequestKind) -> bool {

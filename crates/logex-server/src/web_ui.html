@@ -50,6 +50,9 @@
   .hint { margin-top: 12px; font-size: 12px; color: #8b949e; line-height: 1.5; }
   .marker-rail { position: relative; height: 108px; }
   .marker-line { position: absolute; top: 52px; left: 0; right: 0; height: 4px; border-radius: 999px; background: linear-gradient(90deg, #58a6ff, #3fb950); opacity: .6; }
+  .marker-fill-live, .marker-fill-history { position: absolute; top: 52px; height: 4px; border-radius: 999px; }
+  .marker-fill-live { background: linear-gradient(90deg, #58a6ff, #7ee787); }
+  .marker-fill-history { background: linear-gradient(90deg, #d29922, #3fb950); }
   .marker { position: absolute; width: max-content; max-width: 160px; transform: translateX(-50%); text-align: center; }
   .marker.top { top: 8px; }
   .marker.bottom { top: 50px; }
@@ -62,6 +65,7 @@
   .marker-optimistic .marker-dot { background: #79c0ff; }
   .marker-finalized .marker-dot { background: #3fb950; }
   .marker-indexed .marker-dot { background: #d29922; }
+  .marker-history .marker-dot { background: #d29922; }
   .marker-cursor .marker-dot { background: #f78166; }
   .marker-genesis .marker-dot { background: #8b949e; }
   .direction-note { margin-top: 10px; display: flex; justify-content: space-between; font-size: 12px; color: #8b949e; }
@@ -98,13 +102,12 @@
   </div>
   <div class="status-panel" id="statusPanel">
     <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
-    <span class="stat">Mode: <b id="stMode">--</b></span>
-    <span class="stat">Coverage: <b id="stDirection">--</b></span>
+    <span class="stat">Checkpoint: <b id="stHeaderCheckpoint">--</b></span>
     <span class="stat">Cursor: <b id="stBlock">--</b></span>
-    <span class="stat">Top: <b id="stTarget">--</b></span>
-    <span class="stat">Indexed: <b id="stIndexed">--</b></span>
-    <span class="stat">Serving: <b id="stServing">--</b></span>
+    <span class="stat">Live head: <b id="stTarget">--</b></span>
+    <span class="stat">Indexed cursor: <b id="stIndexed">--</b></span>
     <span class="stat">Connected: <b id="stPeers">--</b></span>
+    <span class="stat">Serving: <b id="stServing">--</b></span>
     <span class="stat">Candidates: <b id="stPending">--</b></span>
     <span class="stat">Rate: <b id="stSpeed">--</b> blk/s</span>
     <span class="stat">ETA: <b id="stEta">--</b></span>
@@ -120,53 +123,57 @@
     <div class="progress-top">
       <strong id="stProgressPct">--</strong>
       <div class="progress-meta">
-        <span>Model: <b id="stModelMeta">--</b></span>
-        <span>Remaining span: <b id="stRemaining">--</b></span>
-        <span>Canonical top: <b id="stHead">--</b></span>
-        <span>Checkpoint: <b id="stCheckpointShort">--</b></span>
+        <span>Checkpoint block: <b id="stCheckpointBlock">--</b></span>
+        <span>Latest block: <b id="stHead">--</b></span>
+        <span>Toward latest: <b id="stLiveCoverage">--</b></span>
+        <span>Toward genesis: <b id="stHistoryCoverage">--</b></span>
       </div>
     </div>
     <div class="progress-bar"><div class="progress-fill" id="stProgressFill"></div></div>
   </div>
   <div class="cards-grid">
     <div class="meta-card">
-      <div class="card-title">Consensus Markers</div>
+      <div class="card-title">Checkpoint Sync</div>
       <div class="card-grid">
         <div class="kv"><span class="k">Checkpoint Root</span><span class="v mono" id="stCheckpointRoot">--</span></div>
         <div class="kv"><span class="k">Checkpoint Slot</span><span class="v" id="stCheckpointSlot">--</span></div>
+        <div class="kv"><span class="k">Checkpoint Block</span><span class="v" id="stCheckpointExec">--</span></div>
         <div class="kv"><span class="k">Optimistic Head</span><span class="v" id="stOptimistic">--</span></div>
         <div class="kv"><span class="k">Finalized Head</span><span class="v" id="stFinalized">--</span></div>
         <div class="kv"><span class="k">Indexed Head</span><span class="v" id="stIndexedExec">--</span></div>
         <div class="kv"><span class="k">Index Lag</span><span class="v" id="stIndexLag">--</span></div>
         <div class="kv"><span class="k">Finality Gap</span><span class="v" id="stFinalityGap">--</span></div>
         <div class="kv"><span class="k">Execution Head</span><span class="v" id="stExecutionHead">--</span></div>
+        <div class="kv"><span class="k">Latest Bootstrap</span><span class="v" id="stClBootstrapPayload">--</span></div>
+        <div class="kv"><span class="k">Latest Finality</span><span class="v" id="stClFinalityPayload">--</span></div>
+        <div class="kv"><span class="k">Latest Optimistic</span><span class="v" id="stClOptimisticPayload">--</span></div>
       </div>
       <p class="hint" id="stConsensusHint">--</p>
     </div>
     <div class="meta-card">
-      <div class="card-title">Verification Model</div>
+      <div class="card-title">Network</div>
       <div class="card-grid">
-        <div class="kv"><span class="k">Sync Model</span><span class="v" id="stSyncModel">--</span></div>
-        <div class="kv"><span class="k">Coverage</span><span class="v" id="stSyncDirection">--</span></div>
         <div class="kv"><span class="k">Cursor Block</span><span class="v" id="stCursor">--</span></div>
         <div class="kv"><span class="k">Stored Logs</span><span class="v" id="stStoredLogsCard">--</span></div>
         <div class="kv"><span class="k">Session Logs</span><span class="v" id="stSessionLogsCard">--</span></div>
         <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
+        <div class="kv"><span class="k">EL Connected</span><span class="v" id="stPeersCard">--</span></div>
+        <div class="kv"><span class="k">EL Serving</span><span class="v" id="stServingCard">--</span></div>
+        <div class="kv"><span class="k">EL Candidates</span><span class="v" id="stPendingCard">--</span></div>
         <div class="kv"><span class="k">CL Discovery</span><span class="v" id="stClSessions">--</span></div>
-        <div class="kv"><span class="k">CL Peers</span><span class="v" id="stClDialable">--</span></div>
-        <div class="kv"><span class="k">CL Status RPC</span><span class="v" id="stClBootnodes">--</span></div>
-        <div class="kv"><span class="k">CL Bootstrap RPC</span><span class="v" id="stClNodeId">--</span></div>
-        <div class="kv"><span class="k">Latest Bootstrap</span><span class="v" id="stClBootstrapPayload">--</span></div>
-        <div class="kv"><span class="k">Latest Finality</span><span class="v" id="stClFinalityPayload">--</span></div>
-        <div class="kv"><span class="k">Latest Optimistic</span><span class="v" id="stClOptimisticPayload">--</span></div>
+        <div class="kv"><span class="k">CL Connected</span><span class="v" id="stClConnected">--</span></div>
+        <div class="kv"><span class="k">CL Status RPC</span><span class="v" id="stClStatusPeers">--</span></div>
+        <div class="kv"><span class="k">CL Finality RPC</span><span class="v" id="stClFinalityPeers">--</span></div>
+        <div class="kv"><span class="k">CL Optimistic RPC</span><span class="v" id="stClOptimisticPeers">--</span></div>
+        <div class="kv"><span class="k">CL Bootstrap RPC</span><span class="v" id="stClBootstrapPeers">--</span></div>
       </div>
       <p class="hint" id="stDirectionHint">--</p>
     </div>
   </div>
   <div class="rail-card">
-    <div class="card-title">Execution Marker Rail</div>
+    <div class="card-title">Checkpoint-Centered Sync Bar</div>
     <div class="marker-rail" id="markerRail"></div>
-    <div class="direction-note"><span id="railLeftLabel">Toward Head</span><span id="railRightLabel">Toward Genesis</span></div>
+    <div class="direction-note"><span id="railLeftLabel">Latest block</span><span id="railRightLabel">Genesis</span></div>
     <p class="hint" id="stRailHint">--</p>
   </div>
   <div class="query-panel">
@@ -252,12 +259,14 @@ function anchorBlock(anchor) {
   return Number.isFinite(value) ? value : null;
 }
 
-function syncModelLabel(model) {
-  return model === 'cl_anchored' ? 'CL anchored' : 'EL legacy';
+function executionBlockFromHeader(header) {
+  if (!header || !header.execution || header.execution.block_number == null) return null;
+  var value = Number(header.execution.block_number);
+  return Number.isFinite(value) ? value : null;
 }
 
-function syncDirectionLabel(direction) {
-  return direction === 'checkpoint_outward' ? 'Checkpoint outward' : 'Peer tip upward';
+function checkpointExecutionBlock(lightClient) {
+  return executionBlockFromHeader(lightClient && lightClient.bootstrap && lightClient.bootstrap.header);
 }
 
 function lightClientPayloadLabel(fork, header) {
@@ -270,34 +279,58 @@ function lightClientPayloadLabel(fork, header) {
   return [prefix, slot, exec].filter(Boolean).join(' / ');
 }
 
-function railPosition(block, topBlock) {
-  if (!Number.isFinite(block) || !Number.isFinite(topBlock) || topBlock <= 0) return 0;
-  return Math.max(0, Math.min(100, (1 - (block / topBlock)) * 100));
+function liveSidePosition(block, checkpointBlock, liveBlock) {
+  if (!Number.isFinite(block) || !Number.isFinite(checkpointBlock) || !Number.isFinite(liveBlock)) return 50;
+  if (liveBlock <= checkpointBlock) return 50;
+  var ratio = (block - checkpointBlock) / (liveBlock - checkpointBlock);
+  return Math.max(0, Math.min(50, 50 - (ratio * 50)));
 }
 
-function renderMarkerRail(data, topBlock, cursorBlock, hasConsensus) {
+function historySidePosition(block, checkpointBlock) {
+  if (!Number.isFinite(block) || !Number.isFinite(checkpointBlock) || checkpointBlock <= 0) return 50;
+  var ratio = (checkpointBlock - block) / checkpointBlock;
+  return Math.max(50, Math.min(100, 50 + (ratio * 50)));
+}
+
+function renderMarkerRail(data, checkpointBlock, liveBlock, liveVerifiedBlock, historyBlock, hasConsensus) {
   var rail = document.getElementById('markerRail');
-  if (!hasConsensus || !(topBlock > 0)) {
-    rail.innerHTML = '<div class="empty-state">Checkpointed CL mode will populate execution markers here.</div>';
-    document.getElementById('stRailHint').textContent = 'Enable checkpointed consensus sync to see checkpoint-centered execution coverage markers.';
+  if (!hasConsensus) {
+    rail.innerHTML = '<div class="empty-state">Checkpointed consensus sync will place the weak-subjectivity checkpoint at the center of this bar.</div>';
+    document.getElementById('stRailHint').textContent = 'Live and historical coverage become meaningful here once the node is running from a weak-subjectivity checkpoint.';
     return;
   }
 
-  var checkpointLabel = data.checkpoint_root ? truncHash(data.checkpoint_root) : 'Checkpoint';
+  if (!Number.isFinite(checkpointBlock)) {
+    rail.innerHTML = '<div class="empty-state">Waiting for a decoded light-client bootstrap to map the checkpoint onto an execution block.</div>';
+    document.getElementById('stRailHint').textContent = 'The checkpoint marker becomes concrete once a native CL bootstrap payload is decoded and tied to its execution block.';
+    return;
+  }
+
+  var latestKnown = Number.isFinite(liveBlock) ? liveBlock : checkpointBlock;
+  var leftFill = Number.isFinite(liveVerifiedBlock)
+    ? liveSidePosition(liveVerifiedBlock, checkpointBlock, latestKnown)
+    : 50;
+  var rightFill = Number.isFinite(historyBlock)
+    ? historySidePosition(historyBlock, checkpointBlock)
+    : 50;
+  var checkpointLabel = fmt(checkpointBlock);
   var markers = [
-    { name: 'Head', value: fmt(topBlock), pos: 0, className: 'marker-head' },
+    { name: 'Latest', value: fmt(latestKnown), pos: 0, className: 'marker-head' },
     { name: 'Checkpoint', value: checkpointLabel, pos: 50, className: 'marker-checkpoint' },
-    { name: 'Optimistic', value: fmt(anchorBlock(data.optimistic_execution_head)), pos: railPosition(anchorBlock(data.optimistic_execution_head), topBlock), className: 'marker-optimistic' },
-    { name: 'Finalized', value: fmt(anchorBlock(data.finalized_execution_head)), pos: railPosition(anchorBlock(data.finalized_execution_head), topBlock), className: 'marker-finalized' },
-    { name: 'Indexed', value: fmt(anchorBlock(data.indexed_execution_head)), pos: railPosition(anchorBlock(data.indexed_execution_head), topBlock), className: 'marker-indexed' },
-    { name: 'Cursor', value: fmt(cursorBlock), pos: railPosition(cursorBlock, topBlock), className: 'marker-cursor' },
+    { name: 'Optimistic', value: fmt(anchorBlock(data.optimistic_execution_head)), pos: liveSidePosition(anchorBlock(data.optimistic_execution_head), checkpointBlock, latestKnown), className: 'marker-optimistic' },
+    { name: 'Finalized', value: fmt(anchorBlock(data.finalized_execution_head)), pos: liveSidePosition(anchorBlock(data.finalized_execution_head), checkpointBlock, latestKnown), className: 'marker-finalized' },
+    { name: 'Indexed', value: fmt(anchorBlock(data.indexed_execution_head)), pos: liveSidePosition(anchorBlock(data.indexed_execution_head), checkpointBlock, latestKnown), className: 'marker-indexed' },
+    { name: 'Cursor', value: fmt(Number(data.current_block || 0)), pos: liveSidePosition(Number(data.current_block || 0), checkpointBlock, latestKnown), className: 'marker-cursor' },
+    { name: 'History', value: fmt(historyBlock), pos: historySidePosition(historyBlock, checkpointBlock), className: 'marker-history' },
     { name: 'Genesis', value: '0', pos: 100, className: 'marker-genesis' }
   ].filter(function(marker) {
-    return marker.name === 'Head' || marker.name === 'Genesis' || marker.value !== '--';
+    return marker.name === 'Latest' || marker.name === 'Checkpoint' || marker.name === 'Genesis' || marker.value !== '--';
   });
 
   rail.innerHTML =
     '<div class="marker-line"></div>' +
+    '<div class="marker-fill-live" style="left:' + leftFill.toFixed(2) + '%; width:' + (50 - leftFill).toFixed(2) + '%"></div>' +
+    '<div class="marker-fill-history" style="left:50%; width:' + (rightFill - 50).toFixed(2) + '%"></div>' +
     markers.map(function(marker, idx) {
       var placement = idx % 2 === 0 ? 'top' : 'bottom';
       var labelBeforeDot =
@@ -307,8 +340,13 @@ function renderMarkerRail(data, topBlock, cursorBlock, hasConsensus) {
       return '<div class="marker ' + placement + ' ' + marker.className + '" style="left:' + marker.pos.toFixed(2) + '%">' + labelBeforeDot + '</div>';
     }).join('');
 
-  document.getElementById('stRailHint').textContent =
-    'The checkpoint marker is the conceptual origin. Coverage expands from that anchor toward both the live head and genesis.';
+  var liveHint = Number.isFinite(liveVerifiedBlock)
+    ? 'Live-side verification is plotted from the checkpoint toward the latest known block.'
+    : 'Live-side verification will extend left once optimistic or finalized execution heads arrive from CL.';
+  var historyHint = Number.isFinite(historyBlock)
+    ? 'Genesis-side verification is plotted from the checkpoint toward block 0.'
+    : 'Genesis-side verification has not started yet on this branch, so the right side is intentionally left empty.';
+  document.getElementById('stRailHint').textContent = liveHint + ' ' + historyHint;
 }
 
 function updateStatus(data) {
@@ -316,37 +354,68 @@ function updateStatus(data) {
   var target = Number(data.target_block || 0);
   var targetKnown = target > 0;
   var nodeState = data.node_state || 'starting';
-  var syncModel = data.sync_model || 'el_legacy';
-  var syncDirection = data.sync_direction || 'peer_tip_upward';
-  var hasConsensus = syncModel === 'cl_anchored';
+  var hasConsensus = !!data.checkpoint_root;
   var clNetwork = data.consensus_network || {};
   var clLight = data.consensus_light_client || {};
+  var checkpointBlock = checkpointExecutionBlock(clLight);
   var canonicalTop = Number(data.canonical_top_block || 0);
+  var latestKnown = hasConsensus
+    ? (canonicalTop > 0 ? canonicalTop : (targetKnown ? target : null))
+    : (targetKnown ? target : (canonicalTop > 0 ? canonicalTop : null));
   var indexedExec = anchorBlock(data.indexed_execution_head);
   var optimisticExec = anchorBlock(data.optimistic_execution_head);
   var finalizedExec = anchorBlock(data.finalized_execution_head);
+  var liveVerifiedBlock = optimisticExec != null ? optimisticExec : (finalizedExec != null ? finalizedExec : indexedExec);
+  var historyVerifiedBlock = null;
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
   var badgeData = stateToBadge(nodeState);
   badge.className = badgeData.className;
   badgeText.textContent = data.node_state_label || badgeData.label;
 
-  var remaining = null;
   var pct = 0;
   if (hasConsensus) {
-    remaining = indexedExec != null ? indexedExec : (current > 0 ? current : null);
-    if (canonicalTop > 0 && indexedExec != null) {
-      pct = railPosition(indexedExec, canonicalTop);
+    if (Number.isFinite(checkpointBlock) && Number.isFinite(latestKnown) && latestKnown > 0) {
+      var verifiedSpan = 0;
+      if (Number.isFinite(liveVerifiedBlock) && liveVerifiedBlock >= checkpointBlock) {
+        verifiedSpan += (liveVerifiedBlock - checkpointBlock);
+      }
+      if (Number.isFinite(historyVerifiedBlock) && historyVerifiedBlock <= checkpointBlock) {
+        verifiedSpan += (checkpointBlock - historyVerifiedBlock);
+      }
+      pct = Math.max(0, Math.min(100, (verifiedSpan / latestKnown) * 100));
     }
   } else {
-    remaining = targetKnown && target > current ? target - current : null;
     pct = targetKnown ? Math.min((current / target) * 100, 100) : 0;
   }
 
-  document.getElementById('stMode').textContent = syncModelLabel(syncModel);
-  document.getElementById('stDirection').textContent = syncDirectionLabel(syncDirection);
+  var liveCoverage = '--';
+  if (hasConsensus) {
+    if (!Number.isFinite(checkpointBlock)) {
+      liveCoverage = 'Waiting for bootstrap';
+    } else if (!Number.isFinite(liveVerifiedBlock)) {
+      liveCoverage = 'Waiting for CL heads';
+    } else {
+      var liveDistance = Math.max(0, liveVerifiedBlock - checkpointBlock);
+      var liveLag = Number.isFinite(latestKnown) ? Math.max(0, latestKnown - liveVerifiedBlock) : null;
+      liveCoverage = fmt(liveDistance) + ' verified';
+      if (liveLag != null) {
+        liveCoverage += ' / ' + fmt(liveLag) + ' behind';
+      }
+    }
+  } else if (targetKnown) {
+    liveCoverage = fmt(Math.max(0, target - current)) + ' remaining';
+  }
+
+  var historyCoverage = hasConsensus
+    ? (Number.isFinite(historyVerifiedBlock)
+      ? fmt(Math.max(0, checkpointBlock - historyVerifiedBlock)) + ' verified'
+      : 'Not started yet')
+    : '--';
+
+  document.getElementById('stHeaderCheckpoint').textContent = data.checkpoint_root ? truncHash(String(data.checkpoint_root)) : '--';
   document.getElementById('stBlock').textContent = fmt(current);
-  document.getElementById('stTarget').textContent = canonicalTop > 0 ? fmt(canonicalTop) : (targetKnown ? fmt(target) : 'Awaiting tip');
+  document.getElementById('stTarget').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : 'Awaiting tip';
   document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
   document.getElementById('stPeers').textContent = fmt(data.connected_peers);
   document.getElementById('stServing').textContent = fmt(data.serving_peers);
@@ -357,30 +426,34 @@ function updateStatus(data) {
   document.getElementById('stSessionLogs').textContent = fmt(data.logs_ingested);
   document.getElementById('stStorageUsed').textContent = fmtBytes(data.storage_used_bytes);
   document.getElementById('stDiskFree').textContent = fmtBytes(data.disk_free_bytes);
-  document.getElementById('stModelMeta').textContent = syncModelLabel(syncModel);
-  document.getElementById('stHead').textContent = canonicalTop > 0 ? fmt(canonicalTop) : '--';
-  document.getElementById('stCheckpointShort').textContent = data.checkpoint_root ? truncHash(data.checkpoint_root) : '--';
-  document.getElementById('stRemaining').textContent = remaining == null ? '--' : fmt(remaining);
+  document.getElementById('stCheckpointBlock').textContent = fmt(checkpointBlock);
+  document.getElementById('stHead').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : '--';
+  document.getElementById('stLiveCoverage').textContent = liveCoverage;
+  document.getElementById('stHistoryCoverage').textContent = historyCoverage;
 
   document.getElementById('stCheckpointRoot').textContent = data.checkpoint_root || '--';
   document.getElementById('stCheckpointSlot').textContent = fmt(data.checkpoint_slot);
+  document.getElementById('stCheckpointExec').textContent = fmt(checkpointBlock);
   document.getElementById('stOptimistic').textContent = fmt(optimisticExec);
   document.getElementById('stFinalized').textContent = fmt(finalizedExec);
   document.getElementById('stIndexedExec').textContent = fmt(indexedExec);
   document.getElementById('stIndexLag').textContent = fmt(data.index_lag_blocks);
   document.getElementById('stFinalityGap').textContent = fmt(data.finality_lag_blocks);
-  document.getElementById('stExecutionHead').textContent = canonicalTop > 0 ? fmt(canonicalTop) : '--';
+  document.getElementById('stExecutionHead').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : '--';
 
-  document.getElementById('stSyncModel').textContent = syncModelLabel(syncModel);
-  document.getElementById('stSyncDirection').textContent = syncDirectionLabel(syncDirection);
   document.getElementById('stCursor').textContent = fmt(current);
   document.getElementById('stStoredLogsCard').textContent = fmt(data.total_rows);
   document.getElementById('stSessionLogsCard').textContent = fmt(data.logs_ingested);
   document.getElementById('stPeerTip').textContent = targetKnown ? fmt(target) : '--';
+  document.getElementById('stPeersCard').textContent = fmt(data.connected_peers);
+  document.getElementById('stServingCard').textContent = fmt(data.serving_peers);
+  document.getElementById('stPendingCard').textContent = fmt(data.pending_peers);
   document.getElementById('stClSessions').textContent = fmt(clNetwork.active_sessions);
-  document.getElementById('stClDialable').textContent = fmt(clNetwork.connected_peer_sessions);
-  document.getElementById('stClBootnodes').textContent = fmt(clNetwork.status_peers);
-  document.getElementById('stClNodeId').textContent = fmt(clNetwork.bootstrap_peers);
+  document.getElementById('stClConnected').textContent = fmt(clNetwork.connected_peer_sessions);
+  document.getElementById('stClStatusPeers').textContent = fmt(clNetwork.status_peers);
+  document.getElementById('stClFinalityPeers').textContent = fmt(clNetwork.finality_update_peers);
+  document.getElementById('stClOptimisticPeers').textContent = fmt(clNetwork.optimistic_update_peers);
+  document.getElementById('stClBootstrapPeers').textContent = fmt(clNetwork.bootstrap_peers);
   document.getElementById('stClBootstrapPayload').textContent = lightClientPayloadLabel(
     clLight.bootstrap && clLight.bootstrap.fork,
     clLight.bootstrap && clLight.bootstrap.header
@@ -396,13 +469,15 @@ function updateStatus(data) {
 
   if (hasConsensus) {
     document.getElementById('stConsensusHint').textContent =
-      'Checkpoint, optimistic, finalized, and indexed execution anchors show the canonical CL view that EL data must match.';
+      'Checkpoint, optimistic, finalized, and indexed execution anchors show the CL-authenticated execution path that EL data must match before logs are accepted.';
     document.getElementById('stDirectionHint').textContent =
-      'CL-anchored history proving is checkpoint-centered: discovery tracks native consensus peers while verification expands from the weak-subjectivity anchor toward both the live head and genesis.';
-    if (canonicalTop > 0) {
-      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% downward history coverage from the checkpoint model';
+      'This checkpoint-centered view tracks two jobs independently: staying near the live head and proving older history down toward genesis.';
+    if (!Number.isFinite(checkpointBlock)) {
+      document.getElementById('stProgressPct').textContent = 'Waiting for a decoded checkpoint bootstrap';
+    } else if (Number.isFinite(liveVerifiedBlock)) {
+      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% of full-chain span verified around the checkpoint';
     } else {
-      document.getElementById('stProgressPct').textContent = 'Checkpoint-centered verification, awaiting canonical head marker';
+      document.getElementById('stProgressPct').textContent = 'Checkpoint loaded, waiting for live CL execution heads';
     }
   } else if (nodeState === 'syncing' || nodeState === 'synced') {
     document.getElementById('stConsensusHint').textContent =
@@ -416,7 +491,7 @@ function updateStatus(data) {
     }
   } else if (nodeState === 'connecting' && Number(data.connected_peers || 0) > 0) {
     document.getElementById('stConsensusHint').textContent =
-      'Checkpointed consensus sync is not active yet, so the dashboard is showing legacy EL status only.';
+      'Checkpointed consensus sync is not active yet, so the dashboard is showing EL-only status.';
     document.getElementById('stDirectionHint').textContent =
       'Connected, waiting for a serving peer that can supply a credible tip.';
     document.getElementById('stProgressPct').textContent = 'Connected, waiting for serving peer';
@@ -429,7 +504,7 @@ function updateStatus(data) {
   }
 
   document.getElementById('stProgressFill').style.width = pct.toFixed(1) + '%';
-  renderMarkerRail(data, canonicalTop, current, hasConsensus);
+  renderMarkerRail(data, checkpointBlock, latestKnown, liveVerifiedBlock, historyVerifiedBlock, hasConsensus);
 }
 
 function fetchStatus() {
