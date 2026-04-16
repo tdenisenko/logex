@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alloy_primitives::hex;
-use discv5::enr::{CombinedKey, EnrPublicKey, NodeId};
+use discv5::enr::{CombinedKey, CombinedPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
 use futures::StreamExt;
 use libp2p::gossipsub;
@@ -36,7 +36,10 @@ use crate::rpc::{
     build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
     build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, resource_unavailable,
 };
-use crate::{ConsensusStore, decode_bootstrap, decode_finality_update, decode_optimistic_update};
+use crate::{
+    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, decode_bootstrap, decode_finality_update,
+    decode_optimistic_update,
+};
 
 const CONSENSUS_STATE_DIR: &str = "cl";
 const DISCOVERY_SECRET_FILE: &str = "discovery-secret";
@@ -1672,18 +1675,13 @@ impl ConsensusNetwork {
     }
 
     fn local_status_message(&self) -> StatusMessage {
-        let checkpoint = self.consensus.checkpoint();
-        match checkpoint.beacon_slot {
-            Some(slot) => StatusMessage {
-                fork_digest: self.fork_digest,
-                finalized_root: checkpoint.beacon_root,
-                finalized_epoch: slot / 32,
-                head_root: checkpoint.beacon_root,
-                head_slot: slot,
-                earliest_available_slot: slot,
-            },
-            None => StatusMessage::genesis(self.fork_digest),
-        }
+        // Until LogEx can actually serve verified light-client history to peers, advertise only
+        // genesis-based availability instead of implying that checkpoint-rooted data is locally
+        // available over req/resp.
+        StatusMessage::genesis(
+            self.fork_digest,
+            MAINNET_CONSENSUS_CHAIN_SPEC.genesis_block_root,
+        )
     }
 
     fn local_metadata(&self) -> MetaData {
@@ -2194,9 +2192,21 @@ fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
 }
 
 fn peer_id_from_enr(enr: &Enr) -> Result<PeerId, String> {
-    let public_key = identity::secp256k1::PublicKey::try_from_bytes(&enr.public_key().encode())
-        .map_err(|error| error.to_string())?;
-    Ok(identity::PublicKey::from(public_key).to_peer_id())
+    let public_key = match enr.public_key() {
+        CombinedPublicKey::Secp256k1(public_key) => {
+            let public_key = identity::secp256k1::PublicKey::try_from_bytes(
+                &public_key.to_sec1_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+            identity::PublicKey::from(public_key)
+        }
+        CombinedPublicKey::Ed25519(public_key) => {
+            let public_key = identity::ed25519::PublicKey::try_from_bytes(&public_key.to_bytes())
+                .map_err(|error| error.to_string())?;
+            identity::PublicKey::from(public_key)
+        }
+    };
+    Ok(PeerId::from_public_key(&public_key))
 }
 
 fn multiaddr_from_ip(ip: IpAddr, port: u16, peer_id: PeerId) -> Multiaddr {
@@ -2316,6 +2326,15 @@ mod tests {
                 .iter()
                 .all(|addr| addr.to_string().contains(&peer_id.to_string()))
         );
+    }
+
+    #[test]
+    fn peer_id_from_enr_matches_libp2p_identity() {
+        let enr_key = CombinedKey::generate_secp256k1();
+        let enr = Enr::builder().build(&enr_key).unwrap();
+        let libp2p_keypair = build_libp2p_keypair(&enr_key).unwrap();
+
+        assert_eq!(peer_id_from_enr(&enr).unwrap(), libp2p_keypair.public().to_peer_id());
     }
 
     #[test]

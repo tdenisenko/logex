@@ -11,10 +11,12 @@ use logex_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod chain;
 mod light_client;
 mod network;
 mod rpc;
 
+pub(crate) use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
 pub use light_client::{
     LightClientDecodeError, decode_bootstrap, decode_finality_update, decode_optimistic_update,
 };

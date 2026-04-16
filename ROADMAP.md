@@ -109,6 +109,8 @@ LogEx should become a canonical Ethereum event-log node that:
   - the first outbound single-response CL req/resp transport is wired for `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate`
   - outbound CL req/resp is now split by protocol family instead of trying to multiplex every request type through one shared libp2p request/response behaviour
   - `Status v2` and `MetaData v3` are now encoded and decoded correctly for current post-Fulu peers, while still keeping `Status v1`, `MetaData v2`, and `MetaData v1` fallback support
+  - mainnet consensus chain constants are now explicit inside LogEx for handshake and future verification work, including the real beacon genesis block root and genesis validators root
+  - ENR-to-libp2p peer-id derivation now follows the same secp256k1 conversion path used by Lighthouse, removing a concrete identity-mismatch risk from CL peer dialing
   - `Goodbye v1` is now implemented so LogEx can rotate bad peers using the consensus RPC instead of only dropping TCP sessions
   - the CL request scheduler now keeps peer-state counters honest by clearing them on disconnect, treats `Status` as the first handshake to finish before light-client fetches, and counts inbound `Status` as a completed handshake instead of waiting for a redundant round-trip
   - the CL request scheduler now respects a per-protocol in-flight request cap instead of blasting every connected peer at once
@@ -196,12 +198,16 @@ LogEx should become a canonical Ethereum event-log node that:
   - outbound QUIC transport is implemented and peer ENRs are now harvested for both TCP and QUIC dial addresses
   - the current scheduler once again behaves like a light client should:
     - `Status` is sent first on new peer sessions, even before identify finishes
-    - a genesis-style `Status` message is used while bootstrap is still missing
+    - while LogEx is not yet serving verified light-client history to peers, it now uses a genesis-style `Status` message that follows the spec more closely: the head side is anchored to the real mainnet beacon genesis block root while the finalized checkpoint remains the canonical zero root for epoch 0, instead of advertising checkpoint-rooted availability it cannot serve
     - bootstrap is prioritized before finality / optimistic requests, instead of blasting every light-client method at once
   - reliable live acquisition of light-client bootstrap/finality/optimistic payloads is still not implemented yet
   - cryptographic verification of those payloads is still not implemented yet
   - multi-chunk CL req/resp (`LightClientUpdatesByRange`, beacon block fetches) is still not implemented yet
   - current gossip subscriptions decode payloads for observability, but they still do not perform sync-committee validation or feed canonical anchor production yet
+  - recent mainnet smokes are healthier than before the latest interop fixes:
+    - pre-bootstrap `Status` now uses the genesis head / zero finalized-checkpoint form expected by the spec
+    - ENR-derived peer IDs now follow the same secp256k1 conversion path used by Lighthouse
+    - live identified CL sessions now occasionally appear, but they still do not stay up long enough to make bootstrap/status progress reliable
 - The current branch also does not yet implement the pre-Merge PoW canonicality path.
 - This means the current branch is a real architectural shift, but not yet the full end-to-end canonical system.
 
@@ -254,6 +260,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - the local consensus ENR now includes `attnets` / `syncnets`, and LogEx now subscribes to the light-client finality / optimistic gossip topics for the current fork digest
      - the consensus transport now includes outbound QUIC dialing, peer ENRs are harvested for QUIC addresses as well as TCP, and shared discovery/p2p UDP ports no longer crash the node when QUIC is enabled
      - restarting with the same checkpoint root plus a newly supplied slot now enriches the persisted checkpoint instead of forcing a fresh data directory, while conflicting checkpoint roots still fail loudly
+     - mainnet consensus chain constants are now recorded explicitly inside LogEx, the pre-bootstrap `Status` handshake now uses the real beacon genesis block root plus the canonical zero finalized checkpoint rather than a placeholder-style root or an unserved checkpoint root, and ENR-derived peer IDs now follow the same secp256k1 conversion used by Lighthouse
    - TODO:
      - finish the remaining mainnet interop gap: live smoke now reaches discovery, outbound `Status`, outbound bootstrap attempts, and live gossip subscriptions, but stable `Status` round-trips still do not land reliably on useful light-client peers
      - diagnose and fix the remaining peer-retention failure so `Status` can land first and stay landed long enough for bootstrap to succeed; without that, bootstrap/finality/optimistic cannot become reliable

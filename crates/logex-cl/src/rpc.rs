@@ -93,12 +93,12 @@ pub struct StatusMessage {
 }
 
 impl StatusMessage {
-    pub fn genesis(fork_digest: [u8; 4]) -> Self {
+    pub fn genesis(fork_digest: [u8; 4], genesis_block_root: B256) -> Self {
         Self {
             fork_digest,
             finalized_root: B256::ZERO,
             finalized_epoch: 0,
-            head_root: B256::ZERO,
+            head_root: genesis_block_root,
             head_slot: 0,
             earliest_available_slot: 0,
         }
@@ -759,6 +759,18 @@ mod tests {
         let decoded = decode_metadata(&Eth2RpcProtocol::MetadataV3, &encoded).unwrap();
 
         assert_eq!(decoded, metadata);
+    }
+
+    #[test]
+    fn genesis_status_uses_genesis_block_root() {
+        let genesis_root = B256::repeat_byte(0x55);
+        let status = StatusMessage::genesis([1, 2, 3, 4], genesis_root);
+
+        assert_eq!(status.finalized_root, B256::ZERO);
+        assert_eq!(status.head_root, genesis_root);
+        assert_eq!(status.finalized_epoch, 0);
+        assert_eq!(status.head_slot, 0);
+        assert_eq!(status.earliest_available_slot, 0);
     }
 
     #[test]
