@@ -109,6 +109,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - the first outbound single-response CL req/resp transport is wired for `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate`
   - outbound CL req/resp is now split by protocol family instead of trying to multiplex every request type through one shared libp2p request/response behaviour
   - `Status v2` and `MetaData v3` are now encoded and decoded correctly for current post-Fulu peers, while still keeping `Status v1`, `MetaData v2`, and `MetaData v1` fallback support
+  - `Goodbye v1` is now implemented so LogEx can rotate bad peers using the consensus RPC instead of only dropping TCP sessions
   - the CL request scheduler now keeps peer-state counters honest by clearing them on disconnect, treats `Status` as the first handshake to finish before light-client fetches, and counts inbound `Status` as a completed handshake instead of waiting for a redundant round-trip
   - the CL request scheduler now respects a per-protocol in-flight request cap instead of blasting every connected peer at once
   - native CL status surfaces now expose identified-peer counts, protocol-capability counts, per-kind in-flight requests, and per-kind request-failure counters so live mainnet interop failures are inspectable instead of guesswork
@@ -177,6 +178,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - the first raw single-response CL req/resp transport is implemented
   - that transport now uses per-method protocol families instead of one shared outbound req/resp family
   - `Status v2` and `MetaData v3` are implemented with backward compatibility for older peers, and `MetaData v1` fallback support is now in place as well
+  - `Goodbye v1` is implemented so peer eviction can use the consensus RPC instead of only raw disconnects
   - the CL request scheduler now prioritizes `Status` as the connection handshake, counts inbound `Status` as success, and no longer treats disconnected responders as healthy current peers
   - the CL scheduler now keeps per-protocol request concurrency within the consensus req/resp limit instead of fanning out unbounded requests
   - `/status` now surfaces identified peers, protocol-capability counts, per-kind in-flight requests, and per-kind request-failure counters for native CL debugging
@@ -222,6 +224,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - outbound single-response req/resp transport is wired for `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate`
      - outbound req/resp is now split into per-method protocol families so `Status`, `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` no longer negotiate against the wrong protocol id on the wire
      - `Status v2` and `MetaData v3` are now implemented for current post-Fulu peers, while preserving `Status v1`, `MetaData v2`, and `MetaData v1` fallback compatibility
+     - `Goodbye v1` is now implemented so peer rotation can use the consensus RPC instead of only dropping TCP sessions
      - the CL scheduler now treats `Status` as the first-class handshake, sends it even before identify data arrives, and only fans out light-client requests after the peer is considered handshaked
      - inbound peer `Status` requests now count as handshake progress instead of being ignored after the response is sent
      - peer success counters are now cleared on disconnect so `/status` reflects live CL session health rather than stale historical responders
@@ -234,7 +237,7 @@ LogEx should become a canonical Ethereum event-log node that:
    - TODO:
      - finish the remaining mainnet interop gap: live smoke now reaches discovery, libp2p sessions, identify, and outbound native req/resp, but stable `Status` round-trips still do not land reliably on useful light-client peers
      - diagnose and fix the remaining live handshake failure so stable native `Status` round-trips land first; without that, bootstrap/finality/optimistic cannot become reliable
-     - implement the remaining baseline RPC compatibility work that live churn still points to, including `Goodbye v1` handling and any remaining request/response wire details needed for stable interop with Lighthouse/Teku/Nimbus-class peers
+     - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1`, including any request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
      - once `Status` is landing reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
      - implement native CL req/resp for `LightClientUpdatesByRange` and beacon block fetches

@@ -26,10 +26,11 @@ use tokio::task::JoinHandle;
 
 use crate::rpc::{
     Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse,
-    LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID, LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
-    LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID, METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID,
-    METADATA_V3_PROTOCOL_ID, MetaData, PING_PROTOCOL_ID, STATUS_V1_PROTOCOL_ID,
-    STATUS_V2_PROTOCOL_ID, StatusMessage, build_light_client_bootstrap_behaviour,
+    GOODBYE_V1_PROTOCOL_ID, LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
+    LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID,
+    METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID, METADATA_V3_PROTOCOL_ID, MetaData,
+    PING_PROTOCOL_ID, STATUS_V1_PROTOCOL_ID, STATUS_V2_PROTOCOL_ID, StatusMessage,
+    build_goodbye_behaviour, build_light_client_bootstrap_behaviour,
     build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
     build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, resource_unavailable,
 };
@@ -43,6 +44,8 @@ const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
+const GOODBYE_REASON_IRRELEVANT_NETWORK: u64 = 2;
+const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
 
@@ -99,6 +102,7 @@ struct PersistedPeer {
 struct ConsensusBehaviour {
     identify: identify::Behaviour,
     status_rpc: StatusRpcBehaviour,
+    goodbye_rpc: GoodbyeRpcBehaviour,
     metadata_rpc: MetadataRpcBehaviour,
     ping_rpc: PingRpcBehaviour,
     light_client_bootstrap_rpc: LightClientBootstrapRpcBehaviour,
@@ -110,6 +114,7 @@ struct ConsensusBehaviour {
 enum ConsensusBehaviourEvent {
     Identify(Box<identify::Event>),
     StatusRpc(Eth2RpcEvent),
+    GoodbyeRpc(Eth2RpcEvent),
     MetadataRpc(Eth2RpcEvent),
     PingRpc(Eth2RpcEvent),
     LightClientBootstrapRpc(Eth2RpcEvent),
@@ -141,6 +146,27 @@ impl From<Eth2RpcEvent> for StatusRpcWrappedEvent {
 impl From<StatusRpcWrappedEvent> for ConsensusBehaviourEvent {
     fn from(event: StatusRpcWrappedEvent) -> Self {
         ConsensusBehaviourEvent::StatusRpc(event.0)
+    }
+}
+
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "GoodbyeRpcWrappedEvent")]
+struct GoodbyeRpcBehaviour {
+    inner: Eth2RpcBehaviour,
+}
+
+#[derive(Debug)]
+struct GoodbyeRpcWrappedEvent(Eth2RpcEvent);
+
+impl From<Eth2RpcEvent> for GoodbyeRpcWrappedEvent {
+    fn from(event: Eth2RpcEvent) -> Self {
+        Self(event)
+    }
+}
+
+impl From<GoodbyeRpcWrappedEvent> for ConsensusBehaviourEvent {
+    fn from(event: GoodbyeRpcWrappedEvent) -> Self {
+        ConsensusBehaviourEvent::GoodbyeRpc(event.0)
     }
 }
 
@@ -299,6 +325,7 @@ struct ConsensusNetwork {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RpcRequestKind {
     Status,
+    Goodbye,
     MetaData,
     Ping,
     LightClientBootstrap,
@@ -310,6 +337,7 @@ impl RpcRequestKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::Goodbye => "goodbye",
             Self::MetaData => "metadata",
             Self::Ping => "ping",
             Self::LightClientBootstrap => "light_client_bootstrap",
@@ -322,6 +350,7 @@ impl RpcRequestKind {
 #[derive(Debug, Clone, Copy, Default)]
 struct RpcFailureCounts {
     status: u64,
+    goodbye: u64,
     metadata: u64,
     ping: u64,
     bootstrap: u64,
@@ -333,6 +362,7 @@ impl RpcFailureCounts {
     fn increment(&mut self, kind: RpcRequestKind) {
         match kind {
             RpcRequestKind::Status => self.status += 1,
+            RpcRequestKind::Goodbye => self.goodbye += 1,
             RpcRequestKind::MetaData => self.metadata += 1,
             RpcRequestKind::Ping => self.ping += 1,
             RpcRequestKind::LightClientBootstrap => self.bootstrap += 1,
@@ -345,6 +375,7 @@ impl RpcFailureCounts {
 #[derive(Debug, Clone, Copy, Default)]
 struct PeerFailureCounts {
     status: u32,
+    goodbye: u32,
     metadata: u32,
     ping: u32,
     bootstrap: u32,
@@ -358,6 +389,10 @@ impl PeerFailureCounts {
             RpcRequestKind::Status => {
                 self.status += 1;
                 self.status
+            }
+            RpcRequestKind::Goodbye => {
+                self.goodbye += 1;
+                self.goodbye
             }
             RpcRequestKind::MetaData => {
                 self.metadata += 1;
@@ -385,6 +420,7 @@ impl PeerFailureCounts {
     fn reset(&mut self, kind: RpcRequestKind) {
         match kind {
             RpcRequestKind::Status => self.status = 0,
+            RpcRequestKind::Goodbye => self.goodbye = 0,
             RpcRequestKind::MetaData => self.metadata = 0,
             RpcRequestKind::Ping => self.ping = 0,
             RpcRequestKind::LightClientBootstrap => self.bootstrap = 0,
@@ -397,6 +433,7 @@ impl PeerFailureCounts {
 #[derive(Debug, Clone, Copy, Default)]
 struct PeerRpcSupport {
     status: bool,
+    goodbye: bool,
     metadata: bool,
     ping: bool,
     light_client_bootstrap: bool,
@@ -410,6 +447,7 @@ impl PeerRpcSupport {
         for protocol in &info.protocols {
             match protocol.as_ref() {
                 STATUS_V1_PROTOCOL_ID | STATUS_V2_PROTOCOL_ID => support.status = true,
+                GOODBYE_V1_PROTOCOL_ID => support.goodbye = true,
                 METADATA_V1_PROTOCOL_ID | METADATA_V2_PROTOCOL_ID | METADATA_V3_PROTOCOL_ID => {
                     support.metadata = true;
                 }
@@ -430,6 +468,7 @@ impl PeerRpcSupport {
     const fn supports_request(self, kind: RpcRequestKind) -> bool {
         match kind {
             RpcRequestKind::Status => self.status,
+            RpcRequestKind::Goodbye => self.goodbye,
             RpcRequestKind::MetaData => self.metadata,
             RpcRequestKind::Ping => self.ping,
             RpcRequestKind::LightClientBootstrap => self.light_client_bootstrap,
@@ -698,6 +737,9 @@ impl ConsensusNetwork {
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::StatusRpc(event)) => {
                 self.handle_rpc_event(RpcRequestKind::Status, event);
             }
+            SwarmEvent::Behaviour(ConsensusBehaviourEvent::GoodbyeRpc(event)) => {
+                self.handle_goodbye_rpc_event(event);
+            }
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::MetadataRpc(event)) => {
                 self.handle_metadata_rpc_event(event);
             }
@@ -746,7 +788,7 @@ impl ConsensusNetwork {
                         optimistic = support.light_client_optimistic_update,
                         "disconnecting consensus peer that does not advertise the full light-client req/resp set"
                     );
-                    self.disconnect_peer(peer_id);
+                    self.disconnect_peer_with_reason(peer_id, GOODBYE_REASON_IRRELEVANT_NETWORK);
                     return;
                 }
                 self.drive_rpc_requests();
@@ -788,6 +830,9 @@ impl ConsensusNetwork {
                         }
                         Eth2RpcRequest::Ping(_) => {
                             Eth2RpcResponse::Ping(self.local_metadata().seq_number)
+                        }
+                        Eth2RpcRequest::Goodbye(_) => {
+                            resource_unavailable("goodbye must use the goodbye RPC family")
                         }
                         Eth2RpcRequest::LightClientBootstrap(_)
                         | Eth2RpcRequest::LightClientFinalityUpdate
@@ -845,7 +890,7 @@ impl ConsensusNetwork {
                         failures = peer_failures,
                         "disconnecting consensus peer after repeated status RPC failures"
                     );
-                    self.disconnect_peer(peer);
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
                 }
             }
             request_response::Event::InboundFailure {
@@ -863,6 +908,93 @@ impl ConsensusNetwork {
                 if kind == RpcRequestKind::Status {
                     self.drive_rpc_requests();
                 }
+            }
+        }
+    }
+
+    fn handle_goodbye_rpc_event(&mut self, event: Eth2RpcEvent) {
+        match event {
+            request_response::Event::Message { peer, message, .. } => match message {
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    tracing::debug!(%peer, ?request, "received inbound consensus goodbye RPC request");
+                    let response = match request {
+                        Eth2RpcRequest::Goodbye(reason) => Eth2RpcResponse::Goodbye(reason),
+                        _ => resource_unavailable("unsupported request on goodbye RPC family"),
+                    };
+                    if let Err(response) = self
+                        .swarm
+                        .behaviour_mut()
+                        .goodbye_rpc
+                        .inner
+                        .send_response(channel, response)
+                    {
+                        tracing::warn!(
+                            %peer,
+                            error = ?response,
+                            "failed to send consensus goodbye RPC response"
+                        );
+                    }
+                    self.disconnect_now(peer);
+                }
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                } => {
+                    let Some(_) = self.take_pending_request(RpcRequestKind::Goodbye, request_id)
+                    else {
+                        tracing::warn!(%peer, ?request_id, "received consensus goodbye response for an unknown request");
+                        return;
+                    };
+                    match response {
+                        Eth2RpcResponse::Goodbye(reason) => {
+                            tracing::debug!(%peer, reason, "received consensus goodbye response");
+                        }
+                        Eth2RpcResponse::Error(error) => {
+                            tracing::debug!(
+                                %peer,
+                                error_code = error.code,
+                                message = %String::from_utf8_lossy(&error.message),
+                                "consensus goodbye RPC returned an error"
+                            );
+                        }
+                        other => {
+                            tracing::warn!(
+                                %peer,
+                                ?other,
+                                "consensus goodbye RPC returned an unexpected response"
+                            );
+                        }
+                    }
+                    self.disconnect_now(peer);
+                }
+            },
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                let _ = self.take_pending_request(RpcRequestKind::Goodbye, request_id);
+                self.request_failures.increment(RpcRequestKind::Goodbye);
+                tracing::debug!(%peer, ?request_id, %error, "consensus goodbye RPC request failed");
+                self.disconnect_now(peer);
+            }
+            request_response::Event::InboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                tracing::debug!(%peer, ?request_id, %error, "consensus goodbye RPC inbound failure");
+                self.disconnect_now(peer);
+            }
+            request_response::Event::ResponseSent {
+                peer, request_id, ..
+            } => {
+                tracing::debug!(%peer, ?request_id, "consensus goodbye RPC response sent");
+                self.disconnect_now(peer);
             }
         }
     }
@@ -1094,7 +1226,7 @@ impl ConsensusNetwork {
                         failures = peer_failures,
                         "disconnecting consensus peer after repeated status RPC errors"
                     );
-                    self.disconnect_peer(peer);
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
                 }
             }
             (kind, response) => {
@@ -1201,6 +1333,12 @@ impl ConsensusNetwork {
                 .status_rpc
                 .inner
                 .send_response(channel, response),
+            RpcRequestKind::Goodbye => self
+                .swarm
+                .behaviour_mut()
+                .goodbye_rpc
+                .inner
+                .send_response(channel, response),
             RpcRequestKind::MetaData => self
                 .swarm
                 .behaviour_mut()
@@ -1266,6 +1404,12 @@ impl ConsensusNetwork {
                 .status_rpc
                 .inner
                 .send_request(&peer, request),
+            RpcRequestKind::Goodbye => self
+                .swarm
+                .behaviour_mut()
+                .goodbye_rpc
+                .inner
+                .send_request(&peer, request),
             RpcRequestKind::MetaData => self
                 .swarm
                 .behaviour_mut()
@@ -1305,6 +1449,7 @@ impl ConsensusNetwork {
     fn build_request(&self, kind: RpcRequestKind) -> Eth2RpcRequest {
         match kind {
             RpcRequestKind::Status => Eth2RpcRequest::Status(self.local_status_message()),
+            RpcRequestKind::Goodbye => Eth2RpcRequest::Goodbye(GOODBYE_REASON_FAULT),
             RpcRequestKind::MetaData => Eth2RpcRequest::MetaData,
             RpcRequestKind::Ping => Eth2RpcRequest::Ping(0),
             RpcRequestKind::LightClientBootstrap => {
@@ -1346,7 +1491,39 @@ impl ConsensusNetwork {
         }
     }
 
-    fn disconnect_peer(&mut self, peer: PeerId) {
+    fn disconnect_peer_with_reason(&mut self, peer: PeerId, reason: u64) {
+        if self.is_request_pending(peer, RpcRequestKind::Goodbye) {
+            return;
+        }
+        let supports_goodbye = self
+            .peer_support
+            .get(&peer)
+            .copied()
+            .map(|support| support.supports_request(RpcRequestKind::Goodbye))
+            .unwrap_or(false);
+        if !supports_goodbye || !self.connected_peers.contains(&peer) {
+            self.disconnect_now(peer);
+            return;
+        }
+
+        let request_id = self
+            .swarm
+            .behaviour_mut()
+            .goodbye_rpc
+            .inner
+            .send_request(&peer, Eth2RpcRequest::Goodbye(reason));
+        self.pending_requests.insert(
+            PendingRequestKey {
+                kind: RpcRequestKind::Goodbye,
+                request_id,
+            },
+            peer,
+        );
+        self.pending_peer_kinds
+            .insert((peer, RpcRequestKind::Goodbye));
+    }
+
+    fn disconnect_now(&mut self, peer: PeerId) {
         let _ = self.swarm.disconnect_peer_id(peer);
     }
 
@@ -1391,6 +1568,7 @@ impl ConsensusNetwork {
     fn is_request_satisfied(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
         match kind {
             RpcRequestKind::Status => self.status_peers.contains(&peer),
+            RpcRequestKind::Goodbye => false,
             RpcRequestKind::MetaData => self.metadata_peers.contains(&peer),
             RpcRequestKind::Ping => self.ping_peers.contains(&peer),
             RpcRequestKind::LightClientBootstrap => self.bootstrap_peers.contains(&peer),
@@ -1559,6 +1737,9 @@ fn build_rpc_swarm(
                 identify,
                 status_rpc: StatusRpcBehaviour {
                     inner: build_status_behaviour(),
+                },
+                goodbye_rpc: GoodbyeRpcBehaviour {
+                    inner: build_goodbye_behaviour(),
                 },
                 metadata_rpc: MetadataRpcBehaviour {
                     inner: build_metadata_behaviour(),
@@ -1848,6 +2029,7 @@ mod tests {
             listen_addrs: vec![],
             protocols: vec![
                 StreamProtocol::new(STATUS_V2_PROTOCOL_ID),
+                StreamProtocol::new(GOODBYE_V1_PROTOCOL_ID),
                 StreamProtocol::new(METADATA_V1_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID),
@@ -1859,7 +2041,9 @@ mod tests {
 
         let support = PeerRpcSupport::from_identify_info(&info);
         assert!(support.status);
+        assert!(support.goodbye);
         assert!(support.metadata);
+        assert!(support.supports_request(RpcRequestKind::Goodbye));
         assert!(support.supports_light_client());
         assert!(support.supports_request(RpcRequestKind::MetaData));
         assert!(support.supports_request(RpcRequestKind::LightClientBootstrap));

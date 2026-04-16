@@ -9,6 +9,7 @@ use snap::write::FrameEncoder;
 
 pub(crate) const STATUS_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/1/ssz_snappy";
 pub(crate) const STATUS_V2_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/2/ssz_snappy";
+pub(crate) const GOODBYE_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/goodbye/1/ssz_snappy";
 pub(crate) const METADATA_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/1/ssz_snappy";
 pub(crate) const METADATA_V2_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
 pub(crate) const METADATA_V3_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/3/ssz_snappy";
@@ -31,6 +32,7 @@ pub type Eth2OutboundRequestId = request_response::OutboundRequestId;
 pub enum Eth2RpcProtocol {
     StatusV2,
     StatusV1,
+    GoodbyeV1,
     MetadataV3,
     MetadataV2,
     MetadataV1,
@@ -45,6 +47,7 @@ impl AsRef<str> for Eth2RpcProtocol {
         match self {
             Self::StatusV2 => STATUS_V2_PROTOCOL_ID,
             Self::StatusV1 => STATUS_V1_PROTOCOL_ID,
+            Self::GoodbyeV1 => GOODBYE_V1_PROTOCOL_ID,
             Self::MetadataV3 => METADATA_V3_PROTOCOL_ID,
             Self::MetadataV2 => METADATA_V2_PROTOCOL_ID,
             Self::MetadataV1 => METADATA_V1_PROTOCOL_ID,
@@ -59,6 +62,7 @@ impl AsRef<str> for Eth2RpcProtocol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eth2RpcRequest {
     Status(StatusMessage),
+    Goodbye(u64),
     MetaData,
     Ping(u64),
     LightClientBootstrap(B256),
@@ -69,6 +73,7 @@ pub enum Eth2RpcRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eth2RpcResponse {
     Status(StatusMessage),
+    Goodbye(u64),
     MetaData(MetaData),
     Ping(u64),
     LightClientBootstrap(RawRpcResponse),
@@ -149,6 +154,10 @@ pub fn build_status_behaviour() -> Eth2RpcBehaviour {
         (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
         (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
     ])
+}
+
+pub fn build_goodbye_behaviour() -> Eth2RpcBehaviour {
+    build_rpc_behaviour([(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)])
 }
 
 pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
@@ -250,6 +259,9 @@ fn encode_request(protocol: &Eth2RpcProtocol, request: Eth2RpcRequest) -> io::Re
         (Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2, Eth2RpcRequest::Status(status)) => {
             encode_ssz_snappy_payload(&encode_status(protocol, status))
         }
+        (Eth2RpcProtocol::GoodbyeV1, Eth2RpcRequest::Goodbye(reason)) => {
+            encode_ssz_snappy_payload(&encode_u64(reason))
+        }
         (
             Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3,
             Eth2RpcRequest::MetaData,
@@ -280,6 +292,7 @@ fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io:
         Eth2RpcResponse::Status(status) => {
             encode_single_success_response(&encode_status(protocol, status))
         }
+        Eth2RpcResponse::Goodbye(reason) => encode_single_success_response(&encode_u64(reason)),
         Eth2RpcResponse::MetaData(metadata) => {
             encode_single_success_response(&encode_metadata(protocol, metadata))
         }
@@ -300,6 +313,7 @@ fn decode_request(protocol: &Eth2RpcProtocol, payload: &[u8]) -> io::Result<Eth2
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
             decode_status(protocol, payload).map(Eth2RpcRequest::Status)
         }
+        Eth2RpcProtocol::GoodbyeV1 => decode_u64(payload).map(Eth2RpcRequest::Goodbye),
         Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
             if payload.is_empty() {
                 Ok(Eth2RpcRequest::MetaData)
@@ -373,6 +387,7 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
             decode_status(protocol, &payload).map(Eth2RpcResponse::Status)
         }
+        Eth2RpcProtocol::GoodbyeV1 => decode_u64(&payload).map(Eth2RpcResponse::Goodbye),
         Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
             decode_metadata(protocol, &payload).map(Eth2RpcResponse::MetaData)
         }
@@ -599,6 +614,7 @@ fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
         | Eth2RpcProtocol::LightClientOptimisticUpdateV1 => 4,
         Eth2RpcProtocol::StatusV1
         | Eth2RpcProtocol::StatusV2
+        | Eth2RpcProtocol::GoodbyeV1
         | Eth2RpcProtocol::MetadataV1
         | Eth2RpcProtocol::MetadataV2
         | Eth2RpcProtocol::MetadataV3
@@ -660,6 +676,15 @@ mod tests {
                 message: b"resource unavailable".to_vec(),
             })
         );
+    }
+
+    #[test]
+    fn goodbye_round_trip() {
+        let encoded =
+            encode_response(&Eth2RpcProtocol::GoodbyeV1, Eth2RpcResponse::Goodbye(3)).unwrap();
+        let decoded = decode_response(&Eth2RpcProtocol::GoodbyeV1, &encoded).unwrap();
+
+        assert_eq!(decoded, Eth2RpcResponse::Goodbye(3));
     }
 
     #[test]
