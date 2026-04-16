@@ -9,6 +9,7 @@ use snap::write::FrameEncoder;
 
 pub(crate) const STATUS_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/1/ssz_snappy";
 pub(crate) const STATUS_V2_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/2/ssz_snappy";
+pub(crate) const METADATA_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/1/ssz_snappy";
 pub(crate) const METADATA_V2_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
 pub(crate) const METADATA_V3_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/metadata/3/ssz_snappy";
 pub(crate) const PING_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/ping/1/ssz_snappy";
@@ -32,6 +33,7 @@ pub enum Eth2RpcProtocol {
     StatusV1,
     MetadataV3,
     MetadataV2,
+    MetadataV1,
     PingV1,
     LightClientBootstrapV1,
     LightClientFinalityUpdateV1,
@@ -45,6 +47,7 @@ impl AsRef<str> for Eth2RpcProtocol {
             Self::StatusV1 => STATUS_V1_PROTOCOL_ID,
             Self::MetadataV3 => METADATA_V3_PROTOCOL_ID,
             Self::MetadataV2 => METADATA_V2_PROTOCOL_ID,
+            Self::MetadataV1 => METADATA_V1_PROTOCOL_ID,
             Self::PingV1 => PING_PROTOCOL_ID,
             Self::LightClientBootstrapV1 => LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
             Self::LightClientFinalityUpdateV1 => LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
@@ -152,6 +155,7 @@ pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
         (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
         (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
+        (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
     ])
 }
 
@@ -246,9 +250,10 @@ fn encode_request(protocol: &Eth2RpcProtocol, request: Eth2RpcRequest) -> io::Re
         (Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2, Eth2RpcRequest::Status(status)) => {
             encode_ssz_snappy_payload(&encode_status(protocol, status))
         }
-        (Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3, Eth2RpcRequest::MetaData) => {
-            Ok(Vec::new())
-        }
+        (
+            Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3,
+            Eth2RpcRequest::MetaData,
+        ) => Ok(Vec::new()),
         (Eth2RpcProtocol::PingV1, Eth2RpcRequest::Ping(seq_number)) => {
             encode_ssz_snappy_payload(&encode_u64(seq_number))
         }
@@ -295,7 +300,7 @@ fn decode_request(protocol: &Eth2RpcProtocol, payload: &[u8]) -> io::Result<Eth2
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
             decode_status(protocol, payload).map(Eth2RpcRequest::Status)
         }
-        Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
+        Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
             if payload.is_empty() {
                 Ok(Eth2RpcRequest::MetaData)
             } else {
@@ -368,7 +373,7 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
             decode_status(protocol, &payload).map(Eth2RpcResponse::Status)
         }
-        Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
+        Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3 => {
             decode_metadata(protocol, &payload).map(Eth2RpcResponse::MetaData)
         }
         Eth2RpcProtocol::PingV1 => decode_u64(&payload).map(Eth2RpcResponse::Ping),
@@ -594,6 +599,7 @@ fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
         | Eth2RpcProtocol::LightClientOptimisticUpdateV1 => 4,
         Eth2RpcProtocol::StatusV1
         | Eth2RpcProtocol::StatusV2
+        | Eth2RpcProtocol::MetadataV1
         | Eth2RpcProtocol::MetadataV2
         | Eth2RpcProtocol::MetadataV3
         | Eth2RpcProtocol::PingV1 => 0,
@@ -669,6 +675,27 @@ mod tests {
         let decoded = decode_metadata(&Eth2RpcProtocol::MetadataV2, &encoded).unwrap();
 
         assert_eq!(decoded, metadata);
+    }
+
+    #[test]
+    fn metadata_v1_round_trip() {
+        let metadata = MetaData {
+            seq_number: 5,
+            attnets: [0xbb; 8],
+            syncnets: [0x03],
+            custody_group_count: 99,
+        };
+
+        let encoded = encode_metadata(&Eth2RpcProtocol::MetadataV1, metadata);
+        let decoded = decode_metadata(&Eth2RpcProtocol::MetadataV1, &encoded).unwrap();
+
+        assert_eq!(
+            decoded,
+            MetaData {
+                custody_group_count: 0,
+                ..metadata
+            }
+        );
     }
 
     #[test]

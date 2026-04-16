@@ -60,8 +60,22 @@ pub struct ConsensusNetworkStatus {
     pub active_sessions: usize,
     /// Number of libp2p consensus peers currently connected over TCP.
     pub connected_peer_sessions: usize,
+    /// Number of connected peers for which identify information has been recorded.
+    pub identified_peers: usize,
+    /// Number of identified peers that advertise the Status RPC.
+    pub status_capable_peers: usize,
+    /// Number of identified peers that advertise the MetaData RPC.
+    pub metadata_capable_peers: usize,
+    /// Number of identified peers that advertise the light-client bootstrap RPC.
+    pub bootstrap_capable_peers: usize,
+    /// Number of identified peers that advertise the light-client finality update RPC.
+    pub finality_update_capable_peers: usize,
+    /// Number of identified peers that advertise the light-client optimistic update RPC.
+    pub optimistic_update_capable_peers: usize,
     /// Number of peers that answered the initial Status req/resp handshake.
     pub status_peers: usize,
+    /// Number of peers that answered the MetaData req/resp handshake.
+    pub metadata_peers: usize,
     /// Number of peers that served a light-client bootstrap payload.
     pub bootstrap_peers: usize,
     /// Number of peers that served a light-client finality update payload.
@@ -70,6 +84,26 @@ pub struct ConsensusNetworkStatus {
     pub optimistic_update_peers: usize,
     /// Number of outbound light-client RPC requests currently in flight.
     pub pending_rpc_requests: usize,
+    /// Number of in-flight Status requests.
+    pub pending_status_requests: usize,
+    /// Number of in-flight MetaData requests.
+    pub pending_metadata_requests: usize,
+    /// Number of in-flight light-client bootstrap requests.
+    pub pending_bootstrap_requests: usize,
+    /// Number of in-flight light-client finality-update requests.
+    pub pending_finality_update_requests: usize,
+    /// Number of in-flight light-client optimistic-update requests.
+    pub pending_optimistic_update_requests: usize,
+    /// Number of failed Status request attempts since startup.
+    pub status_request_failures: u64,
+    /// Number of failed MetaData request attempts since startup.
+    pub metadata_request_failures: u64,
+    /// Number of failed light-client bootstrap request attempts since startup.
+    pub bootstrap_request_failures: u64,
+    /// Number of failed light-client finality-update request attempts since startup.
+    pub finality_update_request_failures: u64,
+    /// Number of failed light-client optimistic-update request attempts since startup.
+    pub optimistic_update_request_failures: u64,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.

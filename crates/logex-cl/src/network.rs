@@ -27,11 +27,11 @@ use tokio::task::JoinHandle;
 use crate::rpc::{
     Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse,
     LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID, LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
-    LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID, METADATA_V3_PROTOCOL_ID,
-    MetaData, PING_PROTOCOL_ID, STATUS_V1_PROTOCOL_ID, STATUS_V2_PROTOCOL_ID, StatusMessage,
-    build_light_client_bootstrap_behaviour, build_light_client_finality_update_behaviour,
-    build_light_client_optimistic_update_behaviour, build_metadata_behaviour, build_ping_behaviour,
-    build_status_behaviour, resource_unavailable,
+    LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID, METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID,
+    METADATA_V3_PROTOCOL_ID, MetaData, PING_PROTOCOL_ID, STATUS_V1_PROTOCOL_ID,
+    STATUS_V2_PROTOCOL_ID, StatusMessage, build_light_client_bootstrap_behaviour,
+    build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
+    build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, resource_unavailable,
 };
 use crate::{ConsensusStore, decode_bootstrap, decode_finality_update, decode_optimistic_update};
 
@@ -41,6 +41,8 @@ const KNOWN_PEERS_FILE: &str = "known-peers.json";
 const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
+const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
 
@@ -282,18 +284,22 @@ struct ConsensusNetwork {
     dialing_peers: HashSet<PeerId>,
     connected_peers: HashSet<PeerId>,
     peer_support: HashMap<PeerId, PeerRpcSupport>,
+    peer_failures: HashMap<PeerId, PeerFailureCounts>,
     status_peers: HashSet<PeerId>,
+    metadata_peers: HashSet<PeerId>,
     ping_peers: HashSet<PeerId>,
     bootstrap_peers: HashSet<PeerId>,
     finality_update_peers: HashSet<PeerId>,
     optimistic_update_peers: HashSet<PeerId>,
     pending_requests: HashMap<PendingRequestKey, PeerId>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
+    request_failures: RpcFailureCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RpcRequestKind {
     Status,
+    MetaData,
     Ping,
     LightClientBootstrap,
     LightClientFinalityUpdate,
@@ -304,10 +310,86 @@ impl RpcRequestKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::MetaData => "metadata",
             Self::Ping => "ping",
             Self::LightClientBootstrap => "light_client_bootstrap",
             Self::LightClientFinalityUpdate => "light_client_finality_update",
             Self::LightClientOptimisticUpdate => "light_client_optimistic_update",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RpcFailureCounts {
+    status: u64,
+    metadata: u64,
+    ping: u64,
+    bootstrap: u64,
+    finality_update: u64,
+    optimistic_update: u64,
+}
+
+impl RpcFailureCounts {
+    fn increment(&mut self, kind: RpcRequestKind) {
+        match kind {
+            RpcRequestKind::Status => self.status += 1,
+            RpcRequestKind::MetaData => self.metadata += 1,
+            RpcRequestKind::Ping => self.ping += 1,
+            RpcRequestKind::LightClientBootstrap => self.bootstrap += 1,
+            RpcRequestKind::LightClientFinalityUpdate => self.finality_update += 1,
+            RpcRequestKind::LightClientOptimisticUpdate => self.optimistic_update += 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerFailureCounts {
+    status: u32,
+    metadata: u32,
+    ping: u32,
+    bootstrap: u32,
+    finality_update: u32,
+    optimistic_update: u32,
+}
+
+impl PeerFailureCounts {
+    fn increment(&mut self, kind: RpcRequestKind) -> u32 {
+        match kind {
+            RpcRequestKind::Status => {
+                self.status += 1;
+                self.status
+            }
+            RpcRequestKind::MetaData => {
+                self.metadata += 1;
+                self.metadata
+            }
+            RpcRequestKind::Ping => {
+                self.ping += 1;
+                self.ping
+            }
+            RpcRequestKind::LightClientBootstrap => {
+                self.bootstrap += 1;
+                self.bootstrap
+            }
+            RpcRequestKind::LightClientFinalityUpdate => {
+                self.finality_update += 1;
+                self.finality_update
+            }
+            RpcRequestKind::LightClientOptimisticUpdate => {
+                self.optimistic_update += 1;
+                self.optimistic_update
+            }
+        }
+    }
+
+    fn reset(&mut self, kind: RpcRequestKind) {
+        match kind {
+            RpcRequestKind::Status => self.status = 0,
+            RpcRequestKind::MetaData => self.metadata = 0,
+            RpcRequestKind::Ping => self.ping = 0,
+            RpcRequestKind::LightClientBootstrap => self.bootstrap = 0,
+            RpcRequestKind::LightClientFinalityUpdate => self.finality_update = 0,
+            RpcRequestKind::LightClientOptimisticUpdate => self.optimistic_update = 0,
         }
     }
 }
@@ -328,7 +410,9 @@ impl PeerRpcSupport {
         for protocol in &info.protocols {
             match protocol.as_ref() {
                 STATUS_V1_PROTOCOL_ID | STATUS_V2_PROTOCOL_ID => support.status = true,
-                METADATA_V2_PROTOCOL_ID | METADATA_V3_PROTOCOL_ID => support.metadata = true,
+                METADATA_V1_PROTOCOL_ID | METADATA_V2_PROTOCOL_ID | METADATA_V3_PROTOCOL_ID => {
+                    support.metadata = true;
+                }
                 PING_PROTOCOL_ID => support.ping = true,
                 LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID => support.light_client_bootstrap = true,
                 LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID => {
@@ -346,6 +430,7 @@ impl PeerRpcSupport {
     const fn supports_request(self, kind: RpcRequestKind) -> bool {
         match kind {
             RpcRequestKind::Status => self.status,
+            RpcRequestKind::MetaData => self.metadata,
             RpcRequestKind::Ping => self.ping,
             RpcRequestKind::LightClientBootstrap => self.light_client_bootstrap,
             RpcRequestKind::LightClientFinalityUpdate => self.light_client_finality_update,
@@ -431,13 +516,16 @@ impl ConsensusNetwork {
             dialing_peers: HashSet::new(),
             connected_peers: HashSet::new(),
             peer_support: HashMap::new(),
+            peer_failures: HashMap::new(),
             status_peers: HashSet::new(),
+            metadata_peers: HashSet::new(),
             ping_peers: HashSet::new(),
             bootstrap_peers: HashSet::new(),
             finality_update_peers: HashSet::new(),
             optimistic_update_peers: HashSet::new(),
             pending_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
+            request_failures: RpcFailureCounts::default(),
         })
     }
 
@@ -648,6 +736,19 @@ impl ConsensusNetwork {
                     "received consensus identify info"
                 );
                 self.peer_support.insert(peer_id, support);
+                if !support.supports_light_client() {
+                    tracing::debug!(
+                        %peer_id,
+                        status = support.status,
+                        metadata = support.metadata,
+                        bootstrap = support.light_client_bootstrap,
+                        finality = support.light_client_finality_update,
+                        optimistic = support.light_client_optimistic_update,
+                        "disconnecting consensus peer that does not advertise the full light-client req/resp set"
+                    );
+                    self.disconnect_peer(peer_id);
+                    return;
+                }
                 self.drive_rpc_requests();
             }
             identify::Event::Sent { peer_id, .. } => {
@@ -714,6 +815,8 @@ impl ConsensusNetwork {
                 ..
             } => {
                 let _ = self.take_pending_request(kind, request_id);
+                self.request_failures.increment(kind);
+                let peer_failures = self.record_peer_failure(peer, kind);
                 match kind {
                     RpcRequestKind::LightClientBootstrap
                     | RpcRequestKind::LightClientFinalityUpdate
@@ -733,6 +836,16 @@ impl ConsensusNetwork {
                             "consensus RPC request failed"
                         );
                     }
+                }
+                if kind == RpcRequestKind::Status
+                    && peer_failures >= MAX_STATUS_FAILURES_BEFORE_DISCONNECT
+                {
+                    tracing::debug!(
+                        %peer,
+                        failures = peer_failures,
+                        "disconnecting consensus peer after repeated status RPC failures"
+                    );
+                    self.disconnect_peer(peer);
                 }
             }
             request_response::Event::InboundFailure {
@@ -784,14 +897,7 @@ impl ConsensusNetwork {
                 request_response::Message::Response {
                     request_id,
                     response,
-                } => {
-                    tracing::debug!(
-                        %peer,
-                        ?request_id,
-                        ?response,
-                        "received unsolicited consensus metadata RPC response"
-                    );
-                }
+                } => self.handle_rpc_response(RpcRequestKind::MetaData, peer, request_id, response),
             },
             request_response::Event::OutboundFailure {
                 peer,
@@ -799,6 +905,9 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
+                let _ = self.take_pending_request(RpcRequestKind::MetaData, request_id);
+                self.request_failures.increment(RpcRequestKind::MetaData);
+                self.record_peer_failure(peer, RpcRequestKind::MetaData);
                 tracing::debug!(%peer, ?request_id, %error, "consensus metadata RPC request failed");
             }
             request_response::Event::InboundFailure {
@@ -828,6 +937,7 @@ impl ConsensusNetwork {
             tracing::warn!(%peer, request = kind.as_str(), ?request_id, "received consensus RPC response for an unknown request");
             return;
         };
+        self.reset_peer_failure(peer, kind);
 
         match (kind, response) {
             (RpcRequestKind::Status, Eth2RpcResponse::Status(status)) => {
@@ -840,6 +950,15 @@ impl ConsensusNetwork {
                     );
                 }
                 self.status_peers.insert(peer);
+                self.drive_rpc_requests();
+            }
+            (RpcRequestKind::MetaData, Eth2RpcResponse::MetaData(metadata)) => {
+                tracing::debug!(
+                    %peer,
+                    seq_number = metadata.seq_number,
+                    "received consensus metadata response"
+                );
+                self.metadata_peers.insert(peer);
                 self.drive_rpc_requests();
             }
             (RpcRequestKind::Ping, Eth2RpcResponse::Ping(seq_number)) => {
@@ -942,6 +1061,8 @@ impl ConsensusNetwork {
                 }
             },
             (kind, Eth2RpcResponse::Error(error)) => {
+                self.request_failures.increment(kind);
+                let peer_failures = self.record_peer_failure(peer, kind);
                 let message = String::from_utf8_lossy(&error.message);
                 match kind {
                     RpcRequestKind::LightClientBootstrap
@@ -964,6 +1085,16 @@ impl ConsensusNetwork {
                             "consensus peer returned an RPC error"
                         );
                     }
+                }
+                if kind == RpcRequestKind::Status
+                    && peer_failures >= MAX_STATUS_FAILURES_BEFORE_DISCONNECT
+                {
+                    tracing::debug!(
+                        %peer,
+                        failures = peer_failures,
+                        "disconnecting consensus peer after repeated status RPC errors"
+                    );
+                    self.disconnect_peer(peer);
                 }
             }
             (kind, response) => {
@@ -999,7 +1130,8 @@ impl ConsensusNetwork {
     }
 
     fn drive_rpc_requests(&mut self) {
-        let connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
+        let mut connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
+        connected.sort_by_key(|peer| peer.to_string());
         for peer in connected {
             if !self.status_peers.contains(&peer) {
                 if self
@@ -1008,27 +1140,49 @@ impl ConsensusNetwork {
                     .copied()
                     .map(|support| support.supports_request(RpcRequestKind::Status))
                     .unwrap_or(true)
+                    && self.can_issue_request(RpcRequestKind::Status)
                 {
                     self.ensure_request(peer, RpcRequestKind::Status);
                 }
                 continue;
             }
 
+            if self
+                .peer_support
+                .get(&peer)
+                .copied()
+                .map(|support| support.supports_request(RpcRequestKind::MetaData))
+                .unwrap_or(true)
+                && self.can_issue_request(RpcRequestKind::MetaData)
+            {
+                self.ensure_request(peer, RpcRequestKind::MetaData);
+            }
+
             let Some(support) = self.peer_support.get(&peer).copied() else {
-                self.ensure_request(peer, RpcRequestKind::Ping);
+                if self.can_issue_request(RpcRequestKind::Ping) {
+                    self.ensure_request(peer, RpcRequestKind::Ping);
+                }
                 continue;
             };
 
-            if support.supports_request(RpcRequestKind::LightClientFinalityUpdate) {
+            if support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
+            {
                 self.ensure_request(peer, RpcRequestKind::LightClientFinalityUpdate);
             }
-            if support.supports_request(RpcRequestKind::LightClientOptimisticUpdate) {
+            if support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
+            {
                 self.ensure_request(peer, RpcRequestKind::LightClientOptimisticUpdate);
             }
-            if support.supports_request(RpcRequestKind::LightClientBootstrap) {
+            if support.supports_request(RpcRequestKind::LightClientBootstrap)
+                && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
+            {
                 self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
             }
-            if support.supports_request(RpcRequestKind::Ping) {
+            if support.supports_request(RpcRequestKind::Ping)
+                && self.can_issue_request(RpcRequestKind::Ping)
+            {
                 self.ensure_request(peer, RpcRequestKind::Ping);
             }
         }
@@ -1045,6 +1199,12 @@ impl ConsensusNetwork {
                 .swarm
                 .behaviour_mut()
                 .status_rpc
+                .inner
+                .send_response(channel, response),
+            RpcRequestKind::MetaData => self
+                .swarm
+                .behaviour_mut()
+                .metadata_rpc
                 .inner
                 .send_response(channel, response),
             RpcRequestKind::Ping => self
@@ -1106,6 +1266,12 @@ impl ConsensusNetwork {
                 .status_rpc
                 .inner
                 .send_request(&peer, request),
+            RpcRequestKind::MetaData => self
+                .swarm
+                .behaviour_mut()
+                .metadata_rpc
+                .inner
+                .send_request(&peer, request),
             RpcRequestKind::Ping => self
                 .swarm
                 .behaviour_mut()
@@ -1139,6 +1305,7 @@ impl ConsensusNetwork {
     fn build_request(&self, kind: RpcRequestKind) -> Eth2RpcRequest {
         match kind {
             RpcRequestKind::Status => Eth2RpcRequest::Status(self.local_status_message()),
+            RpcRequestKind::MetaData => Eth2RpcRequest::MetaData,
             RpcRequestKind::Ping => Eth2RpcRequest::Ping(0),
             RpcRequestKind::LightClientBootstrap => {
                 Eth2RpcRequest::LightClientBootstrap(self.consensus.checkpoint().beacon_root)
@@ -1169,6 +1336,20 @@ impl ConsensusNetwork {
         MetaData::empty()
     }
 
+    fn record_peer_failure(&mut self, peer: PeerId, kind: RpcRequestKind) -> u32 {
+        self.peer_failures.entry(peer).or_default().increment(kind)
+    }
+
+    fn reset_peer_failure(&mut self, peer: PeerId, kind: RpcRequestKind) {
+        if let Some(failures) = self.peer_failures.get_mut(&peer) {
+            failures.reset(kind);
+        }
+    }
+
+    fn disconnect_peer(&mut self, peer: PeerId) {
+        let _ = self.swarm.disconnect_peer_id(peer);
+    }
+
     fn take_pending_request(
         &mut self,
         kind: RpcRequestKind,
@@ -1194,7 +1375,9 @@ impl ConsensusNetwork {
 
     fn clear_peer_state(&mut self, peer: PeerId) {
         self.peer_support.remove(&peer);
+        self.peer_failures.remove(&peer);
         self.status_peers.remove(&peer);
+        self.metadata_peers.remove(&peer);
         self.ping_peers.remove(&peer);
         self.bootstrap_peers.remove(&peer);
         self.finality_update_peers.remove(&peer);
@@ -1208,6 +1391,7 @@ impl ConsensusNetwork {
     fn is_request_satisfied(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
         match kind {
             RpcRequestKind::Status => self.status_peers.contains(&peer),
+            RpcRequestKind::MetaData => self.metadata_peers.contains(&peer),
             RpcRequestKind::Ping => self.ping_peers.contains(&peer),
             RpcRequestKind::LightClientBootstrap => self.bootstrap_peers.contains(&peer),
             RpcRequestKind::LightClientFinalityUpdate => self.finality_update_peers.contains(&peer),
@@ -1217,10 +1401,47 @@ impl ConsensusNetwork {
         }
     }
 
+    fn pending_requests_for_kind(&self, kind: RpcRequestKind) -> usize {
+        self.pending_requests
+            .keys()
+            .filter(|key| key.kind == kind)
+            .count()
+    }
+
+    fn can_issue_request(&self, kind: RpcRequestKind) -> bool {
+        self.pending_requests_for_kind(kind) < MAX_CONCURRENT_RPC_REQUESTS_PER_KIND
+    }
+
     fn refresh_status(&self) {
         let table_entries = self.discv5.table_entries_enr();
         let light_client = self.consensus.light_client_status();
         let checkpoint = self.consensus.checkpoint();
+        let identified_peers = self.peer_support.len();
+        let status_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.status)
+            .count();
+        let metadata_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.metadata)
+            .count();
+        let bootstrap_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.light_client_bootstrap)
+            .count();
+        let finality_update_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.light_client_finality_update)
+            .count();
+        let optimistic_update_capable_peers = self
+            .peer_support
+            .values()
+            .filter(|support| support.light_client_optimistic_update)
+            .count();
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
@@ -1234,11 +1455,31 @@ impl ConsensusNetwork {
             routing_table_peers: table_entries.len(),
             active_sessions: self.discv5.connected_peers(),
             connected_peer_sessions: self.connected_peers.len(),
+            identified_peers,
+            status_capable_peers,
+            metadata_capable_peers,
+            bootstrap_capable_peers,
+            finality_update_capable_peers,
+            optimistic_update_capable_peers,
             status_peers: self.status_peers.len(),
+            metadata_peers: self.metadata_peers.len(),
             bootstrap_peers: self.bootstrap_peers.len(),
             finality_update_peers: self.finality_update_peers.len(),
             optimistic_update_peers: self.optimistic_update_peers.len(),
             pending_rpc_requests: self.pending_requests.len(),
+            pending_status_requests: self.pending_requests_for_kind(RpcRequestKind::Status),
+            pending_metadata_requests: self.pending_requests_for_kind(RpcRequestKind::MetaData),
+            pending_bootstrap_requests: self
+                .pending_requests_for_kind(RpcRequestKind::LightClientBootstrap),
+            pending_finality_update_requests: self
+                .pending_requests_for_kind(RpcRequestKind::LightClientFinalityUpdate),
+            pending_optimistic_update_requests: self
+                .pending_requests_for_kind(RpcRequestKind::LightClientOptimisticUpdate),
+            status_request_failures: self.request_failures.status,
+            metadata_request_failures: self.request_failures.metadata,
+            bootstrap_request_failures: self.request_failures.bootstrap,
+            finality_update_request_failures: self.request_failures.finality_update,
+            optimistic_update_request_failures: self.request_failures.optimistic_update,
         };
         let mut sync_status = self.sync_status.lock().unwrap();
         sync_status.checkpoint = Some(checkpoint);
@@ -1607,6 +1848,7 @@ mod tests {
             listen_addrs: vec![],
             protocols: vec![
                 StreamProtocol::new(STATUS_V2_PROTOCOL_ID),
+                StreamProtocol::new(METADATA_V1_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID),
                 StreamProtocol::new(LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID),
@@ -1617,7 +1859,9 @@ mod tests {
 
         let support = PeerRpcSupport::from_identify_info(&info);
         assert!(support.status);
+        assert!(support.metadata);
         assert!(support.supports_light_client());
+        assert!(support.supports_request(RpcRequestKind::MetaData));
         assert!(support.supports_request(RpcRequestKind::LightClientBootstrap));
         assert!(support.supports_request(RpcRequestKind::LightClientFinalityUpdate));
         assert!(support.supports_request(RpcRequestKind::LightClientOptimisticUpdate));
