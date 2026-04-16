@@ -60,6 +60,14 @@ pub struct ConsensusNetworkStatus {
     pub active_sessions: usize,
     /// Number of libp2p consensus peers currently connected over TCP.
     pub connected_peer_sessions: usize,
+    /// Number of discovered peers remembered as useful CL candidates from prior sessions.
+    pub preferred_peers: usize,
+    /// Number of peers currently cooling down before another dial attempt.
+    pub cooldown_peers: usize,
+    /// Number of peers ignored for the current run because identify or RPC behaviour proved them irrelevant.
+    pub ignored_peers: usize,
+    /// Number of peers deferred until bootstrap has landed because they only advertise post-bootstrap work.
+    pub deferred_until_post_bootstrap_peers: usize,
     /// Number of connected peers for which identify information has been recorded.
     pub identified_peers: usize,
     /// Number of identified peers that advertise the Status RPC.
@@ -142,6 +150,9 @@ pub struct ConsensusNetworkStatus {
     /// Most recent identify record observed from a connected consensus peer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_identify_event: Option<String>,
+    /// Most recent peer-selection or backoff policy decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_peer_policy_event: Option<String>,
     /// Most recent consensus RPC failure or error response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_rpc_failure: Option<String>,

@@ -537,6 +537,10 @@ mod tests {
                     routing_table_peers: 11,
                     active_sessions: 3,
                     connected_peer_sessions: 2,
+                    preferred_peers: 3,
+                    cooldown_peers: 5,
+                    ignored_peers: 7,
+                    deferred_until_post_bootstrap_peers: 2,
                     identified_peers: 2,
                     status_capable_peers: 2,
                     metadata_capable_peers: 2,
@@ -578,6 +582,9 @@ mod tests {
                     last_connection_event: Some("connected peer=peer1 endpoint=Dialer".to_string()),
                     last_identify_event: Some(
                         "peer=peer1 agent=lighthouse protocols=12 status=true metadata=true bootstrap=false updates_by_range=false finality=false optimistic=false blocks_by_range=true blocks_by_root=true preview=[/eth2/beacon_chain/req/status/2/ssz_snappy]".to_string(),
+                    ),
+                    last_peer_policy_event: Some(
+                        "peer=peer3 policy=defer_until_post_bootstrap reason=peer only advertises post-bootstrap work".to_string(),
                     ),
                     last_rpc_failure: Some(
                         "peer=peer1 request=status failure=connection closed".to_string(),
