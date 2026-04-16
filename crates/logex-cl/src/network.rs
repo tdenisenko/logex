@@ -118,6 +118,14 @@ pub enum ConsensusNetworkError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistedPeer {
     enr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    support: Option<PeerRpcSupport>,
+    #[serde(default)]
+    status_successes: u32,
+    #[serde(default)]
+    bootstrap_successes: u32,
+    #[serde(default)]
+    useful_successes: u32,
 }
 
 #[derive(NetworkBehaviour)]
@@ -543,6 +551,25 @@ struct PeerLifecycleState {
 }
 
 impl PeerLifecycleState {
+    fn from_persisted(peer: &PersistedPeer) -> Self {
+        Self {
+            remembered_support: peer.support,
+            status_successes: peer.status_successes,
+            bootstrap_successes: peer.bootstrap_successes,
+            useful_successes: peer.useful_successes,
+            transport_failures: 0,
+            rpc_failures: 0,
+            disconnects: 0,
+            cooldown_until: None,
+            ignored_for_run: false,
+            deferred_until_post_bootstrap: false,
+        }
+    }
+
+    fn persisted_support(&self) -> Option<PeerRpcSupport> {
+        self.remembered_support
+    }
+
     fn remember_support(&mut self, support: PeerRpcSupport) {
         self.remembered_support = Some(support);
         if support.status {
@@ -697,7 +724,7 @@ impl PeerFailureCounts {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct PeerRpcSupport {
     status: bool,
     goodbye: bool,
@@ -811,6 +838,7 @@ impl ConsensusNetwork {
 
         let known_peers = load_known_peers(&known_peers_path)?;
         let mut dialable_peers = HashMap::new();
+        let mut peer_lifecycle = HashMap::new();
 
         for enr in &bootnodes {
             if let Err(error) = discv5.add_enr(enr.clone()) {
@@ -828,6 +856,9 @@ impl ConsensusNetwork {
                             enr = %peer.enr,
                             "skipping cached consensus peer that could not be inserted"
                         );
+                    }
+                    if let Some((peer_id, _)) = enr_multiaddrs(&enr) {
+                        peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
                     }
                     observe_dialable_peer(&mut dialable_peers, &enr);
                 }
@@ -861,7 +892,7 @@ impl ConsensusNetwork {
             closing_peers: HashSet::new(),
             connected_since: HashMap::new(),
             peer_endpoints: HashMap::new(),
-            peer_lifecycle: HashMap::new(),
+            peer_lifecycle,
             peer_support: HashMap::new(),
             peer_failures: HashMap::new(),
             inbound_status_peers: HashSet::new(),
@@ -2635,8 +2666,28 @@ impl ConsensusNetwork {
                     || enr_quic4(enr).is_some()
                     || enr_quic6(enr).is_some()
             })
-            .map(|enr| PersistedPeer {
-                enr: enr.to_base64(),
+            .map(|enr| {
+                let peer_state = peer_id_from_enr(&enr)
+                    .ok()
+                    .and_then(|peer| self.peer_lifecycle.get(&peer).cloned());
+                PersistedPeer {
+                    enr: enr.to_base64(),
+                    support: peer_state
+                        .as_ref()
+                        .and_then(PeerLifecycleState::persisted_support),
+                    status_successes: peer_state
+                        .as_ref()
+                        .map(|state| state.status_successes)
+                        .unwrap_or_default(),
+                    bootstrap_successes: peer_state
+                        .as_ref()
+                        .map(|state| state.bootstrap_successes)
+                        .unwrap_or_default(),
+                    useful_successes: peer_state
+                        .as_ref()
+                        .map(|state| state.useful_successes)
+                        .unwrap_or_default(),
+                }
             })
             .collect::<Vec<_>>();
 
@@ -3076,9 +3127,21 @@ mod tests {
         let peers = vec![
             PersistedPeer {
                 enr: MAINNET_BOOTNODES[0].to_string(),
+                support: Some(PeerRpcSupport {
+                    status: true,
+                    light_client_bootstrap: true,
+                    ..PeerRpcSupport::default()
+                }),
+                status_successes: 2,
+                bootstrap_successes: 1,
+                useful_successes: 1,
             },
             PersistedPeer {
                 enr: MAINNET_BOOTNODES[1].to_string(),
+                support: None,
+                status_successes: 0,
+                bootstrap_successes: 0,
+                useful_successes: 0,
             },
         ];
 
@@ -3086,6 +3149,28 @@ mod tests {
         let loaded = load_known_peers(&path).unwrap();
 
         assert_eq!(loaded, peers);
+    }
+
+    #[test]
+    fn known_peers_backward_compatibility_defaults_missing_state() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        let legacy = serde_json::json!([{ "enr": MAINNET_BOOTNODES[0] }]);
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let loaded = load_known_peers(&path).unwrap();
+
+        assert_eq!(
+            loaded,
+            vec![PersistedPeer {
+                enr: MAINNET_BOOTNODES[0].to_string(),
+                support: None,
+                status_successes: 0,
+                bootstrap_successes: 0,
+                useful_successes: 0,
+            }]
+        );
     }
 
     #[test]

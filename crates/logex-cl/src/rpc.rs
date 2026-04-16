@@ -195,8 +195,8 @@ fn build_rpc_behaviour(
 
 pub fn build_status_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
-        (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
         (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
+        (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
     ])
 }
 
@@ -206,8 +206,8 @@ pub fn build_goodbye_behaviour() -> Eth2RpcBehaviour {
 
 pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
-        (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
         (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
+        (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
         (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
     ])
 }
