@@ -593,7 +593,10 @@ mod tests {
         assert_eq!(status["pending_peers"], 12);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
         assert_eq!(status["consensus_network"]["dialable_peers"], 13);
-        assert_eq!(status["consensus_light_client"]["bootstrap"]["fork"], "electra");
+        assert_eq!(
+            status["consensus_light_client"]["bootstrap"]["fork"],
+            "electra"
+        );
         assert_eq!(
             status["consensus_light_client"]["bootstrap"]["header"]["execution"]["block_number"],
             500

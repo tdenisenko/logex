@@ -2,8 +2,7 @@ use alloy_primitives::{Address, B256, FixedBytes, U256};
 use alloy_rpc_types_beacon::{BlsPublicKey, BlsSignature};
 use logex_types::{
     ConsensusDataFork, LightClientBootstrapStatus, LightClientExecutionData,
-    LightClientFinalityUpdateStatus, LightClientHeaderSummary,
-    LightClientOptimisticUpdateStatus,
+    LightClientFinalityUpdateStatus, LightClientHeaderSummary, LightClientOptimisticUpdateStatus,
 };
 use ssz::Decode;
 use ssz_derive::{Decode, Encode};
@@ -26,8 +25,7 @@ const SYNC_COMMITTEE_PUBKEY_BYTES: usize = SYNC_COMMITTEE_PUBKEYS * BLS_PUBKEY_B
 
 type ExecutionBranch = FixedBytes<{ 32 * EXECUTION_BRANCH_DEPTH }>;
 type PreElectraFinalityBranch = FixedBytes<{ 32 * PRE_ELECTRA_FINALITY_BRANCH_DEPTH }>;
-type PreElectraSyncCommitteeBranch =
-    FixedBytes<{ 32 * PRE_ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH }>;
+type PreElectraSyncCommitteeBranch = FixedBytes<{ 32 * PRE_ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH }>;
 type ElectraFinalityBranch = FixedBytes<{ 32 * ELECTRA_FINALITY_BRANCH_DEPTH }>;
 type ElectraSyncCommitteeBranch = FixedBytes<{ 32 * ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH }>;
 
@@ -177,7 +175,9 @@ struct LightClientOptimisticUpdateDeneb {
     signature_slot: u64,
 }
 
-pub fn decode_bootstrap(bytes: &[u8]) -> Result<LightClientBootstrapStatus, LightClientDecodeError> {
+pub fn decode_bootstrap(
+    bytes: &[u8],
+) -> Result<LightClientBootstrapStatus, LightClientDecodeError> {
     if let Ok(payload) = LightClientBootstrapElectra::from_ssz_bytes(bytes) {
         return Ok(LightClientBootstrapStatus {
             fork: ConsensusDataFork::Electra,
@@ -364,7 +364,9 @@ fn execution_data_capella(
     })
 }
 
-fn execution_data_deneb(execution: &ExecutionPayloadHeaderDeneb) -> Option<LightClientExecutionData> {
+fn execution_data_deneb(
+    execution: &ExecutionPayloadHeaderDeneb,
+) -> Option<LightClientExecutionData> {
     (execution.block_hash != B256::ZERO).then_some(LightClientExecutionData {
         block_number: execution.block_number,
         block_hash: execution.block_hash,
@@ -381,10 +383,7 @@ fn participant_count(sync_aggregate: &SyncAggregateRaw) -> usize {
         .sum()
 }
 
-fn candidate_failures(
-    bytes: &[u8],
-    attempts: &[(&str, Option<String>)],
-) -> String {
+fn candidate_failures(bytes: &[u8], attempts: &[(&str, Option<String>)]) -> String {
     let details = attempts
         .iter()
         .filter_map(|(label, error)| error.as_ref().map(|error| format!("{label}: {error}")))
@@ -490,7 +489,10 @@ mod tests {
         assert_eq!(summary.fork, ConsensusDataFork::Electra);
         assert_eq!(summary.header.beacon_slot, 12_345);
         assert_eq!(summary.header.execution.unwrap().block_number, 22_222_222);
-        assert_eq!(summary.current_sync_committee_branch_depth, ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH);
+        assert_eq!(
+            summary.current_sync_committee_branch_depth,
+            ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH
+        );
     }
 
     #[test]
@@ -516,7 +518,10 @@ mod tests {
         assert_eq!(summary.attested_header.beacon_slot, 54_321);
         assert_eq!(summary.finalized_header.beacon_slot, 54_300);
         assert_eq!(summary.sync_committee_participants, 5);
-        assert_eq!(summary.finality_branch_depth, PRE_ELECTRA_FINALITY_BRANCH_DEPTH);
+        assert_eq!(
+            summary.finality_branch_depth,
+            PRE_ELECTRA_FINALITY_BRANCH_DEPTH
+        );
     }
 
     #[test]
@@ -534,7 +539,10 @@ mod tests {
         let summary = decode_optimistic_update(&payload.as_ssz_bytes()).unwrap();
         assert_eq!(summary.fork, ConsensusDataFork::Capella);
         assert_eq!(summary.attested_header.beacon_slot, 77_777);
-        assert_eq!(summary.attested_header.execution.unwrap().block_number, 17_777_777);
+        assert_eq!(
+            summary.attested_header.execution.unwrap().block_number,
+            17_777_777
+        );
         assert_eq!(summary.sync_committee_participants, 3);
     }
 }

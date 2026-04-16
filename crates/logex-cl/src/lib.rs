@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use logex_types::{
     ChainAnchors, ConsensusLightClientStatus, ExecutionAnchor, LightClientBootstrapStatus,
-    LightClientFinalityUpdateStatus, LightClientOptimisticUpdateStatus,
-    WeakSubjectivityCheckpoint,
+    LightClientFinalityUpdateStatus, LightClientOptimisticUpdateStatus, WeakSubjectivityCheckpoint,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -159,7 +158,13 @@ impl ConsensusStore {
         &self,
         status: LightClientBootstrapStatus,
     ) -> Result<(), ConsensusStateError> {
-        self.inner.lock().unwrap().light_client.bootstrap = Some(status);
+        {
+            let mut snapshot = self.inner.lock().unwrap();
+            if snapshot.checkpoint.beacon_slot.is_none() {
+                snapshot.checkpoint.beacon_slot = Some(status.header.beacon_slot);
+            }
+            snapshot.light_client.bootstrap = Some(status);
+        }
         self.persist()
     }
 
@@ -437,5 +442,32 @@ mod tests {
             Some(3)
         );
         assert_eq!(store.next_anchor_after(3), None);
+    }
+
+    #[test]
+    fn bootstrap_status_recovers_checkpoint_slot_when_missing() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+
+        assert_eq!(store.checkpoint().beacon_slot, None);
+        store
+            .update_bootstrap_status(LightClientBootstrapStatus {
+                fork: logex_types::ConsensusDataFork::Deneb,
+                header: logex_types::LightClientHeaderSummary {
+                    beacon_slot: 12_345,
+                    execution: None,
+                },
+                current_sync_committee_pubkeys: 512,
+                current_sync_committee_branch_depth: 5,
+            })
+            .unwrap();
+
+        assert_eq!(store.checkpoint().beacon_slot, Some(12_345));
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(reopened.checkpoint().beacon_slot, Some(12_345));
     }
 }
