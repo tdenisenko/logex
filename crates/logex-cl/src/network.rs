@@ -4,12 +4,13 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::hex;
 use discv5::enr::{CombinedKey, EnrPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
 use futures::StreamExt;
+use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::identity;
 use libp2p::multiaddr::Protocol;
@@ -20,6 +21,7 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
 use libp2p_mplex as mplex;
 use logex_types::{ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -44,10 +46,19 @@ const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
+const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
 const GOODBYE_REASON_IRRELEVANT_NETWORK: u64 = 2;
 const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
+const GOSSIP_MAX_TRANSMIT_SIZE: usize = 10 * 1024 * 1024 + 1024;
+const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
+const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
+const GOSSIP_ENCODING_NAME: &str = "ssz_snappy";
+const MESSAGE_DOMAIN_INVALID_SNAPPY: [u8; 4] = [0, 0, 0, 0];
+const MESSAGE_DOMAIN_VALID_SNAPPY: [u8; 4] = [1, 0, 0, 0];
+const ATTESTATION_SUBNET_BITFIELD: [u8; 8] = [0u8; 8];
+const SYNCNET_BITFIELD: [u8; 1] = [0u8; 1];
 
 #[derive(Debug, Clone)]
 pub struct ConsensusNetworkConfig {
@@ -86,6 +97,8 @@ pub enum ConsensusNetworkError {
     EventStream(String),
     #[error("failed to construct consensus libp2p transport: {0}")]
     ConstructRpcTransport(String),
+    #[error("failed to construct consensus gossipsub behaviour: {0}")]
+    ConstructGossip(String),
     #[error("failed to bind consensus libp2p listener: {0}")]
     ListenRpcTransport(String),
     #[error("failed to derive libp2p identity from consensus secret key: {0}")]
@@ -101,6 +114,7 @@ struct PersistedPeer {
 #[behaviour(to_swarm = "ConsensusBehaviourEvent")]
 struct ConsensusBehaviour {
     identify: identify::Behaviour,
+    gossip: gossipsub::Behaviour,
     status_rpc: StatusRpcBehaviour,
     goodbye_rpc: GoodbyeRpcBehaviour,
     metadata_rpc: MetadataRpcBehaviour,
@@ -113,6 +127,7 @@ struct ConsensusBehaviour {
 #[derive(Debug)]
 enum ConsensusBehaviourEvent {
     Identify(Box<identify::Event>),
+    Gossip(Box<gossipsub::Event>),
     StatusRpc(Eth2RpcEvent),
     GoodbyeRpc(Eth2RpcEvent),
     MetadataRpc(Eth2RpcEvent),
@@ -125,6 +140,12 @@ enum ConsensusBehaviourEvent {
 impl From<identify::Event> for ConsensusBehaviourEvent {
     fn from(event: identify::Event) -> Self {
         Self::Identify(Box::new(event))
+    }
+}
+
+impl From<gossipsub::Event> for ConsensusBehaviourEvent {
+    fn from(event: gossipsub::Event) -> Self {
+        Self::Gossip(Box::new(event))
     }
 }
 
@@ -309,6 +330,7 @@ struct ConsensusNetwork {
     dialable_peers: HashMap<PeerId, Vec<Multiaddr>>,
     dialing_peers: HashSet<PeerId>,
     connected_peers: HashSet<PeerId>,
+    connected_since: HashMap<PeerId, Instant>,
     peer_support: HashMap<PeerId, PeerRpcSupport>,
     peer_failures: HashMap<PeerId, PeerFailureCounts>,
     status_peers: HashSet<PeerId>,
@@ -320,6 +342,22 @@ struct ConsensusNetwork {
     pending_requests: HashMap<PendingRequestKey, PeerId>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
     request_failures: RpcFailureCounts,
+    gossip_topics: ConsensusGossipTopics,
+    gossip_counts: GossipMessageCounts,
+    gossip_subscriptions: HashSet<gossipsub::TopicHash>,
+}
+
+#[derive(Debug, Clone)]
+struct ConsensusGossipTopics {
+    finality_update: gossipsub::IdentTopic,
+    optimistic_update: gossipsub::IdentTopic,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GossipMessageCounts {
+    finality_update: u64,
+    optimistic_update: u64,
+    decode_failures: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -482,6 +520,12 @@ impl PeerRpcSupport {
             && self.light_client_finality_update
             && self.light_client_optimistic_update
     }
+
+    const fn supports_any_light_client(self) -> bool {
+        self.light_client_bootstrap
+            || self.light_client_finality_update
+            || self.light_client_optimistic_update
+    }
 }
 
 impl ConsensusNetwork {
@@ -493,6 +537,7 @@ impl ConsensusNetwork {
         let bootnodes = mainnet_bootnodes()?;
         let fork_id = current_eth2_fork_id(&bootnodes)?;
         let fork_digest = current_fork_digest(&fork_id)?;
+        let gossip_topics = build_gossip_topics(fork_digest);
         let secret_path = discovery_secret_path(&config.data_dir);
         let known_peers_path = known_peers_path(&config.data_dir);
         let enr_key = load_or_create_secret_key(&secret_path)?;
@@ -554,6 +599,7 @@ impl ConsensusNetwork {
             dialable_peers,
             dialing_peers: HashSet::new(),
             connected_peers: HashSet::new(),
+            connected_since: HashMap::new(),
             peer_support: HashMap::new(),
             peer_failures: HashMap::new(),
             status_peers: HashSet::new(),
@@ -565,6 +611,9 @@ impl ConsensusNetwork {
             pending_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
             request_failures: RpcFailureCounts::default(),
+            gossip_topics,
+            gossip_counts: GossipMessageCounts::default(),
+            gossip_subscriptions: HashSet::new(),
         })
     }
 
@@ -598,6 +647,7 @@ impl ConsensusNetwork {
             bootnodes = self.bootnode_count,
             "consensus network started"
         );
+        self.subscribe_gossip_topics();
         self.refresh_status();
 
         let mut query_interval = tokio::time::interval(DISCOVERY_QUERY_INTERVAL);
@@ -718,6 +768,9 @@ impl ConsensusNetwork {
                 tracing::debug!(%peer_id, endpoint = ?endpoint, "consensus libp2p connection established");
                 self.dialing_peers.remove(&peer_id);
                 self.connected_peers.insert(peer_id);
+                self.connected_since
+                    .entry(peer_id)
+                    .or_insert_with(Instant::now);
                 self.drive_rpc_requests();
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -760,6 +813,9 @@ impl ConsensusNetwork {
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::Identify(event)) => {
                 self.handle_identify_event(*event);
             }
+            SwarmEvent::Behaviour(ConsensusBehaviourEvent::Gossip(event)) => {
+                self.handle_gossip_event(*event);
+            }
             _ => {}
         }
     }
@@ -775,22 +831,10 @@ impl ConsensusNetwork {
                     listen_addrs = info.listen_addrs.len(),
                     protocols = info.protocols.len(),
                     supports_light_client = support.supports_light_client(),
+                    supports_any_light_client = support.supports_any_light_client(),
                     "received consensus identify info"
                 );
                 self.peer_support.insert(peer_id, support);
-                if !support.supports_light_client() {
-                    tracing::debug!(
-                        %peer_id,
-                        status = support.status,
-                        metadata = support.metadata,
-                        bootstrap = support.light_client_bootstrap,
-                        finality = support.light_client_finality_update,
-                        optimistic = support.light_client_optimistic_update,
-                        "disconnecting consensus peer that does not advertise the full light-client req/resp set"
-                    );
-                    self.disconnect_peer_with_reason(peer_id, GOODBYE_REASON_IRRELEVANT_NETWORK);
-                    return;
-                }
                 self.drive_rpc_requests();
             }
             identify::Event::Sent { peer_id, .. } => {
@@ -803,6 +847,143 @@ impl ConsensusNetwork {
                 tracing::debug!(%peer_id, %error, "consensus identify exchange failed");
             }
         }
+    }
+
+    fn subscribe_gossip_topics(&mut self) {
+        for topic in [
+            self.gossip_topics.finality_update.clone(),
+            self.gossip_topics.optimistic_update.clone(),
+        ] {
+            match self.swarm.behaviour_mut().gossip.subscribe(&topic) {
+                Ok(true) | Ok(false) => {
+                    self.gossip_subscriptions.insert(topic.hash());
+                }
+                Err(error) => {
+                    tracing::warn!(topic = %topic.hash(), %error, "failed to subscribe to consensus gossip topic");
+                }
+            }
+        }
+    }
+
+    fn handle_gossip_event(&mut self, event: gossipsub::Event) {
+        match event {
+            gossipsub::Event::Message {
+                propagation_source,
+                message_id,
+                message,
+            } => {
+                let acceptance = self.handle_gossip_message(propagation_source, &message);
+                if !self
+                    .swarm
+                    .behaviour_mut()
+                    .gossip
+                    .report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        acceptance,
+                    )
+                {
+                    tracing::debug!(
+                        %propagation_source,
+                        %message_id,
+                        "consensus gossip message was no longer pending validation"
+                    );
+                }
+            }
+            gossipsub::Event::Subscribed { peer_id, topic } => {
+                tracing::debug!(%peer_id, topic = %topic, "consensus peer subscribed to gossip topic");
+            }
+            gossipsub::Event::Unsubscribed { peer_id, topic } => {
+                tracing::debug!(%peer_id, topic = %topic, "consensus peer unsubscribed from gossip topic");
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_gossip_message(
+        &mut self,
+        propagation_source: PeerId,
+        message: &gossipsub::Message,
+    ) -> gossipsub::MessageAcceptance {
+        let Some(decoded) = decode_gossip_payload(&message.data) else {
+            self.gossip_counts.decode_failures += 1;
+            tracing::debug!(
+                %propagation_source,
+                topic = %message.topic,
+                bytes = message.data.len(),
+                "failed to decompress consensus gossip payload"
+            );
+            return gossipsub::MessageAcceptance::Reject;
+        };
+
+        if message.topic == self.gossip_topics.finality_update.hash() {
+            match decode_finality_update(&decoded) {
+                Ok(summary) => {
+                    self.gossip_counts.finality_update += 1;
+                    tracing::info!(
+                        %propagation_source,
+                        bytes = decoded.len(),
+                        fork = ?summary.fork,
+                        attested_slot = summary.attested_header.beacon_slot,
+                        finalized_slot = summary.finalized_header.beacon_slot,
+                        "received consensus light-client finality-update gossip"
+                    );
+                    if let Err(error) = self.consensus.update_finality_update_status(summary) {
+                        tracing::warn!(
+                            %propagation_source,
+                            %error,
+                            "failed to persist finality update learned from gossip"
+                        );
+                    }
+                    return gossipsub::MessageAcceptance::Ignore;
+                }
+                Err(error) => {
+                    self.gossip_counts.decode_failures += 1;
+                    tracing::debug!(
+                        %propagation_source,
+                        bytes = decoded.len(),
+                        %error,
+                        "failed to decode consensus finality-update gossip payload"
+                    );
+                    return gossipsub::MessageAcceptance::Reject;
+                }
+            }
+        }
+
+        if message.topic == self.gossip_topics.optimistic_update.hash() {
+            match decode_optimistic_update(&decoded) {
+                Ok(summary) => {
+                    self.gossip_counts.optimistic_update += 1;
+                    tracing::info!(
+                        %propagation_source,
+                        bytes = decoded.len(),
+                        fork = ?summary.fork,
+                        attested_slot = summary.attested_header.beacon_slot,
+                        "received consensus light-client optimistic-update gossip"
+                    );
+                    if let Err(error) = self.consensus.update_optimistic_update_status(summary) {
+                        tracing::warn!(
+                            %propagation_source,
+                            %error,
+                            "failed to persist optimistic update learned from gossip"
+                        );
+                    }
+                    return gossipsub::MessageAcceptance::Ignore;
+                }
+                Err(error) => {
+                    self.gossip_counts.decode_failures += 1;
+                    tracing::debug!(
+                        %propagation_source,
+                        bytes = decoded.len(),
+                        %error,
+                        "failed to decode consensus optimistic-update gossip payload"
+                    );
+                    return gossipsub::MessageAcceptance::Reject;
+                }
+            }
+        }
+
+        gossipsub::MessageAcceptance::Ignore
     }
 
     fn handle_rpc_event(&mut self, kind: RpcRequestKind, event: Eth2RpcEvent) {
@@ -1262,40 +1443,58 @@ impl ConsensusNetwork {
     }
 
     fn drive_rpc_requests(&mut self) {
+        let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let mut connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
         connected.sort_by_key(|peer| peer.to_string());
         for peer in connected {
+            let support = self.peer_support.get(&peer).copied();
+            let identify_ready = support.is_some();
+            let identify_timed_out = self.identify_timed_out(peer);
+
             if !self.status_peers.contains(&peer) {
-                if self
-                    .peer_support
-                    .get(&peer)
-                    .copied()
-                    .map(|support| support.supports_request(RpcRequestKind::Status))
-                    .unwrap_or(true)
-                    && self.can_issue_request(RpcRequestKind::Status)
-                {
+                if self.can_issue_request(RpcRequestKind::Status) {
                     self.ensure_request(peer, RpcRequestKind::Status);
                 }
                 continue;
             }
 
-            if self
-                .peer_support
-                .get(&peer)
-                .copied()
-                .map(|support| support.supports_request(RpcRequestKind::MetaData))
-                .unwrap_or(true)
+            if identify_ready
+                && support
+                    .map(|support| support.supports_request(RpcRequestKind::MetaData))
+                    .unwrap_or(false)
                 && self.can_issue_request(RpcRequestKind::MetaData)
             {
                 self.ensure_request(peer, RpcRequestKind::MetaData);
             }
 
-            let Some(support) = self.peer_support.get(&peer).copied() else {
-                if self.can_issue_request(RpcRequestKind::Ping) {
-                    self.ensure_request(peer, RpcRequestKind::Ping);
+            let Some(support) = support else {
+                if identify_timed_out {
+                    tracing::debug!(
+                        %peer,
+                        "disconnecting consensus peer that never identified after status"
+                    );
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
                 }
                 continue;
             };
+
+            if !support.supports_any_light_client() {
+                tracing::debug!(
+                    %peer,
+                    "disconnecting consensus peer that does not advertise any useful light-client RPCs"
+                );
+                self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                continue;
+            }
+
+            if bootstrap_needed {
+                if support.supports_request(RpcRequestKind::LightClientBootstrap)
+                    && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
+                {
+                    self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
+                }
+                continue;
+            }
 
             if support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
@@ -1306,11 +1505,6 @@ impl ConsensusNetwork {
                 && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
             {
                 self.ensure_request(peer, RpcRequestKind::LightClientOptimisticUpdate);
-            }
-            if support.supports_request(RpcRequestKind::LightClientBootstrap)
-                && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
-            {
-                self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
             }
             if support.supports_request(RpcRequestKind::Ping)
                 && self.can_issue_request(RpcRequestKind::Ping)
@@ -1481,6 +1675,13 @@ impl ConsensusNetwork {
         MetaData::empty()
     }
 
+    fn identify_timed_out(&self, peer: PeerId) -> bool {
+        self.connected_since
+            .get(&peer)
+            .map(|connected_at| connected_at.elapsed() >= IDENTIFY_GRACE_PERIOD)
+            .unwrap_or(false)
+    }
+
     fn record_peer_failure(&mut self, peer: PeerId, kind: RpcRequestKind) -> u32 {
         self.peer_failures.entry(peer).or_default().increment(kind)
     }
@@ -1551,6 +1752,7 @@ impl ConsensusNetwork {
     }
 
     fn clear_peer_state(&mut self, peer: PeerId) {
+        self.connected_since.remove(&peer);
         self.peer_support.remove(&peer);
         self.peer_failures.remove(&peer);
         self.status_peers.remove(&peer);
@@ -1658,6 +1860,10 @@ impl ConsensusNetwork {
             bootstrap_request_failures: self.request_failures.bootstrap,
             finality_update_request_failures: self.request_failures.finality_update,
             optimistic_update_request_failures: self.request_failures.optimistic_update,
+            gossip_subscriptions: self.gossip_subscriptions.len(),
+            finality_update_gossip_messages: self.gossip_counts.finality_update,
+            optimistic_update_gossip_messages: self.gossip_counts.optimistic_update,
+            gossip_decode_failures: self.gossip_counts.decode_failures,
         };
         let mut sync_status = self.sync_status.lock().unwrap();
         sync_status.checkpoint = Some(checkpoint);
@@ -1701,7 +1907,9 @@ fn build_local_enr(
     builder
         .udp4(discovery_port)
         .tcp4(p2p_port)
-        .add_value("eth2", &fork_id);
+        .add_value("eth2", &fork_id)
+        .add_value("attnets", &ATTESTATION_SUBNET_BITFIELD)
+        .add_value("syncnets", &SYNCNET_BITFIELD);
     builder
         .build(enr_key)
         .expect("local consensus ENR should always be constructible")
@@ -1728,13 +1936,15 @@ fn build_rpc_swarm(
         )
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
         .with_behaviour(move |_| {
+            let gossip = build_gossip_behaviour()?;
             let identify = identify::Behaviour::new(
                 identify::Config::new(IDENTIFY_PROTOCOL_VERSION.into(), public_key.clone())
                     .with_agent_version(IDENTIFY_AGENT_VERSION.to_owned())
                     .with_cache_size(0),
             );
-            ConsensusBehaviour {
+            Ok(ConsensusBehaviour {
                 identify,
+                gossip,
                 status_rpc: StatusRpcBehaviour {
                     inner: build_status_behaviour(),
                 },
@@ -1756,10 +1966,50 @@ fn build_rpc_swarm(
                 light_client_optimistic_update_rpc: LightClientOptimisticUpdateRpcBehaviour {
                     inner: build_light_client_optimistic_update_behaviour(),
                 },
-            }
+            })
         })
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
         .map(|builder| builder.build())
+}
+
+fn build_gossip_behaviour() -> Result<gossipsub::Behaviour, ConsensusNetworkError> {
+    let config = gossipsub::ConfigBuilder::default()
+        .validation_mode(gossipsub::ValidationMode::Anonymous)
+        .validate_messages()
+        .max_transmit_size(GOSSIP_MAX_TRANSMIT_SIZE)
+        .message_id_fn(eth2_message_id)
+        .build()
+        .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))?;
+    gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Anonymous, config)
+        .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))
+}
+
+fn build_gossip_topics(fork_digest: [u8; 4]) -> ConsensusGossipTopics {
+    let fork_digest = hex::encode(fork_digest);
+    ConsensusGossipTopics {
+        finality_update: gossipsub::IdentTopic::new(format!(
+            "/eth2/{fork_digest}/{LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME}/{GOSSIP_ENCODING_NAME}"
+        )),
+        optimistic_update: gossipsub::IdentTopic::new(format!(
+            "/eth2/{fork_digest}/{LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME}/{GOSSIP_ENCODING_NAME}"
+        )),
+    }
+}
+
+fn eth2_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
+    let (domain, data) = match decode_gossip_payload(&message.data) {
+        Some(decoded) => (MESSAGE_DOMAIN_VALID_SNAPPY, decoded),
+        None => (MESSAGE_DOMAIN_INVALID_SNAPPY, message.data.clone()),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(data);
+    let digest = hasher.finalize();
+    gossipsub::MessageId::from(hex::encode(&digest[..20]))
+}
+
+fn decode_gossip_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    snap::raw::Decoder::new().decompress_vec(payload).ok()
 }
 
 fn discovery_secret_path(data_dir: &Path) -> PathBuf {

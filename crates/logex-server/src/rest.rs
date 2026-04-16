@@ -559,6 +559,10 @@ mod tests {
                     bootstrap_request_failures: 0,
                     finality_update_request_failures: 0,
                     optimistic_update_request_failures: 0,
+                    gossip_subscriptions: 2,
+                    finality_update_gossip_messages: 4,
+                    optimistic_update_gossip_messages: 9,
+                    gossip_decode_failures: 1,
                 }),
                 consensus_light_client: Some(ConsensusLightClientStatus {
                     bootstrap: Some(LightClientBootstrapStatus {

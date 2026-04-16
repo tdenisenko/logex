@@ -41,6 +41,15 @@ pub enum ConsensusStateError {
     PersistState { path: PathBuf, source: io::Error },
     #[error("invalid checkpoint string: {0}")]
     InvalidCheckpoint(String),
+    #[error(
+        "existing consensus state is rooted at {persisted_root} slot {persisted_slot:?}, but startup requested {requested_root} slot {requested_slot:?}"
+    )]
+    ConflictingCheckpoint {
+        persisted_root: alloy_primitives::B256,
+        persisted_slot: Option<u64>,
+        requested_root: alloy_primitives::B256,
+        requested_slot: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +93,17 @@ impl ConsensusStore {
                     path: path.clone(),
                     message: error.to_string(),
                 })?;
-            return Ok(Self {
+            let store = Self {
                 path,
                 inner: Arc::new(Mutex::new(snapshot)),
-            });
+            };
+            if let Some(checkpoint) = checkpoint {
+                let requested = load_checkpoint_descriptor(checkpoint)?.checkpoint;
+                if store.reconcile_checkpoint(requested)? {
+                    store.persist()?;
+                }
+            }
+            return Ok(store);
         }
 
         let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
@@ -213,6 +229,37 @@ impl ConsensusStore {
 
     pub fn state_path(&self) -> &Path {
         &self.path
+    }
+
+    fn reconcile_checkpoint(
+        &self,
+        requested: WeakSubjectivityCheckpoint,
+    ) -> Result<bool, ConsensusStateError> {
+        let mut snapshot = self.inner.lock().unwrap();
+        if snapshot.checkpoint.beacon_root != requested.beacon_root {
+            return Err(ConsensusStateError::ConflictingCheckpoint {
+                persisted_root: snapshot.checkpoint.beacon_root,
+                persisted_slot: snapshot.checkpoint.beacon_slot,
+                requested_root: requested.beacon_root,
+                requested_slot: requested.beacon_slot,
+            });
+        }
+
+        match (snapshot.checkpoint.beacon_slot, requested.beacon_slot) {
+            (Some(existing_slot), Some(requested_slot)) if existing_slot != requested_slot => {
+                Err(ConsensusStateError::ConflictingCheckpoint {
+                    persisted_root: snapshot.checkpoint.beacon_root,
+                    persisted_slot: snapshot.checkpoint.beacon_slot,
+                    requested_root: requested.beacon_root,
+                    requested_slot: requested.beacon_slot,
+                })
+            }
+            (None, Some(slot)) => {
+                snapshot.checkpoint.beacon_slot = Some(slot);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -469,5 +516,39 @@ mod tests {
         assert_eq!(store.checkpoint().beacon_slot, Some(12_345));
         let reopened = ConsensusStore::open(temp.path(), None).unwrap();
         assert_eq!(reopened.checkpoint().beacon_slot, Some(12_345));
+    }
+
+    #[test]
+    fn reopening_with_same_root_and_known_slot_enriches_persisted_checkpoint() {
+        let temp = TempDir::new().unwrap();
+        let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        ConsensusStore::open(temp.path(), Some(root)).unwrap();
+
+        let reopened = ConsensusStore::open(temp.path(), Some(&format!("777@{root}"))).unwrap();
+        assert_eq!(reopened.checkpoint().beacon_slot, Some(777));
+
+        let persisted = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(persisted.checkpoint().beacon_slot, Some(777));
+    }
+
+    #[test]
+    fn reopening_with_conflicting_checkpoint_root_fails() {
+        let temp = TempDir::new().unwrap();
+        ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+
+        let error = ConsensusStore::open(
+            temp.path(),
+            Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConsensusStateError::ConflictingCheckpoint { .. }
+        ));
     }
 }

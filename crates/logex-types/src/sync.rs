@@ -104,6 +104,14 @@ pub struct ConsensusNetworkStatus {
     pub finality_update_request_failures: u64,
     /// Number of failed light-client optimistic-update request attempts since startup.
     pub optimistic_update_request_failures: u64,
+    /// Number of active CL gossipsub topic subscriptions.
+    pub gossip_subscriptions: usize,
+    /// Number of light-client finality-update gossip messages observed since startup.
+    pub finality_update_gossip_messages: u64,
+    /// Number of light-client optimistic-update gossip messages observed since startup.
+    pub optimistic_update_gossip_messages: u64,
+    /// Number of malformed or undecodable light-client gossip payloads observed since startup.
+    pub gossip_decode_failures: u64,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.
