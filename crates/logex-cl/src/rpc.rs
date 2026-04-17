@@ -143,6 +143,17 @@ impl StatusMessage {
             earliest_available_slot: 0,
         }
     }
+
+    pub fn checkpoint(fork_digest: [u8; 4], checkpoint_root: B256, checkpoint_slot: u64) -> Self {
+        Self {
+            fork_digest,
+            finalized_root: checkpoint_root,
+            finalized_epoch: checkpoint_slot / 32,
+            head_root: checkpoint_root,
+            head_slot: checkpoint_slot,
+            earliest_available_slot: checkpoint_slot,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,9 +308,13 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut bytes = Vec::new();
-        io.read_to_end(&mut bytes).await?;
-        decode_response(protocol, &bytes)
+        if is_multi_chunk_protocol(protocol) {
+            let mut bytes = Vec::new();
+            io.read_to_end(&mut bytes).await?;
+            return decode_response(protocol, &bytes);
+        }
+
+        read_single_response(protocol, io).await
     }
 
     async fn write_request<T>(
@@ -619,6 +634,28 @@ fn encode_ssz_snappy_payload(raw_ssz: &[u8]) -> io::Result<Vec<u8>> {
     Ok(payload)
 }
 
+async fn read_single_response<T>(
+    protocol: &Eth2RpcProtocol,
+    io: &mut T,
+) -> io::Result<Eth2RpcResponse>
+where
+    T: AsyncRead + Unpin + Send,
+{
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(consumed) = single_response_len(protocol, &bytes)? {
+            return decode_response(protocol, &bytes[..consumed]);
+        }
+
+        let read = io.read(&mut chunk).await?;
+        if read == 0 {
+            return decode_response(protocol, &bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
 fn decode_ssz_snappy_payload(bytes: &[u8]) -> io::Result<Vec<u8>> {
     let (raw, consumed) = decode_ssz_snappy_payload_prefix(bytes)?;
     if consumed != bytes.len() {
@@ -632,9 +669,13 @@ fn decode_ssz_snappy_payload(bytes: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 fn decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<(Vec<u8>, usize)> {
-    let (declared_len, compressed) =
-        unsigned_varint::decode::u64(bytes).map_err(|error| invalid_data(error.to_string()))?;
-    let varint_len = bytes.len() - compressed.len();
+    let (declared_len, varint_len) = decode_unsigned_varint_prefix(bytes)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "missing payload length prefix",
+        )
+    })?;
+    let compressed = &bytes[varint_len..];
     let mut cursor = io::Cursor::new(compressed);
     let mut decoder = FrameDecoder::new(&mut cursor);
     let mut raw = Vec::with_capacity(declared_len as usize);
@@ -662,6 +703,48 @@ fn decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<(Vec<u8>, usize)
         )));
     }
     Ok((raw, varint_len + cursor.position() as usize))
+}
+
+fn try_decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<Option<(Vec<u8>, usize)>> {
+    let Some((declared_len, varint_len)) = decode_unsigned_varint_prefix(bytes)? else {
+        return Ok(None);
+    };
+    let compressed = &bytes[varint_len..];
+    let mut cursor = io::Cursor::new(compressed);
+    let mut decoder = FrameDecoder::new(&mut cursor);
+    let mut raw = Vec::with_capacity(declared_len as usize);
+    let mut chunk = [0u8; 4096];
+    while raw.len() < declared_len as usize {
+        let read = match io::Read::read(&mut decoder, &mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            return Ok(None);
+        }
+        let remaining = declared_len as usize - raw.len();
+        raw.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+    Ok(Some((raw, varint_len + cursor.position() as usize)))
+}
+
+fn decode_unsigned_varint_prefix(bytes: &[u8]) -> io::Result<Option<(u64, usize)>> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (index, byte) in bytes.iter().copied().enumerate().take(10) {
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(Some((value, index + 1)));
+        }
+        shift += 7;
+    }
+
+    if bytes.len() < 10 {
+        Ok(None)
+    } else {
+        Err(invalid_data("payload length varint exceeds 10 bytes"))
+    }
 }
 
 fn encode_status(protocol: &Eth2RpcProtocol, status: StatusMessage) -> Vec<u8> {
@@ -912,6 +995,37 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn is_multi_chunk_protocol(protocol: &Eth2RpcProtocol) -> bool {
+    matches!(
+        protocol,
+        Eth2RpcProtocol::LightClientUpdatesByRangeV1
+            | Eth2RpcProtocol::BeaconBlocksByRangeV1
+            | Eth2RpcProtocol::BeaconBlocksByRangeV2
+            | Eth2RpcProtocol::BeaconBlocksByRootV1
+            | Eth2RpcProtocol::BeaconBlocksByRootV2
+    )
+}
+
+fn single_response_len(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Option<usize>> {
+    let Some((&result_code, rest)) = bytes.split_first() else {
+        return Ok(None);
+    };
+    let context_len = if result_code == SUCCESS_CODE {
+        success_response_context_len(protocol)
+    } else {
+        0
+    };
+    if rest.len() < context_len {
+        return Ok(None);
+    }
+    let payload_offset = 1 + context_len;
+    let Some((_, consumed)) = try_decode_ssz_snappy_payload_prefix(&bytes[payload_offset..])?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(payload_offset + consumed))
+}
+
 fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
     match protocol {
         Eth2RpcProtocol::LightClientBootstrapV1
@@ -967,6 +1081,37 @@ mod tests {
         let decoded = decode_ssz_snappy_payload(&encoded).unwrap();
 
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn single_response_len_finds_complete_chunk_without_eof() {
+        let encoded = encode_response(
+            &Eth2RpcProtocol::LightClientFinalityUpdateV1,
+            Eth2RpcResponse::LightClientFinalityUpdate(RawRpcResponse {
+                context_bytes: Some([0xaa, 0xbb, 0xcc, 0xdd]),
+                bytes: vec![1, 2, 3, 4],
+            }),
+        )
+        .unwrap();
+
+        let consumed =
+            single_response_len(&Eth2RpcProtocol::LightClientFinalityUpdateV1, &encoded).unwrap();
+
+        assert_eq!(consumed, Some(encoded.len()));
+    }
+
+    #[test]
+    fn single_response_len_waits_for_more_bytes_on_partial_payload() {
+        let encoded = encode_response(
+            &Eth2RpcProtocol::MetadataV2,
+            Eth2RpcResponse::MetaData(MetaData::empty()),
+        )
+        .unwrap();
+
+        let partial = &encoded[..encoded.len() - 1];
+        let consumed = single_response_len(&Eth2RpcProtocol::MetadataV2, partial).unwrap();
+
+        assert_eq!(consumed, None);
     }
 
     #[test]
@@ -1081,6 +1226,18 @@ mod tests {
         assert_eq!(status.finalized_epoch, 0);
         assert_eq!(status.head_slot, 0);
         assert_eq!(status.earliest_available_slot, 0);
+    }
+
+    #[test]
+    fn checkpoint_status_uses_checkpoint_root_and_slot() {
+        let checkpoint_root = B256::repeat_byte(0x22);
+        let status = StatusMessage::checkpoint([4, 3, 2, 1], checkpoint_root, 14_132_160);
+
+        assert_eq!(status.finalized_root, checkpoint_root);
+        assert_eq!(status.head_root, checkpoint_root);
+        assert_eq!(status.finalized_epoch, 441_630);
+        assert_eq!(status.head_slot, 14_132_160);
+        assert_eq!(status.earliest_available_slot, 14_132_160);
     }
 
     #[test]

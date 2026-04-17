@@ -60,6 +60,8 @@ pub struct ConsensusNetworkStatus {
     pub active_sessions: usize,
     /// Number of libp2p consensus peers currently connected over TCP.
     pub connected_peer_sessions: usize,
+    /// Number of libp2p consensus peers currently being dialed.
+    pub dialing_peer_sessions: usize,
     /// Number of discovered peers remembered as useful CL candidates from prior sessions.
     pub preferred_peers: usize,
     /// Number of peers currently cooling down before another dial attempt.

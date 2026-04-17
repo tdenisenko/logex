@@ -5050,6 +5050,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-beacon",
  "async-trait",
+ "blst",
  "discv5",
  "ethereum_ssz",
  "ethereum_ssz_derive",
@@ -5066,6 +5067,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tree_hash",
  "unsigned-varint 0.8.0",
 ]
 

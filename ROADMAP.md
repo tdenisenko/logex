@@ -126,12 +126,15 @@ LogEx should become a canonical Ethereum event-log node that:
     - new peer sessions are allowed to identify first
     - `Status` is now sent only to peers that actually advertise the `Status` RPC in identify
     - peers that identify without `Status` are treated as irrelevant and disconnected instead of being probed blindly
-  - mainnet smoke runs from the recorded example checkpoint have already observed live native CL discovery and live libp2p peer sessions, but they still do not produce reliable CL req/resp round-trips yet
+  - mainnet smoke runs from the recorded example checkpoint now go beyond discovery-only behavior:
+    - live native CL discovery and libp2p peer sessions are established
+    - a verified bootstrap store is persisted locally from native peers
+    - `/status` now surfaces the checkpoint-derived finalized/optimistic execution anchor from that verified bootstrap store
   - fork-aware typed SSZ decoding is now implemented for current post-Merge light-client payloads:
     - `LightClientBootstrap` for Capella, Deneb, and Electra
     - `LightClientFinalityUpdate` for Capella, Deneb, and Electra
     - `LightClientOptimisticUpdate` for Capella and Deneb-or-later payload layouts
-  - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard so live consensus progress is inspectable even before cryptographic verification is finished
+  - verified bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard so live consensus progress is inspectable from trusted light-client state rather than from decode-only payload snapshots
   - the local consensus ENR now advertises zeroed `attnets` and `syncnets` bitfields in addition to the mainnet `eth2` fork id, so LogEx presents a more standards-conformant CL identity on discovery
   - the CL swarm now supports QUIC transport in addition to TCP and keeps QUIC multiaddrs learned from peer ENRs instead of discarding them
   - the TCP side of the CL swarm now matches the production-client transport surface more closely:
@@ -140,7 +143,7 @@ LogEx should become a canonical Ethereum event-log node that:
     - the combined TCP/QUIC transport is now DNS-wrapped the same way production beacon clients typically build their libp2p stack
   - when the operator uses the same UDP port for CL discovery and CL p2p, LogEx now skips the inbound QUIC listener instead of crashing on a port bind conflict; outbound QUIC dialing still remains available in that configuration
   - LogEx now subscribes to the `light_client_finality_update` and `light_client_optimistic_update` gossip topics for the current fork digest and exposes gossip subscription / decode counters through `/status`
-  - consensus gossip payloads are now decompressed with the spec's snappy-block rule and decoded into persisted light-client summaries, but LogEx still intentionally does not forward them as validated canonical data until sync-committee verification exists
+  - consensus gossip payloads are now decompressed with the spec's snappy-block rule and decoded for observability, but LogEx still intentionally does not forward them as validated canonical data until the gossip path is wired into the verified light-client store
   - restart behavior for checkpoints is stricter and more honest:
     - rerunning with the same checkpoint root plus a known slot enriches persisted consensus state
     - rerunning with a conflicting checkpoint root or slot now fails instead of silently mixing trust bases
@@ -153,6 +156,13 @@ LogEx should become a canonical Ethereum event-log node that:
   - finalized-head-aware compaction is live whenever finalized CL anchors exist
   - the anchored EL sync path now fetches headers by block hash, validates the fetched header against the CL-derived execution anchor, validates body/receipts locally, and only then ingests logs
   - anchored sync now rewinds indexed canonical state on optimistic anchor replacement within the persisted recent-header window instead of silently continuing on stale canonical data
+  - the verified light-client store is now real instead of decode-only:
+    - weak-subjectivity bootstrap is checked against the trusted beacon block root
+    - bootstrap current-sync-committee proofs are verified against the beacon state root
+    - optimistic and finality singleton updates are signature-checked before they mutate trusted state
+    - full `LightClientUpdate` payloads from `LightClientUpdatesByRange` are now decoded, signature-checked, next-sync-committee-checked, and applied to the trusted store
+    - the store now tracks `best_valid_update`, next-sync-committee learning, and spec-style forced progression after `UPDATE_TIMEOUT`
+    - checkpoint-derived finalized and optimistic execution anchors now come only from that verified store
 - Query/storage direction is already established:
   - local storage is the source of truth
   - REST `/query`, gRPC `Query`, and the web UI share the same DataFusion-backed SQL engine
@@ -220,9 +230,15 @@ LogEx should become a canonical Ethereum event-log node that:
     - `Status` is sent only after identify confirms that the peer actually advertises the `Status` RPC
     - while LogEx is not yet serving verified light-client history to peers, it now uses a genesis-style `Status` message that follows the spec more closely: the head side is anchored to the real mainnet beacon genesis block root while the finalized checkpoint remains the canonical zero root for epoch 0, instead of advertising checkpoint-rooted availability it cannot serve
     - bootstrap is prioritized before finality / optimistic requests, instead of blasting every light-client method at once
-  - reliable live acquisition of light-client bootstrap/finality/optimistic payloads is still not implemented yet
-  - cryptographic verification of those payloads is still not implemented yet
-  - multi-chunk CL req/resp (`LightClientUpdatesByRange`, beacon block fetches) is implemented, but not yet upgraded into verified decoded light-client store updates and authenticated beacon-history segments
+  - verified weak-subjectivity bootstrap is implemented and already lands in fixed-port short mainnet smokes from the recorded real checkpoint
+  - cryptographic verification is now implemented for the trusted light-client store path:
+    - bootstrap proof verification
+    - `execution_branch` verification for trusted light-client headers
+    - sync-committee signature verification for optimistic / finality / full updates
+    - next-sync-committee proof verification for full updates
+  - multi-chunk CL req/resp now splits into two states:
+    - `LightClientUpdatesByRange` is upgraded into verified light-client store updates
+    - beacon-block fetches still need the authenticated beacon-history segment walker before they can produce contiguous execution anchors
   - current gossip subscriptions decode payloads for observability, but they still do not perform sync-committee validation or feed canonical anchor production yet
   - recent mainnet smokes are healthier than before the latest interop fixes:
     - pre-bootstrap `Status` now uses the genesis head / zero finalized-checkpoint form expected by the spec
@@ -230,7 +246,9 @@ LogEx should become a canonical Ethereum event-log node that:
     - the dialer now records concrete address-level failures instead of opaque peer-level churn, which makes `/status` useful for transport debugging
     - bootnodes are once again usable as low-priority fallback libp2p dial targets instead of being discovery-only seeds
     - the reusable smoke cache is now kept cleaner: peers that previously identified without beacon `Status` support are no longer persisted, and ENRs carrying the `opstack` marker are filtered out before they can poison future CL dial attempts
-    - recent smokes now show real identify-driven rejection of non-beacon peers instead of silently retaining them, but beacon-capable peers are still not surviving long enough to yield `Status` or bootstrap responses
+    - with checkpoint `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4`, short fixed-port smokes now persist a verified bootstrap store and surface the checkpoint execution anchor through `/status`
+    - the repaired scheduler no longer treats successful post-bootstrap dynamic requests as permanently satisfied, so finality / optimistic / updates-by-range work can be polled continuously instead of freezing after the first success
+    - the remaining short-run blocker is now narrower and more honest: in the latest smoke, bootstrap-capable peers landed quickly, but the observed peers exposed `updates_by_range=false`, and the singleton finality / optimistic requests still did not complete in that short run
 - The current branch also does not yet implement the pre-Merge PoW canonicality path.
 - This means the current branch is a real architectural shift, but not yet the full end-to-end canonical system.
 
@@ -274,6 +292,7 @@ LogEx should become a canonical Ethereum event-log node that:
      - peer success counters are now cleared on disconnect so `/status` reflects live CL session health rather than stale historical responders
      - the CL scheduler now caps in-flight requests per protocol kind to the consensus req/resp concurrency limit instead of blasting every connected peer at once
      - the CL scheduler now keeps bootstrap ahead of finality / optimistic requests until a real bootstrap payload has landed, which is closer to the light-client sync process than firing every request type in parallel
+     - post-bootstrap dynamic CL requests are no longer treated as permanently satisfied after the first success, so finality / optimistic / updates-by-range work can keep polling instead of freezing at the checkpoint
      - `/status` now exposes identified peers, protocol-capability counts, per-kind in-flight requests, per-kind request-failure counters, and the latest identify/transport/RPC breadcrumbs for native CL debugging
      - `/status` now also exposes light-client gossip subscription counts plus finality / optimistic gossip decode counters
      - peers that do not advertise the full light-client req/resp set are now disconnected as soon as identify proves they are not useful for the light-client path, and peers that repeatedly fail `Status` are rotated out instead of being kept forever
@@ -286,9 +305,9 @@ LogEx should become a canonical Ethereum event-log node that:
        - `GetLightClientFinalityUpdate`
        - `GetLightClientOptimisticUpdate`
      - `LightClientUpdatesByRange`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot` remain outbound-only until LogEx can serve those methods with correct local data instead of generic placeholders
-     - live mainnet smoke runs from the recorded example checkpoint have already observed discovery and libp2p peer sessions
+     - live mainnet smoke runs from the recorded example checkpoint now go past discovery-only behavior and land a verified bootstrap store from native peers
      - fork-aware typed SSZ decoding now exists for current post-Merge `LightClientBootstrap`, `LightClientFinalityUpdate`, and `LightClientOptimisticUpdate` payloads
-     - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard
+     - verified bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard
      - raw bootstrap/finality/optimistic RPC payloads are now persisted alongside the decoded summaries, and LogEx now serves those exact cached payloads back to inbound peers when they are available locally
      - the local consensus ENR now includes `attnets` / `syncnets`, and LogEx now subscribes to the light-client finality / optimistic gossip topics for the current fork digest
      - the consensus transport now includes outbound QUIC dialing, peer ENRs are harvested for QUIC addresses as well as TCP, and shared discovery/p2p UDP ports no longer crash the node when QUIC is enabled
@@ -297,6 +316,8 @@ LogEx should become a canonical Ethereum event-log node that:
      - LogEx now derives its own current mainnet `fork_digest` and ENR `eth2` fork id from the consensus-spec fork schedule instead of copying whichever bootnode `eth2` field happened to be encountered first
      - the pre-bootstrap `Status` handshake now uses the real beacon genesis block root plus the canonical zero finalized checkpoint rather than a placeholder-style root or an unserved checkpoint root, and ENR-derived peer IDs now follow the same secp256k1 conversion used by Lighthouse
      - native multi-chunk CL req/resp is now implemented for `LightClientUpdatesByRange`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot`, including chunked stream parsing, per-method protocol advertisement, peer capability tracking, and response/error accounting
+     - `LightClientUpdatesByRange` payloads are now decoded, verified, and applied into the trusted light-client store instead of being treated as raw opaque chunks only
+     - the verified store now tracks next-sync-committee learning, `best_valid_update`, and spec-style forced progression after `UPDATE_TIMEOUT`
      - the CL scheduler now treats checkpoint-history fetches as first-class work: it will try to fetch the checkpoint beacon block by root, fall back to slot-based block range fetches when the checkpoint slot is known, and request one sync-committee-period update window once the slot context exists
      - the bootstrap scheduler now keeps checkpoint-history peers alive during bootstrap instead of disconnecting them merely because they do not advertise `LightClientBootstrap`; peers that can serve beacon blocks by root/range are now considered useful before bootstrap lands
      - discovery now fans out across multiple random `FINDNODE` targets per cycle instead of a single random lookup, so fresh runs can accumulate dialable CL ENRs faster
@@ -316,21 +337,20 @@ LogEx should become a canonical Ethereum event-log node that:
      - cached ENRs that previously identified without beacon `Status` support are now dropped on load and no longer persisted back to disk, and ENRs carrying the `opstack` marker are filtered out before they can enter the reusable CL peer cache
      - bootnodes are now reintroduced as low-priority fallback dial targets, and the TCP transport now follows the same explicit `noise` + `yamux|mplex` + timeout shape used by production beacon clients like Lighthouse more closely than the earlier builder-default stack
    - TODO:
-     - finish the remaining mainnet interop gap: live smoke now reaches discovery, routing-table-fed dial candidates, spec-derived local fork identity, useful-peer prioritization, outbound `Status`, and live gossip subscriptions, but bootstrap-capable peers still are not landing reliably enough to start the real light-client store
+     - finish the remaining post-bootstrap mainnet interop gap: the light-client store now bootstraps natively, but short smokes still have not landed verified finality / optimistic / updates-by-range progression beyond the checkpoint
      - keep narrowing the remaining transport churn beyond address selection itself, especially peers that still reset or EOF during the libp2p/noise handshake before identify or beacon `Status`
-     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred and the TCP transport matches the production-client muxer surface more closely, and fix any remaining edge cases where peers accept the connection long enough to be dialed but still die before identify, `Status`, bootstrap, or checkpoint-block requests can complete
+     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred and the TCP transport matches the production-client muxer surface more closely, and fix any remaining edge cases where peers accept the connection long enough to be dialed but still die before identify, `Status`, or post-bootstrap light-client requests can complete
      - finish separating actual beacon peers from discovery noise earlier in the pipeline so the dial budget is spent on peers that can really speak the beacon req/resp surface, not just nodes that happen to share a compatible ENR fork digest
-     - once bootstrap-capable peers land reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
-     - persist and serve correct checkpoint-related `LightClientUpdatesByRange` and beacon-history responses before advertising those multi-chunk methods inbound
+     - keep hardening `GetLightClientFinalityUpdate` and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to advance the live store instead of staying pending in short smokes
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
-     - upgrade the new `LightClientUpdatesByRange` and beacon-block transports from raw chunk streams into decoded, verified update/block objects that feed the light-client store and backward beacon-history proving
+     - keep proving that `LightClientUpdatesByRange` lands on real mainnet peers often enough to rotate committees and drive the store forward in practice, not only in unit tests
+     - upgrade beacon-block transports from raw chunk streams into decoded, verified block objects that feed backward beacon-history proving
      - upgrade the current gossip path from parse-only observability to real light-client validation and head tracking after the verified req/resp bootstrap path exists
-     - verify sync committee signatures, committee rotation, and weak-subjectivity bootstrap state exactly enough to match the Helios-style trust model
-     - verify `execution_branch` against the beacon header `body_root` for every trusted light-client header
+     - persist and serve correct checkpoint-related `LightClientUpdatesByRange` responses once the local cache/model can answer them honestly
    - Why this is still blocking:
-     - the node can now discover and dial native CL peers over TCP and QUIC, maintain libp2p sessions, speak version-aware per-method req/resp for both single-response and multi-chunk methods, advertise a more standards-conformant ENR, subscribe to light-client gossip, and decode live light-client payloads once received, but current mainnet smoke runs still stall before reliable bootstrap responses arrive
-     - peer-selection noise has been reduced enough that `/status` now points at the next meaningful blocker: `Status` interoperability is materially better, but bootstrap-capable peers are still too sparse or too short-lived to initialize the native light-client store
-     - until bootstrap/finality/optimistic payloads are acquired reliably and then cryptographically verified, checkpointed CL state must still be imported rather than learned live
+     - the node can now discover and dial native CL peers over TCP and QUIC, maintain libp2p sessions, speak version-aware per-method req/resp for both single-response and multi-chunk methods, advertise a more standards-conformant ENR, subscribe to light-client gossip, and persist a verified bootstrap store from native peers, but short mainnet smokes still are not advancing the verified store beyond the checkpoint
+     - peer-selection noise has been reduced enough that `/status` now points at the next meaningful blocker: bootstrap-capable peers land quickly, but recent identified peers have exposed `updates_by_range=false`, and singleton finality / optimistic requests still remained pending in the latest fixed-port smoke
+     - until finality / optimistic / updates-by-range progression lands reliably on live peers, LogEx cannot yet claim that the native CL path is producing live forward movement beyond the checkpoint
    - Done when:
      - a fresh mainnet sync can start from a weak-subjectivity checkpoint, discover peers natively, and produce verified optimistic/finalized execution anchors without any external consensus RPC
 

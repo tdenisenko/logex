@@ -537,6 +537,7 @@ mod tests {
                     routing_table_peers: 11,
                     active_sessions: 3,
                     connected_peer_sessions: 2,
+                    dialing_peer_sessions: 1,
                     preferred_peers: 3,
                     cooldown_peers: 5,
                     ignored_peers: 7,
