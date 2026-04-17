@@ -10,13 +10,14 @@ use alloy_primitives::hex;
 use discv5::enr::{CombinedKey, CombinedPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
 use futures::StreamExt;
+use libp2p::core::ConnectedPoint;
 use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::identity;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
 use libp2p_mplex as mplex;
 use logex_types::{ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint};
@@ -53,6 +54,7 @@ const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
+const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 1;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
 const PEER_BACKOFF_BASE: Duration = Duration::from_secs(15);
@@ -126,6 +128,8 @@ struct PersistedPeer {
     bootstrap_successes: u32,
     #[serde(default)]
     useful_successes: u32,
+    #[serde(default)]
+    dial_stats: PeerDialAddressStats,
 }
 
 #[derive(NetworkBehaviour)]
@@ -536,12 +540,111 @@ struct PeerFailureCounts {
     beacon_blocks_by_root: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DialAddressClass {
+    Tcp4,
+    Quic4,
+    Tcp6,
+    Quic6,
+}
+
+impl DialAddressClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tcp4 => "tcp4",
+            Self::Quic4 => "quic4",
+            Self::Tcp6 => "tcp6",
+            Self::Quic6 => "quic6",
+        }
+    }
+
+    const fn default_priority(self, bootstrap_needed: bool) -> i32 {
+        match (bootstrap_needed, self) {
+            (true, Self::Tcp4) => 400,
+            (true, Self::Quic4) => 350,
+            (true, Self::Tcp6) => 200,
+            (true, Self::Quic6) => 150,
+            (false, Self::Quic4) => 400,
+            (false, Self::Tcp4) => 350,
+            (false, Self::Quic6) => 200,
+            (false, Self::Tcp6) => 150,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct PeerDialAddressStats {
+    tcp4_successes: u32,
+    quic4_successes: u32,
+    tcp6_successes: u32,
+    quic6_successes: u32,
+    tcp4_failures: u32,
+    quic4_failures: u32,
+    tcp6_failures: u32,
+    quic6_failures: u32,
+}
+
+impl PeerDialAddressStats {
+    fn record_success(&mut self, class: DialAddressClass) {
+        let successes = self.successes_mut(class);
+        *successes = (*successes).saturating_add(1);
+        *self.failures_mut(class) = 0;
+    }
+
+    fn record_failure(&mut self, class: DialAddressClass) {
+        let failures = self.failures_mut(class);
+        *failures = (*failures).saturating_add(1);
+    }
+
+    fn priority(self, class: DialAddressClass, bootstrap_needed: bool) -> i32 {
+        class.default_priority(bootstrap_needed) + self.successes(class) as i32 * 100
+            - self.failures(class) as i32 * 125
+    }
+
+    const fn successes(self, class: DialAddressClass) -> u32 {
+        match class {
+            DialAddressClass::Tcp4 => self.tcp4_successes,
+            DialAddressClass::Quic4 => self.quic4_successes,
+            DialAddressClass::Tcp6 => self.tcp6_successes,
+            DialAddressClass::Quic6 => self.quic6_successes,
+        }
+    }
+
+    const fn failures(self, class: DialAddressClass) -> u32 {
+        match class {
+            DialAddressClass::Tcp4 => self.tcp4_failures,
+            DialAddressClass::Quic4 => self.quic4_failures,
+            DialAddressClass::Tcp6 => self.tcp6_failures,
+            DialAddressClass::Quic6 => self.quic6_failures,
+        }
+    }
+
+    fn successes_mut(&mut self, class: DialAddressClass) -> &mut u32 {
+        match class {
+            DialAddressClass::Tcp4 => &mut self.tcp4_successes,
+            DialAddressClass::Quic4 => &mut self.quic4_successes,
+            DialAddressClass::Tcp6 => &mut self.tcp6_successes,
+            DialAddressClass::Quic6 => &mut self.quic6_successes,
+        }
+    }
+
+    fn failures_mut(&mut self, class: DialAddressClass) -> &mut u32 {
+        match class {
+            DialAddressClass::Tcp4 => &mut self.tcp4_failures,
+            DialAddressClass::Quic4 => &mut self.quic4_failures,
+            DialAddressClass::Tcp6 => &mut self.tcp6_failures,
+            DialAddressClass::Quic6 => &mut self.quic6_failures,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PeerLifecycleState {
     remembered_support: Option<PeerRpcSupport>,
     status_successes: u32,
     bootstrap_successes: u32,
     useful_successes: u32,
+    dial_stats: PeerDialAddressStats,
     transport_failures: u32,
     rpc_failures: u32,
     disconnects: u32,
@@ -557,6 +660,7 @@ impl PeerLifecycleState {
             status_successes: peer.status_successes,
             bootstrap_successes: peer.bootstrap_successes,
             useful_successes: peer.useful_successes,
+            dial_stats: peer.dial_stats,
             transport_failures: 0,
             rpc_failures: 0,
             disconnects: 0,
@@ -598,6 +702,16 @@ impl PeerLifecycleState {
         }
         self.rpc_failures = 0;
         self.cooldown_until = None;
+    }
+
+    fn record_dial_success(&mut self, class: DialAddressClass) {
+        self.dial_stats.record_success(class);
+        self.transport_failures = self.transport_failures.saturating_sub(1);
+        self.cooldown_until = None;
+    }
+
+    fn record_dial_failure(&mut self, class: DialAddressClass) {
+        self.dial_stats.record_failure(class);
     }
 
     fn record_transport_failure(&mut self, now: Instant) -> Duration {
@@ -982,6 +1096,7 @@ impl ConsensusNetwork {
                 }
                 _ = query_interval.tick() => {
                     self.drive_discovery_queries().await;
+                    self.refresh_dialable_peers_from_routing_table();
                     self.refresh_status();
                 }
                 _ = rpc_interval.tick() => {
@@ -1033,6 +1148,12 @@ impl ConsensusNetwork {
             Err(error) => {
                 tracing::debug!(%error, "consensus discovery query failed");
             }
+        }
+    }
+
+    fn refresh_dialable_peers_from_routing_table(&mut self) {
+        for enr in self.discv5.table_entries_enr() {
+            self.observe_enr(&enr);
         }
     }
 
@@ -1090,9 +1211,26 @@ impl ConsensusNetwork {
                 peer_id, endpoint, ..
             } => {
                 tracing::debug!(%peer_id, endpoint = ?endpoint, "consensus libp2p connection established");
+                let dial_class = match &endpoint {
+                    ConnectedPoint::Dialer { address, .. } => dial_address_class(address),
+                    ConnectedPoint::Listener { .. } => None,
+                };
+                if let Some(class) = dial_class {
+                    self.peer_lifecycle
+                        .entry(peer_id)
+                        .or_default()
+                        .record_dial_success(class);
+                }
                 let endpoint = format!("{endpoint:?}");
-                self.last_connection_event =
-                    Some(format!("connected peer={peer_id} endpoint={endpoint}"));
+                self.last_connection_event = Some(match dial_class {
+                    Some(class) => {
+                        format!(
+                            "connected peer={peer_id} endpoint={endpoint} dial_class={}",
+                            class.label()
+                        )
+                    }
+                    None => format!("connected peer={peer_id} endpoint={endpoint}"),
+                });
                 self.dialing_peers.remove(&peer_id);
                 self.closing_peers.remove(&peer_id);
                 self.connected_peers.insert(peer_id);
@@ -1128,6 +1266,7 @@ impl ConsensusNetwork {
                 if let Some(peer_id) = peer_id {
                     self.dialing_peers.remove(&peer_id);
                     self.clear_pending_requests_for_peer(peer_id);
+                    self.record_dial_error(peer_id, &error);
                     self.record_transport_backoff(peer_id, format!("dial_error error={error}"));
                 }
             }
@@ -2111,10 +2250,22 @@ impl ConsensusNetwork {
     }
 
     fn ensure_connected(&mut self, peer: PeerId, addrs: Vec<Multiaddr>) {
+        let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
+        let addrs = self.select_dial_addresses(peer, addrs, bootstrap_needed);
         if addrs.is_empty() {
             return;
         }
 
+        let dial_targets = addrs
+            .iter()
+            .map(|addr| match dial_address_class(addr) {
+                Some(class) => format!("{addr}({})", class.label()),
+                None => addr.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.last_connection_event =
+            Some(format!("dial_start peer={peer} targets=[{dial_targets}]"));
         let dial = DialOpts::peer_id(peer)
             .condition(PeerCondition::Disconnected)
             .addresses(addrs)
@@ -2125,6 +2276,15 @@ impl ConsensusNetwork {
             }
             Err(error) => {
                 tracing::debug!(%peer, %error, "failed to start consensus libp2p dial");
+                self.record_dial_error(peer, &error);
+                if !matches!(
+                    &error,
+                    DialError::DialPeerConditionFalse(_)
+                        | DialError::NoAddresses
+                        | DialError::Aborted
+                ) {
+                    self.record_transport_backoff(peer, format!("dial_start_error error={error}"));
+                }
             }
         }
     }
@@ -2315,6 +2475,36 @@ impl ConsensusNetwork {
             - penalties as i32
     }
 
+    fn select_dial_addresses(
+        &self,
+        peer: PeerId,
+        mut addrs: Vec<Multiaddr>,
+        bootstrap_needed: bool,
+    ) -> Vec<Multiaddr> {
+        addrs.sort_by(|left, right| {
+            self.dial_address_priority(peer, right, bootstrap_needed)
+                .cmp(&self.dial_address_priority(peer, left, bootstrap_needed))
+                .then_with(|| left.to_string().cmp(&right.to_string()))
+        });
+        if addrs.len() > MAX_DIAL_ADDRESSES_PER_ATTEMPT {
+            addrs.truncate(MAX_DIAL_ADDRESSES_PER_ATTEMPT);
+        }
+        addrs
+    }
+
+    fn dial_address_priority(&self, peer: PeerId, addr: &Multiaddr, bootstrap_needed: bool) -> i32 {
+        dial_address_class(addr)
+            .map(|class| {
+                self.peer_lifecycle
+                    .get(&peer)
+                    .map(|lifecycle| lifecycle.dial_stats.priority(class, bootstrap_needed))
+                    .unwrap_or_else(|| {
+                        PeerDialAddressStats::default().priority(class, bootstrap_needed)
+                    })
+            })
+            .unwrap_or(i32::MIN / 2)
+    }
+
     fn mark_peer_ignored_for_run(&mut self, peer: PeerId, reason: String) {
         self.peer_lifecycle
             .entry(peer)
@@ -2348,6 +2538,28 @@ impl ConsensusNetwork {
             self.peer_context(peer),
             delay.as_secs()
         ));
+    }
+
+    fn record_dial_error(&mut self, peer: PeerId, error: &DialError) {
+        let lifecycle = self.peer_lifecycle.entry(peer).or_default();
+        match error {
+            DialError::LocalPeerId { address } | DialError::WrongPeerId { address, .. } => {
+                if let Some(class) = dial_address_class(address) {
+                    lifecycle.record_dial_failure(class);
+                }
+            }
+            DialError::Transport(errors) => {
+                for (address, _) in errors {
+                    if let Some(class) = dial_address_class(address) {
+                        lifecycle.record_dial_failure(class);
+                    }
+                }
+            }
+            DialError::NoAddresses
+            | DialError::DialPeerConditionFalse(_)
+            | DialError::Aborted
+            | DialError::Denied { .. } => {}
+        }
     }
 
     fn record_peer_disconnect(&mut self, peer: PeerId, detail: String) {
@@ -2686,6 +2898,10 @@ impl ConsensusNetwork {
                     useful_successes: peer_state
                         .as_ref()
                         .map(|state| state.useful_successes)
+                        .unwrap_or_default(),
+                    dial_stats: peer_state
+                        .as_ref()
+                        .map(|state| state.dial_stats)
                         .unwrap_or_default(),
                 }
             })
@@ -3062,6 +3278,28 @@ fn enr_quic6(enr: &Enr) -> Option<u16> {
     enr.get_decodable("quic6").and_then(Result::ok)
 }
 
+fn dial_address_class(addr: &Multiaddr) -> Option<DialAddressClass> {
+    let mut ip_version = None;
+    let mut transport = None;
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::Ip4(_) => ip_version = Some(4u8),
+            Protocol::Ip6(_) => ip_version = Some(6u8),
+            Protocol::Tcp(_) => transport = Some("tcp"),
+            Protocol::QuicV1 => transport = Some("quic"),
+            _ => {}
+        }
+    }
+
+    match (ip_version, transport) {
+        (Some(4), Some("tcp")) => Some(DialAddressClass::Tcp4),
+        (Some(4), Some("quic")) => Some(DialAddressClass::Quic4),
+        (Some(6), Some("tcp")) => Some(DialAddressClass::Tcp6),
+        (Some(6), Some("quic")) => Some(DialAddressClass::Quic6),
+        _ => None,
+    }
+}
+
 fn sync_committee_period_for_slot(slot: u64) -> u64 {
     const SLOTS_PER_EPOCH: u64 = 32;
     const EPOCHS_PER_SYNC_COMMITTEE_PERIOD: u64 = 256;
@@ -3135,6 +3373,16 @@ mod tests {
                 status_successes: 2,
                 bootstrap_successes: 1,
                 useful_successes: 1,
+                dial_stats: PeerDialAddressStats {
+                    tcp4_successes: 1,
+                    quic4_successes: 0,
+                    tcp6_successes: 0,
+                    quic6_successes: 0,
+                    tcp4_failures: 0,
+                    quic4_failures: 1,
+                    tcp6_failures: 0,
+                    quic6_failures: 0,
+                },
             },
             PersistedPeer {
                 enr: MAINNET_BOOTNODES[1].to_string(),
@@ -3142,6 +3390,7 @@ mod tests {
                 status_successes: 0,
                 bootstrap_successes: 0,
                 useful_successes: 0,
+                dial_stats: PeerDialAddressStats::default(),
             },
         ];
 
@@ -3169,6 +3418,7 @@ mod tests {
                 status_successes: 0,
                 bootstrap_successes: 0,
                 useful_successes: 0,
+                dial_stats: PeerDialAddressStats::default(),
             }]
         );
     }
@@ -3207,6 +3457,56 @@ mod tests {
         lifecycle.record_success(RpcRequestKind::LightClientBootstrap);
         assert_eq!(lifecycle.bootstrap_successes, 1);
         assert_eq!(lifecycle.useful_successes, 1);
+    }
+
+    #[test]
+    fn dial_address_stats_shift_priority_after_failures_and_successes() {
+        let mut stats = PeerDialAddressStats::default();
+        assert!(
+            stats.priority(DialAddressClass::Tcp4, true)
+                > stats.priority(DialAddressClass::Quic4, true)
+        );
+
+        stats.record_failure(DialAddressClass::Tcp4);
+        assert!(
+            stats.priority(DialAddressClass::Tcp4, true)
+                < stats.priority(DialAddressClass::Quic4, true)
+        );
+
+        stats.record_success(DialAddressClass::Tcp4);
+        assert!(
+            stats.priority(DialAddressClass::Tcp4, true)
+                > stats.priority(DialAddressClass::Quic4, true)
+        );
+    }
+
+    #[test]
+    fn dial_address_class_detects_tcp_and_quic_variants() {
+        let peer_id = PeerId::random();
+        assert_eq!(
+            dial_address_class(&multiaddr_from_ip(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                9000,
+                peer_id
+            )),
+            Some(DialAddressClass::Tcp4)
+        );
+        assert_eq!(
+            dial_address_class(&multiaddr_from_ip_quic(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                9000,
+                peer_id
+            )),
+            Some(DialAddressClass::Quic4)
+        );
+        assert_eq!(
+            dial_address_class(&multiaddr_from_ip(
+                IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                9000,
+                peer_id
+            )),
+            Some(DialAddressClass::Tcp6)
+        );
     }
 
     #[test]

@@ -205,6 +205,11 @@ LogEx should become a canonical Ethereum event-log node that:
   - typed SSZ decoding and persisted status summaries for light-client bootstrap/finality/optimistic payloads are implemented for current post-Merge fork layouts
   - light-client gossip subscriptions are implemented for finality and optimistic updates, and `/status` now shows gossip subscription / decode counters
   - outbound QUIC transport is implemented and peer ENRs are now harvested for both TCP and QUIC dial addresses
+  - consensus dialing is now address-aware instead of spraying every ENR address at once:
+    - each peer attempt now chooses a small ranked transport set instead of blindly dialing all TCP/QUIC and IPv4/IPv6 paths together
+    - per-peer dial outcomes now remember which address families and transport types have succeeded or failed, and that memory survives restarts through the known-peer cache
+    - bootstrap-phase dialing now prefers the most stable paths first and naturally rotates to alternate transports only after the first choice fails
+  - the discovery loop now periodically rehydrates dial candidates from the live discv5 routing table, so newly learned ENRs can graduate into the CL dial pool even if they were not surfaced as explicit discovery events
   - the current scheduler once again behaves like a light client should:
     - identify is now the first admission gate on new peer sessions
     - `Status` is sent only after identify confirms that the peer actually advertises the `Status` RPC
@@ -217,7 +222,8 @@ LogEx should become a canonical Ethereum event-log node that:
   - recent mainnet smokes are healthier than before the latest interop fixes:
     - pre-bootstrap `Status` now uses the genesis head / zero finalized-checkpoint form expected by the spec
     - ENR-derived peer IDs now follow the same secp256k1 conversion path used by Lighthouse
-    - live identified CL sessions now occasionally appear, but they still do not stay up long enough to make bootstrap/status progress reliable
+    - the dialer now records concrete address-level failures instead of opaque peer-level churn, which makes `/status` useful for transport debugging
+    - the node now reaches real outbound TCP peer connections on discovery-fed or cached `/tcp/9000` peers instead of staying trapped on static bootnodes, but many of those peers still close before identify or `Status` can complete
 - The current branch also does not yet implement the pre-Merge PoW canonicality path.
 - This means the current branch is a real architectural shift, but not yet the full end-to-end canonical system.
 
@@ -280,10 +286,15 @@ LogEx should become a canonical Ethereum event-log node that:
      - outbound `Status` now advertises the actual weak-subjectivity checkpoint view when a `slot@root` checkpoint is supplied, instead of pretending the node is still at genesis
      - outbound req/resp now prefers the most widely interoperable protocol versions first: `Status v1` ahead of `Status v2`, and `MetaData v2` ahead of `MetaData v3`
      - remembered peer support and usefulness scores are now persisted with cached ENRs, survive restarts, and feed the next run's CL peer prioritization instead of being relearned from scratch
+     - outbound consensus dialing is now address-aware:
+       - each dial attempt picks a ranked transport/address candidate set instead of trying every ENR address at once
+       - per-peer TCP/QUIC and IPv4/IPv6 success/failure history is persisted with the known-peer cache and reused on restart
+       - bootstrap-phase dialing now prefers the most stable address families first and only falls back to alternate transports after failures
+     - the discovery loop now repopulates CL dial candidates from the live discv5 routing table on every query cycle, so the dial pool can grow beyond static bootnodes and cached peers
    - TODO:
-     - finish the remaining mainnet interop gap: live smoke now reaches discovery, useful-peer prioritization, outbound `Status`, and live gossip subscriptions, and representative runs now keep `status_request_failures=0`, but bootstrap-capable peers still are not landing reliably enough to start the real light-client store
-     - diagnose and fix the remaining transport churn that now dominates after the `Status` cleanup, including dial timeouts, occasional connection resets during transport negotiation, and restart-related port-reuse issues on repeated fixed-port local smokes
-     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred, and fix any remaining edge cases where some peers still close the stream before bootstrap can begin
+     - finish the remaining mainnet interop gap: live smoke now reaches discovery, routing-table-fed dial candidates, real outbound TCP connections, useful-peer prioritization, outbound `Status`, and live gossip subscriptions, while representative runs keep `status_request_failures=0`, but too many peers still close immediately after connect and before identify / `Status`, so bootstrap-capable peers still are not landing reliably enough to start the real light-client store
+     - keep narrowing the remaining transport churn beyond address selection itself, especially immediate post-connect closes on `/tcp/9000`-style peers and IPv6 QUIC `No route to host` noise on hosts without usable IPv6
+     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred, and fix any remaining edge cases where peers accept the TCP session but still close before identify or bootstrap can begin
      - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1` and the newly landed multi-chunk methods, including any remaining request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
      - once `Status` is landing reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
