@@ -3140,12 +3140,25 @@ impl ConsensusNetwork {
         let Some(store) = self.consensus.light_client_store() else {
             return;
         };
-        let Some(chain) = self
-            .canonical_chain_blocks(target)
-            .or_else(|| self.checkpoint_forward_chain_blocks(target))
+        let Some(checkpoint_block) = self.verified_beacon_blocks.get(&target.checkpoint_root).copied()
         else {
             return;
         };
+
+        let chain = self
+            .canonical_chain_blocks_to_root(
+                target.checkpoint_root,
+                target.checkpoint_slot,
+                target.optimistic_root,
+            )
+            .or_else(|| {
+                self.canonical_chain_blocks_to_root(
+                    target.checkpoint_root,
+                    target.checkpoint_slot,
+                    target.finalized_root,
+                )
+            })
+            .unwrap_or_else(|| vec![checkpoint_block]);
 
         let anchor_records = chain
             .iter()
@@ -3160,10 +3173,16 @@ impl ConsensusNetwork {
         let Some(last_anchor) = anchor_records.last().map(|record| record.anchor) else {
             return;
         };
+        let replace_end_block = self
+            .consensus
+            .highest_anchor_block_from(first_anchor.block_number)
+            .map_or(last_anchor.block_number, |existing_end| {
+                existing_end.max(last_anchor.block_number)
+            });
 
         if let Err(error) = self.consensus.replace_anchor_range(
             first_anchor.block_number,
-            last_anchor.block_number,
+            replace_end_block,
             anchor_records,
         ) {
             tracing::warn!(%error, "failed to persist verified beacon-block execution anchors");
@@ -3212,21 +3231,34 @@ impl ConsensusNetwork {
         &self,
         target: HistorySyncTarget,
     ) -> Option<Vec<VerifiedBeaconBlock>> {
-        let checkpoint_block = *self.verified_beacon_blocks.get(&target.checkpoint_root)?;
-        if checkpoint_block.slot != target.checkpoint_slot {
+        self.canonical_chain_blocks_to_root(
+            target.checkpoint_root,
+            target.checkpoint_slot,
+            target.optimistic_root,
+        )
+    }
+
+    fn canonical_chain_blocks_to_root(
+        &self,
+        checkpoint_root: B256,
+        checkpoint_slot: u64,
+        target_root: B256,
+    ) -> Option<Vec<VerifiedBeaconBlock>> {
+        let checkpoint_block = *self.verified_beacon_blocks.get(&checkpoint_root)?;
+        if checkpoint_block.slot != checkpoint_slot {
             return None;
         }
 
-        let mut current_root = target.optimistic_root;
+        let mut current_root = target_root;
         let mut reverse_chain = Vec::new();
         loop {
-            let block = if current_root == target.checkpoint_root {
+            let block = if current_root == checkpoint_root {
                 checkpoint_block
             } else {
                 *self.verified_beacon_blocks.get(&current_root)?
             };
             reverse_chain.push(block);
-            if current_root == target.checkpoint_root {
+            if current_root == checkpoint_root {
                 break;
             }
             current_root = block.parent_root;

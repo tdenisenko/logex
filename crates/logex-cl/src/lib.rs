@@ -154,6 +154,17 @@ impl ConsensusStore {
         self.inner.lock().unwrap().ordered_anchors.clone()
     }
 
+    pub fn highest_anchor_block_from(&self, start_block: u64) -> Option<u64> {
+        self.inner
+            .lock()
+            .unwrap()
+            .ordered_anchors
+            .iter()
+            .rev()
+            .find(|record| record.anchor.block_number >= start_block)
+            .map(|record| record.anchor.block_number)
+    }
+
     pub fn light_client_status(&self) -> ConsensusLightClientStatus {
         self.inner.lock().unwrap().light_client.clone()
     }
