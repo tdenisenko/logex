@@ -56,6 +56,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - Weak subjectivity means a fresh client needs one recent trusted beacon checkpoint on first startup.
   - In practice that checkpoint is a recent beacon block root, optionally paired with a slot.
   - Development note recorded on April 16, 2026: an operator-provided example finalized beacon block root for future bootstrap testing is `0xfc5b0de0b6d9f78f6528ef455a8efddfdf61de272a9abe86441d62a8f63006f9`.
+  - Development note recorded on April 17, 2026: a newer operator-provided example checkpoint for native mainnet smoke tests is `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4`.
   - Treat that recorded root as an example `--checkpoint` input, not as a hardcoded protocol constant; it should be refreshed once it ages out of the weak-subjectivity window.
   - LogEx persists the resulting consensus state locally, so restart should not need the operator to re-enter it.
 - CL-backed EL canonicality starts only once execution payloads exist in the beacon chain.
@@ -272,18 +273,32 @@ LogEx should become a canonical Ethereum event-log node that:
      - peers that do not advertise the full light-client req/resp set are now disconnected as soon as identify proves they are not useful for the light-client path, and peers that repeatedly fail `Status` are rotated out instead of being kept forever
      - the CL scheduler now keeps peer lifecycle memory across disconnects, backs off churny peers with exponential cooldowns, ignores peers that identify as irrelevant for the current phase, and prioritizes peers that have previously returned useful CL responses
      - cached discovery peers are now persisted in usefulness order instead of raw ENR order so restarts retry the best-known CL candidates first
-     - light-client and beacon-history fetch methods are now advertised outbound-only until LogEx can actually serve verified history, and beacon-block fetches now negotiate both v1 and v2 protocol ids
+     - the durable known-peer cache is no longer truncated to the live peer limit; LogEx now retains a much larger ranked pool of useful CL candidates across restarts instead of relearning from only a dozen peers every run
+     - discv5 bootnodes are now treated as discovery seeds first instead of automatic libp2p dial targets, so early CL dialing is less likely to waste budget on nodes that only help discovery
+     - the singleton light-client req/resp methods that LogEx can answer honestly today now negotiate both inbound and outbound directions:
+       - `GetLightClientBootstrap`
+       - `GetLightClientFinalityUpdate`
+       - `GetLightClientOptimisticUpdate`
+     - `LightClientUpdatesByRange`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot` remain outbound-only until LogEx can serve those methods with correct local data instead of generic placeholders
      - live mainnet smoke runs from the recorded example checkpoint have already observed discovery and libp2p peer sessions
      - fork-aware typed SSZ decoding now exists for current post-Merge `LightClientBootstrap`, `LightClientFinalityUpdate`, and `LightClientOptimisticUpdate` payloads
      - decoded bootstrap/finality/optimistic summaries are now persisted in the CL state file and surfaced through CLI `info`, `/status`, and the dashboard
+     - raw bootstrap/finality/optimistic RPC payloads are now persisted alongside the decoded summaries, and LogEx now serves those exact cached payloads back to inbound peers when they are available locally
      - the local consensus ENR now includes `attnets` / `syncnets`, and LogEx now subscribes to the light-client finality / optimistic gossip topics for the current fork digest
      - the consensus transport now includes outbound QUIC dialing, peer ENRs are harvested for QUIC addresses as well as TCP, and shared discovery/p2p UDP ports no longer crash the node when QUIC is enabled
      - restarting with the same checkpoint root plus a newly supplied slot now enriches the persisted checkpoint instead of forcing a fresh data directory, while conflicting checkpoint roots still fail loudly
-     - mainnet consensus chain constants are now recorded explicitly inside LogEx, the pre-bootstrap `Status` handshake now uses the real beacon genesis block root plus the canonical zero finalized checkpoint rather than a placeholder-style root or an unserved checkpoint root, and ENR-derived peer IDs now follow the same secp256k1 conversion used by Lighthouse
+     - mainnet consensus chain constants are now recorded explicitly inside LogEx, including the genesis time plus the stable fork schedule through Fulu
+     - LogEx now derives its own current mainnet `fork_digest` and ENR `eth2` fork id from the consensus-spec fork schedule instead of copying whichever bootnode `eth2` field happened to be encountered first
+     - the pre-bootstrap `Status` handshake now uses the real beacon genesis block root plus the canonical zero finalized checkpoint rather than a placeholder-style root or an unserved checkpoint root, and ENR-derived peer IDs now follow the same secp256k1 conversion used by Lighthouse
      - native multi-chunk CL req/resp is now implemented for `LightClientUpdatesByRange`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot`, including chunked stream parsing, per-method protocol advertisement, peer capability tracking, and response/error accounting
      - the CL scheduler now treats checkpoint-history fetches as first-class work: it will try to fetch the checkpoint beacon block by root, fall back to slot-based block range fetches when the checkpoint slot is known, and request one sync-committee-period update window once the slot context exists
+     - the bootstrap scheduler now keeps checkpoint-history peers alive during bootstrap instead of disconnecting them merely because they do not advertise `LightClientBootstrap`; peers that can serve beacon blocks by root/range are now considered useful before bootstrap lands
+     - discovery now fans out across multiple random `FINDNODE` targets per cycle instead of a single random lookup, so fresh runs can accumulate dialable CL ENRs faster
      - optional `MetaData` probing has been moved off the bootstrap-critical path so it no longer burns otherwise useful peers before the first successful light-client bootstrap
-     - outbound `Status` now advertises the actual weak-subjectivity checkpoint view when a `slot@root` checkpoint is supplied, instead of pretending the node is still at genesis
+     - outbound `Status` for the limited-data light-client phase now follows the Altair light-client networking guidance instead of advertising a private checkpoint-backed history surface:
+       - `head_root` stays anchored to the real mainnet beacon genesis block root
+       - the finalized checkpoint remains the canonical zero-root epoch-0 form
+       - `earliest_available_slot` stays at genesis until LogEx can honestly serve more than limited local light-client data
      - outbound req/resp now prefers the most widely interoperable protocol versions first: `Status v1` ahead of `Status v2`, and `MetaData v2` ahead of `MetaData v3`
      - remembered peer support and usefulness scores are now persisted with cached ENRs, survive restarts, and feed the next run's CL peer prioritization instead of being relearned from scratch
      - outbound consensus dialing is now address-aware:
@@ -291,12 +306,14 @@ LogEx should become a canonical Ethereum event-log node that:
        - per-peer TCP/QUIC and IPv4/IPv6 success/failure history is persisted with the known-peer cache and reused on restart
        - bootstrap-phase dialing now prefers the most stable address families first and only falls back to alternate transports after failures
      - the discovery loop now repopulates CL dial candidates from the live discv5 routing table on every query cycle, so the dial pool can grow beyond static bootnodes and cached peers
+     - ENR fork filtering now matches the current 4-byte fork digest instead of requiring the entire 16-byte `ENRForkID` tuple to match exactly, which aligns with the consensus spec and admits peers that share the current fork but advertise a different next-fork schedule
    - TODO:
-     - finish the remaining mainnet interop gap: live smoke now reaches discovery, routing-table-fed dial candidates, real outbound TCP connections, useful-peer prioritization, outbound `Status`, and live gossip subscriptions, while representative runs keep `status_request_failures=0`, but too many peers still close immediately after connect and before identify / `Status`, so bootstrap-capable peers still are not landing reliably enough to start the real light-client store
-     - keep narrowing the remaining transport churn beyond address selection itself, especially immediate post-connect closes on `/tcp/9000`-style peers and IPv6 QUIC `No route to host` noise on hosts without usable IPv6
-     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred, and fix any remaining edge cases where peers accept the TCP session but still close before identify or bootstrap can begin
-     - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1` and the newly landed multi-chunk methods, including any remaining request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
-     - once `Status` is landing reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
+     - finish the remaining mainnet interop gap: live smoke now reaches discovery, routing-table-fed dial candidates, spec-derived local fork identity, useful-peer prioritization, outbound `Status`, and live gossip subscriptions, but bootstrap-capable peers still are not landing reliably enough to start the real light-client store
+     - keep narrowing the remaining transport churn beyond address selection itself, especially peers that time out or reset during the libp2p/noise handshake before identify or `Status`
+     - keep proving that `Status` is really stable across Nimbus/Teku/Lighthouse-class peers now that `Status v1` is preferred, and fix any remaining edge cases where peers accept the connection long enough to be dialed but still die before identify, `Status`, bootstrap, or checkpoint-block requests can complete
+     - implement the remaining baseline RPC compatibility work that live churn still points to beyond `Goodbye v1`, the honest limited-data `Status` form, and the newly landed multi-chunk methods, including any remaining request/response wire details still needed for stable interop with Lighthouse/Teku/Nimbus-class peers
+     - once bootstrap-capable peers land reliably, harden `GetLightClientBootstrap`, `GetLightClientFinalityUpdate`, and `GetLightClientOptimisticUpdate` until responses are flowing steadily enough to drive the live light-client store
+     - persist and serve correct checkpoint-related `LightClientUpdatesByRange` and beacon-history responses before advertising those multi-chunk methods inbound
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
      - upgrade the new `LightClientUpdatesByRange` and beacon-block transports from raw chunk streams into decoded, verified update/block objects that feed the light-client store and backward beacon-history proving
      - upgrade the current gossip path from parse-only observability to real light-client validation and head tracking after the verified req/resp bootstrap path exists

@@ -51,10 +51,12 @@ const CONSENSUS_STATE_DIR: &str = "cl";
 const DISCOVERY_SECRET_FILE: &str = "discovery-secret";
 const KNOWN_PEERS_FILE: &str = "known-peers.json";
 const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
+const DISCOVERY_QUERY_FANOUT: usize = 4;
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
-const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 1;
+const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
+const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
 const PEER_BACKOFF_BASE: Duration = Duration::from_secs(15);
@@ -97,10 +99,6 @@ pub enum ConsensusNetworkError {
     PersistKnownPeers { path: PathBuf, source: io::Error },
     #[error("invalid built-in mainnet bootnode ENR: {0}")]
     InvalidBootnode(String),
-    #[error("built-in mainnet bootnodes did not expose an eth2 fork id")]
-    MissingBootnodeForkId,
-    #[error("built-in mainnet bootnodes exposed an invalid eth2 fork id")]
-    InvalidBootnodeForkId,
     #[error("failed to construct consensus discovery service: {0}")]
     ConstructDiscovery(String),
     #[error("failed to start consensus discovery service: {0}")]
@@ -414,7 +412,6 @@ struct ConsensusNetwork {
     discv5: Discv5,
     swarm: Swarm<ConsensusBehaviour>,
     bootnode_count: usize,
-    expected_fork_id: Vec<u8>,
     fork_digest: [u8; 4],
     known_peers_path: PathBuf,
     last_persisted: Vec<PersistedPeer>,
@@ -918,6 +915,10 @@ impl PeerRpcSupport {
         self.beacon_blocks_by_range || self.beacon_blocks_by_root
     }
 
+    const fn supports_pre_bootstrap_history_work(self) -> bool {
+        self.supports_history_backfill()
+    }
+
     const fn supports_bootstrap_sync(self) -> bool {
         self.status && self.light_client_bootstrap
     }
@@ -934,13 +935,20 @@ impl ConsensusNetwork {
         sync_status: Arc<Mutex<SyncStatus>>,
     ) -> Result<Self, ConsensusNetworkError> {
         let bootnodes = mainnet_bootnodes()?;
-        let fork_id = current_eth2_fork_id(&bootnodes)?;
-        let fork_digest = current_fork_digest(&fork_id)?;
+        let local_epoch = config
+            .checkpoint
+            .beacon_slot
+            .map(|slot| MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot))
+            .map(|checkpoint_epoch| checkpoint_epoch.max(MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch()))
+            .unwrap_or_else(|| MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch());
+        let fork_id = MAINNET_CONSENSUS_CHAIN_SPEC.enr_fork_id_for_epoch(local_epoch);
+        let fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(local_epoch);
         let gossip_topics = build_gossip_topics(fork_digest);
         let secret_path = discovery_secret_path(&config.data_dir);
         let known_peers_path = known_peers_path(&config.data_dir);
         let enr_key = load_or_create_secret_key(&secret_path)?;
-        let local_enr = build_local_enr(&enr_key, &fork_id, config.discovery_port, config.p2p_port);
+        let local_enr =
+            build_local_enr(&enr_key, &fork_id, config.discovery_port, config.p2p_port);
         let local_keypair = build_libp2p_keypair(&enr_key)?;
         let listen_config =
             ListenConfig::from_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.discovery_port);
@@ -958,7 +966,6 @@ impl ConsensusNetwork {
             if let Err(error) = discv5.add_enr(enr.clone()) {
                 tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
             }
-            observe_dialable_peer(&mut dialable_peers, enr);
         }
 
         for peer in &known_peers {
@@ -995,7 +1002,6 @@ impl ConsensusNetwork {
             discv5,
             swarm,
             bootnode_count: bootnodes.len(),
-            expected_fork_id: fork_id.clone(),
             fork_digest,
             known_peers_path,
             last_persisted: known_peers,
@@ -1138,15 +1144,17 @@ impl ConsensusNetwork {
     }
 
     async fn drive_discovery_queries(&mut self) {
-        let target = NodeId::random();
-        match self.discv5.find_node(target).await {
-            Ok(found) => {
-                for enr in found {
-                    self.observe_enr(&enr);
+        for _ in 0..DISCOVERY_QUERY_FANOUT {
+            let target = NodeId::random();
+            match self.discv5.find_node(target).await {
+                Ok(found) => {
+                    for enr in found {
+                        self.observe_enr(&enr);
+                    }
                 }
-            }
-            Err(error) => {
-                tracing::debug!(%error, "consensus discovery query failed");
+                Err(error) => {
+                    tracing::debug!(%error, "consensus discovery query failed");
+                }
             }
         }
     }
@@ -1191,7 +1199,7 @@ impl ConsensusNetwork {
     }
 
     fn observe_enr(&mut self, enr: &Enr) {
-        if !enr_matches_fork_id(enr, &self.expected_fork_id) {
+        if !enr_matches_fork_digest(enr, &self.fork_digest) {
             tracing::debug!(
                 node_id = %enr.node_id(),
                 "ignoring discovered consensus ENR that does not match the expected eth2 fork id"
@@ -1441,7 +1449,8 @@ impl ConsensusNetwork {
                         finalized_slot = summary.finalized_header.beacon_slot,
                         "received consensus light-client finality-update gossip"
                     );
-                    if let Err(error) = self.consensus.update_finality_update_status(summary) {
+                    if let Err(error) = self.consensus.update_finality_update_status(summary, None)
+                    {
                         tracing::warn!(
                             %propagation_source,
                             %error,
@@ -1474,7 +1483,10 @@ impl ConsensusNetwork {
                         attested_slot = summary.attested_header.beacon_slot,
                         "received consensus light-client optimistic-update gossip"
                     );
-                    if let Err(error) = self.consensus.update_optimistic_update_status(summary) {
+                    if let Err(error) = self
+                        .consensus
+                        .update_optimistic_update_status(summary, None)
+                    {
                         tracing::warn!(
                             %propagation_source,
                             %error,
@@ -1527,10 +1539,44 @@ impl ConsensusNetwork {
                         Eth2RpcRequest::Goodbye(_) => {
                             resource_unavailable("goodbye must use the goodbye RPC family")
                         }
-                        Eth2RpcRequest::LightClientBootstrap(_)
-                        | Eth2RpcRequest::LightClientUpdatesByRange(_)
-                        | Eth2RpcRequest::LightClientFinalityUpdate
-                        | Eth2RpcRequest::LightClientOptimisticUpdate
+                        Eth2RpcRequest::LightClientBootstrap(root) => {
+                            if root == self.consensus.checkpoint().beacon_root {
+                                self.consensus
+                                    .light_client_payloads()
+                                    .bootstrap
+                                    .map(Eth2RpcResponse::LightClientBootstrap)
+                                    .unwrap_or_else(|| {
+                                        resource_unavailable(
+                                            "light-client bootstrap is not yet available locally",
+                                        )
+                                    })
+                            } else {
+                                resource_unavailable(
+                                    "light-client bootstrap is only available for the local trusted checkpoint root",
+                                )
+                            }
+                        }
+                        Eth2RpcRequest::LightClientFinalityUpdate => self
+                            .consensus
+                            .light_client_payloads()
+                            .finality_update
+                            .map(Eth2RpcResponse::LightClientFinalityUpdate)
+                            .unwrap_or_else(|| {
+                                resource_unavailable(
+                                    "light-client finality update is not yet available locally",
+                                )
+                            }),
+                        Eth2RpcRequest::LightClientOptimisticUpdate => self
+                            .consensus
+                            .light_client_payloads()
+                            .optimistic_update
+                            .map(Eth2RpcResponse::LightClientOptimisticUpdate)
+                            .unwrap_or_else(|| {
+                                resource_unavailable(
+                                    "light-client optimistic update is not yet available locally",
+                                )
+                            }),
+                        Eth2RpcRequest::LightClientUpdatesByRange(_)
                         | Eth2RpcRequest::BeaconBlocksByRange(_)
                         | Eth2RpcRequest::BeaconBlocksByRoot(_) => {
                             resource_unavailable("light-client data is not yet served by LogEx")
@@ -1690,11 +1736,31 @@ impl ConsensusNetwork {
                 ..
             } => {
                 let _ = self.take_pending_request(RpcRequestKind::Goodbye, request_id);
-                self.request_failures.increment(RpcRequestKind::Goodbye);
-                let peer_context = self.peer_context(peer);
-                self.last_rpc_failure =
-                    Some(format!("{peer_context} request=goodbye failure={error}"));
-                tracing::debug!(%peer, ?request_id, %error, "consensus goodbye RPC request failed");
+                let expected_no_response =
+                    matches!(
+                        &error,
+                        request_response::OutboundFailure::Io(io_error)
+                            if io_error.kind() == io::ErrorKind::UnexpectedEof
+                    ) || matches!(error, request_response::OutboundFailure::ConnectionClosed);
+                if expected_no_response {
+                    tracing::debug!(
+                        %peer,
+                        ?request_id,
+                        %error,
+                        "consensus goodbye RPC completed without an explicit response payload"
+                    );
+                } else {
+                    self.request_failures.increment(RpcRequestKind::Goodbye);
+                    let peer_context = self.peer_context(peer);
+                    self.last_rpc_failure =
+                        Some(format!("{peer_context} request=goodbye failure={error}"));
+                    tracing::debug!(
+                        %peer,
+                        ?request_id,
+                        %error,
+                        "consensus goodbye RPC request failed"
+                    );
+                }
                 self.disconnect_now(peer);
             }
             request_response::Event::InboundFailure {
@@ -1838,7 +1904,10 @@ impl ConsensusNetwork {
                     );
                     self.record_peer_success(peer, RpcRequestKind::LightClientBootstrap);
                     self.bootstrap_peers.insert(peer);
-                    if let Err(error) = self.consensus.update_bootstrap_status(summary) {
+                    if let Err(error) = self
+                        .consensus
+                        .update_bootstrap_status(summary, Some(payload.clone()))
+                    {
                         tracing::warn!(%peer, %error, "failed to persist decoded bootstrap payload");
                     }
                     self.drive_rpc_requests();
@@ -1886,7 +1955,10 @@ impl ConsensusNetwork {
                     );
                     self.record_peer_success(peer, RpcRequestKind::LightClientFinalityUpdate);
                     self.finality_update_peers.insert(peer);
-                    if let Err(error) = self.consensus.update_finality_update_status(summary) {
+                    if let Err(error) = self
+                        .consensus
+                        .update_finality_update_status(summary, Some(payload.clone()))
+                    {
                         tracing::warn!(%peer, %error, "failed to persist decoded finality update");
                     }
                     self.drive_rpc_requests();
@@ -1919,7 +1991,10 @@ impl ConsensusNetwork {
                     );
                     self.record_peer_success(peer, RpcRequestKind::LightClientOptimisticUpdate);
                     self.optimistic_update_peers.insert(peer);
-                    if let Err(error) = self.consensus.update_optimistic_update_status(summary) {
+                    if let Err(error) = self
+                        .consensus
+                        .update_optimistic_update_status(summary, Some(payload.clone()))
+                    {
                         tracing::warn!(%peer, %error, "failed to persist decoded optimistic update");
                     }
                     self.drive_rpc_requests();
@@ -2096,7 +2171,12 @@ impl ConsensusNetwork {
             }
 
             if bootstrap_needed && !support.supports_bootstrap_sync() {
-                if support.supports_any_post_bootstrap_work() {
+                if support.supports_pre_bootstrap_history_work() {
+                    tracing::debug!(
+                        %peer,
+                        "keeping consensus peer connected for checkpoint history fetches during bootstrap phase"
+                    );
+                } else if support.supports_any_post_bootstrap_work() {
                     self.defer_peer_until_post_bootstrap(
                         peer,
                         "peer only advertises post-bootstrap work".to_owned(),
@@ -2133,6 +2213,16 @@ impl ConsensusNetwork {
                     && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
                 {
                     self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
+                }
+                if support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
+                    && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
+                {
+                    self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
+                } else if self.history_request_slot().is_some()
+                    && support.supports_request(RpcRequestKind::BeaconBlocksByRange)
+                    && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
+                {
+                    self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
                 }
                 continue;
             }
@@ -2400,18 +2490,6 @@ impl ConsensusNetwork {
     }
 
     fn local_status_message(&self) -> StatusMessage {
-        let checkpoint = self.consensus.checkpoint();
-        if let Some(checkpoint_slot) = checkpoint.beacon_slot {
-            return StatusMessage {
-                fork_digest: self.fork_digest,
-                finalized_root: checkpoint.beacon_root,
-                finalized_epoch: checkpoint_slot / 32,
-                head_root: checkpoint.beacon_root,
-                head_slot: checkpoint_slot,
-                earliest_available_slot: checkpoint_slot,
-            };
-        }
-
         StatusMessage::genesis(
             self.fork_digest,
             MAINNET_CONSENSUS_CHAIN_SPEC.genesis_block_root,
@@ -2926,8 +3004,8 @@ impl ConsensusNetwork {
                 .cmp(&left_priority)
                 .then_with(|| left.enr.cmp(&right.enr))
         });
-        if self.config.max_peers > 0 && peers.len() > self.config.max_peers {
-            peers.truncate(self.config.max_peers);
+        if peers.len() > MAX_PERSISTED_KNOWN_PEERS {
+            peers.truncate(MAX_PERSISTED_KNOWN_PEERS);
         }
 
         if peers == self.last_persisted {
@@ -3182,24 +3260,14 @@ fn mainnet_bootnodes() -> Result<Vec<Enr>, ConsensusNetworkError> {
 }
 
 #[allow(deprecated)]
-fn current_eth2_fork_id(bootnodes: &[Enr]) -> Result<Vec<u8>, ConsensusNetworkError> {
-    bootnodes
-        .iter()
-        .find_map(|enr| enr.get("eth2").map(|bytes| bytes.to_vec()))
-        .ok_or(ConsensusNetworkError::MissingBootnodeForkId)
-}
-
-fn current_fork_digest(fork_id: &[u8]) -> Result<[u8; 4], ConsensusNetworkError> {
-    fork_id
-        .get(0..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(ConsensusNetworkError::InvalidBootnodeForkId)
-}
-
-#[allow(deprecated)]
-fn enr_matches_fork_id(enr: &Enr, expected_fork_id: &[u8]) -> bool {
+fn enr_matches_fork_digest(enr: &Enr, expected_fork_digest: &[u8; 4]) -> bool {
     enr.get("eth2")
-        .map(|fork_id| fork_id.as_ref() == expected_fork_id)
+        .map(|fork_id| {
+            fork_id
+                .get(0..4)
+                .map(|fork_digest| fork_digest == expected_fork_digest)
+                .unwrap_or(false)
+        })
         .unwrap_or(false)
 }
 
@@ -3426,13 +3494,19 @@ mod tests {
     #[test]
     fn bundled_bootnodes_parse() {
         let bootnodes = mainnet_bootnodes().unwrap();
+        let current_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch();
 
         assert!(bootnodes.len() >= 10);
         assert!(bootnodes.iter().all(|enr| enr.udp4().is_some()));
-        assert_eq!(current_eth2_fork_id(&bootnodes).unwrap().len(), 16);
         assert_eq!(
-            current_fork_digest(&current_eth2_fork_id(&bootnodes).unwrap())
-                .unwrap()
+            MAINNET_CONSENSUS_CHAIN_SPEC
+                .enr_fork_id_for_epoch(current_epoch)
+                .len(),
+            16
+        );
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC
+                .fork_digest_for_epoch(current_epoch)
                 .len(),
             4
         );
@@ -3537,17 +3611,21 @@ mod tests {
 
     #[test]
     fn enr_fork_filter_accepts_matching_bootnode_and_rejects_other_fork_id() {
-        let bootnodes = mainnet_bootnodes().unwrap();
-        let expected_fork_id = current_eth2_fork_id(&bootnodes).unwrap();
-        let matching = &bootnodes[0];
-
+        let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(14_132_160);
+        let expected_fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch);
+        let expected_fork_id = MAINNET_CONSENSUS_CHAIN_SPEC.enr_fork_id_for_epoch(epoch);
         let enr_key = CombinedKey::generate_secp256k1();
-        let mut builder = Enr::builder();
-        builder.add_value("eth2", &[0u8; 16]);
-        let mismatched = builder.build(&enr_key).unwrap();
+        let matching = Enr::builder()
+            .add_value("eth2", &expected_fork_id)
+            .build(&enr_key)
+            .unwrap();
+        let mismatched = Enr::builder()
+            .add_value("eth2", &[0u8; 16])
+            .build(&enr_key)
+            .unwrap();
 
-        assert!(enr_matches_fork_id(matching, &expected_fork_id));
-        assert!(!enr_matches_fork_id(&mismatched, &expected_fork_id));
+        assert!(enr_matches_fork_digest(&matching, &expected_fork_digest));
+        assert!(!enr_matches_fork_digest(&mismatched, &expected_fork_digest));
     }
 
     #[test]

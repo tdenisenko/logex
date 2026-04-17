@@ -4,6 +4,7 @@ use alloy_primitives::B256;
 use async_trait::async_trait;
 use futures::prelude::*;
 use libp2p::request_response::{self, Codec, ProtocolSupport};
+use serde::{Deserialize, Serialize};
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
 
@@ -163,7 +164,7 @@ impl MetaData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRpcResponse {
     pub context_bytes: Option<[u8; 4]>,
     pub bytes: Vec<u8>,
@@ -219,7 +220,7 @@ pub fn build_ping_behaviour() -> Eth2RpcBehaviour {
 pub fn build_light_client_bootstrap_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientBootstrapV1,
-        ProtocolSupport::Outbound,
+        ProtocolSupport::Full,
     )])
 }
 
@@ -233,14 +234,14 @@ pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
 pub fn build_light_client_finality_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientFinalityUpdateV1,
-        ProtocolSupport::Outbound,
+        ProtocolSupport::Full,
     )])
 }
 
 pub fn build_light_client_optimistic_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientOptimisticUpdateV1,
-        ProtocolSupport::Outbound,
+        ProtocolSupport::Full,
     )])
 }
 
