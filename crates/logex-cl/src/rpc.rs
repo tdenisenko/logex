@@ -264,11 +264,11 @@ pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
         (
             Eth2RpcProtocol::BeaconBlocksByRangeV2,
-            ProtocolSupport::Outbound,
+            ProtocolSupport::Full,
         ),
         (
             Eth2RpcProtocol::BeaconBlocksByRangeV1,
-            ProtocolSupport::Outbound,
+            ProtocolSupport::Full,
         ),
     ], HISTORY_RPC_TIMEOUT)
 }
@@ -277,11 +277,11 @@ pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
         (
             Eth2RpcProtocol::BeaconBlocksByRootV2,
-            ProtocolSupport::Outbound,
+            ProtocolSupport::Full,
         ),
         (
             Eth2RpcProtocol::BeaconBlocksByRootV1,
-            ProtocolSupport::Outbound,
+            ProtocolSupport::Full,
         ),
     ], HISTORY_RPC_TIMEOUT)
 }

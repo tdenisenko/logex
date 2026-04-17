@@ -119,9 +119,10 @@ LogEx should become a canonical Ethereum event-log node that:
   - native CL status surfaces now expose identified-peer counts, protocol-capability counts, per-kind in-flight requests, and per-kind request-failure counters so live mainnet interop failures are inspectable instead of guesswork
   - `/status` now also records the most recent identify summary, most recent transport event, and most recent RPC failure so live mainnet interop debugging can distinguish peer-advertisement problems from raw transport churn
   - peers that do not advertise the full light-client req/resp set are now disconnected as soon as identify proves they are not useful for the light-client path, and peers that repeatedly fail `Status` are rotated out instead of being retained indefinitely
-  - LogEx now advertises light-client history-fetch protocols honestly:
-    - `LightClientBootstrap`, `LightClientUpdatesByRange`, `LightClientFinalityUpdate`, `LightClientOptimisticUpdate`, `BeaconBlocksByRange`, and `BeaconBlocksByRoot` are now outbound-only until LogEx can actually serve verified history to peers
+  - LogEx now advertises light-client history-fetch protocols more honestly:
+    - `LightClientUpdatesByRange` remains outbound-only until the local verified-update cache can answer it honestly
     - `BeaconBlocksByRange` and `BeaconBlocksByRoot` now negotiate both v1 and v2 protocol ids instead of assuming only the latest variant
+    - `BeaconBlocksByRange` and `BeaconBlocksByRoot` now serve truthfully from the locally verified beacon-block cache instead of remaining outbound-only forever
   - the CL handshake is now identify-gated:
     - new peer sessions are allowed to identify first
     - `Status` is now sent only to peers that actually advertise the `Status` RPC in identify
@@ -242,6 +243,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - Electra/Fulu full beacon-block SSZ decoding now uses standard `ssz_types` bitfields instead of custom local bitlist/bitvector code, and the recorded mainnet fixture for slot `14132042` now round-trips and reproduces the canonical beacon root exactly
   - forward history recovery is no longer range-only:
     - LogEx now chases missing beacon block roots downward from the verified optimistic head back toward the checkpoint, in parallel with `BeaconBlocksByRange`
+    - trusted `BeaconBlocksByRoot` work is now batched up to the protocol limit and excludes roots already verified or already in flight, which cuts down duplicate root-chase churn when a useful peer stays alive long enough to answer more than one request
     - peers that answer `BeaconBlocksByRoot` with blocks whose roots do not match the requested trusted roots are now treated as faulty and disconnected instead of being retried indefinitely
   - finality / optimistic gossip now feeds the verified light-client store directly once bootstrap exists, so head tracking is no longer req/resp-only
   - recent mainnet smokes are healthier than before the latest interop fixes:
@@ -253,6 +255,7 @@ LogEx should become a canonical Ethereum event-log node that:
     - with checkpoint `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4`, short fixed-port smokes now persist a verified bootstrap store and surface the checkpoint execution anchor through `/status`
     - the repaired scheduler no longer treats successful post-bootstrap dynamic requests as permanently satisfied, so finality / optimistic / updates-by-range work can be polled continuously instead of freezing after the first success
     - newer fixed-port smokes are now also confirming verified finality / optimistic head movement from both singleton req/resp and validated gossip even when `updates_by_range` peers are absent; the remaining short-run blocker has shifted further toward forward beacon-history completion rather than head-state progression itself
+    - the newest fixed-port smokes now show truthful cached beacon-block serving enabled on the history RPC families while useful Lighthouse peers bootstrap and start post-bootstrap root/range work, so LogEx is acting more like a real CL peer even though the forward materialized ceiling still needs to catch up
   - checkpoint-to-older-history materialization is now real on native peers and persists directly into the ordered execution-anchor range
   - forward beacon-range scheduling is now checkpoint-centered and forward-first instead of alternating with the already-working backward side
   - the post-bootstrap forward-history scheduler no longer starves `BeaconBlocksByRange` behind trusted `BeaconBlocksByRoot` chasing:
