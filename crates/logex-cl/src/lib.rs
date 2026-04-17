@@ -93,6 +93,8 @@ pub struct PersistedLightClientPayloads {
     pub finality_update: Option<RawRpcResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimistic_update: Option<RawRpcResponse>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub updates_by_period: BTreeMap<u64, RawRpcResponse>,
 }
 
 #[derive(Debug)]
@@ -293,12 +295,19 @@ impl ConsensusStore {
     pub(crate) fn record_verified_applied_update(
         &self,
         applied: AppliedLightClientUpdate,
+        verified_updates_by_period: Vec<(u64, RawRpcResponse)>,
     ) -> Result<(), ConsensusStateError> {
         {
             let mut snapshot = self.inner.lock().unwrap();
             snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
             if let Some(status) = applied.finality_status {
                 snapshot.light_client.finality_update = Some(status);
+            }
+            for (period, payload) in verified_updates_by_period {
+                snapshot
+                    .light_client_payloads
+                    .updates_by_period
+                    .insert(period, payload);
             }
             snapshot.verified_light_client_store = Some(applied.store);
             apply_verified_store(&mut snapshot);
@@ -1094,6 +1103,135 @@ mod tests {
                 .optimistic_update
                 .map(|status| status.attested_header.beacon_slot),
             Some(97)
+        );
+    }
+
+    #[test]
+    fn verified_updates_by_range_payloads_persist_by_period() {
+        let temp = TempDir::new().unwrap();
+        let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+
+        store
+            .record_verified_bootstrap(
+                LightClientBootstrapStatus {
+                    fork: logex_types::ConsensusDataFork::Electra,
+                    header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 64,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 100,
+                            block_hash: B256::repeat_byte(0x11),
+                            receipts_root: B256::repeat_byte(0x12),
+                        }),
+                    },
+                    current_sync_committee_pubkeys: 512,
+                    current_sync_committee_branch_depth: 6,
+                },
+                RawRpcResponse {
+                    context_bytes: Some([1, 2, 3, 4]),
+                    bytes: vec![1, 2, 3],
+                },
+                VerifiedLightClientStore {
+                    checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 64,
+                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    next_sync_committee: None,
+                    finalized_header: verified_header(64, 0x10, 100),
+                    optimistic_header: verified_header(64, 0x10, 100),
+                    best_valid_update: None,
+                    previous_max_active_participants: 0,
+                    current_max_active_participants: 0,
+                },
+            )
+            .unwrap();
+
+        store
+            .record_verified_applied_update(
+                AppliedLightClientUpdate {
+                    store: VerifiedLightClientStore {
+                        checkpoint_root: B256::repeat_byte(0xaa),
+                        bootstrap_slot: 64,
+                        current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                        next_sync_committee: Some(
+                            crate::light_client::SyncCommitteeData::default(),
+                        ),
+                        finalized_header: verified_header(96, 0x20, 101),
+                        optimistic_header: verified_header(97, 0x21, 102),
+                        best_valid_update: None,
+                        previous_max_active_participants: 0,
+                        current_max_active_participants: 0,
+                    },
+                    optimistic_status: LightClientOptimisticUpdateStatus {
+                        fork: logex_types::ConsensusDataFork::Electra,
+                        attested_header: logex_types::LightClientHeaderSummary {
+                            beacon_slot: 97,
+                            execution: Some(logex_types::LightClientExecutionData {
+                                block_number: 102,
+                                block_hash: B256::repeat_byte(0x31),
+                                receipts_root: B256::repeat_byte(0x32),
+                            }),
+                        },
+                        signature_slot: 98,
+                        sync_committee_participants: 509,
+                    },
+                    finality_status: Some(LightClientFinalityUpdateStatus {
+                        fork: logex_types::ConsensusDataFork::Electra,
+                        attested_header: logex_types::LightClientHeaderSummary {
+                            beacon_slot: 97,
+                            execution: Some(logex_types::LightClientExecutionData {
+                                block_number: 102,
+                                block_hash: B256::repeat_byte(0x31),
+                                receipts_root: B256::repeat_byte(0x32),
+                            }),
+                        },
+                        finalized_header: logex_types::LightClientHeaderSummary {
+                            beacon_slot: 96,
+                            execution: Some(logex_types::LightClientExecutionData {
+                                block_number: 101,
+                                block_hash: B256::repeat_byte(0x21),
+                                receipts_root: B256::repeat_byte(0x22),
+                            }),
+                        },
+                        signature_slot: 98,
+                        sync_committee_participants: 509,
+                        finality_branch_depth: 7,
+                    }),
+                },
+                vec![
+                    (
+                        10,
+                        RawRpcResponse {
+                            context_bytes: Some([9, 9, 9, 9]),
+                            bytes: vec![9, 9, 9],
+                        },
+                    ),
+                    (
+                        11,
+                        RawRpcResponse {
+                            context_bytes: Some([8, 8, 8, 8]),
+                            bytes: vec![8, 8, 8],
+                        },
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        let payloads = reopened.light_client_payloads();
+        assert_eq!(payloads.updates_by_period.len(), 2);
+        assert_eq!(
+            payloads
+                .updates_by_period
+                .get(&10)
+                .map(|payload| payload.bytes.clone()),
+            Some(vec![9, 9, 9])
+        );
+        assert_eq!(
+            payloads
+                .updates_by_period
+                .get(&11)
+                .map(|payload| payload.bytes.clone()),
+            Some(vec![8, 8, 8])
         );
     }
 }

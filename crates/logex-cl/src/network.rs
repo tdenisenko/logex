@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -711,6 +711,33 @@ fn cached_beacon_block_payloads_by_range(
         })
         .filter_map(|block| payloads.get(&block.beacon_root).cloned())
         .collect()
+}
+
+fn cached_light_client_update_payloads_by_range(
+    request: LightClientUpdatesByRangeRequest,
+    payloads: &BTreeMap<u64, RawRpcResponse>,
+) -> Vec<RawRpcResponse> {
+    if request.count == 0 {
+        return Vec::new();
+    }
+
+    let end_period = request.start_period.saturating_add(request.count);
+    let mut range = payloads.range(request.start_period..end_period);
+    let Some((&first_period, first_payload)) = range.next() else {
+        return Vec::new();
+    };
+
+    let mut responses = vec![first_payload.clone()];
+    let mut expected_period = first_period.saturating_add(1);
+    for (&period, payload) in range {
+        if period != expected_period {
+            break;
+        }
+        responses.push(payload.clone());
+        expected_period = expected_period.saturating_add(1);
+    }
+
+    responses
 }
 
 fn select_checkpoint_forward_child(
@@ -1966,8 +1993,16 @@ impl ConsensusNetwork {
                                     "light-client optimistic update is not yet available locally",
                                 )
                             }),
-                        Eth2RpcRequest::LightClientUpdatesByRange(_) => {
-                            resource_unavailable("light-client data is not yet served by LogEx")
+                        Eth2RpcRequest::LightClientUpdatesByRange(request) => {
+                            let responses =
+                                self.cached_verified_light_client_updates_by_range(request);
+                            if responses.is_empty() {
+                                resource_unavailable(
+                                    "light-client updates by range are not yet available locally",
+                                )
+                            } else {
+                                Eth2RpcResponse::LightClientUpdatesByRange(responses)
+                            }
                         }
                         Eth2RpcRequest::BeaconBlocksByRange(request) => {
                             Eth2RpcResponse::BeaconBlocksByRange(
@@ -2354,12 +2389,17 @@ impl ConsensusNetwork {
                     return;
                 };
                 let mut applied = None;
+                let mut verified_updates_by_period = Vec::new();
                 for chunk in &chunks {
                     match apply_light_client_update_payload(&chunk.bytes, &store) {
                         Ok(next) => {
+                            let period = sync_committee_period_for_slot(
+                                next.optimistic_status.attested_header.beacon_slot,
+                            );
                             tracing::info!(
                                 %peer,
                                 bytes = chunk.bytes.len(),
+                                period,
                                 attested_slot = next.optimistic_status.attested_header.beacon_slot,
                                 finalized_slot = next
                                     .finality_status
@@ -2369,6 +2409,7 @@ impl ConsensusNetwork {
                                 "received and verified light-client update payload"
                             );
                             store = next.store.clone();
+                            verified_updates_by_period.push((period, chunk.clone()));
                             applied = Some(next);
                         }
                         Err(error) => {
@@ -2384,7 +2425,10 @@ impl ConsensusNetwork {
                 if let Some(applied) = applied {
                     self.record_peer_success(peer, RpcRequestKind::LightClientUpdatesByRange);
                     self.updates_by_range_peers.insert(peer);
-                    if let Err(error) = self.consensus.record_verified_applied_update(applied) {
+                    if let Err(error) = self
+                        .consensus
+                        .record_verified_applied_update(applied, verified_updates_by_period)
+                    {
                         tracing::warn!(
                             %peer,
                             %error,
@@ -3287,6 +3331,14 @@ impl ConsensusNetwork {
             &canonical_blocks,
             &self.verified_beacon_block_payloads,
         )
+    }
+
+    fn cached_verified_light_client_updates_by_range(
+        &self,
+        request: LightClientUpdatesByRangeRequest,
+    ) -> Vec<RawRpcResponse> {
+        let payloads = self.consensus.light_client_payloads();
+        cached_light_client_update_payloads_by_range(request, &payloads.updates_by_period)
     }
 
     fn pending_history_roots(&self) -> HashSet<B256> {
@@ -5336,6 +5388,52 @@ mod tests {
         );
 
         assert_eq!(responses, vec![payload(0x10), payload(0x11), payload(0x13)]);
+    }
+
+    #[test]
+    fn cached_light_client_updates_by_range_start_at_earliest_known_period() {
+        let payload = |byte: u8| RawRpcResponse {
+            context_bytes: Some([byte; 4]),
+            bytes: vec![byte],
+        };
+        let payloads = BTreeMap::from([
+            (10u64, payload(0x0a)),
+            (12u64, payload(0x0c)),
+            (13u64, payload(0x0d)),
+        ]);
+
+        let responses = cached_light_client_update_payloads_by_range(
+            LightClientUpdatesByRangeRequest {
+                start_period: 11,
+                count: 4,
+            },
+            &payloads,
+        );
+
+        assert_eq!(responses, vec![payload(0x0c), payload(0x0d)]);
+    }
+
+    #[test]
+    fn cached_light_client_updates_by_range_stops_on_first_gap() {
+        let payload = |byte: u8| RawRpcResponse {
+            context_bytes: Some([byte; 4]),
+            bytes: vec![byte],
+        };
+        let payloads = BTreeMap::from([
+            (20u64, payload(0x14)),
+            (21u64, payload(0x15)),
+            (23u64, payload(0x17)),
+        ]);
+
+        let responses = cached_light_client_update_payloads_by_range(
+            LightClientUpdatesByRangeRequest {
+                start_period: 20,
+                count: 8,
+            },
+            &payloads,
+        );
+
+        assert_eq!(responses, vec![payload(0x14), payload(0x15)]);
     }
 
     #[test]

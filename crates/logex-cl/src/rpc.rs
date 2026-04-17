@@ -247,7 +247,7 @@ pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(
             Eth2RpcProtocol::LightClientUpdatesByRangeV1,
-            ProtocolSupport::Outbound,
+            ProtocolSupport::Full,
         )],
         HISTORY_RPC_TIMEOUT,
     )
