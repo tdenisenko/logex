@@ -12,11 +12,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod chain;
+mod beacon_block;
 mod light_client;
 mod network;
 mod rpc;
 
 pub(crate) use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
+pub(crate) use beacon_block::{
+    VerifiedBeaconBlock, decode_verified_beacon_block, verify_trusted_beacon_root,
+};
 pub(crate) use light_client::{
     AppliedLightClientUpdate, VerifiedLightClientStore, apply_finality_update_payload,
     apply_light_client_update_payload, apply_optimistic_update_payload,
@@ -191,7 +195,7 @@ impl ConsensusStore {
     pub fn replace_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
         let mut snapshot = self.inner.lock().unwrap();
         snapshot.ordered_anchors = normalize_anchor_records(anchors);
-        snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
+        recompute_snapshot_anchors(&mut snapshot);
         drop(snapshot);
         self.persist()
     }
@@ -201,7 +205,25 @@ impl ConsensusStore {
         snapshot.ordered_anchors.extend(anchors);
         let ordered = std::mem::take(&mut snapshot.ordered_anchors);
         snapshot.ordered_anchors = normalize_anchor_records(ordered);
-        snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
+        recompute_snapshot_anchors(&mut snapshot);
+        drop(snapshot);
+        self.persist()
+    }
+
+    pub fn replace_anchor_range(
+        &self,
+        start_block: u64,
+        end_block: u64,
+        anchors: Vec<AnchorRecord>,
+    ) -> Result<(), ConsensusStateError> {
+        let mut snapshot = self.inner.lock().unwrap();
+        snapshot
+            .ordered_anchors
+            .retain(|record| record.anchor.block_number < start_block || record.anchor.block_number > end_block);
+        snapshot.ordered_anchors.extend(anchors);
+        let ordered = std::mem::take(&mut snapshot.ordered_anchors);
+        snapshot.ordered_anchors = normalize_anchor_records(ordered);
+        recompute_snapshot_anchors(&mut snapshot);
         drop(snapshot);
         self.persist()
     }
@@ -233,11 +255,13 @@ impl ConsensusStore {
         payload: RawRpcResponse,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.light_client.finality_update = Some(status);
-        snapshot.light_client_payloads.finality_update = Some(payload);
-        snapshot.verified_light_client_store = Some(store);
-        apply_verified_store(&mut snapshot);
+        {
+            let mut snapshot = self.inner.lock().unwrap();
+            snapshot.light_client.finality_update = Some(status);
+            snapshot.light_client_payloads.finality_update = Some(payload);
+            snapshot.verified_light_client_store = Some(store);
+            apply_verified_store(&mut snapshot);
+        }
         self.persist()
     }
 
@@ -247,11 +271,13 @@ impl ConsensusStore {
         payload: RawRpcResponse,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.light_client.optimistic_update = Some(status);
-        snapshot.light_client_payloads.optimistic_update = Some(payload);
-        snapshot.verified_light_client_store = Some(store);
-        apply_verified_store(&mut snapshot);
+        {
+            let mut snapshot = self.inner.lock().unwrap();
+            snapshot.light_client.optimistic_update = Some(status);
+            snapshot.light_client_payloads.optimistic_update = Some(payload);
+            snapshot.verified_light_client_store = Some(store);
+            apply_verified_store(&mut snapshot);
+        }
         self.persist()
     }
 
@@ -259,13 +285,15 @@ impl ConsensusStore {
         &self,
         applied: AppliedLightClientUpdate,
     ) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
-        if let Some(status) = applied.finality_status {
-            snapshot.light_client.finality_update = Some(status);
+        {
+            let mut snapshot = self.inner.lock().unwrap();
+            snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
+            if let Some(status) = applied.finality_status {
+                snapshot.light_client.finality_update = Some(status);
+            }
+            snapshot.verified_light_client_store = Some(applied.store);
+            apply_verified_store(&mut snapshot);
         }
-        snapshot.verified_light_client_store = Some(applied.store);
-        apply_verified_store(&mut snapshot);
         self.persist()
     }
 
@@ -273,9 +301,11 @@ impl ConsensusStore {
         &self,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.verified_light_client_store = Some(store);
-        apply_verified_store(&mut snapshot);
+        {
+            let mut snapshot = self.inner.lock().unwrap();
+            snapshot.verified_light_client_store = Some(store);
+            apply_verified_store(&mut snapshot);
+        }
         self.persist()
     }
 
@@ -382,12 +412,13 @@ fn load_checkpoint_descriptor(input: &str) -> Result<ConsensusSnapshot, Consensu
                 beacon_root: descriptor.beacon_root,
                 beacon_slot: descriptor.beacon_slot,
             },
-            anchors: compute_chain_anchors(&ordered_anchors),
+            anchors: ChainAnchors::default(),
             ordered_anchors,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: PersistedLightClientPayloads::default(),
             verified_light_client_store: None,
-        });
+        }
+        .with_recomputed_anchors());
     }
 
     let checkpoint = parse_checkpoint_string(input)?;
@@ -456,13 +487,26 @@ fn apply_verified_store(snapshot: &mut ConsensusSnapshot) {
     }
 }
 
+fn recompute_snapshot_anchors(snapshot: &mut ConsensusSnapshot) {
+    let indexed_head = snapshot.anchors.indexed_head;
+    snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
+    snapshot.anchors.indexed_head = indexed_head;
+    apply_verified_store(snapshot);
+}
+
 fn rehydrate_verified_light_client_state(mut snapshot: ConsensusSnapshot) -> ConsensusSnapshot {
-    if snapshot.verified_light_client_store.is_some() {
-        apply_verified_store(&mut snapshot);
+    if let Some(store) = snapshot.verified_light_client_store.as_mut() {
+        if store.bootstrap_slot == 0 {
+            store.bootstrap_slot = snapshot
+                .checkpoint
+                .beacon_slot
+                .unwrap_or(store.finalized_header.beacon.slot);
+        }
+        recompute_snapshot_anchors(&mut snapshot);
         return snapshot;
     }
 
-    snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
+    recompute_snapshot_anchors(&mut snapshot);
     snapshot.light_client = ConsensusLightClientStatus::default();
     let mut verified_payloads = PersistedLightClientPayloads::default();
     let mut verified_store = None;
@@ -515,8 +559,19 @@ fn rehydrate_verified_light_client_state(mut snapshot: ConsensusSnapshot) -> Con
 
     snapshot.light_client_payloads = verified_payloads;
     snapshot.verified_light_client_store = verified_store;
-    apply_verified_store(&mut snapshot);
+    recompute_snapshot_anchors(&mut snapshot);
     snapshot
+}
+
+trait ConsensusSnapshotExt {
+    fn with_recomputed_anchors(self) -> Self;
+}
+
+impl ConsensusSnapshotExt for ConsensusSnapshot {
+    fn with_recomputed_anchors(mut self) -> Self {
+        recompute_snapshot_anchors(&mut self);
+        self
+    }
 }
 
 fn consensus_state_path(data_dir: &Path) -> PathBuf {
@@ -529,7 +584,31 @@ fn consensus_state_path(data_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    fn verified_header(
+        slot: u64,
+        byte: u8,
+        block_number: u64,
+    ) -> crate::light_client::VerifiedLightClientHeader {
+        crate::light_client::VerifiedLightClientHeader {
+            fork: logex_types::ConsensusDataFork::Electra,
+            beacon: crate::light_client::BeaconBlockHeaderSsz {
+                slot,
+                proposer_index: 0,
+                parent_root: B256::repeat_byte(byte),
+                state_root: B256::repeat_byte(byte.wrapping_add(1)),
+                body_root: B256::repeat_byte(byte.wrapping_add(2)),
+            },
+            execution: Some(crate::light_client::VerifiedExecutionPayloadHeader {
+                block_number,
+                block_hash: B256::repeat_byte(byte.wrapping_add(3)),
+                receipts_root: B256::repeat_byte(byte.wrapping_add(4)),
+            }),
+        }
+    }
 
     #[test]
     fn parses_inline_checkpoint_root() {
@@ -673,6 +752,7 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 12_345,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
                     finalized_header: crate::light_client::VerifiedLightClientHeader {
@@ -741,5 +821,206 @@ mod tests {
             error,
             ConsensusStateError::ConflictingCheckpoint { .. }
         ));
+    }
+
+    #[test]
+    fn verified_finality_update_persists_without_deadlocking() {
+        let temp = TempDir::new().unwrap();
+        let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+
+        store
+            .record_verified_bootstrap(
+                LightClientBootstrapStatus {
+                    fork: logex_types::ConsensusDataFork::Electra,
+                    header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 64,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 100,
+                            block_hash: B256::repeat_byte(0x11),
+                            receipts_root: B256::repeat_byte(0x12),
+                        }),
+                    },
+                    current_sync_committee_pubkeys: 512,
+                    current_sync_committee_branch_depth: 6,
+                },
+                RawRpcResponse {
+                    context_bytes: Some([1, 2, 3, 4]),
+                    bytes: vec![1, 2, 3],
+                },
+                VerifiedLightClientStore {
+                    checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 64,
+                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    next_sync_committee: None,
+                    finalized_header: verified_header(64, 0x10, 100),
+                    optimistic_header: verified_header(64, 0x10, 100),
+                    best_valid_update: None,
+                    previous_max_active_participants: 0,
+                    current_max_active_participants: 0,
+                },
+            )
+            .unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = store.record_verified_finality_update(
+                LightClientFinalityUpdateStatus {
+                    fork: logex_types::ConsensusDataFork::Electra,
+                    attested_header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 96,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 101,
+                            block_hash: B256::repeat_byte(0x21),
+                            receipts_root: B256::repeat_byte(0x22),
+                        }),
+                    },
+                    finalized_header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 96,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 101,
+                            block_hash: B256::repeat_byte(0x21),
+                            receipts_root: B256::repeat_byte(0x22),
+                        }),
+                    },
+                    signature_slot: 97,
+                    sync_committee_participants: 509,
+                    finality_branch_depth: 7,
+                },
+                RawRpcResponse {
+                    context_bytes: Some([5, 6, 7, 8]),
+                    bytes: vec![4, 5, 6],
+                },
+                VerifiedLightClientStore {
+                    checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 64,
+                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    next_sync_committee: None,
+                    finalized_header: verified_header(96, 0x20, 101),
+                    optimistic_header: verified_header(96, 0x20, 101),
+                    best_valid_update: None,
+                    previous_max_active_participants: 0,
+                    current_max_active_participants: 0,
+                },
+            );
+            done_tx.send(result).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("verified finality update should not deadlock")
+            .unwrap();
+
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            reopened
+                .chain_anchors()
+                .finalized_head
+                .map(|anchor| anchor.block_number),
+            Some(101)
+        );
+        assert_eq!(
+            reopened
+                .light_client_status()
+                .finality_update
+                .map(|status| status.finalized_header.beacon_slot),
+            Some(96)
+        );
+    }
+
+    #[test]
+    fn verified_optimistic_update_persists_without_deadlocking() {
+        let temp = TempDir::new().unwrap();
+        let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+
+        store
+            .record_verified_bootstrap(
+                LightClientBootstrapStatus {
+                    fork: logex_types::ConsensusDataFork::Electra,
+                    header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 64,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 100,
+                            block_hash: B256::repeat_byte(0x11),
+                            receipts_root: B256::repeat_byte(0x12),
+                        }),
+                    },
+                    current_sync_committee_pubkeys: 512,
+                    current_sync_committee_branch_depth: 6,
+                },
+                RawRpcResponse {
+                    context_bytes: Some([1, 2, 3, 4]),
+                    bytes: vec![1, 2, 3],
+                },
+                VerifiedLightClientStore {
+                    checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 64,
+                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    next_sync_committee: None,
+                    finalized_header: verified_header(64, 0x10, 100),
+                    optimistic_header: verified_header(64, 0x10, 100),
+                    best_valid_update: None,
+                    previous_max_active_participants: 0,
+                    current_max_active_participants: 0,
+                },
+            )
+            .unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = store.record_verified_optimistic_update(
+                LightClientOptimisticUpdateStatus {
+                    fork: logex_types::ConsensusDataFork::Electra,
+                    attested_header: logex_types::LightClientHeaderSummary {
+                        beacon_slot: 97,
+                        execution: Some(logex_types::LightClientExecutionData {
+                            block_number: 102,
+                            block_hash: B256::repeat_byte(0x31),
+                            receipts_root: B256::repeat_byte(0x32),
+                        }),
+                    },
+                    signature_slot: 98,
+                    sync_committee_participants: 509,
+                },
+                RawRpcResponse {
+                    context_bytes: Some([9, 10, 11, 12]),
+                    bytes: vec![7, 8, 9],
+                },
+                VerifiedLightClientStore {
+                    checkpoint_root: B256::repeat_byte(0xaa),
+                    bootstrap_slot: 64,
+                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    next_sync_committee: None,
+                    finalized_header: verified_header(64, 0x10, 100),
+                    optimistic_header: verified_header(97, 0x30, 102),
+                    best_valid_update: None,
+                    previous_max_active_participants: 0,
+                    current_max_active_participants: 0,
+                },
+            );
+            done_tx.send(result).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("verified optimistic update should not deadlock")
+            .unwrap();
+
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            reopened
+                .chain_anchors()
+                .optimistic_head
+                .map(|anchor| anchor.block_number),
+            Some(102)
+        );
+        assert_eq!(
+            reopened
+                .light_client_status()
+                .optimistic_update
+                .map(|status| status.attested_header.beacon_slot),
+            Some(97)
+        );
     }
 }

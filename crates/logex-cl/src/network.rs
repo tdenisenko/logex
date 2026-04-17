@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use alloy_primitives::hex;
+use alloy_primitives::{B256, hex};
 use discv5::enr::{CombinedKey, CombinedPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
 use futures::{StreamExt, future::Either};
@@ -45,9 +45,10 @@ use crate::rpc::{
     build_status_behaviour, resource_unavailable,
 };
 use crate::{
-    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, apply_finality_update_payload,
-    apply_light_client_update_payload, apply_optimistic_update_payload,
-    force_update_light_client_store, verify_bootstrap_payload,
+    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock,
+    apply_finality_update_payload, apply_light_client_update_payload,
+    apply_optimistic_update_payload, decode_verified_beacon_block,
+    force_update_light_client_store, verify_bootstrap_payload, verify_trusted_beacon_root,
 };
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -58,6 +59,8 @@ const DISCOVERY_QUERY_FANOUT: usize = 4;
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
+// Deneb+ `beacon_blocks_by_range/2` inherits `MAX_REQUEST_BLOCKS_DENEB = 128`.
+const BEACON_BLOCK_RANGE_WINDOW: u64 = 128;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
@@ -451,6 +454,96 @@ struct ConsensusNetwork {
     last_peer_policy_event: Option<String>,
     last_rpc_failure: Option<String>,
     last_response_send_failure: Option<String>,
+    verified_beacon_blocks: HashMap<B256, VerifiedBeaconBlock>,
+    active_history_target: Option<HistorySyncTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HistorySyncTarget {
+    checkpoint_root: B256,
+    checkpoint_slot: u64,
+    finalized_root: B256,
+    optimistic_root: B256,
+    optimistic_slot: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedCanonicalPathProgress {
+    checkpoint_slot: u64,
+    target_slot: u64,
+    reached_checkpoint: bool,
+    oldest_cached_slot: Option<u64>,
+}
+
+fn select_history_sync_target(
+    current: Option<HistorySyncTarget>,
+    latest: Option<HistorySyncTarget>,
+    current_complete: bool,
+) -> Option<HistorySyncTarget> {
+    match (current, latest) {
+        (_, None) => None,
+        (None, latest) => latest,
+        (Some(current), Some(latest))
+            if current_complete
+                || current.checkpoint_root != latest.checkpoint_root
+                || latest.optimistic_slot <= current.optimistic_slot
+                || (current.optimistic_root == latest.optimistic_root
+                    && current.optimistic_slot == latest.optimistic_slot) =>
+        {
+            Some(latest)
+        }
+        (Some(current), Some(_latest)) => Some(current),
+    }
+}
+
+fn select_post_bootstrap_request_kind(
+    root_ready: bool,
+    range_ready: bool,
+    updates_ready: bool,
+    finality_ready: bool,
+    optimistic_ready: bool,
+) -> Option<RpcRequestKind> {
+    if root_ready {
+        Some(RpcRequestKind::BeaconBlocksByRoot)
+    } else if range_ready {
+        Some(RpcRequestKind::BeaconBlocksByRange)
+    } else if updates_ready {
+        Some(RpcRequestKind::LightClientUpdatesByRange)
+    } else if finality_ready {
+        Some(RpcRequestKind::LightClientFinalityUpdate)
+    } else if optimistic_ready {
+        Some(RpcRequestKind::LightClientOptimisticUpdate)
+    } else {
+        None
+    }
+}
+
+fn next_history_range_request_for_progress(
+    progress: CachedCanonicalPathProgress,
+) -> Option<BeaconBlocksByRangeRequest> {
+    if progress.reached_checkpoint {
+        return None;
+    }
+
+    let missing_end_slot = progress
+        .oldest_cached_slot
+        .map(|slot| slot.saturating_sub(1))
+        .unwrap_or(progress.target_slot);
+    if missing_end_slot <= progress.checkpoint_slot {
+        return None;
+    }
+
+    let start_slot = missing_end_slot
+        .saturating_sub(BEACON_BLOCK_RANGE_WINDOW - 1)
+        .max(progress.checkpoint_slot.saturating_add(1));
+    let count = missing_end_slot
+        .saturating_sub(start_slot)
+        .saturating_add(1);
+    (count > 0).then_some(BeaconBlocksByRangeRequest {
+        start_slot,
+        count,
+        step: 1,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -908,13 +1001,6 @@ impl PeerRpcSupport {
         }
     }
 
-    const fn supports_light_client(self) -> bool {
-        self.light_client_bootstrap
-            && self.light_client_updates_by_range
-            && self.light_client_finality_update
-            && self.light_client_optimistic_update
-    }
-
     const fn supports_any_light_client(self) -> bool {
         self.light_client_bootstrap
             || self.light_client_updates_by_range
@@ -934,8 +1020,14 @@ impl PeerRpcSupport {
         self.status && self.light_client_bootstrap
     }
 
+    const fn supports_light_client_progression(self) -> bool {
+        self.light_client_updates_by_range
+            || self.light_client_finality_update
+            || self.light_client_optimistic_update
+    }
+
     const fn supports_any_post_bootstrap_work(self) -> bool {
-        self.supports_light_client() || self.supports_history_backfill()
+        self.supports_light_client_progression() || self.supports_history_backfill()
     }
 }
 
@@ -1077,6 +1169,8 @@ impl ConsensusNetwork {
             last_peer_policy_event: None,
             last_rpc_failure: None,
             last_response_send_failure: None,
+            verified_beacon_blocks: HashMap::new(),
+            active_history_target: None,
         })
     }
 
@@ -1416,7 +1510,7 @@ impl ConsensusNetwork {
                     agent_version = %info.agent_version,
                     listen_addrs = info.listen_addrs.len(),
                     protocols = info.protocols.len(),
-                    supports_light_client = support.supports_light_client(),
+                    supports_light_client_progression = support.supports_light_client_progression(),
                     supports_any_light_client = support.supports_any_light_client(),
                     "received consensus identify info"
                 );
@@ -1551,6 +1645,8 @@ impl ConsensusNetwork {
                             "failed to persist verified finality update learned from gossip"
                         );
                     }
+                    self.materialize_verified_history_segment();
+                    self.drive_rpc_requests();
                     return gossipsub::MessageAcceptance::Ignore;
                 }
                 Err(error) => {
@@ -1600,6 +1696,8 @@ impl ConsensusNetwork {
                             "failed to persist verified optimistic update learned from gossip"
                         );
                     }
+                    self.materialize_verified_history_segment();
+                    self.drive_rpc_requests();
                     return gossipsub::MessageAcceptance::Ignore;
                 }
                 Err(error) => {
@@ -2028,6 +2126,7 @@ impl ConsensusNetwork {
                             "failed to persist verified bootstrap payload"
                         );
                     }
+                    self.materialize_verified_history_segment();
                     self.drive_rpc_requests();
                 }
                 Err(error) => {
@@ -2091,6 +2190,7 @@ impl ConsensusNetwork {
                             "failed to persist verified light-client updates by range state"
                         );
                     }
+                    self.materialize_verified_history_segment();
                     self.drive_rpc_requests();
                 } else {
                     tracing::warn!(
@@ -2140,6 +2240,7 @@ impl ConsensusNetwork {
                                 "failed to persist verified finality update"
                             );
                         }
+                        self.materialize_verified_history_segment();
                         self.drive_rpc_requests();
                     }
                     Err(error) => {
@@ -2190,6 +2291,7 @@ impl ConsensusNetwork {
                                 "failed to persist verified optimistic update"
                             );
                         }
+                        self.materialize_verified_history_segment();
                         self.drive_rpc_requests();
                     }
                     Err(error) => {
@@ -2212,6 +2314,27 @@ impl ConsensusNetwork {
                 );
                 self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
                 self.beacon_blocks_by_range_peers.insert(peer);
+                let mut decoded = 0usize;
+                for chunk in &chunks {
+                    match decode_verified_beacon_block(chunk) {
+                        Ok(block) => {
+                            decoded += 1;
+                            self.record_verified_beacon_block(block);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %peer,
+                                bytes = chunk.bytes.len(),
+                                %error,
+                                "failed to decode or verify beacon block from range response"
+                            );
+                        }
+                    }
+                }
+                if decoded > 0 {
+                    self.materialize_verified_history_segment();
+                    self.drive_rpc_requests();
+                }
             }
             (RpcRequestKind::BeaconBlocksByRoot, Eth2RpcResponse::BeaconBlocksByRoot(chunks)) => {
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
@@ -2223,6 +2346,64 @@ impl ConsensusNetwork {
                 );
                 self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRoot);
                 self.beacon_blocks_by_root_peers.insert(peer);
+                let mut decoded = 0usize;
+                let target = self.current_history_sync_target();
+                for chunk in &chunks {
+                    match decode_verified_beacon_block(chunk)
+                        .and_then(|block| {
+                            match target {
+                                Some(target) if block.beacon_root == target.checkpoint_root => {
+                                    verify_trusted_beacon_root(
+                                        block,
+                                        target.checkpoint_root,
+                                        target.checkpoint_slot,
+                                    )
+                                }
+                                Some(target) if block.beacon_root == target.optimistic_root => {
+                                    verify_trusted_beacon_root(
+                                        block,
+                                        target.optimistic_root,
+                                        target.optimistic_slot,
+                                    )
+                                }
+                                _ => Ok(block),
+                            }
+                        }) {
+                        Ok(block) => {
+                            if let Some(target) = target {
+                                if block.beacon_root != target.checkpoint_root
+                                    && block.beacon_root != target.optimistic_root
+                                {
+                                    tracing::warn!(
+                                        %peer,
+                                        actual_root = %block.beacon_root,
+                                        actual_slot = block.slot,
+                                        checkpoint_root = %target.checkpoint_root,
+                                        checkpoint_slot = target.checkpoint_slot,
+                                        optimistic_root = %target.optimistic_root,
+                                        optimistic_slot = target.optimistic_slot,
+                                        "discarding beacon block by root response that did not match the active trusted endpoints"
+                                    );
+                                    continue;
+                                }
+                            }
+                            decoded += 1;
+                            self.record_verified_beacon_block(block);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %peer,
+                                bytes = chunk.bytes.len(),
+                                %error,
+                                "failed to decode or verify beacon block from root response"
+                            );
+                        }
+                    }
+                }
+                if decoded > 0 {
+                    self.materialize_verified_history_segment();
+                    self.drive_rpc_requests();
+                }
             }
             (kind, Eth2RpcResponse::Error(error)) => {
                 self.request_failures.increment(kind);
@@ -2333,6 +2514,7 @@ impl ConsensusNetwork {
     }
 
     fn drive_rpc_requests(&mut self) {
+        self.refresh_history_sync_target();
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         if !bootstrap_needed {
             for lifecycle in self.peer_lifecycle.values_mut() {
@@ -2347,7 +2529,6 @@ impl ConsensusNetwork {
         });
         for peer in connected {
             let support = self.peer_support.get(&peer).copied();
-            let identify_ready = support.is_some();
             let identify_timed_out = self.identify_timed_out(peer);
 
             let Some(support) = support else {
@@ -2423,57 +2604,15 @@ impl ConsensusNetwork {
                 {
                     self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
                 }
-                if support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
-                    && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
-                {
-                    self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
-                } else if self.history_request_slot().is_some()
-                    && support.supports_request(RpcRequestKind::BeaconBlocksByRange)
-                    && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
-                {
-                    self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
-                }
                 continue;
             }
 
-            if identify_ready
-                && support.supports_request(RpcRequestKind::MetaData)
-                && self.can_issue_request(RpcRequestKind::MetaData)
-            {
-                self.ensure_request(peer, RpcRequestKind::MetaData);
+            if self.pending_requests_for_peer(peer) > 0 {
+                continue;
             }
 
-            if support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
-                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
-            {
-                self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
-            } else if self.history_request_slot().is_some()
-                && support.supports_request(RpcRequestKind::BeaconBlocksByRange)
-                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
-            {
-                self.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
-            }
-
-            if self.history_request_slot().is_some()
-                && support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
-                && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
-            {
-                self.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
-            }
-            if support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
-            {
-                self.ensure_request(peer, RpcRequestKind::LightClientFinalityUpdate);
-            }
-            if support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
-            {
-                self.ensure_request(peer, RpcRequestKind::LightClientOptimisticUpdate);
-            }
-            if support.supports_request(RpcRequestKind::Ping)
-                && self.can_issue_request(RpcRequestKind::Ping)
-            {
-                self.ensure_request(peer, RpcRequestKind::Ping);
+            if let Some(kind) = self.next_post_bootstrap_request_kind(support) {
+                self.ensure_request(peer, kind);
             }
         }
     }
@@ -2692,20 +2831,45 @@ impl ConsensusNetwork {
             RpcRequestKind::LightClientOptimisticUpdate => {
                 Some(Eth2RpcRequest::LightClientOptimisticUpdate)
             }
-            RpcRequestKind::BeaconBlocksByRange => self.history_request_slot().map(|start_slot| {
-                Eth2RpcRequest::BeaconBlocksByRange(BeaconBlocksByRangeRequest {
-                    start_slot,
-                    count: 1,
-                    step: 1,
-                })
-            }),
-            RpcRequestKind::BeaconBlocksByRoot => Some(Eth2RpcRequest::BeaconBlocksByRoot(vec![
-                self.consensus.checkpoint().beacon_root,
-            ])),
+            RpcRequestKind::BeaconBlocksByRange => self
+                .next_history_range_request()
+                .map(Eth2RpcRequest::BeaconBlocksByRange),
+            RpcRequestKind::BeaconBlocksByRoot => self
+                .next_history_root_request()
+                .map(|root| Eth2RpcRequest::BeaconBlocksByRoot(vec![root])),
         }
     }
 
+    fn next_post_bootstrap_request_kind(&self, support: PeerRpcSupport) -> Option<RpcRequestKind> {
+        select_post_bootstrap_request_kind(
+            support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
+                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
+                && self.next_history_root_request().is_some(),
+            support.supports_request(RpcRequestKind::BeaconBlocksByRange)
+                && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
+                && self.next_history_range_request().is_some(),
+            support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
+                && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
+                && self.next_updates_by_range_request().is_some(),
+            support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
+            support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
+        )
+    }
+
     fn local_status_message(&self) -> StatusMessage {
+        if let Some(store) = self.consensus.light_client_store() {
+            return StatusMessage {
+                fork_digest: self.fork_digest,
+                finalized_root: store.finalized_header.beacon_root(),
+                finalized_epoch: store.finalized_header.beacon.slot / 32,
+                head_root: store.optimistic_header.beacon_root(),
+                head_slot: store.optimistic_header.beacon.slot,
+                earliest_available_slot: store.bootstrap_slot(),
+            };
+        }
+
         let checkpoint = self.consensus.checkpoint();
         match checkpoint.beacon_slot {
             Some(checkpoint_slot) => {
@@ -2739,20 +2903,151 @@ impl ConsensusNetwork {
         })
     }
 
-    fn history_request_slot(&self) -> Option<u64> {
-        let verified_bootstrap_slot = self
-            .consensus
-            .light_client_store()
-            .map(|store| store.bootstrap_slot());
-        let checkpoint_slot = self.consensus.checkpoint().beacon_slot;
-        let bootstrap_slot = self
-            .consensus
-            .light_client_status()
-            .bootstrap
-            .map(|bootstrap| bootstrap.header.beacon_slot);
-        verified_bootstrap_slot
-            .or(checkpoint_slot)
-            .or(bootstrap_slot)
+    fn latest_history_sync_target(&self) -> Option<HistorySyncTarget> {
+        let store = self.consensus.light_client_store()?;
+        Some(HistorySyncTarget {
+            checkpoint_root: store.checkpoint_root,
+            checkpoint_slot: store.bootstrap_slot(),
+            finalized_root: store.finalized_header.beacon_root(),
+            optimistic_root: store.optimistic_header.beacon_root(),
+            optimistic_slot: store.optimistic_header.beacon.slot,
+        })
+    }
+
+    fn current_history_sync_target(&self) -> Option<HistorySyncTarget> {
+        self.active_history_target
+            .or_else(|| self.latest_history_sync_target())
+    }
+
+    fn refresh_history_sync_target(&mut self) {
+        let latest = self.latest_history_sync_target();
+        let current = self.active_history_target;
+        let current_complete = current
+            .and_then(|target| self.canonical_chain_blocks(target))
+            .is_some();
+        let next = select_history_sync_target(current, latest, current_complete);
+        if next != current {
+            tracing::debug!(
+                previous_target = ?current,
+                next_target = ?next,
+                current_complete,
+                "updated active consensus history sync target"
+            );
+        }
+        self.active_history_target = next;
+    }
+
+    fn next_history_root_request(&self) -> Option<B256> {
+        let target = self.current_history_sync_target()?;
+        if !self.verified_beacon_blocks.contains_key(&target.checkpoint_root) {
+            return Some(target.checkpoint_root);
+        }
+        (!self.verified_beacon_blocks.contains_key(&target.optimistic_root))
+            .then_some(target.optimistic_root)
+    }
+
+    fn next_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
+        let target = self.current_history_sync_target()?;
+        if target.optimistic_slot <= target.checkpoint_slot {
+            return None;
+        }
+        let progress = self.cached_canonical_path_progress(target)?;
+        next_history_range_request_for_progress(progress)
+    }
+
+    fn cached_canonical_path_progress(
+        &self,
+        target: HistorySyncTarget,
+    ) -> Option<CachedCanonicalPathProgress> {
+        let mut current_root = target.optimistic_root;
+        let mut oldest_cached_slot = None;
+
+        loop {
+            if current_root == target.checkpoint_root {
+                return Some(CachedCanonicalPathProgress {
+                    checkpoint_slot: target.checkpoint_slot,
+                    target_slot: target.optimistic_slot,
+                    reached_checkpoint: true,
+                    oldest_cached_slot,
+                });
+            }
+
+            let Some(block) = self.verified_beacon_blocks.get(&current_root) else {
+                return Some(CachedCanonicalPathProgress {
+                    checkpoint_slot: target.checkpoint_slot,
+                    target_slot: target.optimistic_slot,
+                    reached_checkpoint: false,
+                    oldest_cached_slot,
+                });
+            };
+            oldest_cached_slot = Some(block.slot);
+            current_root = block.parent_root;
+        }
+    }
+
+    fn record_verified_beacon_block(&mut self, block: VerifiedBeaconBlock) {
+        self.verified_beacon_blocks.insert(block.beacon_root, block);
+    }
+
+    fn materialize_verified_history_segment(&mut self) {
+        let Some(target) = self.current_history_sync_target() else {
+            return;
+        };
+        let Some(chain) = self.canonical_chain_blocks(target) else {
+            return;
+        };
+
+        let finalized_index = chain
+            .iter()
+            .position(|block| block.beacon_root == target.finalized_root);
+        let anchor_records = chain
+            .iter()
+            .enumerate()
+            .map(|(index, block)| crate::AnchorRecord {
+                anchor: block.execution_anchor,
+                finalized: finalized_index.is_some_and(|finalized| index <= finalized),
+            })
+            .collect::<Vec<_>>();
+        let Some(first_anchor) = anchor_records.first().map(|record| record.anchor) else {
+            return;
+        };
+        let Some(last_anchor) = anchor_records.last().map(|record| record.anchor) else {
+            return;
+        };
+
+        if let Err(error) = self.consensus.replace_anchor_range(
+            first_anchor.block_number,
+            last_anchor.block_number,
+            anchor_records,
+        ) {
+            tracing::warn!(%error, "failed to persist verified beacon-block execution anchors");
+            return;
+        }
+        self.refresh_history_sync_target();
+    }
+
+    fn canonical_chain_blocks(&self, target: HistorySyncTarget) -> Option<Vec<VerifiedBeaconBlock>> {
+        let checkpoint_block = *self.verified_beacon_blocks.get(&target.checkpoint_root)?;
+        if checkpoint_block.slot != target.checkpoint_slot {
+            return None;
+        }
+
+        let mut current_root = target.optimistic_root;
+        let mut reverse_chain = Vec::new();
+        loop {
+            let block = if current_root == target.checkpoint_root {
+                checkpoint_block
+            } else {
+                *self.verified_beacon_blocks.get(&current_root)?
+            };
+            reverse_chain.push(block);
+            if current_root == target.checkpoint_root {
+                break;
+            }
+            current_root = block.parent_root;
+        }
+        reverse_chain.reverse();
+        Some(reverse_chain)
     }
 
     fn maybe_force_light_client_store(&mut self) {
@@ -3042,11 +3337,9 @@ impl ConsensusNetwork {
             RpcRequestKind::LightClientBootstrap
             | RpcRequestKind::LightClientUpdatesByRange
             | RpcRequestKind::LightClientFinalityUpdate
-            | RpcRequestKind::LightClientOptimisticUpdate => false,
-            RpcRequestKind::BeaconBlocksByRange => {
-                self.beacon_blocks_by_range_peers.contains(&peer)
-            }
-            RpcRequestKind::BeaconBlocksByRoot => self.beacon_blocks_by_root_peers.contains(&peer),
+            | RpcRequestKind::LightClientOptimisticUpdate
+            | RpcRequestKind::BeaconBlocksByRange
+            | RpcRequestKind::BeaconBlocksByRoot => false,
         }
     }
 
@@ -3054,6 +3347,13 @@ impl ConsensusNetwork {
         self.pending_requests
             .keys()
             .filter(|key| key.kind == kind)
+            .count()
+    }
+
+    fn pending_requests_for_peer(&self, peer: PeerId) -> usize {
+        self.pending_peer_kinds
+            .iter()
+            .filter(|(pending_peer, _)| *pending_peer == peer)
             .count()
     }
 
@@ -3596,9 +3896,26 @@ fn enr_fork_digest(enr: &Enr) -> Option<[u8; 4]> {
 }
 
 fn enr_matches_fork_digest(enr: &Enr, expected_fork_digest: &[u8; 4]) -> bool {
-    enr_fork_digest(enr)
-        .map(|fork_digest| &fork_digest == expected_fork_digest)
-        .unwrap_or(false)
+    let Some(remote_fork_digest) = enr_fork_digest(enr) else {
+        return true;
+    };
+    if &remote_fork_digest == expected_fork_digest {
+        return true;
+    }
+
+    let Some(remote_version) =
+        MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_digest(remote_fork_digest)
+    else {
+        return false;
+    };
+    let Some(expected_version) =
+        MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_digest(*expected_fork_digest)
+    else {
+        return false;
+    };
+
+    remote_version == expected_version
+        || (remote_version[0] >= 0x05 && expected_version[0] >= 0x05)
 }
 
 #[allow(deprecated)]
@@ -3764,6 +4081,7 @@ const MAINNET_BOOTNODES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::b256;
     use libp2p::StreamProtocol;
     use tempfile::TempDir;
 
@@ -3992,6 +4310,30 @@ mod tests {
     }
 
     #[test]
+    fn enr_fork_filter_accepts_compatible_post_electra_and_missing_digest() {
+        let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(14_132_160);
+        let expected_fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch);
+        let compatible_fork_id = {
+            let mut fork_id = [0u8; 16];
+            fork_id[..4].copy_from_slice(
+                &MAINNET_CONSENSUS_CHAIN_SPEC.plain_fork_digest_for_version([0x05, 0x00, 0x00, 0x00]),
+            );
+            fork_id[4..8].copy_from_slice(&[0x05, 0x00, 0x00, 0x00]);
+            fork_id[8..16].copy_from_slice(&364_032u64.to_le_bytes());
+            fork_id
+        };
+        let enr_key = CombinedKey::generate_secp256k1();
+        let compatible = Enr::builder()
+            .add_value("eth2", &compatible_fork_id)
+            .build(&enr_key)
+            .unwrap();
+        let missing = Enr::builder().build(&enr_key).unwrap();
+
+        assert!(enr_matches_fork_digest(&compatible, &expected_fork_digest));
+        assert!(enr_matches_fork_digest(&missing, &expected_fork_digest));
+    }
+
+    #[test]
     fn enr_relevance_filter_rejects_opstack_peers() {
         let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(14_132_160);
         let expected_fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch);
@@ -4036,7 +4378,7 @@ mod tests {
         assert!(support.goodbye);
         assert!(support.metadata);
         assert!(support.supports_request(RpcRequestKind::Goodbye));
-        assert!(support.supports_light_client());
+        assert!(support.supports_light_client_progression());
         assert!(support.supports_request(RpcRequestKind::MetaData));
         assert!(support.supports_request(RpcRequestKind::LightClientBootstrap));
         assert!(support.supports_request(RpcRequestKind::LightClientUpdatesByRange));
@@ -4047,7 +4389,7 @@ mod tests {
     }
 
     #[test]
-    fn identify_support_rejects_partial_light_client_protocol_sets() {
+    fn identify_support_accepts_partial_post_bootstrap_light_client_sets() {
         let info = identify::Info {
             public_key: identity::Keypair::generate_ed25519().public(),
             protocol_version: IDENTIFY_PROTOCOL_VERSION.to_owned(),
@@ -4063,9 +4405,101 @@ mod tests {
 
         let support = PeerRpcSupport::from_identify_info(&info);
         assert!(support.status);
-        assert!(!support.supports_light_client());
+        assert!(support.supports_light_client_progression());
+        assert!(support.supports_any_post_bootstrap_work());
         assert!(support.supports_request(RpcRequestKind::LightClientFinalityUpdate));
         assert!(!support.supports_request(RpcRequestKind::LightClientBootstrap));
+    }
+
+    #[test]
+    fn history_target_stays_pinned_while_forward_head_moves_and_advances_when_complete() {
+        let checkpoint_root = b256!("0x0101010101010101010101010101010101010101010101010101010101010101");
+        let initial_optimistic_root =
+            b256!("0x0202020202020202020202020202020202020202020202020202020202020202");
+        let newer_optimistic_root =
+            b256!("0x0303030303030303030303030303030303030303030303030303030303030303");
+        let initial = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 100,
+            finalized_root: checkpoint_root,
+            optimistic_root: initial_optimistic_root,
+            optimistic_slot: 120,
+        };
+        let newer = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 100,
+            finalized_root: initial_optimistic_root,
+            optimistic_root: newer_optimistic_root,
+            optimistic_slot: 125,
+        };
+
+        assert_eq!(
+            select_history_sync_target(Some(initial), Some(newer), false),
+            Some(initial)
+        );
+        assert_eq!(
+            select_history_sync_target(Some(initial), Some(newer), true),
+            Some(newer)
+        );
+    }
+
+    #[test]
+    fn history_target_switches_immediately_on_reorg_or_same_slot_replacement() {
+        let checkpoint_root = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
+        let current = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 64,
+            finalized_root: checkpoint_root,
+            optimistic_root: b256!(
+                "0x2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            optimistic_slot: 96,
+        };
+        let reorged = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 64,
+            finalized_root: checkpoint_root,
+            optimistic_root: b256!(
+                "0x3333333333333333333333333333333333333333333333333333333333333333"
+            ),
+            optimistic_slot: 96,
+        };
+
+        assert_eq!(
+            select_history_sync_target(Some(current), Some(reorged), false),
+            Some(reorged)
+        );
+    }
+
+    #[test]
+    fn post_bootstrap_request_selection_skips_unbuildable_higher_priority_work() {
+        assert_eq!(
+            select_post_bootstrap_request_kind(false, true, false, true, true),
+            Some(RpcRequestKind::BeaconBlocksByRange)
+        );
+        assert_eq!(
+            select_post_bootstrap_request_kind(false, false, false, true, true),
+            Some(RpcRequestKind::LightClientFinalityUpdate)
+        );
+        assert_eq!(
+            select_post_bootstrap_request_kind(false, false, false, false, true),
+            Some(RpcRequestKind::LightClientOptimisticUpdate)
+        );
+    }
+
+    #[test]
+    fn history_range_request_caps_deneb_electra_block_counts() {
+        let request = next_history_range_request_for_progress(CachedCanonicalPathProgress {
+            checkpoint_slot: 100,
+            target_slot: 400,
+            reached_checkpoint: false,
+            oldest_cached_slot: Some(400),
+        })
+        .expect("range request should be available");
+
+        assert_eq!(request.start_slot, 272);
+        assert_eq!(request.count, 128);
+        assert_eq!(request.step, 1);
     }
 
     #[test]

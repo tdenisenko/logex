@@ -5068,6 +5068,7 @@ dependencies = [
  "toml",
  "tracing",
  "tree_hash",
+ "tree_hash_derive",
  "unsigned-varint 0.8.0",
 ]
 

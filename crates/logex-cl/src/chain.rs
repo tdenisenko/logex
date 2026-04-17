@@ -83,6 +83,41 @@ impl ConsensusChainSpec {
         fork_digest
     }
 
+    pub fn plain_fork_digest_for_version(self, version: [u8; 4]) -> [u8; 4] {
+        let base_digest = self.fork_data_root(version);
+        [base_digest[0], base_digest[1], base_digest[2], base_digest[3]]
+    }
+
+    pub fn fork_version_for_digest(self, digest: [u8; 4]) -> Option<[u8; 4]> {
+        if digest == self.plain_fork_digest_for_version(self.genesis_fork_version) {
+            return Some(self.genesis_fork_version);
+        }
+
+        for scheduled in self.fork_schedule {
+            if digest == self.plain_fork_digest_for_version(scheduled.version) {
+                return Some(scheduled.version);
+            }
+        }
+
+        if digest == self.fork_digest_for_epoch(0) {
+            return Some(self.fork_version_for_epoch(0));
+        }
+
+        for scheduled in self.fork_schedule {
+            if digest == self.fork_digest_for_epoch(scheduled.epoch) {
+                return Some(scheduled.version);
+            }
+        }
+
+        for scheduled in self.blob_schedule {
+            if digest == self.fork_digest_for_epoch(scheduled.epoch) {
+                return Some(self.fork_version_for_epoch(scheduled.epoch));
+            }
+        }
+
+        None
+    }
+
     pub fn enr_fork_id_for_epoch(self, epoch: u64) -> [u8; 16] {
         let current_version = self.fork_version_for_epoch(epoch);
         let next_fork_version = self
@@ -283,6 +318,22 @@ mod tests {
         assert_ne!(bpo1, bpo2);
         assert_eq!(current, bpo2);
         assert_eq!(hex::encode(current), "8c9f62fe");
+    }
+
+    #[test]
+    fn mainnet_fork_version_lookup_accepts_plain_and_blob_shift_digests() {
+        let simple_fulu =
+            MAINNET_CONSENSUS_CHAIN_SPEC.plain_fork_digest_for_version([0x06, 0x00, 0x00, 0x00]);
+        let shifted_fulu = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(441_630);
+
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_digest(simple_fulu),
+            Some([0x06, 0x00, 0x00, 0x00])
+        );
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_digest(shifted_fulu),
+            Some([0x06, 0x00, 0x00, 0x00])
+        );
     }
 
     #[test]

@@ -332,6 +332,8 @@ impl VerifiedLightClientHeader {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct VerifiedLightClientStore {
     pub checkpoint_root: B256,
+    #[serde(default)]
+    pub bootstrap_slot: u64,
     pub current_sync_committee: SyncCommitteeData,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_sync_committee: Option<SyncCommitteeData>,
@@ -347,7 +349,7 @@ pub(crate) struct VerifiedLightClientStore {
 
 impl VerifiedLightClientStore {
     pub(crate) fn bootstrap_slot(&self) -> u64 {
-        self.finalized_header.beacon.slot
+        self.bootstrap_slot
     }
 
     pub(crate) fn finalized_anchor(&self) -> Option<ExecutionAnchor> {
@@ -490,6 +492,7 @@ pub(crate) fn verify_bootstrap_payload(
     let status = decoded.status();
     let store = VerifiedLightClientStore {
         checkpoint_root: checkpoint.beacon_root,
+        bootstrap_slot: checkpoint.beacon_slot.unwrap_or(slot),
         current_sync_committee: decoded.current_sync_committee().to_persisted(),
         next_sync_committee: None,
         finalized_header: header.clone(),
