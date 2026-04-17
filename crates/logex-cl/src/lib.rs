@@ -11,16 +11,14 @@ use logex_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod chain;
 mod beacon_block;
+mod chain;
 mod light_client;
 mod network;
 mod rpc;
 
+pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
 pub(crate) use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
-pub(crate) use beacon_block::{
-    VerifiedBeaconBlock, decode_verified_beacon_block, verify_trusted_beacon_root,
-};
 pub(crate) use light_client::{
     AppliedLightClientUpdate, VerifiedLightClientStore, apply_finality_update_payload,
     apply_light_client_update_payload, apply_optimistic_update_payload,
@@ -217,9 +215,9 @@ impl ConsensusStore {
         anchors: Vec<AnchorRecord>,
     ) -> Result<(), ConsensusStateError> {
         let mut snapshot = self.inner.lock().unwrap();
-        snapshot
-            .ordered_anchors
-            .retain(|record| record.anchor.block_number < start_block || record.anchor.block_number > end_block);
+        snapshot.ordered_anchors.retain(|record| {
+            record.anchor.block_number < start_block || record.anchor.block_number > end_block
+        });
         snapshot.ordered_anchors.extend(anchors);
         let ordered = std::mem::take(&mut snapshot.ordered_anchors);
         snapshot.ordered_anchors = normalize_anchor_records(ordered);
@@ -723,6 +721,70 @@ mod tests {
             Some(3)
         );
         assert_eq!(store.next_anchor_after(3), None);
+    }
+
+    #[test]
+    fn replace_anchor_range_merges_backward_and_forward_checkpoint_expansions() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let anchor = |block_number: u64, byte: u8, finalized: bool| AnchorRecord {
+            anchor: ExecutionAnchor {
+                beacon_root: B256::repeat_byte(byte),
+                beacon_slot: block_number,
+                block_number,
+                block_hash: B256::repeat_byte(byte.wrapping_add(1)),
+                receipts_root: B256::repeat_byte(byte.wrapping_add(2)),
+            },
+            finalized,
+        };
+
+        store
+            .replace_anchor_range(
+                100,
+                102,
+                vec![
+                    anchor(100, 0x10, true),
+                    anchor(101, 0x11, false),
+                    anchor(102, 0x12, false),
+                ],
+            )
+            .unwrap();
+        store
+            .replace_anchor_range(
+                98,
+                100,
+                vec![
+                    anchor(98, 0x08, true),
+                    anchor(99, 0x09, true),
+                    anchor(100, 0x10, true),
+                ],
+            )
+            .unwrap();
+
+        let ordered = store.ordered_anchors();
+        let blocks = ordered
+            .iter()
+            .map(|record| record.anchor.block_number)
+            .collect::<Vec<_>>();
+        assert_eq!(blocks, vec![98, 99, 100, 101, 102]);
+        assert_eq!(
+            store
+                .chain_anchors()
+                .optimistic_head
+                .map(|anchor| anchor.block_number),
+            Some(102)
+        );
+        assert_eq!(
+            store
+                .chain_anchors()
+                .finalized_head
+                .map(|anchor| anchor.block_number),
+            Some(100)
+        );
     }
 
     #[test]

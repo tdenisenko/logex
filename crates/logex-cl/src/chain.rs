@@ -85,7 +85,12 @@ impl ConsensusChainSpec {
 
     pub fn plain_fork_digest_for_version(self, version: [u8; 4]) -> [u8; 4] {
         let base_digest = self.fork_data_root(version);
-        [base_digest[0], base_digest[1], base_digest[2], base_digest[3]]
+        [
+            base_digest[0],
+            base_digest[1],
+            base_digest[2],
+            base_digest[3],
+        ]
     }
 
     pub fn fork_version_for_digest(self, digest: [u8; 4]) -> Option<[u8; 4]> {

@@ -125,8 +125,8 @@
       <div class="progress-meta">
         <span>Checkpoint block: <b id="stCheckpointBlock">--</b></span>
         <span>Latest block: <b id="stHead">--</b></span>
-        <span>Toward latest: <b id="stLiveCoverage">--</b></span>
-        <span>Toward genesis: <b id="stHistoryCoverage">--</b></span>
+        <span>Live span: <b id="stLiveCoverage">--</b></span>
+        <span>History span: <b id="stHistoryCoverage">--</b></span>
       </div>
     </div>
     <div class="progress-bar"><div class="progress-fill" id="stProgressFill"></div></div>
@@ -141,12 +141,12 @@
         <div class="kv"><span class="k">Optimistic Head</span><span class="v" id="stOptimistic">--</span></div>
         <div class="kv"><span class="k">Finalized Head</span><span class="v" id="stFinalized">--</span></div>
         <div class="kv"><span class="k">Indexed Head</span><span class="v" id="stIndexedExec">--</span></div>
+        <div class="kv"><span class="k">Live Materialized</span><span class="v" id="stMaterializedTip">--</span></div>
+        <div class="kv"><span class="k">History Floor</span><span class="v" id="stHistoryFloor">--</span></div>
+        <div class="kv"><span class="k">Anchors Materialized</span><span class="v" id="stAnchorCount">--</span></div>
         <div class="kv"><span class="k">Index Lag</span><span class="v" id="stIndexLag">--</span></div>
         <div class="kv"><span class="k">Finality Gap</span><span class="v" id="stFinalityGap">--</span></div>
-        <div class="kv"><span class="k">Execution Head</span><span class="v" id="stExecutionHead">--</span></div>
-        <div class="kv"><span class="k">Latest Bootstrap</span><span class="v" id="stClBootstrapPayload">--</span></div>
-        <div class="kv"><span class="k">Latest Finality</span><span class="v" id="stClFinalityPayload">--</span></div>
-        <div class="kv"><span class="k">Latest Optimistic</span><span class="v" id="stClOptimisticPayload">--</span></div>
+        <div class="kv"><span class="k">Latest Block</span><span class="v" id="stExecutionHead">--</span></div>
       </div>
       <p class="hint" id="stConsensusHint">--</p>
     </div>
@@ -171,7 +171,7 @@
     </div>
   </div>
   <div class="rail-card">
-    <div class="card-title">Checkpoint-Centered Sync Bar</div>
+    <div class="card-title">Checkpoint Expansion Bar</div>
     <div class="marker-rail" id="markerRail"></div>
     <div class="direction-note"><span id="railLeftLabel">Latest block</span><span id="railRightLabel">Genesis</span></div>
     <p class="hint" id="stRailHint">--</p>
@@ -269,16 +269,6 @@ function checkpointExecutionBlock(lightClient) {
   return executionBlockFromHeader(lightClient && lightClient.bootstrap && lightClient.bootstrap.header);
 }
 
-function lightClientPayloadLabel(fork, header) {
-  if (!header) return '--';
-  var prefix = fork ? String(fork).replace(/_/g, ' ') : 'decoded';
-  var slot = header.beacon_slot != null ? 'slot ' + fmt(header.beacon_slot) : null;
-  var exec = header.execution && header.execution.block_number != null
-    ? 'EL ' + fmt(header.execution.block_number)
-    : null;
-  return [prefix, slot, exec].filter(Boolean).join(' / ');
-}
-
 function liveSidePosition(block, checkpointBlock, liveBlock) {
   if (!Number.isFinite(block) || !Number.isFinite(checkpointBlock) || !Number.isFinite(liveBlock)) return 50;
   if (liveBlock <= checkpointBlock) return 50;
@@ -321,7 +311,7 @@ function renderMarkerRail(data, checkpointBlock, liveBlock, liveVerifiedBlock, h
     { name: 'Finalized', value: fmt(anchorBlock(data.finalized_execution_head)), pos: liveSidePosition(anchorBlock(data.finalized_execution_head), checkpointBlock, latestKnown), className: 'marker-finalized' },
     { name: 'Indexed', value: fmt(anchorBlock(data.indexed_execution_head)), pos: liveSidePosition(anchorBlock(data.indexed_execution_head), checkpointBlock, latestKnown), className: 'marker-indexed' },
     { name: 'Cursor', value: fmt(Number(data.current_block || 0)), pos: liveSidePosition(Number(data.current_block || 0), checkpointBlock, latestKnown), className: 'marker-cursor' },
-    { name: 'History', value: fmt(historyBlock), pos: historySidePosition(historyBlock, checkpointBlock), className: 'marker-history' },
+    { name: 'Floor', value: fmt(historyBlock), pos: historySidePosition(historyBlock, checkpointBlock), className: 'marker-history' },
     { name: 'Genesis', value: '0', pos: 100, className: 'marker-genesis' }
   ].filter(function(marker) {
     return marker.name === 'Latest' || marker.name === 'Checkpoint' || marker.name === 'Genesis' || marker.value !== '--';
@@ -345,7 +335,7 @@ function renderMarkerRail(data, checkpointBlock, liveBlock, liveVerifiedBlock, h
     : 'Live-side verification will extend left once optimistic or finalized execution heads arrive from CL.';
   var historyHint = Number.isFinite(historyBlock)
     ? 'Genesis-side verification is plotted from the checkpoint toward block 0.'
-    : 'Genesis-side verification has not started yet on this branch, so the right side is intentionally left empty.';
+    : 'Genesis-side verification has not materialized any execution anchors yet, so the right side is intentionally left empty.';
   document.getElementById('stRailHint').textContent = liveHint + ' ' + historyHint;
 }
 
@@ -363,10 +353,12 @@ function updateStatus(data) {
     ? (canonicalTop > 0 ? canonicalTop : (targetKnown ? target : null))
     : (targetKnown ? target : (canonicalTop > 0 ? canonicalTop : null));
   var indexedExec = anchorBlock(data.indexed_execution_head);
+  var materializedFloor = anchorBlock(data.materialized_execution_floor);
+  var materializedCeiling = anchorBlock(data.materialized_execution_ceiling);
   var optimisticExec = anchorBlock(data.optimistic_execution_head);
   var finalizedExec = anchorBlock(data.finalized_execution_head);
-  var liveVerifiedBlock = optimisticExec != null ? optimisticExec : (finalizedExec != null ? finalizedExec : indexedExec);
-  var historyVerifiedBlock = null;
+  var liveVerifiedBlock = materializedCeiling != null ? materializedCeiling : indexedExec;
+  var historyVerifiedBlock = materializedFloor;
   var badge = document.getElementById('badge');
   var badgeText = document.getElementById('badgeText');
   var badgeData = stateToBadge(nodeState);
@@ -394,11 +386,11 @@ function updateStatus(data) {
     if (!Number.isFinite(checkpointBlock)) {
       liveCoverage = 'Waiting for bootstrap';
     } else if (!Number.isFinite(liveVerifiedBlock)) {
-      liveCoverage = 'Waiting for CL heads';
+      liveCoverage = 'Waiting for anchors';
     } else {
       var liveDistance = Math.max(0, liveVerifiedBlock - checkpointBlock);
       var liveLag = Number.isFinite(latestKnown) ? Math.max(0, latestKnown - liveVerifiedBlock) : null;
-      liveCoverage = fmt(liveDistance) + ' verified';
+      liveCoverage = fmt(liveDistance) + ' materialized';
       if (liveLag != null) {
         liveCoverage += ' / ' + fmt(liveLag) + ' behind';
       }
@@ -409,7 +401,7 @@ function updateStatus(data) {
 
   var historyCoverage = hasConsensus
     ? (Number.isFinite(historyVerifiedBlock)
-      ? fmt(Math.max(0, checkpointBlock - historyVerifiedBlock)) + ' verified'
+      ? fmt(Math.max(0, checkpointBlock - historyVerifiedBlock)) + ' materialized'
       : 'Not started yet')
     : '--';
 
@@ -437,6 +429,9 @@ function updateStatus(data) {
   document.getElementById('stOptimistic').textContent = fmt(optimisticExec);
   document.getElementById('stFinalized').textContent = fmt(finalizedExec);
   document.getElementById('stIndexedExec').textContent = fmt(indexedExec);
+  document.getElementById('stMaterializedTip').textContent = fmt(materializedCeiling);
+  document.getElementById('stHistoryFloor').textContent = fmt(materializedFloor);
+  document.getElementById('stAnchorCount').textContent = fmt(data.materialized_execution_anchor_count);
   document.getElementById('stIndexLag').textContent = fmt(data.index_lag_blocks);
   document.getElementById('stFinalityGap').textContent = fmt(data.finality_lag_blocks);
   document.getElementById('stExecutionHead').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : '--';
@@ -454,30 +449,18 @@ function updateStatus(data) {
   document.getElementById('stClFinalityPeers').textContent = fmt(clNetwork.finality_update_peers);
   document.getElementById('stClOptimisticPeers').textContent = fmt(clNetwork.optimistic_update_peers);
   document.getElementById('stClBootstrapPeers').textContent = fmt(clNetwork.bootstrap_peers);
-  document.getElementById('stClBootstrapPayload').textContent = lightClientPayloadLabel(
-    clLight.bootstrap && clLight.bootstrap.fork,
-    clLight.bootstrap && clLight.bootstrap.header
-  );
-  document.getElementById('stClFinalityPayload').textContent = lightClientPayloadLabel(
-    clLight.finality_update && clLight.finality_update.fork,
-    clLight.finality_update && clLight.finality_update.finalized_header
-  );
-  document.getElementById('stClOptimisticPayload').textContent = lightClientPayloadLabel(
-    clLight.optimistic_update && clLight.optimistic_update.fork,
-    clLight.optimistic_update && clLight.optimistic_update.attested_header
-  );
 
   if (hasConsensus) {
     document.getElementById('stConsensusHint').textContent =
-      'Checkpoint, optimistic, finalized, and indexed execution anchors show the CL-authenticated execution path that EL data must match before logs are accepted.';
+      'Checkpoint, materialized range, optimistic head, finalized head, and indexed head show the CL-authenticated execution path that EL data must match before logs are accepted.';
     document.getElementById('stDirectionHint').textContent =
       'This checkpoint-centered view tracks two jobs independently: staying near the live head and proving older history down toward genesis.';
     if (!Number.isFinite(checkpointBlock)) {
       document.getElementById('stProgressPct').textContent = 'Waiting for a decoded checkpoint bootstrap';
-    } else if (Number.isFinite(liveVerifiedBlock)) {
-      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% of full-chain span verified around the checkpoint';
+    } else if (Number.isFinite(liveVerifiedBlock) || Number.isFinite(historyVerifiedBlock)) {
+      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% of full-chain span materialized around the checkpoint';
     } else {
-      document.getElementById('stProgressPct').textContent = 'Checkpoint loaded, waiting for live CL execution heads';
+      document.getElementById('stProgressPct').textContent = 'Checkpoint loaded, waiting for materialized anchors';
     }
   } else if (nodeState === 'syncing' || nodeState === 'synced') {
     document.getElementById('stConsensusHint').textContent =

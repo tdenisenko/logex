@@ -14,8 +14,7 @@ const KZG_COMMITMENT_BYTES: usize = 48;
 const LOGS_BLOOM_BYTES: usize = 256;
 const MAX_COMMITTEES_PER_SLOT: usize = 64;
 const MAX_VALIDATORS_PER_COMMITTEE: usize = 2_048;
-const MAX_ATTESTATION_BITS_ELECTRA: usize =
-    MAX_COMMITTEES_PER_SLOT * MAX_VALIDATORS_PER_COMMITTEE;
+const MAX_ATTESTATION_BITS_ELECTRA: usize = MAX_COMMITTEES_PER_SLOT * MAX_VALIDATORS_PER_COMMITTEE;
 const MAX_PROPOSER_SLASHINGS: usize = 16;
 const MAX_ATTESTER_SLASHINGS_ELECTRA: usize = 1;
 const MAX_ATTESTATIONS_ELECTRA: usize = 8;
@@ -40,6 +39,7 @@ pub(crate) enum BeaconBlockError {
     UnsupportedForkContext(String),
     #[error("failed to decode electra/fulu beacon block payload: {0}")]
     DecodeElectra(String),
+    #[cfg(test)]
     #[error(
         "expected beacon block root {expected} at slot {expected_slot}, got {actual} at slot {actual_slot}"
     )]
@@ -622,6 +622,7 @@ pub(crate) fn decode_verified_beacon_block(
     Err(BeaconBlockError::MissingForkContext)
 }
 
+#[cfg(test)]
 pub(crate) fn verify_trusted_beacon_root(
     block: VerifiedBeaconBlock,
     expected_root: B256,
@@ -663,12 +664,16 @@ fn decode_verified_block_for_fork(
         ConsensusDataFork::Electra => decode_electra_block(response),
         ConsensusDataFork::Capella | ConsensusDataFork::Deneb => {
             let context = response.context_bytes.unwrap_or_default();
-            Err(BeaconBlockError::UnsupportedForkContext(hex_context(context)))
+            Err(BeaconBlockError::UnsupportedForkContext(hex_context(
+                context,
+            )))
         }
     }
 }
 
-fn decode_electra_block(response: &RawRpcResponse) -> Result<VerifiedBeaconBlock, BeaconBlockError> {
+fn decode_electra_block(
+    response: &RawRpcResponse,
+) -> Result<VerifiedBeaconBlock, BeaconBlockError> {
     let block = SignedBeaconBlockElectraSsz::from_ssz_bytes(&response.bytes)
         .map_err(|error| BeaconBlockError::DecodeElectra(format!("{error:?}")))?;
     let header = block.message.header();
@@ -827,8 +832,14 @@ mod tests {
         assert_eq!(verified.parent_root, B256::repeat_byte(0x55));
         assert_eq!(verified.slot, 14_132_160);
         assert_eq!(verified.execution_anchor.block_number, 12_345);
-        assert_eq!(verified.execution_anchor.block_hash, B256::repeat_byte(0x0f));
-        assert_eq!(verified.execution_anchor.receipts_root, B256::repeat_byte(0x0c));
+        assert_eq!(
+            verified.execution_anchor.block_hash,
+            B256::repeat_byte(0x0f)
+        );
+        assert_eq!(
+            verified.execution_anchor.receipts_root,
+            B256::repeat_byte(0x0c)
+        );
     }
 
     #[test]

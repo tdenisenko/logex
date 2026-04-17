@@ -338,6 +338,10 @@ LogEx should become a canonical Ethereum event-log node that:
      - the active checkpoint-history target is now pinned while the live optimistic head moves, reschedules immediately on reorg or same-slot replacement, and is refreshed whenever verified finality/optimistic updates arrive from req/resp or gossip
      - the post-bootstrap scheduler now selects the first buildable request kind instead of blindly stopping at the first supported one, so beacon-root work can give way to beacon-range work instead of stalling behind already-satisfied root fetches
      - `BeaconBlocksByRange` windows are now capped to the Deneb/Electra request limit of 128 slots instead of the earlier invalid 256-slot window
+     - `BeaconBlocksByRoot` responses are now matched against the exact roots LogEx requested instead of only the active checkpoint/optimistic endpoints, so backward parent-root fetches are no longer rejected just because they are older than the current trusted head markers
+     - native checkpoint-centered materialization now expands toward older history on live mainnet peers:
+       - repeated fixed-port smokes with checkpoint `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4` now grow `ordered_anchors` below the checkpoint
+       - `/status` and the dashboard now expose `materialized_execution_floor`, `materialized_execution_ceiling`, and `materialized_execution_anchor_count` so the checkpoint-centered range is visible directly instead of being inferred from raw CL payloads
      - short fixed-port mainnet smokes now advance the verified store beyond the checkpoint on native peers:
        - verified finalized / optimistic execution heads move forward on live mainnet data
        - `Status` failures can drop to zero once peers see the verified light-client head rather than a checkpoint-shaped placeholder
@@ -348,25 +352,26 @@ LogEx should become a canonical Ethereum event-log node that:
      - finish separating actual beacon peers from discovery noise earlier in the pipeline so the dial budget is spent on peers that can really speak the beacon req/resp surface, not just nodes that happen to share a compatible ENR fork digest
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
      - keep proving that `LightClientUpdatesByRange` lands on real mainnet peers often enough to rotate committees and drive the store forward in practice, not only in unit tests
-     - complete the contiguous checkpoint-to-head beacon-history backfill: root fetches and range fetches now run on native peers, but current smokes still do not accumulate enough verified block windows to expand `ordered_anchors` past the checkpoint
-     - expose native beacon-history backfill progress more directly in `/status` and the dashboard so it is obvious how many verified block windows and contiguous anchors have landed
+     - complete the forward checkpoint-to-head beacon-history backfill: current smokes now expand `ordered_anchors` below the checkpoint, but the materialized ceiling still remains pinned at the checkpoint even while verified optimistic/finalized heads move forward
+     - diagnose and fix the remaining `BeaconBlocksByRoot` / `BeaconBlocksByRange` interoperability on the live-head side so forward materialization no longer stalls after the checkpoint block
      - upgrade the current gossip path from parse-only observability to real light-client validation and head tracking after the verified req/resp bootstrap path exists
      - persist and serve correct checkpoint-related `LightClientUpdatesByRange` responses once the local cache/model can answer them honestly
    - Why this is still blocking:
      - the node can now discover and dial native CL peers over TCP and QUIC, maintain libp2p sessions, speak version-aware per-method req/resp for both single-response and multi-chunk methods, advertise a more standards-conformant ENR, subscribe to light-client gossip, and advance verified finalized / optimistic heads beyond the checkpoint on live mainnet peers
-     - the remaining native-CL blocker is no longer bootstrap or singleton light-client progression; it is contiguous beacon-history materialization. Root fetches and range fetches are live, but current fixed-port smokes still do not accumulate enough authenticated block windows to expand `ordered_anchors` beyond the checkpoint block
+     - the remaining native-CL blocker is no longer bootstrap or singleton light-client progression; it is forward checkpoint-to-head beacon-history materialization. Root fetches and range fetches are live, and current fixed-port smokes now expand `ordered_anchors` downward below the checkpoint, but the materialized ceiling still does not advance toward the live verified head
      - until checkpoint-to-head beacon history is materialized into ordered execution anchors, the EL side still cannot consume CL-proven per-block canonicality beyond the bootstrap checkpoint
    - Done when:
      - a fresh mainnet sync can start from a weak-subjectivity checkpoint, discover peers natively, and produce verified optimistic/finalized execution anchors without any external consensus RPC
 
 2. Beacon Block Segment Authentication
    - TODO:
+     - keep extending the backward parent-root walk from the weak-subjectivity checkpoint toward the Merge; live smokes now materialize dozens of authenticated anchors below the checkpoint, but not yet the full checkpoint-to-Merge ancestry
      - complete fetching full beacon blocks between trusted light-client headers until the entire checkpoint-to-finalized / checkpoint-to-optimistic ancestry is covered in practice, not just isolated roots and short range slices
      - verify each full block body against its signed beacon header by recomputing `body_root`
-     - walk parent roots backward from the weak-subjectivity checkpoint toward the Merge so every emitted execution anchor is authenticated, ordered, and contiguous
      - derive execution payload headers from the verified block bodies rather than trusting imported execution anchor files forever
    - Why this is still blocking:
-     - the current anchor store can hold per-block execution anchors, and LogEx now decodes/validates full beacon blocks from native root/range responses, but it still needs the segment walker to turn those validated blocks into a contiguous authenticated chain from the checkpoint toward the head and toward the Merge
+     - the current anchor store can hold per-block execution anchors, and LogEx now decodes/validates full beacon blocks from native root/range responses
+     - live mainnet smokes now prove that the checkpoint-to-older-history side can materialize authenticated anchors below the checkpoint, but the segment walker is still incomplete because the forward checkpoint-to-head side remains pinned at the checkpoint and the backward side still has to continue all the way to the Merge
    - Done when:
      - every execution anchor used by EL ingestion can be traced back to verified beacon blocks bounded by verified light-client headers
 

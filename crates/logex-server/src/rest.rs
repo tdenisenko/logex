@@ -111,16 +111,6 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     } else {
         None
     };
-    let sync_model = if sync.checkpoint.is_some() {
-        "cl_anchored"
-    } else {
-        "el_legacy"
-    };
-    let sync_direction = if sync.checkpoint.is_some() {
-        "checkpoint_outward"
-    } else {
-        "peer_tip_upward"
-    };
     let canonical_top_block = sync
         .optimistic_execution_head
         .map(|anchor| anchor.block_number)
@@ -143,8 +133,6 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "syncing": sync.syncing,
         "node_state": sync.node_state,
         "node_state_label": sync.node_state.as_label(),
-        "sync_model": sync_model,
-        "sync_direction": sync_direction,
         "connected_peers": sync.connected_peers,
         "serving_peers": sync.serving_peers,
         "pending_peers": sync.pending_peers,
@@ -165,6 +153,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
         "checkpoint_slot": sync.checkpoint.and_then(|checkpoint| checkpoint.beacon_slot),
         "indexed_execution_head": sync.indexed_execution_head,
+        "materialized_execution_floor": sync.materialized_execution_floor,
+        "materialized_execution_ceiling": sync.materialized_execution_ceiling,
+        "materialized_execution_anchor_count": sync.materialized_execution_anchor_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
         "consensus_network": sync.consensus_network,
@@ -510,6 +501,21 @@ mod tests {
                     block_hash: B256::repeat_byte(0x02),
                     receipts_root: B256::repeat_byte(0x03),
                 }),
+                materialized_execution_floor: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x0A),
+                    beacon_slot: 1,
+                    block_number: 150,
+                    block_hash: B256::repeat_byte(0x0B),
+                    receipts_root: B256::repeat_byte(0x0C),
+                }),
+                materialized_execution_ceiling: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x0D),
+                    beacon_slot: 2,
+                    block_number: 460,
+                    block_hash: B256::repeat_byte(0x0E),
+                    receipts_root: B256::repeat_byte(0x0F),
+                }),
+                materialized_execution_anchor_count: 311,
                 optimistic_execution_head: Some(ExecutionAnchor {
                     beacon_root: B256::repeat_byte(0x04),
                     beacon_slot: 2,
@@ -634,11 +640,15 @@ mod tests {
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");
-        assert_eq!(status["sync_model"], "cl_anchored");
-        assert_eq!(status["sync_direction"], "checkpoint_outward");
         assert_eq!(status["canonical_top_block"], 500);
         assert_eq!(status["index_lag_blocks"], 300);
         assert_eq!(status["finality_lag_blocks"], 20);
+        assert_eq!(status["materialized_execution_floor"]["block_number"], 150);
+        assert_eq!(
+            status["materialized_execution_ceiling"]["block_number"],
+            460
+        );
+        assert_eq!(status["materialized_execution_anchor_count"], 311);
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);

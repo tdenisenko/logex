@@ -195,6 +195,14 @@ pub struct SyncStatus {
     /// Highest indexed execution anchor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_execution_head: Option<ExecutionAnchor>,
+    /// Lowest CL-authenticated execution anchor currently materialized from verified beacon blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_execution_floor: Option<ExecutionAnchor>,
+    /// Highest CL-authenticated execution anchor currently materialized from verified beacon blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_execution_ceiling: Option<ExecutionAnchor>,
+    /// Number of CL-authenticated execution anchors currently materialized in the checkpoint-centered range.
+    pub materialized_execution_anchor_count: usize,
     /// Highest optimistic execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optimistic_execution_head: Option<ExecutionAnchor>,
