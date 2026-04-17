@@ -27,6 +27,8 @@ tree_hash = "0.10"
 tree_hash_derive = "0.10"
 unsigned-varint = "0.8"
 blst = "0.3"
+ssz_types = "0.11"
+typenum = "1"
 
 [dev-dependencies]
 tempfile = "3"

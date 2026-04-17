@@ -1,10 +1,12 @@
 use alloy_primitives::{Address, B256, FixedBytes, U256};
 use logex_types::{ConsensusDataFork, ExecutionAnchor};
-use ssz::{Decode, DecodeError, Encode};
+use ssz::Decode;
 use ssz_derive::{Decode, Encode};
+use ssz_types::{BitList, BitVector};
 use thiserror::Error;
 use tree_hash::{TreeHash as _, merkle_root, mix_in_length};
 use tree_hash_derive::TreeHash;
+use typenum::{U64, U131072};
 
 use crate::{MAINNET_CONSENSUS_CHAIN_SPEC, rpc::RawRpcResponse};
 
@@ -60,179 +62,8 @@ pub(crate) struct VerifiedBeaconBlock {
     pub execution_anchor: ExecutionAnchor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SszBitlist<const MAX_BITS: usize> {
-    bytes: Vec<u8>,
-    len_bits: usize,
-}
-
-impl<const MAX_BITS: usize> SszBitlist<MAX_BITS> {
-    fn as_slice(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    const fn len_bits(&self) -> usize {
-        self.len_bits
-    }
-}
-
-impl<const MAX_BITS: usize> Encode for SszBitlist<MAX_BITS> {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-
-    fn ssz_append(&self, buf: &mut Vec<u8>) {
-        let byte_len = bytes_for_bits(self.len_bits.saturating_add(1));
-        let mut encoded = self.bytes.clone();
-        encoded.resize(byte_len, 0);
-        let byte_index = self.len_bits / 8;
-        let bit_index = self.len_bits % 8;
-        encoded[byte_index] |= 1 << bit_index;
-        buf.extend_from_slice(&encoded);
-    }
-
-    fn ssz_bytes_len(&self) -> usize {
-        bytes_for_bits(self.len_bits.saturating_add(1))
-    }
-}
-
-impl<const MAX_BITS: usize> Decode for SszBitlist<MAX_BITS> {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-
-    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        if bytes.is_empty() {
-            return Err(DecodeError::BytesInvalid(
-                "bitlist encoding must contain a length marker".to_owned(),
-            ));
-        }
-
-        let last = *bytes.last().expect("checked empty above");
-        let Some(msb_index) = highest_set_bit(last) else {
-            return Err(DecodeError::BytesInvalid(
-                "bitlist encoding must contain a length marker".to_owned(),
-            ));
-        };
-
-        let len_bits = (bytes.len() - 1) * 8 + msb_index;
-        if len_bits > MAX_BITS {
-            return Err(DecodeError::BytesInvalid(format!(
-                "bitlist length {len_bits} exceeded max {MAX_BITS}"
-            )));
-        }
-
-        let logical_len = bytes_for_bits(len_bits);
-        let mut logical_bytes = bytes[..logical_len].to_vec();
-        if let Some(last_byte) = logical_bytes.last_mut() {
-            *last_byte &= !(1 << msb_index);
-        }
-
-        Ok(Self {
-            bytes: logical_bytes,
-            len_bits,
-        })
-    }
-}
-
-impl<const MAX_BITS: usize> tree_hash::TreeHash for SszBitlist<MAX_BITS> {
-    fn tree_hash_type() -> tree_hash::TreeHashType {
-        tree_hash::TreeHashType::List
-    }
-
-    fn tree_hash_packed_encoding(&self) -> tree_hash::PackedEncoding {
-        unreachable!("bitlists are never packed directly")
-    }
-
-    fn tree_hash_packing_factor() -> usize {
-        unreachable!("bitlists are never packed directly")
-    }
-
-    fn tree_hash_root(&self) -> B256 {
-        let root = bitfield_root(self.as_slice(), MAX_BITS);
-        mix_in_length(&root, self.len_bits())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SszBitvector<const BITS: usize> {
-    bytes: Vec<u8>,
-}
-
-impl<const BITS: usize> SszBitvector<BITS> {
-    fn as_slice(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl<const BITS: usize> Encode for SszBitvector<BITS> {
-    fn is_ssz_fixed_len() -> bool {
-        true
-    }
-
-    fn ssz_fixed_len() -> usize {
-        bytes_for_bits(BITS)
-    }
-
-    fn ssz_append(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.bytes);
-    }
-
-    fn ssz_bytes_len(&self) -> usize {
-        bytes_for_bits(BITS)
-    }
-}
-
-impl<const BITS: usize> Decode for SszBitvector<BITS> {
-    fn is_ssz_fixed_len() -> bool {
-        true
-    }
-
-    fn ssz_fixed_len() -> usize {
-        bytes_for_bits(BITS)
-    }
-
-    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let expected = bytes_for_bits(BITS);
-        if bytes.len() != expected {
-            return Err(DecodeError::InvalidByteLength {
-                len: bytes.len(),
-                expected,
-            });
-        }
-
-        if BITS % 8 != 0 {
-            let unused_mask = !((1u8 << (BITS % 8)) - 1);
-            if bytes.last().is_some_and(|last| last & unused_mask != 0) {
-                return Err(DecodeError::BytesInvalid(
-                    "bitvector had non-zero unused bits".to_owned(),
-                ));
-            }
-        }
-
-        Ok(Self {
-            bytes: bytes.to_vec(),
-        })
-    }
-}
-
-impl<const BITS: usize> tree_hash::TreeHash for SszBitvector<BITS> {
-    fn tree_hash_type() -> tree_hash::TreeHashType {
-        tree_hash::TreeHashType::Vector
-    }
-
-    fn tree_hash_packed_encoding(&self) -> tree_hash::PackedEncoding {
-        unreachable!("bitvectors are never packed directly")
-    }
-
-    fn tree_hash_packing_factor() -> usize {
-        unreachable!("bitvectors are never packed directly")
-    }
-
-    fn tree_hash_root(&self) -> B256 {
-        bitfield_root(self.as_slice(), BITS)
-    }
-}
+type SszAggregationBits = BitList<U131072>;
+type SszCommitteeBits = BitVector<U64>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode, TreeHash)]
 struct Eth1DataSsz {
@@ -435,12 +266,12 @@ struct AttesterSlashingElectraSsz {
     attestation_2: IndexedAttestationElectraSsz,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode, TreeHash)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TreeHash)]
 struct AttestationElectraSsz {
-    aggregation_bits: SszBitlist<MAX_ATTESTATION_BITS_ELECTRA>,
+    aggregation_bits: SszAggregationBits,
     data: AttestationDataSsz,
     signature: FixedBytes<BLS_SIGNATURE_BYTES>,
-    committee_bits: SszBitvector<MAX_COMMITTEES_PER_SLOT>,
+    committee_bits: SszCommitteeBits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode, TreeHash)]
@@ -695,20 +526,6 @@ fn hex_context(context_bytes: [u8; 4]) -> String {
     )
 }
 
-fn highest_set_bit(byte: u8) -> Option<usize> {
-    (0..8).rev().find(|bit_index| byte & (1 << bit_index) != 0)
-}
-
-const fn bytes_for_bits(bits: usize) -> usize {
-    bits.div_ceil(8)
-}
-
-fn bitfield_root(bytes: &[u8], max_bits: usize) -> B256 {
-    let byte_size = bytes_for_bits(max_bits);
-    let minimum_leaves = byte_size.div_ceil(32);
-    merkle_root(bytes, minimum_leaves)
-}
-
 fn container_root_from_roots(field_roots: &[B256]) -> B256 {
     let mut bytes = Vec::with_capacity(field_roots.len() * 32);
     for root in field_roots {
@@ -754,6 +571,9 @@ fn packed_u64_list_root(values: &[u64], max_len: usize) -> B256 {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::b256;
+    use ssz::Encode as _;
+
     use super::*;
 
     fn fixed<const N: usize>(byte: u8) -> FixedBytes<N> {
@@ -866,6 +686,34 @@ mod tests {
         let verified = decode_verified_beacon_block(&response).expect("expected verified block");
         assert_eq!(verified.fork, ConsensusDataFork::Electra);
         assert_eq!(verified.slot, 14_132_160);
+    }
+
+    #[test]
+    fn real_fulu_beacon_block_fixture_matches_canonical_root() {
+        let response = RawRpcResponse {
+            context_bytes: Some(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(441_630)),
+            bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+        };
+
+        let signed = SignedBeaconBlockElectraSsz::from_ssz_bytes(&response.bytes)
+            .expect("fixture should decode as electra/fulu block");
+        assert_eq!(signed.as_ssz_bytes(), response.bytes);
+        let header = signed.message.header();
+
+        let verified = decode_verified_beacon_block(&response).expect("expected verified block");
+
+        assert_eq!(verified.slot, 14_132_042);
+        assert_eq!(header.state_root, b256!("0x3e56421c4e4ca7be9701511ed4a5ffe183f42c1f622300e80cece1ea0b205f1b"));
+        assert_eq!(header.body_root, b256!("0xda485436980d8bb8136a1cdc93478a9d3744ac1ae70ad7f9d8997efbb924b3d6"));
+        assert_eq!(
+            verified.parent_root,
+            b256!("0x19e0f7fcc6cbb74021d1914fdd743c4fa8aa8ec819a9628e0131ace607d29e99")
+        );
+        assert_eq!(
+            verified.beacon_root,
+            b256!("0xbb1015ebd50a5861139aaf7761ab2346a822205bdb2d71c66120bdf7378a535d")
+        );
+        assert_eq!(verified.execution_anchor.beacon_slot, 14_132_042);
     }
 
     #[test]

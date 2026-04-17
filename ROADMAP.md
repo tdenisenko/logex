@@ -239,6 +239,10 @@ LogEx should become a canonical Ethereum event-log node that:
   - multi-chunk CL req/resp now splits into two states:
     - `LightClientUpdatesByRange` is upgraded into verified light-client store updates
     - beacon-block fetches still need the authenticated beacon-history segment walker before they can produce contiguous execution anchors
+  - Electra/Fulu full beacon-block SSZ decoding now uses standard `ssz_types` bitfields instead of custom local bitlist/bitvector code, and the recorded mainnet fixture for slot `14132042` now round-trips and reproduces the canonical beacon root exactly
+  - forward history recovery is no longer range-only:
+    - LogEx now chases missing beacon block roots downward from the verified optimistic head back toward the checkpoint, in parallel with `BeaconBlocksByRange`
+    - peers that answer `BeaconBlocksByRoot` with blocks whose roots do not match the requested trusted roots are now treated as faulty and disconnected instead of being retried indefinitely
   - current gossip subscriptions decode payloads for observability, but they still do not perform sync-committee validation or feed canonical anchor production yet
   - recent mainnet smokes are healthier than before the latest interop fixes:
     - pre-bootstrap `Status` now uses the genesis head / zero finalized-checkpoint form expected by the spec
@@ -290,13 +294,13 @@ LogEx should become a canonical Ethereum event-log node that:
      - finish separating actual beacon peers from discovery noise earlier in the pipeline so the dial budget is spent on peers that can really speak the beacon req/resp surface, not just nodes that happen to share a compatible ENR fork digest
      - keep the root-only checkpoint path honest: recover the slot from native bootstrap once bootstrap lands, and require `slot@root` only if live root-only bootstrapping remains provably unreliable
      - keep proving that `LightClientUpdatesByRange` lands on real mainnet peers often enough to rotate committees and drive the store forward in practice, not only in unit tests
-     - complete the forward checkpoint-to-head beacon-history backfill: the planner is now checkpoint-centered and forward-first, but short mainnet smokes still need forward `BeaconBlocksByRange` responses to land reliably enough for `materialized_execution_ceiling` to move above the checkpoint
-     - diagnose and fix the remaining live-head `BeaconBlocksByRoot` / `BeaconBlocksByRange` interoperability bugs, including the observed root-response mismatch where native peers sometimes return the expected slot but LogEx still computes a different block root than the requested one
+     - complete the forward checkpoint-to-head beacon-history backfill: the planner is now checkpoint-centered and forward-first, and LogEx now also root-chases from the optimistic head back toward the checkpoint, but short mainnet smokes still need those forward root/range fetches to stay alive long enough for `materialized_execution_ceiling` to move above the checkpoint in practice
+     - keep rotating out peers that close mid-history response or answer `BeaconBlocksByRoot` with unrelated blocks, so forward sync spends its budget on honest beacon peers instead of retrying faulty ones
      - upgrade the current gossip path from parse-only observability to real light-client validation and head tracking after the verified req/resp bootstrap path exists
      - persist and serve correct checkpoint-related `LightClientUpdatesByRange` responses once the local cache/model can answer them honestly
    - Why this is still blocking:
      - the node can now discover and dial native CL peers over TCP and QUIC, maintain libp2p sessions, speak version-aware per-method req/resp for both single-response and multi-chunk methods, advertise a more standards-conformant ENR, subscribe to light-client gossip, and advance verified finalized / optimistic heads beyond the checkpoint on live mainnet peers
-     - the remaining native-CL blocker is no longer bootstrap or singleton light-client progression; it is forward checkpoint-to-head beacon-history materialization. Root fetches and range fetches are live, and current fixed-port smokes now expand `ordered_anchors` downward below the checkpoint, but the materialized ceiling still does not advance toward the live verified head
+     - the remaining native-CL blocker is no longer bootstrap, singleton light-client progression, or local beacon-block root computation; it is forward checkpoint-to-head beacon-history materialization under real-peer churn. Root fetches and range fetches are live, fixed-port smokes now expand `ordered_anchors` downward below the checkpoint, and wrong-root responses are now rejected as peer faults, but the materialized ceiling still does not advance toward the live verified head often enough yet
      - until checkpoint-to-head beacon history is materialized into ordered execution anchors, the EL side still cannot consume CL-proven per-block canonicality beyond the bootstrap checkpoint
    - Done when:
      - a fresh mainnet sync can start from a weak-subjectivity checkpoint, discover peers natively, and produce verified optimistic/finalized execution anchors without any external consensus RPC

@@ -5062,6 +5062,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snap",
+ "ssz_types",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5069,6 +5070,7 @@ dependencies = [
  "tracing",
  "tree_hash",
  "tree_hash_derive",
+ "typenum",
  "unsigned-varint 0.8.0",
 ]
 
@@ -8481,6 +8483,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "ssz_types"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b55bedc9a18ed2860a46d6beb4f4082416ee1d60be0cc364cebdcdddc7afd4"
+dependencies = [
+ "ethereum_serde_utils",
+ "ethereum_ssz",
+ "itertools 0.13.0",
+ "serde",
+ "serde_derive",
+ "smallvec",
+ "tree_hash",
+ "typenum",
 ]
 
 [[package]]
