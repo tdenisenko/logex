@@ -60,7 +60,8 @@ const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
 // Deneb+ `beacon_blocks_by_range/2` inherits `MAX_REQUEST_BLOCKS_DENEB = 128`.
-const BEACON_BLOCK_RANGE_WINDOW: u64 = 128;
+const MAX_BEACON_BLOCK_RANGE_WINDOW: u64 = 128;
+const FORWARD_BEACON_BLOCK_RANGE_WINDOW: u64 = 16;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
@@ -457,6 +458,7 @@ struct ConsensusNetwork {
     last_response_send_failure: Option<String>,
     verified_beacon_blocks: HashMap<B256, VerifiedBeaconBlock>,
     active_history_target: Option<HistorySyncTarget>,
+    prefer_forward_range_when_both_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,8 +511,21 @@ fn select_post_bootstrap_request_kind(
     updates_ready: bool,
     finality_ready: bool,
     optimistic_ready: bool,
+    pending_priority_root: bool,
+    pending_range: bool,
+    prefer_range_when_both_ready: bool,
 ) -> Option<RpcRequestKind> {
-    if priority_root_ready {
+    if priority_root_ready && range_ready {
+        if !pending_range && pending_priority_root {
+            Some(RpcRequestKind::BeaconBlocksByRange)
+        } else if pending_range && !pending_priority_root {
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        } else if prefer_range_when_both_ready {
+            Some(RpcRequestKind::BeaconBlocksByRange)
+        } else {
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        }
+    } else if priority_root_ready {
         Some(RpcRequestKind::BeaconBlocksByRoot)
     } else if range_ready {
         Some(RpcRequestKind::BeaconBlocksByRange)
@@ -543,7 +558,7 @@ fn next_forward_history_range_request_for_progress(
     }
     let end_slot = progress
         .target_slot
-        .min(start_slot.saturating_add(BEACON_BLOCK_RANGE_WINDOW - 1));
+        .min(start_slot.saturating_add(FORWARD_BEACON_BLOCK_RANGE_WINDOW - 1));
     let count = end_slot.saturating_sub(start_slot).saturating_add(1);
     (count > 0).then_some(BeaconBlocksByRangeRequest {
         start_slot,
@@ -559,7 +574,7 @@ fn backward_history_range_request_for_progress(
         return None;
     }
     let end_slot = progress.oldest_slot.saturating_sub(1);
-    let start_slot = end_slot.saturating_sub(BEACON_BLOCK_RANGE_WINDOW - 1);
+    let start_slot = end_slot.saturating_sub(MAX_BEACON_BLOCK_RANGE_WINDOW - 1);
     let count = end_slot.saturating_sub(start_slot).saturating_add(1);
     (count > 0).then_some(BeaconBlocksByRangeRequest {
         start_slot,
@@ -1233,6 +1248,7 @@ impl ConsensusNetwork {
             last_response_send_failure: None,
             verified_beacon_blocks: HashMap::new(),
             active_history_target: None,
+            prefer_forward_range_when_both_ready: true,
         })
     }
 
@@ -2450,6 +2466,10 @@ impl ConsensusNetwork {
                     self.request_failures.increment(RpcRequestKind::BeaconBlocksByRoot);
                     let peer_failures =
                         self.record_peer_failure(peer, RpcRequestKind::BeaconBlocksByRoot);
+                    self.peer_lifecycle
+                        .entry(peer)
+                        .or_default()
+                        .mark_ignored_for_run();
                     let requested_roots = requested_history_roots
                         .iter()
                         .map(ToString::to_string)
@@ -2465,7 +2485,7 @@ impl ConsensusNetwork {
                         %peer,
                         failures = peer_failures,
                         requested_roots = ?requested_history_roots,
-                        "disconnecting consensus peer after invalid beacon-block-by-root response"
+                        "disconnecting and ignoring consensus peer after invalid beacon-block-by-root response"
                     );
                     self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
                     return;
@@ -2890,6 +2910,13 @@ impl ConsensusNetwork {
             self.pending_history_root_requests.insert(key, roots);
         }
         self.pending_peer_kinds.insert((peer, kind));
+        if matches!(
+            kind,
+            RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot
+        ) {
+            self.prefer_forward_range_when_both_ready =
+                kind != RpcRequestKind::BeaconBlocksByRange;
+        }
     }
 
     fn build_request(&self, kind: RpcRequestKind) -> Option<Eth2RpcRequest> {
@@ -2926,6 +2953,9 @@ impl ConsensusNetwork {
         let range_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRange)
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
             && self.next_history_range_request().is_some();
+        let pending_priority_root =
+            self.pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRoot) > 0;
+        let pending_range = self.pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRange) > 0;
         let deferred_root_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
             && !priority_root_ready
@@ -2941,6 +2971,9 @@ impl ConsensusNetwork {
                 && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
             support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
+            pending_priority_root,
+            pending_range,
+            self.prefer_forward_range_when_both_ready,
         )
     }
 
@@ -4725,15 +4758,21 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_skips_unbuildable_higher_priority_work() {
         assert_eq!(
-            select_post_bootstrap_request_kind(false, true, false, false, true, true),
+            select_post_bootstrap_request_kind(
+                false, true, false, false, true, true, false, false, true,
+            ),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(false, false, false, false, true, true),
+            select_post_bootstrap_request_kind(
+                false, false, false, false, true, true, false, false, true,
+            ),
             Some(RpcRequestKind::LightClientFinalityUpdate)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(false, false, false, false, false, true),
+            select_post_bootstrap_request_kind(
+                false, false, false, false, false, true, false, false, true,
+            ),
             Some(RpcRequestKind::LightClientOptimisticUpdate)
         );
     }
@@ -4741,15 +4780,47 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_prefers_ranges_before_deferred_root_chasing() {
         assert_eq!(
-            select_post_bootstrap_request_kind(false, true, true, false, false, false),
+            select_post_bootstrap_request_kind(
+                false, true, true, false, false, false, false, false, true,
+            ),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(true, true, true, false, false, false),
-            Some(RpcRequestKind::BeaconBlocksByRoot)
+            select_post_bootstrap_request_kind(
+                true, true, true, false, false, false, false, false, true,
+            ),
+            Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(false, false, true, false, false, false),
+            select_post_bootstrap_request_kind(
+                false, false, true, false, false, false, false, false, true,
+            ),
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        );
+    }
+
+    #[test]
+    fn post_bootstrap_request_selection_can_prefer_priority_root_when_range_was_just_sent() {
+        assert_eq!(
+            select_post_bootstrap_request_kind(
+                true, true, true, false, false, false, false, false, false,
+            ),
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        );
+    }
+
+    #[test]
+    fn post_bootstrap_request_selection_keeps_root_and_range_flows_alive_together() {
+        assert_eq!(
+            select_post_bootstrap_request_kind(
+                true, true, true, false, false, false, true, false, false,
+            ),
+            Some(RpcRequestKind::BeaconBlocksByRange)
+        );
+        assert_eq!(
+            select_post_bootstrap_request_kind(
+                true, true, true, false, false, false, false, true, true,
+            ),
             Some(RpcRequestKind::BeaconBlocksByRoot)
         );
     }
@@ -4797,7 +4868,7 @@ mod tests {
         .expect("range request should be available");
 
         assert_eq!(request.start_slot, 101);
-        assert_eq!(request.count, 128);
+        assert_eq!(request.count, FORWARD_BEACON_BLOCK_RANGE_WINDOW);
         assert_eq!(request.step, 1);
     }
 
@@ -4811,7 +4882,7 @@ mod tests {
         .expect("range request should be available");
 
         assert_eq!(request.start_slot, 141);
-        assert_eq!(request.count, 128);
+        assert_eq!(request.count, FORWARD_BEACON_BLOCK_RANGE_WINDOW);
         assert_eq!(request.step, 1);
     }
 

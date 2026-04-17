@@ -7,6 +7,7 @@ use libp2p::request_response::{self, Codec, ProtocolSupport};
 use serde::{Deserialize, Serialize};
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
+use std::time::Duration;
 
 pub(crate) const STATUS_V1_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/1/ssz_snappy";
 pub(crate) const STATUS_V2_PROTOCOL_ID: &str = "/eth2/beacon_chain/req/status/2/ssz_snappy";
@@ -35,6 +36,8 @@ pub(crate) const BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID: &str =
 const SUCCESS_CODE: u8 = 0;
 const RESOURCE_UNAVAILABLE_CODE: u8 = 3;
 const ERROR_MESSAGE_LIMIT: usize = 256;
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub type Eth2RpcBehaviour = request_response::Behaviour<Eth2RpcCodec>;
 pub type Eth2RpcEvent = request_response::Event<Eth2RpcRequest, Eth2RpcResponse>;
@@ -197,9 +200,10 @@ pub struct Eth2RpcCodec;
 
 fn build_rpc_behaviour(
     protocols: impl IntoIterator<Item = (Eth2RpcProtocol, ProtocolSupport)>,
+    request_timeout: Duration,
 ) -> Eth2RpcBehaviour {
     let config = request_response::Config::default()
-        .with_request_timeout(std::time::Duration::from_secs(15))
+        .with_request_timeout(request_timeout)
         .with_max_concurrent_streams(64);
 
     Eth2RpcBehaviour::with_codec(Eth2RpcCodec, protocols, config)
@@ -209,11 +213,11 @@ pub fn build_status_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([
         (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
         (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
-    ])
+    ], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_goodbye_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)])
+    build_rpc_behaviour([(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
@@ -221,39 +225,39 @@ pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
         (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
         (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
         (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
-    ])
+    ], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_ping_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(Eth2RpcProtocol::PingV1, ProtocolSupport::Full)])
+    build_rpc_behaviour([(Eth2RpcProtocol::PingV1, ProtocolSupport::Full)], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_light_client_bootstrap_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientBootstrapV1,
         ProtocolSupport::Full,
-    )])
+    )], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientUpdatesByRangeV1,
         ProtocolSupport::Outbound,
-    )])
+    )], HISTORY_RPC_TIMEOUT)
 }
 
 pub fn build_light_client_finality_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientFinalityUpdateV1,
         ProtocolSupport::Full,
-    )])
+    )], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_light_client_optimistic_update_behaviour() -> Eth2RpcBehaviour {
     build_rpc_behaviour([(
         Eth2RpcProtocol::LightClientOptimisticUpdateV1,
         ProtocolSupport::Full,
-    )])
+    )], DEFAULT_RPC_TIMEOUT)
 }
 
 pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
@@ -266,7 +270,7 @@ pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
             Eth2RpcProtocol::BeaconBlocksByRangeV1,
             ProtocolSupport::Outbound,
         ),
-    ])
+    ], HISTORY_RPC_TIMEOUT)
 }
 
 pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
@@ -279,7 +283,7 @@ pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
             Eth2RpcProtocol::BeaconBlocksByRootV1,
             ProtocolSupport::Outbound,
         ),
-    ])
+    ], HISTORY_RPC_TIMEOUT)
 }
 
 #[async_trait]
