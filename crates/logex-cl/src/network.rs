@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 use alloy_primitives::hex;
 use discv5::enr::{CombinedKey, CombinedPublicKey, NodeId};
 use discv5::{ConfigBuilder, Discv5, Enr, Event, ListenConfig};
-use futures::StreamExt;
-use libp2p::core::ConnectedPoint;
+use futures::{StreamExt, future::Either};
+use libp2p::core::{ConnectedPoint, muxing::StreamMuxerBox, transport::Boxed};
 use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::identity;
@@ -18,7 +19,7 @@ use libp2p::multiaddr::Protocol;
 use libp2p::request_response;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, tcp, yamux};
 use libp2p_mplex as mplex;
 use logex_types::{ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint};
 use serde::{Deserialize, Serialize};
@@ -412,6 +413,7 @@ struct ConsensusNetwork {
     discv5: Discv5,
     swarm: Swarm<ConsensusBehaviour>,
     bootnode_count: usize,
+    bootnode_peers: HashSet<PeerId>,
     fork_digest: [u8; 4],
     known_peers_path: PathBuf,
     last_persisted: Vec<PersistedPeer>,
@@ -959,18 +961,37 @@ impl ConsensusNetwork {
             .map_err(|error| ConsensusNetworkError::ConstructDiscovery(error.to_string()))?;
 
         let known_peers = load_known_peers(&known_peers_path)?;
+        let mut retained_known_peers = Vec::new();
         let mut dialable_peers = HashMap::new();
         let mut peer_lifecycle = HashMap::new();
+        let mut bootnode_peers = HashSet::new();
 
         for enr in &bootnodes {
             if let Err(error) = discv5.add_enr(enr.clone()) {
                 tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
             }
+            if let Some(peer_id) = observe_dialable_peer(&mut dialable_peers, enr) {
+                bootnode_peers.insert(peer_id);
+            }
         }
 
         for peer in &known_peers {
+            if peer.support.is_some_and(|support| !support.status) {
+                tracing::debug!(
+                    enr = %peer.enr,
+                    "ignoring cached consensus peer that previously identified without beacon status support"
+                );
+                continue;
+            }
             match peer.enr.parse::<Enr>() {
                 Ok(enr) => {
+                    if !enr_is_relevant_consensus_peer(&enr, &fork_digest) {
+                        tracing::debug!(
+                            enr = %peer.enr,
+                            "ignoring cached consensus peer ENR that is not relevant to the expected beacon network"
+                        );
+                        continue;
+                    }
                     if let Err(error) = discv5.add_enr(enr.clone()) {
                         tracing::debug!(
                             %error,
@@ -982,6 +1003,7 @@ impl ConsensusNetwork {
                         peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
                     }
                     observe_dialable_peer(&mut dialable_peers, &enr);
+                    retained_known_peers.push(peer.clone());
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -1002,9 +1024,10 @@ impl ConsensusNetwork {
             discv5,
             swarm,
             bootnode_count: bootnodes.len(),
+            bootnode_peers,
             fork_digest,
             known_peers_path,
-            last_persisted: known_peers,
+            last_persisted: retained_known_peers,
             observed: BTreeSet::new(),
             dialable_peers,
             dialing_peers: HashSet::new(),
@@ -1199,10 +1222,10 @@ impl ConsensusNetwork {
     }
 
     fn observe_enr(&mut self, enr: &Enr) {
-        if !enr_matches_fork_digest(enr, &self.fork_digest) {
+        if !enr_is_relevant_consensus_peer(enr, &self.fork_digest) {
             tracing::debug!(
                 node_id = %enr.node_id(),
-                "ignoring discovered consensus ENR that does not match the expected eth2 fork id"
+                "ignoring discovered ENR that is not relevant to the expected beacon network"
             );
             return;
         }
@@ -2548,9 +2571,11 @@ impl ConsensusNetwork {
         let penalties = lifecycle.transport_failures.saturating_mul(3)
             + lifecycle.rpc_failures
             + lifecycle.disconnects;
+        let bootnode_penalty = self.bootnode_peers.contains(&peer) as i32 * 250;
         let preferred = lifecycle.preferred() as i32;
         preferred * 10_000 + i32::from(support_score) * 1_000 + usefulness as i32 * 10
             - penalties as i32
+            - bootnode_penalty
     }
 
     fn select_dial_addresses(
@@ -2950,6 +2975,7 @@ impl ConsensusNetwork {
             .discv5
             .table_entries_enr()
             .into_iter()
+            .filter(|enr| enr_is_relevant_consensus_peer(enr, &self.fork_digest))
             .filter(|enr| {
                 enr.tcp4().is_some()
                     || enr.tcp6().is_some()
@@ -2983,6 +3009,7 @@ impl ConsensusNetwork {
                         .unwrap_or_default(),
                 }
             })
+            .filter(|peer| peer.support.is_none_or(|support| support.status))
             .collect::<Vec<_>>();
 
         peers.sort_by(|left, right| {
@@ -3050,15 +3077,11 @@ fn build_rpc_swarm(
     keypair: identity::Keypair,
 ) -> Result<Swarm<ConsensusBehaviour>, ConsensusNetworkError> {
     let public_key = keypair.public();
+    let transport = build_rpc_transport(&keypair)?;
     SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_tcp(
-            tcp::Config::default().nodelay(true),
-            noise::Config::new,
-            (yamux::Config::default, mplex::Config::default),
-        )
+        .with_other_transport(|_| transport)
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
-        .with_quic()
         .with_behaviour(move |_| {
             let gossip = build_gossip_behaviour()?;
             let identify = identify::Behaviour::new(
@@ -3102,7 +3125,49 @@ fn build_rpc_swarm(
             })
         })
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
-        .map(|builder| builder.build())
+        .map(|builder| {
+            builder
+                .with_swarm_config(|config| {
+                    config
+                        .with_idle_connection_timeout(Duration::from_secs(10))
+                        .with_dial_concurrency_factor(
+                            NonZeroU8::new(1).expect("dial concurrency factor is non-zero"),
+                        )
+                })
+                .build()
+        })
+}
+
+fn build_rpc_transport(
+    keypair: &identity::Keypair,
+) -> Result<Boxed<(PeerId, StreamMuxerBox)>, ConsensusNetworkError> {
+    let mut mplex_config = mplex::Config::new();
+    mplex_config.set_max_buffer_size(256);
+    mplex_config.set_max_buffer_behaviour(mplex::MaxBufferBehaviour::Block);
+
+    let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
+        .upgrade(libp2p::core::upgrade::Version::V1)
+        .authenticate(
+            noise::Config::new(keypair)
+                .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?,
+        )
+        .multiplex(libp2p::core::upgrade::SelectUpgrade::new(
+            yamux::Config::default(),
+            mplex_config,
+        ))
+        .timeout(Duration::from_secs(10));
+
+    let quic_transport = libp2p::quic::tokio::Transport::new(libp2p::quic::Config::new(keypair));
+    let transport = tcp_transport
+        .or_transport(quic_transport)
+        .map(|either_output, _| match either_output {
+            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+        });
+
+    libp2p::dns::tokio::Transport::system(transport)
+        .map(Transport::boxed)
+        .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
 }
 
 fn build_gossip_behaviour() -> Result<gossipsub::Behaviour, ConsensusNetworkError> {
@@ -3155,10 +3220,12 @@ fn known_peers_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONSENSUS_STATE_DIR).join(KNOWN_PEERS_FILE)
 }
 
-fn observe_dialable_peer(peers: &mut HashMap<PeerId, Vec<Multiaddr>>, enr: &Enr) {
+fn observe_dialable_peer(peers: &mut HashMap<PeerId, Vec<Multiaddr>>, enr: &Enr) -> Option<PeerId> {
     if let Some((peer_id, addrs)) = enr_multiaddrs(enr) {
         peers.insert(peer_id, addrs);
+        return Some(peer_id);
     }
+    None
 }
 
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
@@ -3269,6 +3336,15 @@ fn enr_matches_fork_digest(enr: &Enr, expected_fork_digest: &[u8; 4]) -> bool {
                 .unwrap_or(false)
         })
         .unwrap_or(false)
+}
+
+#[allow(deprecated)]
+fn enr_is_opstack_peer(enr: &Enr) -> bool {
+    enr.get("opstack").is_some()
+}
+
+fn enr_is_relevant_consensus_peer(enr: &Enr, expected_fork_digest: &[u8; 4]) -> bool {
+    enr_matches_fork_digest(enr, expected_fork_digest) && !enr_is_opstack_peer(enr)
 }
 
 fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
@@ -3626,6 +3702,24 @@ mod tests {
 
         assert!(enr_matches_fork_digest(&matching, &expected_fork_digest));
         assert!(!enr_matches_fork_digest(&mismatched, &expected_fork_digest));
+    }
+
+    #[test]
+    fn enr_relevance_filter_rejects_opstack_peers() {
+        let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(14_132_160);
+        let expected_fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch);
+        let expected_fork_id = MAINNET_CONSENSUS_CHAIN_SPEC.enr_fork_id_for_epoch(epoch);
+        let enr_key = CombinedKey::generate_secp256k1();
+        let opstack = Enr::builder()
+            .add_value("eth2", &expected_fork_id)
+            .add_value("opstack", &[1u8, 2u8, 3u8])
+            .build(&enr_key)
+            .unwrap();
+
+        assert!(!enr_is_relevant_consensus_peer(
+            &opstack,
+            &expected_fork_digest
+        ));
     }
 
     #[test]
