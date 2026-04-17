@@ -146,17 +146,6 @@ impl StatusMessage {
             earliest_available_slot: 0,
         }
     }
-
-    pub fn checkpoint(fork_digest: [u8; 4], checkpoint_root: B256, checkpoint_slot: u64) -> Self {
-        Self {
-            fork_digest,
-            finalized_root: checkpoint_root,
-            finalized_epoch: checkpoint_slot / 32,
-            head_root: checkpoint_root,
-            head_slot: checkpoint_slot,
-            earliest_available_slot: checkpoint_slot,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,80 +199,104 @@ fn build_rpc_behaviour(
 }
 
 pub fn build_status_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([
-        (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
-        (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
-    ], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [
+            (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
+            (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
+        ],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_goodbye_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([
-        (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
-        (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
-        (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
-    ], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [
+            (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
+            (Eth2RpcProtocol::MetadataV3, ProtocolSupport::Full),
+            (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
+        ],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_ping_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(Eth2RpcProtocol::PingV1, ProtocolSupport::Full)], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(Eth2RpcProtocol::PingV1, ProtocolSupport::Full)],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_light_client_bootstrap_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(
-        Eth2RpcProtocol::LightClientBootstrapV1,
-        ProtocolSupport::Full,
-    )], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(
+            Eth2RpcProtocol::LightClientBootstrapV1,
+            ProtocolSupport::Full,
+        )],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(
-        Eth2RpcProtocol::LightClientUpdatesByRangeV1,
-        ProtocolSupport::Outbound,
-    )], HISTORY_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(
+            Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+            ProtocolSupport::Outbound,
+        )],
+        HISTORY_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_light_client_finality_update_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(
-        Eth2RpcProtocol::LightClientFinalityUpdateV1,
-        ProtocolSupport::Full,
-    )], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(
+            Eth2RpcProtocol::LightClientFinalityUpdateV1,
+            ProtocolSupport::Full,
+        )],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_light_client_optimistic_update_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([(
-        Eth2RpcProtocol::LightClientOptimisticUpdateV1,
-        ProtocolSupport::Full,
-    )], DEFAULT_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [(
+            Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+            ProtocolSupport::Full,
+        )],
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([
-        (
-            Eth2RpcProtocol::BeaconBlocksByRangeV2,
-            ProtocolSupport::Full,
-        ),
-        (
-            Eth2RpcProtocol::BeaconBlocksByRangeV1,
-            ProtocolSupport::Full,
-        ),
-    ], HISTORY_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                ProtocolSupport::Full,
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1,
+                ProtocolSupport::Full,
+            ),
+        ],
+        HISTORY_RPC_TIMEOUT,
+    )
 }
 
 pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
-    build_rpc_behaviour([
-        (
-            Eth2RpcProtocol::BeaconBlocksByRootV2,
-            ProtocolSupport::Full,
-        ),
-        (
-            Eth2RpcProtocol::BeaconBlocksByRootV1,
-            ProtocolSupport::Full,
-        ),
-    ], HISTORY_RPC_TIMEOUT)
+    build_rpc_behaviour(
+        [
+            (Eth2RpcProtocol::BeaconBlocksByRootV2, ProtocolSupport::Full),
+            (Eth2RpcProtocol::BeaconBlocksByRootV1, ProtocolSupport::Full),
+        ],
+        HISTORY_RPC_TIMEOUT,
+    )
 }
 
 #[async_trait]
@@ -1230,18 +1243,6 @@ mod tests {
         assert_eq!(status.finalized_epoch, 0);
         assert_eq!(status.head_slot, 0);
         assert_eq!(status.earliest_available_slot, 0);
-    }
-
-    #[test]
-    fn checkpoint_status_uses_checkpoint_root_and_slot() {
-        let checkpoint_root = B256::repeat_byte(0x22);
-        let status = StatusMessage::checkpoint([4, 3, 2, 1], checkpoint_root, 14_132_160);
-
-        assert_eq!(status.finalized_root, checkpoint_root);
-        assert_eq!(status.head_root, checkpoint_root);
-        assert_eq!(status.finalized_epoch, 441_630);
-        assert_eq!(status.head_slot, 14_132_160);
-        assert_eq!(status.earliest_available_slot, 14_132_160);
     }
 
     #[test]

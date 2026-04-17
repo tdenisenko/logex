@@ -703,8 +703,14 @@ mod tests {
         let verified = decode_verified_beacon_block(&response).expect("expected verified block");
 
         assert_eq!(verified.slot, 14_132_042);
-        assert_eq!(header.state_root, b256!("0x3e56421c4e4ca7be9701511ed4a5ffe183f42c1f622300e80cece1ea0b205f1b"));
-        assert_eq!(header.body_root, b256!("0xda485436980d8bb8136a1cdc93478a9d3744ac1ae70ad7f9d8997efbb924b3d6"));
+        assert_eq!(
+            header.state_root,
+            b256!("0x3e56421c4e4ca7be9701511ed4a5ffe183f42c1f622300e80cece1ea0b205f1b")
+        );
+        assert_eq!(
+            header.body_root,
+            b256!("0xda485436980d8bb8136a1cdc93478a9d3744ac1ae70ad7f9d8997efbb924b3d6")
+        );
         assert_eq!(
             verified.parent_root,
             b256!("0x19e0f7fcc6cbb74021d1914fdd743c4fa8aa8ec819a9628e0131ace607d29e99")
