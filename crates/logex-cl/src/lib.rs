@@ -835,6 +835,10 @@ mod tests {
         let descriptor = temp.path().join("checkpoint.json");
         let checkpoint_slot = recent_test_slot(0);
         let anchor_slot = checkpoint_slot + 23;
+        let beacon_root = format!("{:#x}", B256::repeat_byte(0x33));
+        let anchor_beacon_root = format!("{:#x}", B256::repeat_byte(0x44));
+        let block_hash = format!("{:#x}", B256::repeat_byte(0x55));
+        let receipts_root = format!("{:#x}", B256::repeat_byte(0x66));
         let descriptor_json = format!(
             r#"{{
   "beacon_root": "{beacon_root}",
@@ -852,10 +856,6 @@ mod tests {
     }}
   ]
 }}"#,
-            beacon_root = format!("{:#x}", B256::repeat_byte(0x33)),
-            anchor_beacon_root = format!("{:#x}", B256::repeat_byte(0x44)),
-            block_hash = format!("{:#x}", B256::repeat_byte(0x55)),
-            receipts_root = format!("{:#x}", B256::repeat_byte(0x66)),
         );
         fs::write(&descriptor, descriptor_json).unwrap();
 

@@ -561,7 +561,7 @@ fn bytes_list_root(bytes: &[u8], max_len_bytes: usize) -> B256 {
 }
 
 fn packed_u64_list_root(values: &[u64], max_len: usize) -> B256 {
-    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<u64>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

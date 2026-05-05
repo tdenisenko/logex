@@ -617,7 +617,6 @@ mod tests {
                     finality_update: None,
                     optimistic_update: None,
                 }),
-                ..Default::default()
             },
         ));
         let app = crate::build_router(state);

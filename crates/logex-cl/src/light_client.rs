@@ -1192,16 +1192,13 @@ fn verify_valid_light_client_update(
     }
 
     if let Some(next_sync_committee) = &update.next_sync_committee {
-        if attested_period == store_period {
-            if let Some(known_next_sync_committee) = &store.next_sync_committee {
-                if next_sync_committee != known_next_sync_committee {
-                    return Err(
-                        LightClientVerificationError::InvalidNextSyncCommitteeProof {
-                            attested_slot,
-                        },
-                    );
-                }
-            }
+        if attested_period == store_period
+            && let Some(known_next_sync_committee) = &store.next_sync_committee
+            && next_sync_committee != known_next_sync_committee
+        {
+            return Err(
+                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
+            );
         }
         let Some(next_sync_committee_branch) = next_sync_committee_branch else {
             return Err(
@@ -1348,12 +1345,12 @@ fn apply_validated_light_client_update(
         store.previous_max_active_participants = store.current_max_active_participants;
         store.current_max_active_participants = 0;
     }
-    if let Some(finalized_header) = &update.finalized_header {
-        if finalized_header.beacon.slot > store.finalized_header.beacon.slot {
-            store.finalized_header = finalized_header.clone();
-            if store.finalized_header.beacon.slot > store.optimistic_header.beacon.slot {
-                store.optimistic_header = store.finalized_header.clone();
-            }
+    if let Some(finalized_header) = &update.finalized_header
+        && finalized_header.beacon.slot > store.finalized_header.beacon.slot
+    {
+        store.finalized_header = finalized_header.clone();
+        if store.finalized_header.beacon.slot > store.optimistic_header.beacon.slot {
+            store.optimistic_header = store.finalized_header.clone();
         }
     }
 }
