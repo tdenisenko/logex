@@ -118,7 +118,7 @@ LogEx should become a canonical Ethereum event-log node that:
   - peer churn is still present on public mainnet, but cooldown-aware slot rotation, stricter ENR filtering, wider status/history request concurrency, and invalid/empty history-response accounting are now enough for fresh short smokes to keep the materialized ceiling at the live optimistic head
 - The merged CL P2P milestone also does not yet implement the pre-Merge PoW canonicality path, so the project is still not the full end-to-end canonical system.
 - The clippy cleanup branch `fix/clippy-cleanup` has been merged through PR #68, keeping lint-only changes separate from UI work.
-- The current branch is `fix/sync-dashboard-ui`, which is redesigning the embedded dashboard so operators can distinguish CL sync, EL sync, indexing, and query coverage from one status page.
+- The dashboard UI work is merged, and the CL historical-sync fix is merged through PR #70.
 
 ## Explicitly Not Needed
 
@@ -161,6 +161,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - Fixed CL historical sync so backward checkpoint-to-history work continues while live forward sync advances.
 - Added parent beacon-root persistence for materialized anchors and recovery for legacy anchor stores that do not yet have that parent field.
 - Fixed-port smoke on `18683` recovered the previously stuck data directory: the materialized floor moved from block `25026535` to `25026024`, while the live ceiling advanced to block `25030401`.
+- A merged-code restart/resume smoke continued the backward walk from the same data directory, moving the floor further to block `25025896`.
 - Validation run: `cargo fmt --all`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build -p logex-node`, and the fixed-port CL P2P smoke.
 
 ## Remaining TODOs
@@ -264,11 +265,11 @@ LogEx should become a canonical Ethereum event-log node that:
 
 ## Git Workflow
 
-- Current branch: `fix/beacon-history-sync`.
-- New branch created: yes; CL historical-sync work was split away from the merged UI branch.
+- Current baseline: `master` includes PR #69 and PR #70.
+- New branch created: yes; `docs/update-roadmap-after-beacon-history` records the post-merge roadmap status.
 - Commits made during this run: `fix: recover beacon history backfill`.
-- Pull request status: dashboard PR #69 merged; CL historical-sync PR pending commit/push.
-- Merge status: dashboard PR merged; CL historical-sync branch not merged yet.
+- Pull request status: dashboard PR #69 merged; CL historical-sync PR #70 merged.
+- Merge status: dashboard PR merged; CL historical-sync PR merged.
 - Git/GitHub blockers: `gh` CLI authentication is invalid, so GitHub connector APIs are being used for PR operations.
 
 ## Known Issues or Risks
