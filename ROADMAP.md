@@ -120,7 +120,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - The clippy cleanup branch `fix/clippy-cleanup` has been merged through PR #68, keeping lint-only changes separate from UI work.
 - The dashboard UI work is merged, and the CL historical-sync fix is merged through PR #70.
 - The CL stability gate branch is validating the native beacon-history path with a fixed-port release smoke from a fresh checkpoint and a restart/resume pass over the same data directory.
-  - Latest observed fixed-port smoke state at roadmap update: checkpoint slot `14265280`, materialized floor block `25002120`, materialized ceiling block `25030899`, `28780` anchors, and `0` detected anchor-continuity gaps.
+  - Latest observed fixed-port smoke state at roadmap update: checkpoint slot `14265280`, materialized floor block `24993445`, materialized ceiling block `25030926`, `37482` anchors, and `0` detected anchor-continuity gaps.
 
 ## Explicitly Not Needed
 
@@ -163,7 +163,7 @@ LogEx should become a canonical Ethereum event-log node that:
 
 - Added consensus-store anchor coverage and exposed `materialized_execution_anchor_gap_count` through initial runtime status and `/status`.
 - Ran a fixed-port release smoke on `18683` from a checkpoint-sync endpoint, then restarted the same data directory with the updated binary.
-- Confirmed live and historical CL paths are active together after restart: the materialized floor moved below block `25002120`, the ceiling tracked the optimistic head at block `25030899`, and the persisted anchor store reported `0` gaps and `0` missing parent roots.
+- Confirmed live and historical CL paths are active together after restart: the materialized floor moved below block `24993445`, the ceiling tracked the optimistic head at block `25030926`, and the persisted anchor store reported `0` gaps and `0` missing parent roots.
 - Validation run: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, targeted CL/server tests, release build, and the fixed-port CL P2P smoke.
 
 ## Remaining TODOs
@@ -268,11 +268,11 @@ LogEx should become a canonical Ethereum event-log node that:
 
 ## Git Workflow
 
-- Current branch: `fix/cl-sync-stability-gate`.
-- New branch created: yes.
-- Commits made during this run: pending.
-- Pull request status: pending until the stability-gate commit is ready.
-- Merge status: pending.
+- Current branch after the stability gate: `master` fast-forwarded to the merged PR.
+- Task branch created: `fix/cl-sync-stability-gate`.
+- Commits made during this run: `45402c5 fix: add beacon sync stability coverage`.
+- Pull request status: PR #72 created after local validation and GitHub CI passed.
+- Merge status: PR #72 merged as `6367eab`.
 - Git/GitHub blockers: `gh` CLI authentication is invalid, so GitHub connector APIs are being used for PR operations.
 
 ## Known Issues or Risks
