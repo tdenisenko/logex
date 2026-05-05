@@ -119,6 +119,8 @@ LogEx should become a canonical Ethereum event-log node that:
 - The merged CL P2P milestone also does not yet implement the pre-Merge PoW canonicality path, so the project is still not the full end-to-end canonical system.
 - The clippy cleanup branch `fix/clippy-cleanup` has been merged through PR #68, keeping lint-only changes separate from UI work.
 - The dashboard UI work is merged, and the CL historical-sync fix is merged through PR #70.
+- The CL stability gate branch is validating the native beacon-history path with a fixed-port release smoke from a fresh checkpoint and a restart/resume pass over the same data directory.
+  - Latest observed fixed-port smoke state at roadmap update: checkpoint slot `14265280`, materialized floor block `25002120`, materialized ceiling block `25030899`, `28780` anchors, and `0` detected anchor-continuity gaps.
 
 ## Explicitly Not Needed
 
@@ -154,15 +156,15 @@ LogEx should become a canonical Ethereum event-log node that:
 - Keep forward and backward beacon-history work scheduled independently.
   - Public mainnet peers frequently close range streams, so root-based parent recovery must be allowed to run alongside range backfill.
   - Persisting parent beacon roots with execution anchors keeps restarts from losing the authenticated backward walk; legacy anchors without that field are recovered by refetching the oldest known beacon root once.
+- Report CL materialized-anchor coverage from the consensus store rather than deriving floor, ceiling, and count separately in each status surface.
+  - The status API now includes an anchor-continuity gap count based on contiguous execution block numbers and matching beacon parent roots, so live smokes can prove that backward expansion is not silently creating holes.
 
 ## Completed Since Last Run
 
-- Merged the dashboard UI work through PR #69 after CI passed.
-- Fixed CL historical sync so backward checkpoint-to-history work continues while live forward sync advances.
-- Added parent beacon-root persistence for materialized anchors and recovery for legacy anchor stores that do not yet have that parent field.
-- Fixed-port smoke on `18683` recovered the previously stuck data directory: the materialized floor moved from block `25026535` to `25026024`, while the live ceiling advanced to block `25030401`.
-- A merged-code restart/resume smoke continued the backward walk from the same data directory, moving the floor further to block `25025896`.
-- Validation run: `cargo fmt --all`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build -p logex-node`, and the fixed-port CL P2P smoke.
+- Added consensus-store anchor coverage and exposed `materialized_execution_anchor_gap_count` through initial runtime status and `/status`.
+- Ran a fixed-port release smoke on `18683` from a checkpoint-sync endpoint, then restarted the same data directory with the updated binary.
+- Confirmed live and historical CL paths are active together after restart: the materialized floor moved below block `25002120`, the ceiling tracked the optimistic head at block `25030899`, and the persisted anchor store reported `0` gaps and `0` missing parent roots.
+- Validation run: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, targeted CL/server tests, release build, and the fixed-port CL P2P smoke.
 
 ## Remaining TODOs
 
@@ -178,11 +180,10 @@ LogEx should become a canonical Ethereum event-log node that:
 
 2. Long-Lived Beacon History Proving
    - TODO:
-     - run longer mainnet smokes that prove sustained forward and backward materialization across peer churn
-     - continue the backward parent-root walk from recent checkpoints toward the Merge
-     - verify restart/resume after partially materialized forward and backward windows
+     - keep the current fixed-port release smoke running so the backward parent-root walk can continue from the recent checkpoint toward the Merge
+     - record a longer checkpoint-to-Merge soak result once the run has covered enough history to be meaningful
    - Why this is still blocking:
-     - short fixed-port smokes now show both directions moving, but release readiness still needs sustained proof under real peer churn and restarts
+     - restart/resume and short sustained smokes now show both directions moving with continuous anchors, but the full checkpoint-to-Merge expansion is still a long-lived network soak
    - Done when:
      - a fresh checkpoint-centered run keeps live head coverage current while steadily expanding historical coverage toward the Merge across restarts
 
@@ -256,27 +257,29 @@ LogEx should become a canonical Ethereum event-log node that:
   - Remaining: Long-lived soak runs are still needed before release, but fresh fixed-port smokes now bootstrap from scratch and keep materialized history at the verified optimistic head.
 - Challenge: Older anchor stores did not persist the parent beacon root for the oldest materialized anchor, which could pin the backward walk at that point.
   - Resolution: Persist parent beacon roots for new anchors and refetch the oldest legacy root when the cached parent is unknown, allowing the authentic parent link to be recovered.
+- Challenge: A moving floor/ceiling alone could hide continuity bugs in the materialized anchor range.
+  - Resolution: Added consensus-store anchor coverage and a status-visible gap count that treats skipped execution block numbers or broken beacon-parent links as continuity failures.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the touched CL scheduler, anchor persistence, status type, server status fixture, and anchored sync test helper.
-- Removed the temporary detached UI validation worktree.
-- No runtime modules were removed; the remaining transitional consensus paths are still tracked in the TODO list.
+- Inspected the touched CL store, CL scheduler status refresh, runtime status initialization, REST status fixture, and status/UI references.
+- No obsolete runtime modules were removed; `ordered_anchors()` remains used for verified beacon-chain seeding and tests.
+- The remaining transitional consensus paths are still tracked in the TODO list.
 
 ## Git Workflow
 
-- Current baseline: `master` includes PR #69 and PR #70.
-- New branch created: yes; `docs/update-roadmap-after-beacon-history` records the post-merge roadmap status.
-- Commits made during this run: `fix: recover beacon history backfill`.
-- Pull request status: dashboard PR #69 merged; CL historical-sync PR #70 merged.
-- Merge status: dashboard PR merged; CL historical-sync PR merged.
+- Current branch: `fix/cl-sync-stability-gate`.
+- New branch created: yes.
+- Commits made during this run: pending.
+- Pull request status: pending until the stability-gate commit is ready.
+- Merge status: pending.
 - Git/GitHub blockers: `gh` CLI authentication is invalid, so GitHub connector APIs are being used for PR operations.
 
 ## Known Issues or Risks
 
 - The current weak-subjectivity freshness guard uses a conservative fixed mainnet window rather than computing the exact state-derived consensus-spec weak-subjectivity period.
 - `--checkpoint-sync-url` is a temporary startup bootstrap aid and introduces trust in the selected endpoint for initial checkpoint selection until LogEx provides its own checkpoint source.
-- Fresh fixed-port smokes now show both forward and backward CL materialization moving, but long-lived peer retention and sustained checkpoint-to-Merge history proving still need release-gate proof runs.
+- Fresh fixed-port smokes now show both forward and backward CL materialization moving with continuous anchors, but the checkpoint-to-Merge soak should keep running in the background until it reaches the Merge boundary or exposes a new peer-retention failure.
 - Keep the HTTP port constant for comparable smoke tests; stop any stale process before rerunning instead of incrementing the test port.
 - Pre-Merge PoW canonicality remains unimplemented, so LogEx cannot yet claim full-chain canonicality.
 

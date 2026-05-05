@@ -4439,9 +4439,7 @@ impl ConsensusNetwork {
         let light_client = self.consensus.light_client_status();
         let checkpoint = self.consensus.checkpoint();
         let anchors = self.consensus.chain_anchors();
-        let ordered_anchors = self.consensus.ordered_anchors();
-        let materialized_execution_floor = ordered_anchors.first().map(|record| record.anchor);
-        let materialized_execution_ceiling = ordered_anchors.last().map(|record| record.anchor);
+        let anchor_coverage = self.consensus.anchor_coverage();
         let identified_peers = self.peer_support.len();
         let now = Instant::now();
         let preferred_peers = self
@@ -4597,9 +4595,10 @@ impl ConsensusNetwork {
         sync_status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
         sync_status.optimistic_execution_head = anchors.optimistic_head;
         sync_status.finalized_execution_head = anchors.finalized_head;
-        sync_status.materialized_execution_floor = materialized_execution_floor;
-        sync_status.materialized_execution_ceiling = materialized_execution_ceiling;
-        sync_status.materialized_execution_anchor_count = ordered_anchors.len();
+        sync_status.materialized_execution_floor = anchor_coverage.floor;
+        sync_status.materialized_execution_ceiling = anchor_coverage.ceiling;
+        sync_status.materialized_execution_anchor_count = anchor_coverage.count;
+        sync_status.materialized_execution_anchor_gap_count = anchor_coverage.gap_count;
         if let Some(anchor) = anchors.optimistic_head {
             sync_status.target_block = sync_status.target_block.max(anchor.block_number);
         }

@@ -86,6 +86,14 @@ pub struct AnchorRecord {
     pub parent_beacon_root: Option<B256>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorCoverage {
+    pub floor: Option<ExecutionAnchor>,
+    pub ceiling: Option<ExecutionAnchor>,
+    pub count: usize,
+    pub gap_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusSnapshot {
     pub checkpoint: WeakSubjectivityCheckpoint,
@@ -173,6 +181,16 @@ impl ConsensusStore {
 
     pub fn ordered_anchors(&self) -> Vec<AnchorRecord> {
         self.inner.lock().unwrap().ordered_anchors.clone()
+    }
+
+    pub fn anchor_coverage(&self) -> AnchorCoverage {
+        let snapshot = self.inner.lock().unwrap();
+        AnchorCoverage {
+            floor: snapshot.ordered_anchors.first().map(|record| record.anchor),
+            ceiling: snapshot.ordered_anchors.last().map(|record| record.anchor),
+            count: snapshot.ordered_anchors.len(),
+            gap_count: anchor_record_gap_count(&snapshot.ordered_anchors),
+        }
     }
 
     pub fn highest_anchor_block_from(&self, start_block: u64) -> Option<u64> {
@@ -557,6 +575,18 @@ fn normalize_anchor_records(mut anchors: Vec<AnchorRecord>) -> Vec<AnchorRecord>
         deduped.insert(record.anchor.block_number, record);
     }
     deduped.into_values().collect()
+}
+
+fn anchor_record_gap_count(anchors: &[AnchorRecord]) -> usize {
+    anchors
+        .windows(2)
+        .filter(|window| {
+            let previous = window[0];
+            let current = window[1];
+            current.anchor.block_number != previous.anchor.block_number.saturating_add(1)
+                || current.parent_beacon_root != Some(previous.anchor.beacon_root)
+        })
+        .count()
 }
 
 fn compute_chain_anchors(anchors: &[AnchorRecord]) -> ChainAnchors {
@@ -994,6 +1024,42 @@ mod tests {
                 .map(|anchor| anchor.block_number),
             Some(100)
         );
+    }
+
+    #[test]
+    fn anchor_coverage_reports_materialized_continuity_gaps() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let anchor = |block_number: u64, byte: u8, parent: Option<B256>| AnchorRecord {
+            anchor: ExecutionAnchor {
+                beacon_root: B256::repeat_byte(byte),
+                beacon_slot: block_number,
+                block_number,
+                block_hash: B256::repeat_byte(byte.wrapping_add(1)),
+                receipts_root: B256::repeat_byte(byte.wrapping_add(2)),
+            },
+            finalized: false,
+            parent_beacon_root: parent,
+        };
+
+        store
+            .append_anchors(vec![
+                anchor(10, 0x10, None),
+                anchor(11, 0x11, Some(B256::repeat_byte(0x10))),
+                anchor(13, 0x13, Some(B256::repeat_byte(0x11))),
+                anchor(14, 0x14, Some(B256::repeat_byte(0xee))),
+            ])
+            .unwrap();
+
+        let coverage = store.anchor_coverage();
+        assert_eq!(coverage.floor.map(|anchor| anchor.block_number), Some(10));
+        assert_eq!(coverage.ceiling.map(|anchor| anchor.block_number), Some(14));
+        assert_eq!(coverage.count, 4);
+        assert_eq!(coverage.gap_count, 2);
     }
 
     #[test]
