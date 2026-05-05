@@ -58,7 +58,9 @@ const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const DISCOVERY_QUERY_FANOUT: usize = 4;
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_CONCURRENT_RPC_REQUESTS_PER_KIND: usize = 2;
+const MAX_CONCURRENT_DEFAULT_RPC_REQUESTS: usize = 2;
+const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
+const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
 // Deneb+ `beacon_blocks_by_range/2` inherits `MAX_REQUEST_BLOCKS_DENEB = 128`.
 const MAX_BEACON_BLOCK_RANGE_WINDOW: u64 = 128;
 const MAX_BEACON_BLOCKS_BY_ROOT_REQUEST: usize = 128;
@@ -550,6 +552,22 @@ fn select_post_bootstrap_request_kind(
         Some(RpcRequestKind::LightClientOptimisticUpdate)
     } else {
         None
+    }
+}
+
+const fn max_concurrent_requests_for_kind(kind: RpcRequestKind) -> usize {
+    match kind {
+        RpcRequestKind::Status => MAX_CONCURRENT_STATUS_REQUESTS,
+        RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot => {
+            MAX_CONCURRENT_HISTORY_REQUESTS
+        }
+        RpcRequestKind::Goodbye
+        | RpcRequestKind::MetaData
+        | RpcRequestKind::Ping
+        | RpcRequestKind::LightClientBootstrap
+        | RpcRequestKind::LightClientUpdatesByRange
+        | RpcRequestKind::LightClientFinalityUpdate
+        | RpcRequestKind::LightClientOptimisticUpdate => MAX_CONCURRENT_DEFAULT_RPC_REQUESTS,
     }
 }
 
@@ -2141,15 +2159,23 @@ impl ConsensusNetwork {
                         .inner
                         .send_response(channel, response)
                     {
-                        let peer_context = self.peer_context(peer);
-                        self.last_response_send_failure = Some(format!(
-                            "{peer_context} request=goodbye response={response:?}"
-                        ));
-                        tracing::warn!(
-                            %peer,
-                            error = ?response,
-                            "failed to send consensus goodbye RPC response"
-                        );
+                        if matches!(response, Eth2RpcResponse::Goodbye(_)) {
+                            tracing::debug!(
+                                %peer,
+                                response = ?response,
+                                "consensus goodbye response channel closed before response was sent"
+                            );
+                        } else {
+                            let peer_context = self.peer_context(peer);
+                            self.last_response_send_failure = Some(format!(
+                                "{peer_context} request=goodbye response={response:?}"
+                            ));
+                            tracing::warn!(
+                                %peer,
+                                error = ?response,
+                                "failed to send consensus goodbye RPC response"
+                            );
+                        }
                     }
                     self.disconnect_now(peer);
                 }
@@ -2838,6 +2864,7 @@ impl ConsensusNetwork {
     fn drive_rpc_requests(&mut self) {
         self.refresh_history_sync_target();
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
+        let now = Instant::now();
         if !bootstrap_needed {
             for lifecycle in self.peer_lifecycle.values_mut() {
                 lifecycle.clear_bootstrap_deferral();
@@ -2850,6 +2877,21 @@ impl ConsensusNetwork {
                 .then_with(|| left.to_string().cmp(&right.to_string()))
         });
         for peer in connected {
+            if self
+                .peer_lifecycle
+                .get(&peer)
+                .is_some_and(|lifecycle| lifecycle.in_cooldown(now))
+            {
+                if self.pending_requests_for_peer(peer) == 0 {
+                    tracing::debug!(
+                        %peer,
+                        "disconnecting consensus peer in cooldown to free a request slot"
+                    );
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+                }
+                continue;
+            }
+
             let support = self.peer_support.get(&peer).copied();
             let identify_timed_out = self.identify_timed_out(peer);
 
@@ -4060,7 +4102,7 @@ impl ConsensusNetwork {
     }
 
     fn can_issue_request(&self, kind: RpcRequestKind) -> bool {
-        self.pending_requests_for_kind(kind) < MAX_CONCURRENT_RPC_REQUESTS_PER_KIND
+        self.pending_requests_for_kind(kind) < max_concurrent_requests_for_kind(kind)
     }
 
     fn refresh_status(&self) {
@@ -4598,7 +4640,7 @@ fn enr_fork_digest(enr: &Enr) -> Option<[u8; 4]> {
 
 fn enr_matches_fork_digest(enr: &Enr, expected_fork_digest: &[u8; 4]) -> bool {
     let Some(remote_fork_digest) = enr_fork_digest(enr) else {
-        return true;
+        return false;
     };
     if &remote_fork_digest == expected_fork_digest {
         return true;
@@ -4891,6 +4933,41 @@ mod tests {
     }
 
     #[test]
+    fn request_concurrency_is_wider_for_status_and_history() {
+        assert_eq!(
+            max_concurrent_requests_for_kind(RpcRequestKind::Status),
+            MAX_CONCURRENT_STATUS_REQUESTS
+        );
+        assert_eq!(
+            max_concurrent_requests_for_kind(RpcRequestKind::BeaconBlocksByRange),
+            MAX_CONCURRENT_HISTORY_REQUESTS
+        );
+        assert_eq!(
+            max_concurrent_requests_for_kind(RpcRequestKind::BeaconBlocksByRoot),
+            MAX_CONCURRENT_HISTORY_REQUESTS
+        );
+        assert_eq!(
+            max_concurrent_requests_for_kind(RpcRequestKind::LightClientBootstrap),
+            MAX_CONCURRENT_DEFAULT_RPC_REQUESTS
+        );
+    }
+
+    #[test]
+    fn lifecycle_cooldown_tracks_useful_rpc_failures_until_success() {
+        let mut lifecycle = PeerLifecycleState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            lifecycle.record_rpc_failure(RpcRequestKind::BeaconBlocksByRange, now),
+            Some(Duration::from_secs(15))
+        );
+        assert!(lifecycle.in_cooldown(now + Duration::from_secs(1)));
+
+        lifecycle.record_success(RpcRequestKind::BeaconBlocksByRange);
+        assert!(!lifecycle.in_cooldown(now + Duration::from_secs(1)));
+    }
+
+    #[test]
     fn lifecycle_prefers_successful_bootstrap_peers() {
         let mut lifecycle = PeerLifecycleState::default();
         assert!(!lifecycle.preferred());
@@ -5010,7 +5087,7 @@ mod tests {
     }
 
     #[test]
-    fn enr_fork_filter_accepts_compatible_post_electra_and_missing_digest() {
+    fn enr_fork_filter_accepts_compatible_post_electra_and_rejects_missing_digest() {
         let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(14_132_160);
         let expected_fork_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch);
         let compatible_fork_id = {
@@ -5031,7 +5108,7 @@ mod tests {
         let missing = Enr::builder().build(&enr_key).unwrap();
 
         assert!(enr_matches_fork_digest(&compatible, &expected_fork_digest));
-        assert!(enr_matches_fork_digest(&missing, &expected_fork_digest));
+        assert!(!enr_matches_fork_digest(&missing, &expected_fork_digest));
     }
 
     #[test]
