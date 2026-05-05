@@ -5,208 +5,1065 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LogEx Dashboard</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
-  code, .mono { font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
-  a { color: #58a6ff; }
+  :root {
+    --bg: #080b0f;
+    --surface: #10151c;
+    --surface-2: #151b24;
+    --surface-3: #1c2430;
+    --line: #263241;
+    --line-strong: #35465a;
+    --text: #eef4f8;
+    --muted: #91a0ad;
+    --soft: #c7d0d8;
+    --cl: #48d6b8;
+    --el: #6aa7ff;
+    --index: #f2b84b;
+    --finalized: #62d26f;
+    --warn: #f0a24a;
+    --danger: #ff6b6b;
+    --query: #b28cff;
+    --font-label: 11px;
+    --font-small: 12px;
+    --font-body: 13px;
+    --font-title: 14px;
+    --font-brand: 24px;
+  }
 
-  header { display: flex; justify-content: space-between; align-items: flex-start; padding: 20px 24px 16px; border-bottom: 1px solid #21262d; flex-wrap: wrap; gap: 16px; }
-  .title h1 { font-size: 24px; color: #f0f6fc; letter-spacing: 1px; }
-  .title p { font-size: 13px; color: #8b949e; margin-top: 2px; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    background:
+      radial-gradient(circle at 18% 0%, rgba(72, 214, 184, .10), transparent 32rem),
+      radial-gradient(circle at 90% 16%, rgba(106, 167, 255, .12), transparent 30rem),
+      var(--bg);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: var(--font-body);
+  }
 
-  .status-panel { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; font-size: 13px; }
-  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-  .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .badge-synced { background: #0d3321; color: #3fb950; }
-  .badge-synced .dot { background: #3fb950; }
-  .badge-syncing { background: #3d2e00; color: #d29922; }
-  .badge-syncing .dot { background: #d29922; animation: pulse 1.2s infinite; }
-  .badge-discovering, .badge-connecting { background: #10213a; color: #58a6ff; }
-  .badge-discovering .dot, .badge-connecting .dot { background: #58a6ff; animation: pulse 1.2s infinite; }
-  .badge-waiting { background: #0f2f35; color: #7ee7ff; }
-  .badge-waiting .dot { background: #7ee7ff; animation: pulse 1.2s infinite; }
-  .badge-reconnecting { background: #3d2e00; color: #d29922; }
-  .badge-reconnecting .dot { background: #d29922; animation: pulse 1.2s infinite; }
-  .badge-disconnected { background: #3b1114; color: #f85149; }
-  .badge-disconnected .dot { background: #f85149; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
-  .stat { color: #8b949e; }
-  .stat b { color: #c9d1d9; }
+  code, .mono {
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  }
 
-  main { flex: 1; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
-  .progress-card { background: linear-gradient(135deg, rgba(88,166,255,.12), rgba(35,134,54,.08)); border: 1px solid #21262d; border-radius: 10px; padding: 14px 16px; }
-  .progress-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-  .progress-top strong { font-size: 14px; color: #f0f6fc; }
-  .progress-meta { font-size: 12px; color: #8b949e; display: flex; gap: 14px; flex-wrap: wrap; }
-  .progress-bar { height: 10px; border-radius: 999px; background: #161b22; border: 1px solid #30363d; overflow: hidden; }
-  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #1f6feb, #3fb950); transition: width .35s ease; }
-  .cards-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-  .meta-card, .rail-card { background: #11161d; border: 1px solid #21262d; border-radius: 10px; padding: 14px 16px; }
-  .card-title { font-size: 14px; font-weight: 700; color: #f0f6fc; margin-bottom: 12px; }
-  .card-grid { display: grid; gap: 12px 16px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-  .kv { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .kv .k { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .06em; }
-  .kv .v { font-size: 13px; color: #f0f6fc; min-height: 18px; }
-  .hint { margin-top: 12px; font-size: 12px; color: #8b949e; line-height: 1.5; }
-  .marker-rail { position: relative; height: 108px; }
-  .marker-line { position: absolute; top: 52px; left: 0; right: 0; height: 4px; border-radius: 999px; background: linear-gradient(90deg, #58a6ff, #3fb950); opacity: .6; }
-  .marker-fill-live, .marker-fill-history { position: absolute; top: 52px; height: 4px; border-radius: 999px; }
-  .marker-fill-live { background: linear-gradient(90deg, #58a6ff, #7ee787); }
-  .marker-fill-history { background: linear-gradient(90deg, #d29922, #3fb950); }
-  .marker { position: absolute; width: max-content; max-width: 160px; transform: translateX(-50%); text-align: center; }
-  .marker.top { top: 8px; }
-  .marker.bottom { top: 50px; }
-  .marker-name { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .06em; }
-  .marker-value { font-size: 12px; color: #f0f6fc; }
-  .marker-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #0d1117; margin: 8px auto 0; box-shadow: 0 0 0 2px rgba(13,17,23,.7); }
-  .marker.bottom .marker-dot { margin: 0 auto 8px; }
-  .marker-head .marker-dot { background: #58a6ff; }
-  .marker-checkpoint .marker-dot { background: #f0f6fc; }
-  .marker-optimistic .marker-dot { background: #79c0ff; }
-  .marker-finalized .marker-dot { background: #3fb950; }
-  .marker-indexed .marker-dot { background: #d29922; }
-  .marker-history .marker-dot { background: #d29922; }
-  .marker-cursor .marker-dot { background: #f78166; }
-  .marker-genesis .marker-dot { background: #8b949e; }
-  .direction-note { margin-top: 10px; display: flex; justify-content: space-between; font-size: 12px; color: #8b949e; }
+  button, textarea {
+    font: inherit;
+  }
 
-  .query-panel { display: flex; flex-direction: column; gap: 10px; }
-  textarea { width: 100%; height: 90px; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; resize: vertical; outline: none; }
-  textarea:focus { border-color: #58a6ff; }
-  textarea::placeholder { color: #484f58; }
+  .shell {
+    width: min(1760px, 100%);
+    margin: 0 auto;
+    padding: 24px;
+  }
 
-  .query-bar { display: flex; align-items: center; gap: 12px; }
-  button { background: #238636; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  button:hover { background: #2ea043; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  .result-count { font-size: 13px; color: #8b949e; }
-  .error-msg { color: #f85149; font-size: 13px; background: #1c0a0a; border: 1px solid #3d1212; padding: 8px 12px; border-radius: 6px; display: none; }
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) auto;
+    gap: 20px;
+    align-items: start;
+    padding-bottom: 24px;
+  }
 
-  .results-wrap { flex: 1; overflow: auto; border: 1px solid #21262d; border-radius: 6px; min-height: 120px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
-  th { position: sticky; top: 0; background: #161b22; text-align: left; padding: 8px 12px; color: #8b949e; border-bottom: 1px solid #30363d; font-weight: 600; white-space: nowrap; }
-  td { padding: 6px 12px; border-bottom: 1px solid #161b22; white-space: nowrap; }
-  tr:hover td { background: #161b22; }
-  .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; font-size: 14px; padding: 40px; }
+  .brand h1 {
+    margin: 0;
+    font-size: var(--font-brand);
+    line-height: 1;
+    font-weight: 760;
+    letter-spacing: 0;
+  }
 
-  footer { padding: 12px 24px; border-top: 1px solid #21262d; font-size: 12px; color: #484f58; text-align: center; }
-  footer span { margin: 0 8px; }
+  .brand p {
+    margin: 8px 0 0;
+    max-width: 760px;
+    color: var(--muted);
+    font-size: var(--font-body);
+    line-height: 1.5;
+  }
+
+  .node-strip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    gap: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--soft);
+    background: rgba(16, 21, 28, .88);
+    font-size: var(--font-small);
+    white-space: nowrap;
+  }
+
+  .pill strong {
+    color: var(--text);
+    font-weight: 720;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    box-shadow: 0 0 0 4px rgba(145, 160, 173, .12);
+  }
+
+  .state-synced .dot, .state-queryable .dot { background: var(--finalized); box-shadow: 0 0 0 4px rgba(98, 210, 111, .14); }
+  .state-syncing .dot, .state-tracking .dot, .state-indexing .dot { background: var(--cl); box-shadow: 0 0 0 4px rgba(72, 214, 184, .14); animation: pulse 1.5s infinite; }
+  .state-connecting .dot, .state-discovering .dot, .state-materializing .dot { background: var(--el); box-shadow: 0 0 0 4px rgba(106, 167, 255, .14); animation: pulse 1.5s infinite; }
+  .state-waiting .dot, .state-bootstrapping .dot { background: var(--index); box-shadow: 0 0 0 4px rgba(242, 184, 75, .14); animation: pulse 1.5s infinite; }
+  .state-disconnected .dot, .state-empty .dot { background: var(--danger); box-shadow: 0 0 0 4px rgba(255, 107, 107, .14); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .48; transform: scale(.82); }
+  }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .hero-panel, .panel, .query-panel {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(16, 21, 28, .90);
+    box-shadow: 0 18px 54px rgba(0, 0, 0, .22);
+  }
+
+  .hero-panel {
+    min-height: 0;
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr) minmax(220px, .35fr);
+    gap: 16px;
+    align-items: center;
+  }
+
+  .panel-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  .panel-title h2, .panel-title h3 {
+    margin: 0;
+    font-size: var(--font-title);
+    line-height: 1.15;
+    letter-spacing: 0;
+  }
+
+  .panel-title .sub {
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.35;
+  }
+
+  .big-number {
+    display: block;
+    margin-top: 5px;
+    color: var(--text);
+    font-size: var(--font-body);
+    line-height: 1.1;
+    font-weight: 760;
+    letter-spacing: 0;
+    word-break: break-word;
+  }
+
+  .big-label {
+    color: var(--muted);
+    font-size: var(--font-label);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .bar {
+    height: 10px;
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: #070a0e;
+  }
+
+  .bar > span {
+    display: block;
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    transition: width .35s ease;
+  }
+
+  .bar-cl > span { background: linear-gradient(90deg, var(--cl), var(--finalized)); }
+  .bar-el > span { background: linear-gradient(90deg, var(--el), #9fc7ff); }
+  .bar-index > span { background: linear-gradient(90deg, var(--index), #ffd987); }
+  .bar-query > span { background: linear-gradient(90deg, var(--query), #d0bbff); }
+
+  .graph-panel {
+    margin-bottom: 18px;
+  }
+
+  .graph-wrap {
+    display: grid;
+    gap: 12px;
+  }
+
+  .graph-row {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 18px;
+    align-items: center;
+    padding: 15px 16px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-left-width: 4px;
+    border-radius: 8px;
+    background: rgba(21, 27, 36, .56);
+  }
+
+  .graph-row-label {
+    min-width: 0;
+  }
+
+  .graph-row-label strong {
+    display: block;
+    font-size: var(--font-title);
+    line-height: 1.2;
+  }
+
+  .graph-row-label span {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.25;
+  }
+
+  .graph-row-value {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: var(--font-body);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .graph-bar {
+    min-width: 0;
+    display: grid;
+    gap: 7px;
+  }
+
+  .graph-limits {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.3;
+  }
+
+  .graph-limits span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .graph-limits span:last-child {
+    text-align: right;
+  }
+
+  .graph-current {
+    color: var(--soft);
+    font-size: var(--font-small);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .graph-track {
+    position: relative;
+    height: 18px;
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: #070a0e;
+  }
+
+  .graph-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    transition: left .35s ease, width .35s ease;
+  }
+
+  .graph-fill.live {
+    background: linear-gradient(90deg, var(--cl), var(--finalized));
+  }
+
+  .graph-fill.history {
+    background: linear-gradient(90deg, #ff8a65, var(--index));
+  }
+
+  .graph-fill.el {
+    left: 0;
+    background: linear-gradient(90deg, var(--el), #9fc7ff);
+  }
+
+  .graph-fill.index {
+    left: 0;
+    background: linear-gradient(90deg, var(--index), #ffd987);
+  }
+
+  .graph-fill.query {
+    background: linear-gradient(90deg, var(--query), #d0bbff);
+  }
+
+  .graph-dot {
+    position: absolute;
+    top: 50%;
+    left: 0%;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #070a0e;
+    border-radius: 50%;
+    background: var(--text);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 2px rgba(238, 244, 248, .24);
+    transition: left .35s ease;
+  }
+
+  .graph-dot.live { background: var(--cl); }
+  .graph-dot.history { background: #ff8a65; }
+  .graph-dot.el { background: var(--el); }
+  .graph-dot.index { background: var(--index); }
+  .graph-dot.query { background: var(--query); }
+
+  .graph-row.live { border-left-color: var(--cl); }
+  .graph-row.history { border-left-color: #ff8a65; }
+  .graph-row.el { border-left-color: var(--el); }
+  .graph-row.index { border-left-color: var(--index); }
+  .graph-row.query { border-left-color: var(--query); }
+
+  .dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  .stack {
+    display: grid;
+    gap: 16px;
+  }
+
+  .panel, .query-panel {
+    padding: 20px;
+  }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+  }
+
+  .metric {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 7px;
+    background: rgba(21, 27, 36, .78);
+  }
+
+  .metric .k {
+    display: block;
+    color: var(--muted);
+    font-size: var(--font-label);
+    line-height: 1.2;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .metric .v {
+    display: block;
+    min-height: 18px;
+    margin-top: 6px;
+    color: var(--text);
+    font-size: var(--font-body);
+    line-height: 1.2;
+    font-weight: 720;
+    overflow-wrap: break-word;
+  }
+
+  .metric .note {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.35;
+    overflow-wrap: break-word;
+  }
+
+  .metric.cl { border-color: rgba(72, 214, 184, .34); }
+  .metric.el { border-color: rgba(106, 167, 255, .34); }
+  .metric.index { border-color: rgba(242, 184, 75, .34); }
+  .metric.query { border-color: rgba(178, 140, 255, .34); }
+
+  .marker-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .marker {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 13px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 7px;
+    background: rgba(21, 27, 36, .68);
+  }
+
+  .marker .swatch {
+    width: 12px;
+    height: 44px;
+    border-radius: 999px;
+    background: var(--muted);
+  }
+
+  .marker.cl .swatch { background: var(--cl); }
+  .marker.el .swatch { background: var(--el); }
+  .marker.finalized .swatch { background: var(--finalized); }
+  .marker.index .swatch { background: var(--index); }
+  .marker.query .swatch { background: var(--query); }
+  .marker.history .swatch { background: #ff8a65; }
+  .marker.neutral .swatch { background: var(--muted); }
+
+  .marker .name {
+    display: block;
+    color: var(--muted);
+    font-size: var(--font-label);
+    line-height: 1.2;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .marker .value {
+    display: block;
+    margin-top: 5px;
+    color: var(--text);
+    font-size: var(--font-small);
+    line-height: 1.2;
+    font-weight: 720;
+    overflow-wrap: anywhere;
+  }
+
+  .marker .detail {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .lane-list {
+    display: grid;
+    gap: 14px;
+  }
+
+  .lane {
+    padding: 14px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 7px;
+    background: rgba(21, 27, 36, .62);
+  }
+
+  .lane-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 10px;
+  }
+
+  .lane-head strong {
+    font-size: var(--font-body);
+  }
+
+  .lane-head span {
+    color: var(--muted);
+    font-size: var(--font-body);
+    text-align: right;
+  }
+
+  .range-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  .range-item {
+    min-width: 0;
+  }
+
+  .range-item .label {
+    display: block;
+    color: var(--muted);
+    font-size: var(--font-label);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .range-item .value {
+    display: block;
+    margin-top: 3px;
+    color: var(--soft);
+    font-size: var(--font-body);
+    font-weight: 680;
+    overflow-wrap: anywhere;
+  }
+
+  .network-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .query-panel {
+    display: grid;
+    gap: 12px;
+  }
+
+  .query-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 16px;
+    align-items: start;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 132px;
+    resize: vertical;
+    color: var(--text);
+    background: #070a0e;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 14px;
+    outline: none;
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-body);
+    line-height: 1.5;
+  }
+
+  textarea:focus {
+    border-color: var(--query);
+    box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
+  }
+
+  textarea::placeholder {
+    color: #657180;
+  }
+
+  .query-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  button {
+    min-height: 42px;
+    border: 0;
+    border-radius: 8px;
+    padding: 0 18px;
+    color: #07100d;
+    background: var(--cl);
+    font-size: var(--font-title);
+    font-weight: 760;
+    cursor: pointer;
+  }
+
+  button:hover {
+    filter: brightness(1.07);
+  }
+
+  button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+  }
+
+  .query-meta {
+    color: var(--muted);
+    font-size: var(--font-body);
+    line-height: 1.45;
+  }
+
+  .error-msg {
+    display: none;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 107, 107, .35);
+    border-radius: 8px;
+    color: #ffd3d3;
+    background: rgba(255, 107, 107, .10);
+    font-size: var(--font-body);
+  }
+
+  .results-wrap {
+    min-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #070a0e;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-body);
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: #10151c;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 9px 12px;
+    border-bottom: 1px solid rgba(38, 50, 65, .55);
+    color: var(--soft);
+    white-space: nowrap;
+  }
+
+  tr:hover td {
+    background: rgba(21, 27, 36, .70);
+  }
+
+  .empty-state {
+    min-height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 34px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  footer {
+    padding: 20px 0 4px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    text-align: center;
+  }
+
+  @media (max-width: 1180px) {
+    .topbar, .dashboard-grid, .network-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .node-strip {
+      justify-content: flex-start;
+    }
+
+    .hero-panel {
+      grid-template-columns: 1fr;
+      align-items: stretch;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .shell {
+      padding: 18px;
+    }
+
+    .brand h1 {
+      font-size: var(--font-brand);
+    }
+
+    .metric-grid, .marker-grid, .range-row, .query-head, .graph-row {
+      grid-template-columns: 1fr;
+    }
+
+    .hero-panel, .panel, .query-panel {
+      padding: 16px;
+    }
+  }
 </style>
 </head>
 <body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <h1>LogEx</h1>
+      <p>Canonical Ethereum log sync dashboard</p>
+    </div>
+    <div class="node-strip">
+      <span class="pill state-syncing" id="nodeBadge"><span class="dot"></span><strong id="nodeState">Starting</strong></span>
+      <span class="pill">HTTP <strong id="httpState">/status</strong></span>
+      <span class="pill">Updated <strong id="lastUpdated">--</strong></span>
+    </div>
+  </header>
 
-<header>
-  <div class="title">
-    <h1>LogEx</h1>
-    <p>Canonical Ethereum Log Verification Dashboard</p>
-  </div>
-  <div class="status-panel" id="statusPanel">
-    <span class="status-badge badge-syncing" id="badge"><span class="dot"></span><span id="badgeText">--</span></span>
-    <span class="stat">Checkpoint: <b id="stHeaderCheckpoint">--</b></span>
-    <span class="stat">Cursor: <b id="stBlock">--</b></span>
-    <span class="stat">Live head: <b id="stTarget">--</b></span>
-    <span class="stat">Indexed cursor: <b id="stIndexed">--</b></span>
-    <span class="stat">Connected: <b id="stPeers">--</b></span>
-    <span class="stat">Serving: <b id="stServing">--</b></span>
-    <span class="stat">Candidates: <b id="stPending">--</b></span>
-    <span class="stat">Rate: <b id="stSpeed">--</b> blk/s</span>
-    <span class="stat">ETA: <b id="stEta">--</b></span>
-    <span class="stat">Stored logs: <b id="stStoredLogs">--</b></span>
-    <span class="stat">New this run: <b id="stSessionLogs">--</b></span>
-    <span class="stat">Storage used: <b id="stStorageUsed">--</b></span>
-    <span class="stat">Disk free: <b id="stDiskFree">--</b></span>
-  </div>
-</header>
-
-<main>
-  <div class="progress-card">
-    <div class="progress-top">
-      <strong id="stProgressPct">--</strong>
-      <div class="progress-meta">
-        <span>Checkpoint block: <b id="stCheckpointBlock">--</b></span>
-        <span>Latest block: <b id="stHead">--</b></span>
-        <span>Live span: <b id="stLiveCoverage">--</b></span>
-        <span>History span: <b id="stHistoryCoverage">--</b></span>
+  <section class="panel graph-panel">
+    <div class="panel-title">
+      <div>
+        <h2>Sync Progress Graph</h2>
+        <div class="sub">Checkpoint, target block, indexed block, and queryable block ranges</div>
       </div>
     </div>
-    <div class="progress-bar"><div class="progress-fill" id="stProgressFill"></div></div>
-  </div>
-  <div class="cards-grid">
-    <div class="meta-card">
-      <div class="card-title">Checkpoint Sync</div>
-      <div class="card-grid">
-        <div class="kv"><span class="k">Checkpoint Root</span><span class="v mono" id="stCheckpointRoot">--</span></div>
-        <div class="kv"><span class="k">Checkpoint Slot</span><span class="v" id="stCheckpointSlot">--</span></div>
-        <div class="kv"><span class="k">Checkpoint Block</span><span class="v" id="stCheckpointExec">--</span></div>
-        <div class="kv"><span class="k">Optimistic Head</span><span class="v" id="stOptimistic">--</span></div>
-        <div class="kv"><span class="k">Finalized Head</span><span class="v" id="stFinalized">--</span></div>
-        <div class="kv"><span class="k">Indexed Head</span><span class="v" id="stIndexedExec">--</span></div>
-        <div class="kv"><span class="k">Live Materialized</span><span class="v" id="stMaterializedTip">--</span></div>
-        <div class="kv"><span class="k">History Floor</span><span class="v" id="stHistoryFloor">--</span></div>
-        <div class="kv"><span class="k">Anchors Materialized</span><span class="v" id="stAnchorCount">--</span></div>
-        <div class="kv"><span class="k">Index Lag</span><span class="v" id="stIndexLag">--</span></div>
-        <div class="kv"><span class="k">Finality Gap</span><span class="v" id="stFinalityGap">--</span></div>
-        <div class="kv"><span class="k">Latest Block</span><span class="v" id="stExecutionHead">--</span></div>
+    <div class="graph-wrap">
+      <div class="graph-row live">
+        <div class="graph-row-label">
+          <strong>CL live path</strong>
+          <span>checkpoint to target block</span>
+          <div class="graph-row-value" id="graphLiveValue">--</div>
+        </div>
+        <div class="graph-bar">
+          <div class="graph-limits"><span id="liveStartLimit">Start --</span><span id="liveEndLimit">Target --</span></div>
+          <div class="graph-track">
+            <span class="graph-fill live" id="graphLiveFill"></span>
+            <span class="graph-dot live" id="graphLiveDot"></span>
+          </div>
+          <div class="graph-current" id="liveCurrentLabel">Current --</div>
+        </div>
       </div>
-      <p class="hint" id="stConsensusHint">--</p>
-    </div>
-    <div class="meta-card">
-      <div class="card-title">Network</div>
-      <div class="card-grid">
-        <div class="kv"><span class="k">Cursor Block</span><span class="v" id="stCursor">--</span></div>
-        <div class="kv"><span class="k">Stored Logs</span><span class="v" id="stStoredLogsCard">--</span></div>
-        <div class="kv"><span class="k">Session Logs</span><span class="v" id="stSessionLogsCard">--</span></div>
-        <div class="kv"><span class="k">Peer Tip</span><span class="v" id="stPeerTip">--</span></div>
-        <div class="kv"><span class="k">EL Connected</span><span class="v" id="stPeersCard">--</span></div>
-        <div class="kv"><span class="k">EL Serving</span><span class="v" id="stServingCard">--</span></div>
-        <div class="kv"><span class="k">EL Candidates</span><span class="v" id="stPendingCard">--</span></div>
-        <div class="kv"><span class="k">CL Discovery</span><span class="v" id="stClSessions">--</span></div>
-        <div class="kv"><span class="k">CL Connected</span><span class="v" id="stClConnected">--</span></div>
-        <div class="kv"><span class="k">CL Status RPC</span><span class="v" id="stClStatusPeers">--</span></div>
-        <div class="kv"><span class="k">CL Finality RPC</span><span class="v" id="stClFinalityPeers">--</span></div>
-        <div class="kv"><span class="k">CL Optimistic RPC</span><span class="v" id="stClOptimisticPeers">--</span></div>
-        <div class="kv"><span class="k">CL Bootstrap RPC</span><span class="v" id="stClBootstrapPeers">--</span></div>
+      <div class="graph-row history">
+        <div class="graph-row-label">
+          <strong>CL history path</strong>
+          <span>checkpoint down to genesis</span>
+          <div class="graph-row-value" id="graphHistoryValue">--</div>
+        </div>
+        <div class="graph-bar">
+          <div class="graph-limits"><span id="historyStartLimit">Start --</span><span id="historyEndLimit">Target --</span></div>
+          <div class="graph-track">
+            <span class="graph-fill history" id="graphHistoryFill"></span>
+            <span class="graph-dot history" id="graphHistoryDot"></span>
+          </div>
+          <div class="graph-current" id="historyCurrentLabel">Current --</div>
+        </div>
       </div>
-      <p class="hint" id="stDirectionHint">--</p>
+      <div class="graph-row el">
+        <div class="graph-row-label">
+          <strong>EL validation</strong>
+          <span>execution cursor to peer tip</span>
+          <div class="graph-row-value" id="graphElValue">--</div>
+        </div>
+        <div class="graph-bar">
+          <div class="graph-limits"><span id="elStartLimit">Start --</span><span id="elEndLimit">Target --</span></div>
+          <div class="graph-track">
+            <span class="graph-fill el" id="graphElFill"></span>
+            <span class="graph-dot el" id="graphElDot"></span>
+          </div>
+          <div class="graph-current" id="elCurrentLabel">Current --</div>
+        </div>
+      </div>
+      <div class="graph-row index">
+        <div class="graph-row-label">
+          <strong>Indexing</strong>
+          <span>stored logs to canonical top</span>
+          <div class="graph-row-value" id="graphIndexValue">--</div>
+        </div>
+        <div class="graph-bar">
+          <div class="graph-limits"><span id="indexStartLimit">Start --</span><span id="indexEndLimit">Target --</span></div>
+          <div class="graph-track">
+            <span class="graph-fill index" id="graphIndexFill"></span>
+            <span class="graph-dot index" id="graphIndexDot"></span>
+          </div>
+          <div class="graph-current" id="indexCurrentLabel">Current --</div>
+        </div>
+      </div>
+      <div class="graph-row query">
+        <div class="graph-row-label">
+          <strong>Queryable logs</strong>
+          <span>block range covered by local rows</span>
+          <div class="graph-row-value" id="graphQueryValue">--</div>
+        </div>
+        <div class="graph-bar">
+          <div class="graph-limits"><span id="queryStartLimit">Start --</span><span id="queryEndLimit">Target --</span></div>
+          <div class="graph-track">
+            <span class="graph-fill query" id="graphQueryFill"></span>
+            <span class="graph-dot query" id="graphQueryStartDot"></span>
+            <span class="graph-dot query" id="graphQueryEndDot"></span>
+          </div>
+          <div class="graph-current" id="queryCurrentLabel">Current --</div>
+        </div>
+      </div>
     </div>
-  </div>
-  <div class="rail-card">
-    <div class="card-title">Checkpoint Expansion Bar</div>
-    <div class="marker-rail" id="markerRail"></div>
-    <div class="direction-note"><span id="railLeftLabel">Latest block</span><span id="railRightLabel">Genesis</span></div>
-    <p class="hint" id="stRailHint">--</p>
-  </div>
-  <div class="query-panel">
-    <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
-    <div class="query-bar">
-      <button id="runBtn" onclick="runQuery()">Run Query</button>
-      <span class="result-count" id="resultCount"></span>
-    </div>
-    <div class="error-msg" id="errorMsg"></div>
-  </div>
-  <div class="results-wrap" id="resultsWrap">
-    <div class="empty-state" id="emptyState">Run a LogSQL query to see results</div>
-    <table id="resultsTable" style="display:none">
-      <thead id="thead"></thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
-</main>
+  </section>
 
-<footer>
-  <span>JSON-RPC: POST /</span> | <span>REST: POST /query</span> | <span>gRPC: --grpc-port (default 8578)</span> | <span>WebSocket: /ws</span>
-</footer>
+  <section class="hero-grid">
+    <div class="hero-panel">
+      <div>
+        <span class="big-label">Consensus Layer P2P</span>
+        <strong class="big-number" id="heroClState">--</strong>
+      </div>
+      <div class="bar bar-cl"><span id="heroClBar"></span></div>
+      <div class="query-meta" id="heroClMeta">--</div>
+    </div>
+    <div class="hero-panel">
+      <div>
+        <span class="big-label">Execution Layer P2P</span>
+        <strong class="big-number" id="heroElState">--</strong>
+      </div>
+      <div class="bar bar-el"><span id="heroElBar"></span></div>
+      <div class="query-meta" id="heroElMeta">--</div>
+    </div>
+    <div class="hero-panel">
+      <div>
+        <span class="big-label">Indexed Query Coverage</span>
+        <strong class="big-number" id="heroQueryRange">--</strong>
+      </div>
+      <div class="bar bar-query"><span id="heroQueryBar"></span></div>
+      <div class="query-meta" id="heroQueryMeta">--</div>
+    </div>
+  </section>
+
+  <main class="dashboard-grid">
+    <div class="stack">
+      <section class="network-grid">
+        <div class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>CL P2P Network</h2>
+              <div class="sub">Native beacon light-client and beacon-history peers</div>
+            </div>
+            <span class="pill" id="clBadge"><span class="dot"></span><strong id="clBadgeText">--</strong></span>
+          </div>
+          <div class="metric-grid">
+            <div class="metric cl"><span class="k">Connected</span><span class="v" id="clConnected">--</span><span class="note">libp2p sessions</span></div>
+            <div class="metric cl"><span class="k">Discovered</span><span class="v" id="clDiscovered">--</span><span class="note">ENRs this run</span></div>
+            <div class="metric cl"><span class="k">Status RPC</span><span class="v" id="clStatusPeers">--</span><span class="note">answered status</span></div>
+            <div class="metric cl"><span class="k">In Flight</span><span class="v" id="clInflight">--</span><span class="note" id="clInflightNote">pending RPCs</span></div>
+            <div class="metric cl"><span class="k">Bootstrap</span><span class="v" id="clBootstrapPeers">--</span><span class="note">serving peers</span></div>
+            <div class="metric cl"><span class="k">Updates</span><span class="v" id="clUpdatePeers">--</span><span class="note">range/finality/optimistic</span></div>
+            <div class="metric cl"><span class="k">Beacon Blocks</span><span class="v" id="clBlockPeers">--</span><span class="note">range/root peers</span></div>
+            <div class="metric cl"><span class="k">Peer Pool</span><span class="v" id="clPeerPool">--</span><span class="note">preferred/cooldown/ignored</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>EL P2P Network</h2>
+              <div class="sub">Execution peers used for headers, bodies, receipts, and logs</div>
+            </div>
+            <span class="pill" id="elBadge"><span class="dot"></span><strong id="elBadgeText">--</strong></span>
+          </div>
+          <div class="metric-grid">
+            <div class="metric el"><span class="k">Connected</span><span class="v" id="elConnected">--</span><span class="note">devp2p peers</span></div>
+            <div class="metric el"><span class="k">Serving</span><span class="v" id="elServing">--</span><span class="note">validated data peers</span></div>
+            <div class="metric el"><span class="k">Candidates</span><span class="v" id="elCandidates">--</span><span class="note">waiting to dial</span></div>
+            <div class="metric el"><span class="k">Network Tip</span><span class="v" id="elTip">--</span><span class="note">peer-advertised block</span></div>
+            <div class="metric el"><span class="k">EL Cursor</span><span class="v" id="elCursor">--</span><span class="note">validated block</span></div>
+            <div class="metric el"><span class="k">EL Lag</span><span class="v" id="elLag">--</span><span class="note">blocks remaining</span></div>
+            <div class="metric el"><span class="k">Rate</span><span class="v" id="elRate">--</span><span class="note">blocks/sec</span></div>
+            <div class="metric el"><span class="k">ETA</span><span class="v" id="elEta">--</span><span class="note">to known tip</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Consensus Markers</h2>
+            <div class="sub">Execution block markers derived from the checkpoint-centered CL view</div>
+          </div>
+        </div>
+        <div class="marker-grid">
+          <div class="marker cl"><span class="swatch"></span><span><span class="name">Checkpoint</span><span class="value" id="markerCheckpoint">--</span><span class="detail" id="markerCheckpointDetail">--</span></span></div>
+          <div class="marker finalized"><span class="swatch"></span><span><span class="name">Finalized Block</span><span class="value" id="markerFinalized">--</span><span class="detail" id="markerFinalizedDetail">--</span></span></div>
+          <div class="marker el"><span class="swatch"></span><span><span class="name">Optimistic Block</span><span class="value" id="markerOptimistic">--</span><span class="detail" id="markerOptimisticDetail">--</span></span></div>
+          <div class="marker cl"><span class="swatch"></span><span><span class="name">Highest Verified Block</span><span class="value" id="markerMaterializedTip">--</span><span class="detail" id="markerMaterializedTipDetail">--</span></span></div>
+          <div class="marker history"><span class="swatch"></span><span><span class="name">Lowest Verified Block</span><span class="value" id="markerHistoryFloor">--</span><span class="detail" id="markerHistoryFloorDetail">--</span></span></div>
+          <div class="marker index"><span class="swatch"></span><span><span class="name">Indexed Block</span><span class="value" id="markerIndexed">--</span><span class="detail" id="markerIndexedDetail">--</span></span></div>
+          <div class="marker query"><span class="swatch"></span><span><span class="name">Query Logs</span><span class="value" id="markerQuery">--</span><span class="detail" id="markerQueryDetail">--</span></span></div>
+          <div class="marker neutral"><span class="swatch"></span><span><span class="name">Genesis</span><span class="value">0</span><span class="detail">history target</span></span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Sync Coverage</h2>
+            <div class="sub">Separate progress for CL live tracking, CL history backfill, EL validation, and indexed logs</div>
+          </div>
+        </div>
+        <div class="lane-list">
+          <div class="lane">
+            <div class="lane-head"><strong>CL live path</strong><span id="liveLaneSummary">--</span></div>
+            <div class="bar bar-cl"><span id="liveLaneBar"></span></div>
+            <div class="range-row">
+              <span class="range-item"><span class="label">From</span><span class="value" id="liveLaneFrom">--</span></span>
+              <span class="range-item"><span class="label">Verified Tip</span><span class="value" id="liveLaneDone">--</span></span>
+              <span class="range-item"><span class="label">Target</span><span class="value" id="liveLaneTarget">--</span></span>
+            </div>
+          </div>
+          <div class="lane">
+            <div class="lane-head"><strong>CL history path</strong><span id="historyLaneSummary">--</span></div>
+            <div class="bar bar-index"><span id="historyLaneBar"></span></div>
+            <div class="range-row">
+              <span class="range-item"><span class="label">From</span><span class="value" id="historyLaneFrom">--</span></span>
+              <span class="range-item"><span class="label">Lowest Verified</span><span class="value" id="historyLaneDone">--</span></span>
+              <span class="range-item"><span class="label">Target</span><span class="value">0</span></span>
+            </div>
+          </div>
+          <div class="lane">
+            <div class="lane-head"><strong>EL validated sync</strong><span id="elLaneSummary">--</span></div>
+            <div class="bar bar-el"><span id="elLaneBar"></span></div>
+            <div class="range-row">
+              <span class="range-item"><span class="label">Cursor</span><span class="value" id="elLaneCursor">--</span></span>
+              <span class="range-item"><span class="label">Tip</span><span class="value" id="elLaneTip">--</span></span>
+              <span class="range-item"><span class="label">Remaining</span><span class="value" id="elLaneRemaining">--</span></span>
+            </div>
+          </div>
+          <div class="lane">
+            <div class="lane-head"><strong>Log query coverage</strong><span id="queryLaneSummary">--</span></div>
+            <div class="bar bar-query"><span id="queryLaneBar"></span></div>
+            <div class="range-row">
+              <span class="range-item"><span class="label">Stored From</span><span class="value" id="queryLaneFrom">--</span></span>
+              <span class="range-item"><span class="label">Stored To</span><span class="value" id="queryLaneTo">--</span></span>
+              <span class="range-item"><span class="label">Block Tag: latest</span><span class="value" id="queryLaneLatest">--</span></span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Index And Storage</h2>
+            <div class="sub">Local rows and disk usage available to query surfaces</div>
+          </div>
+        </div>
+        <div class="metric-grid">
+          <div class="metric index"><span class="k">Indexed Block</span><span class="v" id="idxHead">--</span><span class="note">highest indexed block</span></div>
+          <div class="metric index"><span class="k">Index Lag</span><span class="v" id="idxLag">--</span><span class="note">to canonical top</span></div>
+          <div class="metric query"><span class="k">Stored Logs</span><span class="v" id="storedRows">--</span><span class="note">local rows</span></div>
+          <div class="metric query"><span class="k">This Run</span><span class="v" id="sessionRows">--</span><span class="note">ingested logs</span></div>
+          <div class="metric"><span class="k">Segments</span><span class="v" id="segments">--</span><span class="note">sealed partitions</span></div>
+          <div class="metric"><span class="k">Storage Used</span><span class="v" id="storageUsed">--</span><span class="note">data directory</span></div>
+          <div class="metric"><span class="k">Disk Free</span><span class="v" id="diskFree">--</span><span class="note">filesystem</span></div>
+          <div class="metric finalized"><span class="k">Finality Gap</span><span class="v" id="finalityGap">--</span><span class="note">top to finalized</span></div>
+        </div>
+      </section>
+
+      <section class="query-panel">
+        <div class="query-head">
+          <div class="panel-title">
+            <div>
+              <h2>Log Query</h2>
+              <div class="sub" id="queryScope">--</div>
+            </div>
+          </div>
+          <button id="runBtn" onclick="runQuery()">Run Query</button>
+        </div>
+        <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
+        <div class="query-actions">
+          <span class="query-meta" id="resultCount">--</span>
+          <span class="query-meta" id="queryScanScope">--</span>
+        </div>
+        <div class="error-msg" id="errorMsg"></div>
+        <div class="results-wrap" id="resultsWrap">
+          <div class="empty-state" id="emptyState">No query results yet.</div>
+          <table id="resultsTable" style="display:none">
+            <thead id="thead"></thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    JSON-RPC POST / | REST POST /query | WebSocket /ws
+  </footer>
+</div>
 
 <script>
-function fmt(n) {
-  if (n == null) return '--';
-  return Number(n).toLocaleString();
+var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
+var MAINNET_GENESIS_TIME_SECONDS = 1606824023;
+var SECONDS_PER_SLOT = 12;
+var latestStatus = null;
+var lastStatusTimestamp = null;
+
+function byId(id) {
+  return document.getElementById(id);
+}
+
+function setText(id, value) {
+  byId(id).textContent = value == null || value === '' ? '--' : String(value);
+}
+
+function setWidth(id, pct) {
+  var safe = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+  byId(id).style.width = safe.toFixed(1) + '%';
+}
+
+function setLeft(id, pct) {
+  var safe = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+  byId(id).style.left = safe.toFixed(1) + '%';
+}
+
+function setSegment(id, left, width) {
+  var safeLeft = Number.isFinite(left) ? Math.max(0, Math.min(100, left)) : 0;
+  var safeWidth = Number.isFinite(width) ? Math.max(0, Math.min(100 - safeLeft, width)) : 0;
+  var element = byId(id);
+  element.style.left = safeLeft.toFixed(1) + '%';
+  element.style.width = safeWidth.toFixed(1) + '%';
+}
+
+function numberOrNull(value) {
+  if (value == null) return null;
+  var number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function fmt(value) {
+  var number = numberOrNull(value);
+  if (number == null) return '--';
+  return number.toLocaleString();
+}
+
+function fmtBlocks(value) {
+  var number = numberOrNull(value);
+  if (number == null) return '-- blocks';
+  return fmt(number) + (number === 1 ? ' block' : ' blocks');
+}
+
+function fmtRate(value) {
+  var number = numberOrNull(value);
+  if (number == null) return '--';
+  return number.toFixed(2);
 }
 
 function fmtBytes(bytes) {
-  if (bytes == null) return '--';
-  var value = Number(bytes);
-  if (!Number.isFinite(value) || value < 0) return '--';
+  var value = numberOrNull(bytes);
+  if (value == null || value < 0) return '--';
   var units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   var unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
@@ -217,295 +1074,360 @@ function fmtBytes(bytes) {
   return value.toFixed(digits) + ' ' + units[unit];
 }
 
-function truncHash(h) {
-  if (!h || h.length < 16) return h || '';
-  return h.slice(0, 10) + '\u2026' + h.slice(-6);
+function fmtTimestamp(seconds) {
+  var value = numberOrNull(seconds);
+  if (value == null || value <= 0) return '--';
+  var elapsed = Math.floor((Date.now() / 1000) - value);
+  if (elapsed < 10) return 'Now';
+  var units = [
+    { seconds: 86400, singular: 'day', plural: 'days' },
+    { seconds: 3600, singular: 'hour', plural: 'hours' },
+    { seconds: 60, singular: 'min', plural: 'mins' },
+    { seconds: 1, singular: 'sec', plural: 'secs' }
+  ];
+  for (var i = 0; i < units.length; i += 1) {
+    var unit = units[i];
+    if (elapsed >= unit.seconds) {
+      var amount = Math.floor(elapsed / unit.seconds);
+      return amount + ' ' + (amount === 1 ? unit.singular : unit.plural) + ' ago';
+    }
+  }
+  return 'Now';
+}
+
+function refreshLastUpdated() {
+  setText('lastUpdated', fmtTimestamp(lastStatusTimestamp));
+}
+
+function slotTimestamp(slot) {
+  var value = numberOrNull(slot);
+  if (value == null) return null;
+  return MAINNET_GENESIS_TIME_SECONDS + (value * SECONDS_PER_SLOT);
+}
+
+function headerTimestamp(header) {
+  return header && header.beacon_slot != null ? slotTimestamp(header.beacon_slot) : null;
+}
+
+function anchorTimestamp(anchor) {
+  if (!anchor) return null;
+  if (anchor.timestamp != null) return numberOrNull(anchor.timestamp);
+  return slotTimestamp(anchorSlot(anchor));
+}
+
+function blockWithTimestamp(block, timestamp) {
+  var label = fmt(block);
+  var time = fmtTimestamp(timestamp);
+  return time === '--' ? label : label + ' - ' + time;
+}
+
+function detailParts(parts) {
+  return parts.filter(function(part) {
+    return part && part !== '--';
+  }).join(' - ');
 }
 
 function fmtEta(seconds) {
-  if (seconds == null || seconds <= 0) return '--';
-  var h = Math.floor(seconds / 3600);
-  var m = Math.floor((seconds % 3600) / 60);
-  var s = Math.floor(seconds % 60);
+  var value = numberOrNull(seconds);
+  if (value == null || value <= 0) return '--';
+  var h = Math.floor(value / 3600);
+  var m = Math.floor((value % 3600) / 60);
+  var s = Math.floor(value % 60);
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm ' + s + 's';
   return s + 's';
 }
 
-function stateToBadge(state) {
-  switch (state) {
-    case 'synced':
-      return { className: 'status-badge badge-synced', label: 'Synced' };
-    case 'syncing':
-      return { className: 'status-badge badge-syncing', label: 'Syncing' };
-    case 'waiting_for_consensus':
-      return { className: 'status-badge badge-waiting', label: 'Waiting For Consensus' };
-    case 'discovering':
-      return { className: 'status-badge badge-discovering', label: 'Discovering' };
-    case 'connecting':
-      return { className: 'status-badge badge-connecting', label: 'Connecting' };
-    case 'reconnecting':
-      return { className: 'status-badge badge-reconnecting', label: 'Reconnecting' };
-    case 'disconnected':
-      return { className: 'status-badge badge-disconnected', label: 'Disconnected' };
-    default:
-      return { className: 'status-badge badge-syncing', label: 'Starting' };
-  }
+function shortHash(value) {
+  if (!value) return '--';
+  var hash = String(value);
+  if (hash.length <= 18) return hash;
+  return hash.slice(0, 10) + '...' + hash.slice(-6);
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function anchorBlock(anchor) {
-  if (!anchor || anchor.block_number == null) return null;
-  var value = Number(anchor.block_number);
-  return Number.isFinite(value) ? value : null;
+  return anchor && anchor.block_number != null ? numberOrNull(anchor.block_number) : null;
+}
+
+function anchorSlot(anchor) {
+  return anchor && anchor.beacon_slot != null ? numberOrNull(anchor.beacon_slot) : null;
 }
 
 function executionBlockFromHeader(header) {
-  if (!header || !header.execution || header.execution.block_number == null) return null;
-  var value = Number(header.execution.block_number);
-  return Number.isFinite(value) ? value : null;
+  return header && header.execution ? numberOrNull(header.execution.block_number) : null;
 }
 
 function checkpointExecutionBlock(lightClient) {
   return executionBlockFromHeader(lightClient && lightClient.bootstrap && lightClient.bootstrap.header);
 }
 
-function liveSidePosition(block, checkpointBlock, liveBlock) {
-  if (!Number.isFinite(block) || !Number.isFinite(checkpointBlock) || !Number.isFinite(liveBlock)) return 50;
-  if (liveBlock <= checkpointBlock) return 50;
-  var ratio = (block - checkpointBlock) / (liveBlock - checkpointBlock);
-  return Math.max(0, Math.min(50, 50 - (ratio * 50)));
+function ratio(done, total) {
+  if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(100, (done / total) * 100));
 }
 
-function historySidePosition(block, checkpointBlock) {
-  if (!Number.isFinite(block) || !Number.isFinite(checkpointBlock) || checkpointBlock <= 0) return 50;
-  var ratio = (checkpointBlock - block) / checkpointBlock;
-  return Math.max(50, Math.min(100, 50 + (ratio * 50)));
+function blockRange(from, to) {
+  if (from == null || to == null) return '--';
+  return fmt(from) + ' - ' + fmt(to);
 }
 
-function renderMarkerRail(data, checkpointBlock, liveBlock, liveVerifiedBlock, historyBlock, hasConsensus) {
-  var rail = document.getElementById('markerRail');
-  if (!hasConsensus) {
-    rail.innerHTML = '<div class="empty-state">Checkpointed consensus sync will place the weak-subjectivity checkpoint at the center of this bar.</div>';
-    document.getElementById('stRailHint').textContent = 'Live and historical coverage become meaningful here once the node is running from a weak-subjectivity checkpoint.';
-    return;
+function setPill(id, label, stateClass) {
+  var el = byId(id);
+  el.className = 'pill ' + stateClass;
+  var strong = el.querySelector('strong');
+  if (strong) strong.textContent = label;
+}
+
+function nodeStateClass(state) {
+  switch (state) {
+    case 'synced': return 'state-synced';
+    case 'syncing': return 'state-syncing';
+    case 'waiting_for_consensus': return 'state-waiting';
+    case 'discovering': return 'state-discovering';
+    case 'connecting': return 'state-connecting';
+    case 'reconnecting': return 'state-syncing';
+    case 'disconnected': return 'state-disconnected';
+    default: return 'state-connecting';
   }
-
-  if (!Number.isFinite(checkpointBlock)) {
-    rail.innerHTML = '<div class="empty-state">Waiting for a decoded light-client bootstrap to map the checkpoint onto an execution block.</div>';
-    document.getElementById('stRailHint').textContent = 'The checkpoint marker becomes concrete once a native CL bootstrap payload is decoded and tied to its execution block.';
-    return;
-  }
-
-  var latestKnown = Number.isFinite(liveBlock) ? liveBlock : checkpointBlock;
-  var leftFill = Number.isFinite(liveVerifiedBlock)
-    ? liveSidePosition(liveVerifiedBlock, checkpointBlock, latestKnown)
-    : 50;
-  var rightFill = Number.isFinite(historyBlock)
-    ? historySidePosition(historyBlock, checkpointBlock)
-    : 50;
-  var checkpointLabel = fmt(checkpointBlock);
-  var markers = [
-    { name: 'Latest', value: fmt(latestKnown), pos: 0, className: 'marker-head' },
-    { name: 'Checkpoint', value: checkpointLabel, pos: 50, className: 'marker-checkpoint' },
-    { name: 'Optimistic', value: fmt(anchorBlock(data.optimistic_execution_head)), pos: liveSidePosition(anchorBlock(data.optimistic_execution_head), checkpointBlock, latestKnown), className: 'marker-optimistic' },
-    { name: 'Finalized', value: fmt(anchorBlock(data.finalized_execution_head)), pos: liveSidePosition(anchorBlock(data.finalized_execution_head), checkpointBlock, latestKnown), className: 'marker-finalized' },
-    { name: 'Indexed', value: fmt(anchorBlock(data.indexed_execution_head)), pos: liveSidePosition(anchorBlock(data.indexed_execution_head), checkpointBlock, latestKnown), className: 'marker-indexed' },
-    { name: 'Cursor', value: fmt(Number(data.current_block || 0)), pos: liveSidePosition(Number(data.current_block || 0), checkpointBlock, latestKnown), className: 'marker-cursor' },
-    { name: 'Floor', value: fmt(historyBlock), pos: historySidePosition(historyBlock, checkpointBlock), className: 'marker-history' },
-    { name: 'Genesis', value: '0', pos: 100, className: 'marker-genesis' }
-  ].filter(function(marker) {
-    return marker.name === 'Latest' || marker.name === 'Checkpoint' || marker.name === 'Genesis' || marker.value !== '--';
-  });
-
-  rail.innerHTML =
-    '<div class="marker-line"></div>' +
-    '<div class="marker-fill-live" style="left:' + leftFill.toFixed(2) + '%; width:' + (50 - leftFill).toFixed(2) + '%"></div>' +
-    '<div class="marker-fill-history" style="left:50%; width:' + (rightFill - 50).toFixed(2) + '%"></div>' +
-    markers.map(function(marker, idx) {
-      var placement = idx % 2 === 0 ? 'top' : 'bottom';
-      var labelBeforeDot =
-        placement === 'top'
-          ? '<div class="marker-name">' + marker.name + '</div><div class="marker-value">' + marker.value + '</div><div class="marker-dot"></div>'
-          : '<div class="marker-dot"></div><div class="marker-name">' + marker.name + '</div><div class="marker-value">' + marker.value + '</div>';
-      return '<div class="marker ' + placement + ' ' + marker.className + '" style="left:' + marker.pos.toFixed(2) + '%">' + labelBeforeDot + '</div>';
-    }).join('');
-
-  var liveHint = Number.isFinite(liveVerifiedBlock)
-    ? 'Live-side verification is plotted from the checkpoint toward the latest known block.'
-    : 'Live-side verification will extend left once optimistic or finalized execution heads arrive from CL.';
-  var historyHint = Number.isFinite(historyBlock)
-    ? 'Genesis-side verification is plotted from the checkpoint toward block 0.'
-    : 'Genesis-side verification has not materialized any execution anchors yet, so the right side is intentionally left empty.';
-  document.getElementById('stRailHint').textContent = liveHint + ' ' + historyHint;
 }
 
 function updateStatus(data) {
-  var current = Number(data.current_block || 0);
-  var target = Number(data.target_block || 0);
-  var targetKnown = target > 0;
+  latestStatus = data;
+  lastStatusTimestamp = Date.now() / 1000;
   var nodeState = data.node_state || 'starting';
-  var hasConsensus = !!data.checkpoint_root;
+  var nodeLabel = data.node_state_label || nodeState;
   var clNetwork = data.consensus_network || {};
   var clLight = data.consensus_light_client || {};
+  var query = data.query_coverage || {};
+  var current = numberOrNull(data.current_block) || 0;
+  var target = numberOrNull(data.target_block) || 0;
+  var canonicalTop = numberOrNull(data.canonical_top_block) || target || 0;
+  var checkpointHeader = clLight && clLight.bootstrap && clLight.bootstrap.header;
   var checkpointBlock = checkpointExecutionBlock(clLight);
-  var canonicalTop = Number(data.canonical_top_block || 0);
-  var latestKnown = hasConsensus
-    ? (canonicalTop > 0 ? canonicalTop : (targetKnown ? target : null))
-    : (targetKnown ? target : (canonicalTop > 0 ? canonicalTop : null));
-  var indexedExec = anchorBlock(data.indexed_execution_head);
+  var checkpointSlot = numberOrNull(data.checkpoint_slot);
+  var checkpointTime = headerTimestamp(checkpointHeader) || slotTimestamp(checkpointSlot);
   var materializedFloor = anchorBlock(data.materialized_execution_floor);
-  var materializedCeiling = anchorBlock(data.materialized_execution_ceiling);
-  var optimisticExec = anchorBlock(data.optimistic_execution_head);
-  var finalizedExec = anchorBlock(data.finalized_execution_head);
-  var liveVerifiedBlock = materializedCeiling != null ? materializedCeiling : indexedExec;
-  var historyVerifiedBlock = materializedFloor;
-  var badge = document.getElementById('badge');
-  var badgeText = document.getElementById('badgeText');
-  var badgeData = stateToBadge(nodeState);
-  badge.className = badgeData.className;
-  badgeText.textContent = data.node_state_label || badgeData.label;
-
-  var pct = 0;
-  if (hasConsensus) {
-    if (Number.isFinite(checkpointBlock) && Number.isFinite(latestKnown) && latestKnown > 0) {
-      var verifiedSpan = 0;
-      if (Number.isFinite(liveVerifiedBlock) && liveVerifiedBlock >= checkpointBlock) {
-        verifiedSpan += (liveVerifiedBlock - checkpointBlock);
-      }
-      if (Number.isFinite(historyVerifiedBlock) && historyVerifiedBlock <= checkpointBlock) {
-        verifiedSpan += (checkpointBlock - historyVerifiedBlock);
-      }
-      pct = Math.max(0, Math.min(100, (verifiedSpan / latestKnown) * 100));
-    }
-  } else {
-    pct = targetKnown ? Math.min((current / target) * 100, 100) : 0;
+  var materializedFloorTime = anchorTimestamp(data.materialized_execution_floor);
+  var materializedTip = anchorBlock(data.materialized_execution_ceiling);
+  var materializedTipTime = anchorTimestamp(data.materialized_execution_ceiling);
+  var optimistic = anchorBlock(data.optimistic_execution_head);
+  var optimisticTime = anchorTimestamp(data.optimistic_execution_head);
+  var finalized = anchorBlock(data.finalized_execution_head);
+  var finalizedTime = anchorTimestamp(data.finalized_execution_head);
+  var indexedAnchor = anchorBlock(data.indexed_execution_head);
+  var indexedAnchorTime = anchorTimestamp(data.indexed_execution_head);
+  var indexedHead = numberOrNull(data.indexed_head_block) || indexedAnchor;
+  var queryFrom = numberOrNull(query.stored_log_from_block);
+  var queryTo = numberOrNull(query.stored_log_to_block);
+  var queryLatest = numberOrNull(query.latest_block);
+  var queryLatestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
+  var hasConsensus = !!data.checkpoint_root;
+  var latestKnown = canonicalTop || optimistic || target || current || null;
+  var latestKnownTime = null;
+  if (latestKnown != null && optimistic != null && latestKnown === optimistic) {
+    latestKnownTime = optimisticTime;
+  } else if (latestKnown != null && queryLatest != null && latestKnown === queryLatest) {
+    latestKnownTime = queryLatestTime;
   }
 
-  var liveCoverage = '--';
-  if (hasConsensus) {
-    if (!Number.isFinite(checkpointBlock)) {
-      liveCoverage = 'Waiting for bootstrap';
-    } else if (!Number.isFinite(liveVerifiedBlock)) {
-      liveCoverage = 'Waiting for anchors';
-    } else {
-      var liveDistance = Math.max(0, liveVerifiedBlock - checkpointBlock);
-      var liveLag = Number.isFinite(latestKnown) ? Math.max(0, latestKnown - liveVerifiedBlock) : null;
-      liveCoverage = fmt(liveDistance) + ' materialized';
-      if (liveLag != null) {
-        liveCoverage += ' / ' + fmt(liveLag) + ' behind';
-      }
-    }
-  } else if (targetKnown) {
-    liveCoverage = fmt(Math.max(0, target - current)) + ' remaining';
+  var liveDone = checkpointBlock != null && materializedTip != null
+    ? Math.max(0, materializedTip - checkpointBlock)
+    : 0;
+  var liveTotal = checkpointBlock != null && latestKnown != null
+    ? Math.max(0, latestKnown - checkpointBlock)
+    : 0;
+  var livePct = ratio(liveDone, liveTotal);
+  var liveRemaining = latestKnown != null && materializedTip != null
+    ? Math.max(0, latestKnown - materializedTip)
+    : null;
+  var historyDone = checkpointBlock != null && materializedFloor != null
+    ? Math.max(0, checkpointBlock - materializedFloor)
+    : 0;
+  var historyPct = checkpointBlock != null ? ratio(historyDone, checkpointBlock) : 0;
+  var historyRemaining = materializedFloor != null
+    ? Math.max(0, materializedFloor)
+    : null;
+  var liveRemainingText = liveRemaining == null ? 'Waiting for highest verified block' : fmtBlocks(liveRemaining) + ' remaining before CL verification reaches target block';
+  var historyRemainingText = historyRemaining == null ? 'Waiting for lowest verified block' : fmtBlocks(historyRemaining) + ' remaining before history verification reaches genesis';
+  var elPct = target > 0 ? ratio(current, target) : 0;
+  var queryPct = queryLatest != null && queryTo != null ? ratio(queryTo, queryLatest) : 0;
+  var queryRange = blockRange(queryFrom, queryTo);
+  var indexPct = latestKnown != null && indexedHead != null ? ratio(indexedHead, latestKnown) : 0;
+  var queryScale = latestKnown || queryLatest || target || queryTo || 0;
+  var queryStartPct = queryScale > 0 && queryFrom != null ? ratio(queryFrom, queryScale) : 0;
+  var queryEndPct = queryScale > 0 && queryTo != null ? ratio(queryTo, queryScale) : queryStartPct;
+
+  var clState = !hasConsensus
+    ? 'Not configured'
+    : checkpointBlock == null
+      ? 'Bootstrapping'
+      : liveTotal > 0 && livePct >= 99
+        ? 'Tracking head'
+        : 'Materializing';
+  var clStateClass = !hasConsensus ? 'state-empty' : checkpointBlock == null ? 'state-bootstrapping' : livePct >= 99 ? 'state-tracking' : 'state-materializing';
+  var elLag = target > 0 ? Math.max(0, target - current) : null;
+  var elState = nodeLabel;
+  var queryState = queryFrom != null && queryTo != null ? 'Queryable' : 'No rows';
+
+  setPill('nodeBadge', nodeLabel, nodeStateClass(nodeState));
+  setText('nodeState', nodeLabel);
+  refreshLastUpdated();
+
+  setText('heroClState', clState);
+  setText('heroElState', elState);
+  setText('heroQueryRange', queryRange);
+  setWidth('heroClBar', livePct);
+  setWidth('heroElBar', elPct);
+  setWidth('heroQueryBar', queryPct);
+  setText('heroClMeta', checkpointBlock == null ? 'Checkpoint ' + shortHash(data.checkpoint_root) : liveRemainingText);
+  setText('heroElMeta', target > 0 ? fmt(elLag) + ' blocks behind peer tip ' + fmt(target) : 'Awaiting peer tip');
+  setText('heroQueryMeta', queryFrom != null ? fmt(query.stored_rows) + ' rows available; block tag latest resolves to ' + blockWithTimestamp(queryLatest, queryLatestTime) : 'No local log rows are queryable yet');
+
+  setWidth('graphLiveFill', livePct);
+  setLeft('graphLiveDot', livePct);
+  setWidth('graphHistoryFill', historyPct);
+  setLeft('graphHistoryDot', historyPct);
+  setWidth('graphElFill', elPct);
+  setLeft('graphElDot', elPct);
+  setWidth('graphIndexFill', indexPct);
+  setLeft('graphIndexDot', indexPct);
+  setSegment('graphQueryFill', queryStartPct, Math.max(0, queryEndPct - queryStartPct));
+  setLeft('graphQueryStartDot', queryStartPct);
+  setLeft('graphQueryEndDot', queryEndPct);
+  setText('graphLiveValue', checkpointBlock == null ? 'Waiting for checkpoint' : liveRemainingText);
+  setText('graphHistoryValue', checkpointBlock == null ? 'Waiting for checkpoint' : historyRemainingText);
+  setText('graphElValue', target > 0 ? fmt(current) + ' of ' + fmt(target) + ' blocks validated' : 'Awaiting peer tip');
+  setText('graphIndexValue', indexedHead == null ? 'Log indexing has not started' : fmt(indexedHead) + ' indexed; target block ' + fmt(latestKnown));
+  setText('graphQueryValue', queryFrom == null ? 'No local log rows' : queryRange);
+  setText('liveStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
+  setText('liveEndLimit', latestKnown == null ? 'Target --' : 'Target block ' + blockWithTimestamp(latestKnown, latestKnownTime));
+  setText('liveCurrentLabel', materializedTip == null ? 'Highest verified block --' : 'Highest verified block ' + blockWithTimestamp(materializedTip, materializedTipTime));
+  setText('historyStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
+  setText('historyEndLimit', 'Target genesis 0');
+  setText('historyCurrentLabel', materializedFloor == null ? 'Lowest verified block --' : 'Lowest verified block ' + blockWithTimestamp(materializedFloor, materializedFloorTime));
+  setText('elStartLimit', 'Start block 0');
+  setText('elEndLimit', target > 0 ? 'Target peer tip ' + fmt(target) : 'Target peer tip --');
+  setText('elCurrentLabel', 'Current validated cursor ' + fmt(current));
+  setText('indexStartLimit', 'Start block 0');
+  setText('indexEndLimit', latestKnown == null ? 'Target canonical block --' : 'Target canonical block ' + blockWithTimestamp(latestKnown, latestKnownTime));
+  setText('indexCurrentLabel', indexedHead == null ? 'Current indexed block --' : 'Current indexed block ' + blockWithTimestamp(indexedHead, indexedAnchorTime));
+  setText('queryStartLimit', queryFrom == null ? 'Stored from --' : 'Stored from ' + fmt(queryFrom));
+  setText('queryEndLimit', queryTo == null ? 'Stored to --' : 'Stored to ' + fmt(queryTo));
+  setText('queryCurrentLabel', queryFrom == null ? 'No queryable local range yet' : 'Queryable local range ' + queryRange);
+
+  setPill('clBadge', clState, clStateClass);
+  setPill('elBadge', nodeLabel, nodeStateClass(nodeState));
+  setText('clBadgeText', clState);
+  setText('elBadgeText', nodeLabel);
+  var pendingForwardRanges = numberOrNull(clNetwork.pending_forward_beacon_blocks_by_range_requests);
+  var pendingBackwardRanges = numberOrNull(clNetwork.pending_backward_beacon_blocks_by_range_requests);
+  var pendingHistoryRanges = pendingForwardRanges == null && pendingBackwardRanges == null
+    ? 'history ranges ' + fmt(clNetwork.pending_beacon_blocks_by_range_requests)
+    : 'history fwd/bwd ' + fmt(pendingForwardRanges) + ' / ' + fmt(pendingBackwardRanges);
+
+  setText('clConnected', fmt(clNetwork.connected_peer_sessions));
+  setText('clDiscovered', fmt(clNetwork.discovered_peers));
+  setText('clStatusPeers', fmt(clNetwork.status_peers));
+  setText('clInflight', fmt(clNetwork.pending_rpc_requests));
+  setText('clInflightNote', 'pending RPCs; ' + pendingHistoryRanges);
+  setText('clBootstrapPeers', fmt(clNetwork.bootstrap_peers));
+  setText('clUpdatePeers', fmt((numberOrNull(clNetwork.updates_by_range_peers) || 0) + (numberOrNull(clNetwork.finality_update_peers) || 0) + (numberOrNull(clNetwork.optimistic_update_peers) || 0)));
+  setText('clBlockPeers', fmt((numberOrNull(clNetwork.beacon_blocks_by_range_peers) || 0) + (numberOrNull(clNetwork.beacon_blocks_by_root_peers) || 0)));
+  setText('clPeerPool', fmt(clNetwork.preferred_peers) + ' / ' + fmt(clNetwork.cooldown_peers) + ' / ' + fmt(clNetwork.ignored_peers));
+
+  setText('elConnected', fmt(data.connected_peers));
+  setText('elServing', fmt(data.serving_peers));
+  setText('elCandidates', fmt(data.pending_peers));
+  setText('elTip', target > 0 ? fmt(target) : '--');
+  setText('elCursor', fmt(current));
+  setText('elLag', elLag == null ? '--' : fmt(elLag));
+  setText('elRate', fmtRate(data.blocks_per_sec));
+  setText('elEta', fmtEta(data.eta_seconds));
+
+  setText('markerCheckpoint', checkpointBlock == null ? '--' : fmt(checkpointBlock));
+  setText('markerCheckpointDetail', data.checkpoint_root ? detailParts(['slot ' + fmt(checkpointSlot), fmtTimestamp(checkpointTime), 'root ' + shortHash(data.checkpoint_root)]) : 'no checkpoint loaded');
+  setText('markerFinalized', fmt(finalized));
+  setText('markerFinalizedDetail', detailParts(['slot ' + fmt(anchorSlot(data.finalized_execution_head)), fmtTimestamp(finalizedTime)]));
+  setText('markerOptimistic', fmt(optimistic));
+  setText('markerOptimisticDetail', detailParts(['slot ' + fmt(anchorSlot(data.optimistic_execution_head)), fmtTimestamp(optimisticTime)]));
+  setText('markerMaterializedTip', fmt(materializedTip));
+  setText('markerMaterializedTipDetail', detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_ceiling)), fmtTimestamp(materializedTipTime), fmt(data.materialized_execution_anchor_count) + ' anchors']));
+  setText('markerHistoryFloor', fmt(materializedFloor));
+  setText('markerHistoryFloorDetail', materializedFloor == null || checkpointBlock == null ? 'not started' : detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_floor)), fmtTimestamp(materializedFloorTime), historyRemainingText]));
+  setText('markerIndexed', fmt(indexedHead));
+  setText('markerIndexedDetail', detailParts([indexedAnchorTime == null ? null : fmtTimestamp(indexedAnchorTime), 'lag ' + fmt(data.index_lag_blocks) + ' blocks']));
+  setText('markerQuery', queryRange);
+  setText('markerQueryDetail', queryFrom == null ? 'no local rows' : fmt(query.stored_rows) + ' rows');
+
+  setText('liveLaneSummary', liveRemaining == null ? 'waiting for live target' : livePct.toFixed(1) + '% complete; ' + liveRemainingText);
+  setWidth('liveLaneBar', livePct);
+  setText('liveLaneFrom', fmt(checkpointBlock));
+  setText('liveLaneDone', fmt(materializedTip));
+  setText('liveLaneTarget', fmt(latestKnown));
+
+  setText('historyLaneSummary', checkpointBlock != null ? historyPct.toFixed(1) + '% complete; ' + historyRemainingText : 'waiting for checkpoint');
+  setWidth('historyLaneBar', historyPct);
+  setText('historyLaneFrom', fmt(checkpointBlock));
+  setText('historyLaneDone', fmt(materializedFloor));
+
+  setText('elLaneSummary', target > 0 ? elPct.toFixed(1) + '% to peer tip' : 'awaiting tip');
+  setWidth('elLaneBar', elPct);
+  setText('elLaneCursor', fmt(current));
+  setText('elLaneTip', target > 0 ? fmt(target) : '--');
+  setText('elLaneRemaining', elLag == null ? '--' : fmt(elLag));
+
+  setText('queryLaneSummary', queryFrom == null ? 'no local rows' : queryPct.toFixed(1) + '% of block tag latest');
+  setWidth('queryLaneBar', queryPct);
+  setText('queryLaneFrom', fmt(queryFrom));
+  setText('queryLaneTo', fmt(queryTo));
+  setText('queryLaneLatest', blockWithTimestamp(queryLatest, queryLatestTime));
+
+  setText('idxHead', fmt(indexedHead));
+  setText('idxLag', fmt(data.index_lag_blocks));
+  setText('storedRows', fmt(data.total_rows));
+  setText('sessionRows', fmt(data.logs_ingested));
+  setText('segments', fmt(data.sealed_partitions));
+  setText('storageUsed', fmtBytes(data.storage_used_bytes));
+  setText('diskFree', fmtBytes(data.disk_free_bytes));
+  setText('finalityGap', fmt(data.finality_lag_blocks));
+
+  setText('queryScope', queryFrom == null ? 'No stored log rows yet.' : 'Queries scan local stored logs across blocks ' + queryRange + '.');
+  setText('queryScanScope', queryFrom == null ? 'Scan scope: empty local log store' : 'Scan scope: ' + queryRange + '; block tag latest = ' + blockWithTimestamp(queryLatest, queryLatestTime));
+  if (byId('resultCount').textContent === '--') {
+    setText('resultCount', queryState);
   }
-
-  var historyCoverage = hasConsensus
-    ? (Number.isFinite(historyVerifiedBlock)
-      ? fmt(Math.max(0, checkpointBlock - historyVerifiedBlock)) + ' materialized'
-      : 'Not started yet')
-    : '--';
-
-  document.getElementById('stHeaderCheckpoint').textContent = data.checkpoint_root ? truncHash(String(data.checkpoint_root)) : '--';
-  document.getElementById('stBlock').textContent = fmt(current);
-  document.getElementById('stTarget').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : 'Awaiting tip';
-  document.getElementById('stIndexed').textContent = fmt(data.indexed_head_block);
-  document.getElementById('stPeers').textContent = fmt(data.connected_peers);
-  document.getElementById('stServing').textContent = fmt(data.serving_peers);
-  document.getElementById('stPending').textContent = fmt(data.pending_peers);
-  document.getElementById('stSpeed').textContent = data.blocks_per_sec != null ? data.blocks_per_sec.toFixed(2) : '--';
-  document.getElementById('stEta').textContent = fmtEta(data.eta_seconds);
-  document.getElementById('stStoredLogs').textContent = fmt(data.total_rows);
-  document.getElementById('stSessionLogs').textContent = fmt(data.logs_ingested);
-  document.getElementById('stStorageUsed').textContent = fmtBytes(data.storage_used_bytes);
-  document.getElementById('stDiskFree').textContent = fmtBytes(data.disk_free_bytes);
-  document.getElementById('stCheckpointBlock').textContent = fmt(checkpointBlock);
-  document.getElementById('stHead').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : '--';
-  document.getElementById('stLiveCoverage').textContent = liveCoverage;
-  document.getElementById('stHistoryCoverage').textContent = historyCoverage;
-
-  document.getElementById('stCheckpointRoot').textContent = data.checkpoint_root || '--';
-  document.getElementById('stCheckpointSlot').textContent = fmt(data.checkpoint_slot);
-  document.getElementById('stCheckpointExec').textContent = fmt(checkpointBlock);
-  document.getElementById('stOptimistic').textContent = fmt(optimisticExec);
-  document.getElementById('stFinalized').textContent = fmt(finalizedExec);
-  document.getElementById('stIndexedExec').textContent = fmt(indexedExec);
-  document.getElementById('stMaterializedTip').textContent = fmt(materializedCeiling);
-  document.getElementById('stHistoryFloor').textContent = fmt(materializedFloor);
-  document.getElementById('stAnchorCount').textContent = fmt(data.materialized_execution_anchor_count);
-  document.getElementById('stIndexLag').textContent = fmt(data.index_lag_blocks);
-  document.getElementById('stFinalityGap').textContent = fmt(data.finality_lag_blocks);
-  document.getElementById('stExecutionHead').textContent = Number.isFinite(latestKnown) ? fmt(latestKnown) : '--';
-
-  document.getElementById('stCursor').textContent = fmt(current);
-  document.getElementById('stStoredLogsCard').textContent = fmt(data.total_rows);
-  document.getElementById('stSessionLogsCard').textContent = fmt(data.logs_ingested);
-  document.getElementById('stPeerTip').textContent = targetKnown ? fmt(target) : '--';
-  document.getElementById('stPeersCard').textContent = fmt(data.connected_peers);
-  document.getElementById('stServingCard').textContent = fmt(data.serving_peers);
-  document.getElementById('stPendingCard').textContent = fmt(data.pending_peers);
-  document.getElementById('stClSessions').textContent = fmt(clNetwork.active_sessions);
-  document.getElementById('stClConnected').textContent = fmt(clNetwork.connected_peer_sessions);
-  document.getElementById('stClStatusPeers').textContent = fmt(clNetwork.status_peers);
-  document.getElementById('stClFinalityPeers').textContent = fmt(clNetwork.finality_update_peers);
-  document.getElementById('stClOptimisticPeers').textContent = fmt(clNetwork.optimistic_update_peers);
-  document.getElementById('stClBootstrapPeers').textContent = fmt(clNetwork.bootstrap_peers);
-
-  if (hasConsensus) {
-    document.getElementById('stConsensusHint').textContent =
-      'Checkpoint, materialized range, optimistic head, finalized head, and indexed head show the CL-authenticated execution path that EL data must match before logs are accepted.';
-    document.getElementById('stDirectionHint').textContent =
-      'This checkpoint-centered view tracks two jobs independently: staying near the live head and proving older history down toward genesis.';
-    if (!Number.isFinite(checkpointBlock)) {
-      document.getElementById('stProgressPct').textContent = 'Waiting for a decoded checkpoint bootstrap';
-    } else if (Number.isFinite(liveVerifiedBlock) || Number.isFinite(historyVerifiedBlock)) {
-      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% of full-chain span materialized around the checkpoint';
-    } else {
-      document.getElementById('stProgressPct').textContent = 'Checkpoint loaded, waiting for materialized anchors';
-    }
-  } else if (nodeState === 'syncing' || nodeState === 'synced') {
-    document.getElementById('stConsensusHint').textContent =
-      'Legacy EL mode is active. Checkpointed CL markers appear once consensus-backed sync is configured.';
-    document.getElementById('stDirectionHint').textContent =
-      'Legacy mode still follows peer-advertised EL height upward. The final architecture replaces this with checkpoint-centered verification.';
-    if (targetKnown) {
-      document.getElementById('stProgressPct').textContent = pct.toFixed(1) + '% synced';
-    } else {
-      document.getElementById('stProgressPct').textContent = 'Syncing, awaiting peer tip';
-    }
-  } else if (nodeState === 'connecting' && Number(data.connected_peers || 0) > 0) {
-    document.getElementById('stConsensusHint').textContent =
-      'Checkpointed consensus sync is not active yet, so the dashboard is showing EL-only status.';
-    document.getElementById('stDirectionHint').textContent =
-      'Connected, waiting for a serving peer that can supply a credible tip.';
-    document.getElementById('stProgressPct').textContent = 'Connected, waiting for serving peer';
-  } else {
-    document.getElementById('stConsensusHint').textContent =
-      'Consensus-backed markers appear after the node boots from a weak-subjectivity checkpoint.';
-    document.getElementById('stDirectionHint').textContent =
-      'The final trustless model uses a recent checkpoint as the coverage origin and proves both toward the head and toward genesis.';
-    document.getElementById('stProgressPct').textContent = badgeText.textContent;
-  }
-
-  document.getElementById('stProgressFill').style.width = pct.toFixed(1) + '%';
-  renderMarkerRail(data, checkpointBlock, latestKnown, liveVerifiedBlock, historyVerifiedBlock, hasConsensus);
 }
 
 function fetchStatus() {
-  fetch('/status').then(function(r) { return r.json(); }).then(updateStatus).catch(function() {});
+  fetch('/status')
+    .then(function(response) { return response.json(); })
+    .then(updateStatus)
+    .catch(function() {
+      setPill('nodeBadge', 'Status offline', 'state-disconnected');
+      setText('nodeState', 'Status offline');
+      refreshLastUpdated();
+    });
 }
 
-var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
-
 function renderTable(rows) {
-  var thead = document.getElementById('thead');
-  var tbody = document.getElementById('tbody');
-  var table = document.getElementById('resultsTable');
-  var empty = document.getElementById('emptyState');
+  var thead = byId('thead');
+  var tbody = byId('tbody');
+  var table = byId('resultsTable');
+  var empty = byId('emptyState');
 
   if (!rows || rows.length === 0) {
     table.style.display = 'none';
     empty.style.display = 'flex';
-    empty.textContent = 'Query returned no results';
+    empty.textContent = 'Query returned no rows.';
     return;
   }
 
@@ -513,24 +1435,37 @@ function renderTable(rows) {
   if (keys.length === 0) {
     table.style.display = 'none';
     empty.style.display = 'flex';
-    empty.textContent = 'Query returned rows but no columns were projected. Try SELECT * FROM logs ...';
+    empty.textContent = 'Query returned rows with no projected columns.';
     return;
   }
-  var cols = COLUMNS.filter(function(c) { return keys.indexOf(c) !== -1; });
-  keys.forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
 
-  thead.innerHTML = '<tr>' + cols.map(function(c) { return '<th>' + c + '</th>'; }).join('') + '</tr>';
+  var cols = COLUMNS.filter(function(column) { return keys.indexOf(column) !== -1; });
+  keys.forEach(function(key) {
+    if (cols.indexOf(key) === -1) cols.push(key);
+  });
+
+  thead.innerHTML = '<tr>' + cols.map(function(column) {
+    return '<th>' + escapeHtml(column) + '</th>';
+  }).join('') + '</tr>';
 
   tbody.innerHTML = rows.map(function(row) {
-    return '<tr>' + cols.map(function(c) {
-      var v = row[c];
-      if (c === 'tx_hash') return '<td title="' + (v || '') + '">' + truncHash(v) + '</td>';
-      if (c === 'block_number') return '<td>' + fmt(v) + '</td>';
-      if (c === 'topics') return '<td>' + (Array.isArray(v) ? v.length : (v != null ? v : '')) + '</td>';
-      if (c === 'data_len' && typeof v === 'number') return '<td>' + fmt(v) + '</td>';
-      if (typeof v === 'number') return '<td>' + fmt(v) + '</td>';
-      if (typeof v === 'string' && v.length > 30) return '<td title="' + v + '">' + v.slice(0, 30) + '\u2026</td>';
-      return '<td>' + (v != null ? v : '') + '</td>';
+    return '<tr>' + cols.map(function(column) {
+      var value = row[column];
+      var rendered = value;
+      var title = '';
+      if (column === 'tx_hash' || column === 'block_hash' || column === 'address') {
+        title = value || '';
+        rendered = shortHash(value);
+      } else if (column === 'block_number' || typeof value === 'number') {
+        rendered = fmt(value);
+      } else if (column === 'topics' && Array.isArray(value)) {
+        rendered = value.length;
+        title = value.join(', ');
+      } else if (typeof value === 'string' && value.length > 42) {
+        title = value;
+        rendered = value.slice(0, 42) + '...';
+      }
+      return '<td title="' + escapeHtml(title) + '">' + escapeHtml(rendered == null ? '' : rendered) + '</td>';
     }).join('') + '</tr>';
   }).join('');
 
@@ -539,52 +1474,61 @@ function renderTable(rows) {
 }
 
 function runQuery() {
-  var sql = document.getElementById('sql').value.trim();
+  var sql = byId('sql').value.trim();
   if (!sql) return;
 
-  var btn = document.getElementById('runBtn');
-  var errEl = document.getElementById('errorMsg');
-  var countEl = document.getElementById('resultCount');
+  var btn = byId('runBtn');
+  var errEl = byId('errorMsg');
+  var countEl = byId('resultCount');
 
   btn.disabled = true;
-  btn.textContent = 'Running\u2026';
+  btn.textContent = 'Running';
   errEl.style.display = 'none';
-  countEl.textContent = '';
+  countEl.textContent = 'Running query...';
 
   fetch('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sql: sql })
   })
-  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
-  .then(function(res) {
-    if (!res.ok || res.data.error) {
-      errEl.textContent = res.data.error || res.data.message || 'Unknown error';
+    .then(function(response) {
+      return response.json().then(function(body) {
+        return { ok: response.ok, data: body };
+      });
+    })
+    .then(function(result) {
+      if (!result.ok || result.data.error) {
+        errEl.textContent = result.data.error || result.data.message || 'Unknown query error';
+        errEl.style.display = 'block';
+        renderTable([]);
+        return;
+      }
+      var rows = result.data.rows || [];
+      countEl.textContent = fmt(rows.length) + ' rows returned; ' + fmt(result.data.total_scanned) + ' rows scanned';
+      renderTable(rows);
+    })
+    .catch(function(error) {
+      errEl.textContent = 'Request failed: ' + error.message;
       errEl.style.display = 'block';
       renderTable([]);
-      return;
-    }
-    var rows = res.data.rows || res.data.results || res.data;
-    if (!Array.isArray(rows)) rows = [rows];
-    countEl.textContent = fmt(rows.length) + ' row' + (rows.length !== 1 ? 's' : '');
-    renderTable(rows);
-  })
-  .catch(function(e) {
-    errEl.textContent = 'Request failed: ' + e.message;
-    errEl.style.display = 'block';
-  })
-  .finally(function() {
-    btn.disabled = false;
-    btn.textContent = 'Run Query';
-  });
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.textContent = 'Run Query';
+    });
 }
 
-document.getElementById('sql').addEventListener('keydown', function(e) {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+byId('sql').addEventListener('keydown', function(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault();
+    runQuery();
+  }
 });
 
 fetchStatus();
+refreshLastUpdated();
 setInterval(fetchStatus, 2000);
+setInterval(refreshLastUpdated, 1000);
 </script>
 </body>
 </html>
