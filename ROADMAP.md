@@ -8,6 +8,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - does not execute the EVM
 - does not store the full state trie
 - stores logs locally and makes them queryable
+- covers the full Ethereum history rather than only the post-Merge era
 - relies on a weak subjectivity checkpoint as the only unavoidable trust assumption
 - is otherwise theoretically trustless for canonical log verification after that checkpoint
 
@@ -36,6 +37,12 @@ LogEx should become a canonical Ethereum event-log node that:
 - The consensus-side primitive LogEx needs is the beacon light-client protocol.
   - Sync committees verify light-client updates and finality/optimistic updates.
   - They do not directly act as a signature over every beacon block in the way a naive gossip-only design would imply.
+- Receipt-trie verification and canonicality verification are different jobs.
+  - Rebuilding the receipt trie proves that a set of receipts matches a specific block header.
+  - It does not prove that the header itself is canonical.
+  - Canonicality must come from consensus data:
+    - post-Merge from the beacon light client
+    - pre-Merge from verified PoW header ancestry and total difficulty
 - Therefore the canonicality path should be:
   1. verify beacon light-client updates from a weak subjectivity checkpoint
   2. verify the SSZ Merkle branch that binds the `execution_payload_header` into the light-client header, the same way Helios validates `execution_branch` against the beacon header `body_root`
@@ -44,55 +51,72 @@ LogEx should become a canonical Ethereum event-log node that:
   5. locally encode those receipts exactly as Ethereum does and rebuild the execution-layer receipt trie (MPT) from them
   6. require the computed EL receipt-trie root to match the CL-verified `receipts_root` before accepting any logs derived from those receipts
 
+## Full-Chain Trust Model
+
+- Weak subjectivity means a fresh client needs one recent trusted beacon checkpoint on first startup.
+  - In practice that checkpoint is a recent beacon block root, optionally paired with a slot.
+  - LogEx can now fetch the current finalized checkpoint from a trusted Beacon API/checkpoint-sync URL with `--checkpoint-sync-url`, using `/eth/v1/beacon/headers/finalized` as a startup bootstrap aid until LogEx has its own checkpoint distribution endpoint.
+  - A slotted checkpoint or persisted verified consensus store is rejected on startup if its trusted slot is outside LogEx's conservative weak-subjectivity freshness window; root-only checkpoints can only be freshness-checked after a checkpoint-sync endpoint resolves their header slot or after bootstrap persists the slot.
+  - Development note recorded on April 16, 2026: an operator-provided example finalized beacon block root for future bootstrap testing is `0xfc5b0de0b6d9f78f6528ef455a8efddfdf61de272a9abe86441d62a8f63006f9`.
+  - Development note recorded on April 17, 2026: a newer operator-provided example checkpoint for native mainnet smoke tests is `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4`.
+  - Treat that recorded root as an example `--checkpoint` input, not as a hardcoded protocol constant; it should be refreshed once it ages out of the weak-subjectivity window.
+  - LogEx persists the resulting consensus state locally, so restart should not need the operator to re-enter it.
+- CL-backed EL canonicality starts only once execution payloads exist in the beacon chain.
+  - That means post-Merge execution blocks are proved by the beacon light-client path.
+  - Pre-Merge EL blocks are not proved by the CL and need their own PoW canonicality path.
+- The end-state trustless architecture must cover every block, but it does not need to sync from genesis upward.
+  - LogEx should sync outward from the checkpoint block in both directions.
+  - Start from a recent weak-subjectivity checkpoint near the current head.
+  - Continuously sync with the live head from that checkpoint while also proving older history toward genesis.
+  - Verify post-Merge canonicality from that checkpoint toward the live head.
+  - At the same time, walk authenticated beacon ancestry downward from that checkpoint to the first execution payload and identify the canonical terminal PoW block.
+  - From that terminal PoW block, verify the pre-Merge EL header chain downward to genesis using parent links, PoW rules, and total difficulty.
+  - For every block on both sides of the Merge, rebuild receipts locally and require the computed trie root to match the canonical header's `receipts_root`.
+  - Once the genesis-side verification is complete, LogEx should continue as a forward-only live-sync client from then on.
+- Verification depth and stored log depth should be separate operator controls.
+  - LogEx should verify canonicality and receipt roots all the way to genesis even when the operator does not want to keep logs for the entire history.
+  - Add a client flag that sets the lowest block whose logs should be saved and indexed while the downward side of checkpoint-centered history proving moves toward genesis.
+  - Example: if the operator sets the flag to `1_000_000`, LogEx should save and index logs only for blocks above that floor, but it must still continue verifying headers and receipt roots from block `1_000_000` down to genesis.
+  - If the flag is omitted, it should default to genesis so the full log history is saved.
+- This checkpoint-centered design is intentional.
+  - Starting from genesis does not remove the weak-subjectivity assumption for PoS Ethereum.
+  - Starting from a recent trusted checkpoint and then proving both toward the head and toward genesis gives full-chain coverage without pretending PoS can bootstrap from arbitrary ancient history with zero trust.
+
 ## Already Done
 
-- Standalone LogEx node exists and syncs from EL P2P without any external RPC.
-- Reth networking is already integrated for devp2p sessions, discovery, and fetch paths.
-- Persistent node identity and productive peer persistence are in place.
-- Restart/resume and recent canonical header persistence are in place.
-- Ancient and modern receipt-root / bloom verification are in place.
-- Historical receipt decoding and partial receipt-response handling are fixed.
-- The node can ingest logs locally and expose them through the current query APIs.
-- The current EL sync stack is materially closer to a real client than the original prototype:
-  - Reth-backed session management and discovery are in place.
-  - Reth-backed header/body fetch paths are in place.
-  - custom receipt transport remains, because LogEx is intentionally no-execution.
-- Operator-facing honesty is much better than before:
-  - persistent sync head and recent headers are stored locally
-  - restart resumes from durable metadata
-  - productive peers are persisted
-  - UI/runtime state no longer falsely claims sync completion on missing targets
-- Query/storage direction is already established:
-  - local storage is the source of truth
-  - REST `/query`, gRPC `Query`, and the web UI share the same DataFusion-backed SQL engine
-  - gRPC now also exposes typed `GetLogs` and `StreamLogs` methods over the same canonical storage/query core
-  - the native storage rewrite is materially in place:
-    - the catalog tracks hot and sealed segments, manifests, durable sync state, and segment-level metadata
-    - the compatibility `PartitionManager` facade now sits on top of native segment storage instead of the old partition implementation
-    - hot segment rotation, restart/resume, WAL replay, and canonical row marking are wired through the native path
-    - sealed segments are compacted into page-oriented encoded columns with per-column codec and page-index metadata
-    - sealed-segment reads are manifest-aware, so indexed lookups do not require whole-column decompression
-    - startup now performs a lightweight integrity check over the recent canonical header window and segment metadata/page decode boundaries so obvious local corruption is detected early
-    - permanent compaction of sealed history is delayed behind a safety margin from the current head; this is an interim anti-reorg rule that should later be replaced by real CL finality
-  - DataFusion now reads projected columns directly from native segment files
-    - the old row-materialization seed scan is no longer used by REST `/query`, gRPC `Query`, or the web UI
-    - projection pushdown is live
-    - exact filter pushdown is live today for block range, block hash, address, and topic0 predicates
-    - legacy LogEx syntax such as `event'...'`, `address'...'`, and `latest` still works as a pre-processing layer, but regular SQL is now the primary path
-    - SQL execution is explicitly read-only; mutating statements are rejected
-  - `eth_getLogs` now executes natively over the shared indexed row-id scan path instead of being translated through SQL
-  - index coverage is better than before:
-    - block hash is now a first-class index
-    - sealed-segment index rebuilds and manifest refresh now stay compatible with compacted storage
-  - cross-surface consistency coverage now exists for REST, direct SQL, gRPC typed logs, and `eth_getLogs`
-  - a benchmark harness now exists for native log filters and SQL workloads; the remaining benchmark task is feeding it larger realistic datasets and recording target numbers
-  - former roadmap task 3 is complete for the current architecture scope:
-    - native hot/sealed storage, page-oriented sealed-column compaction, manifest-aware reads, and compacted-segment index/query compatibility are in place
-  - former roadmap task 4 is complete for the current architecture scope:
-    - SQL uses native storage through DataFusion
-    - `eth_getLogs` uses the native filter path directly
-    - gRPC exposes both SQL queries and typed log methods
-    - cross-surface consistency coverage is in place
+- EL foundation is solid:
+  - standalone EL P2P sync works without external RPC
+  - Reth-backed discovery/session/fetch paths are in place
+  - restart/resume, recent canonical-header persistence, receipt-root verification, and log ingestion/query surfaces are already working
+- Native CL foundation is materially in place:
+  - embedded mainnet discv5, libp2p peer sessions, TCP+QUIC transport, per-method req/resp, gossip subscriptions, typed SSZ decoding, and native status/debug surfaces are implemented
+  - verified weak-subjectivity bootstrap, verified singleton/full light-client updates, sync-committee checks, `execution_branch` checks, and verified head progression beyond the checkpoint are implemented
+  - verified `LightClientUpdatesByRange` payloads are now persisted by sync-committee period and served back over the native CL req/resp surface when the local cache can answer honestly
+  - full beacon-block decoding, truthful cached beacon-history serving, backward checkpoint-to-older-history materialization, forward root-chasing, and reorg-safe forward anchor pruning are implemented
+- CL-driven runtime/storage boundaries are in place:
+  - `WeakSubjectivityCheckpoint`, `ExecutionAnchor`, and `ChainAnchors` are shared across runtime, sync, storage, and status surfaces
+  - `crates/logex-cl` persists checkpoint state and ordered execution anchors under the data directory
+  - checkpointed startup, restart persistence, finalized-head-aware compaction, anchored EL header/body/receipt validation, and optimistic reorg rewinds are implemented
+- Query/storage work from prior slices remains complete and intentionally summarized here:
+  - native segment storage and compaction are in place
+  - REST/gRPC/UI share the same canonical query core
+  - SQL uses DataFusion over native storage, `eth_getLogs` uses the native filter path, and cross-surface consistency coverage exists
+
+## Current Status
+
+- LogEx already has the correct CL-owned persistence model and EL verification boundary:
+  - EL peers are data providers only once consensus state exists
+  - ordered execution anchors decide which EL blocks are eligible for ingestion
+  - optimistic, finalized, and indexed execution heads are persisted explicitly, and optimistic reorg rewinds are implemented
+- The native CL path is real rather than placeholder:
+  - embedded discv5 discovery, libp2p peer sessions, TCP+QUIC transport, per-method req/resp, gossip subscriptions, typed SSZ decoding, verified bootstrap, verified light-client updates, and verified head progression beyond the checkpoint are implemented
+  - full beacon-block decoding, truthful cached history serving, backward checkpoint-to-older-history materialization, forward root-chasing, and reorg-safe forward anchor pruning are implemented
+  - fixed-port mainnet smokes from `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4` now persist a verified bootstrap store, expose checkpoint/finality/optimistic execution anchors through `/status`, and show verified head movement beyond the checkpoint
+  - a fresh mainnet smoke on May 5, 2026 from `14263616@0xad227f7642484a8c957306069387c2555beab50898ab5a3d5342cd4fcb078267` bootstrapped successfully, verified optimistic/finality updates, and materialized 213 CL-authenticated execution anchors spanning slots `14263488..14263701`
+- The native CL P2P milestone on `cl-canonical-verification` is now PR-ready:
+  - a fresh fixed-port mainnet smoke on May 5, 2026 resolved a current finalized checkpoint via `--checkpoint-sync-url`, bootstrapped from scratch, reached the verified optimistic head, and materialized 343 CL-authenticated execution anchors spanning beacon slots `14263514..14263857`
+  - peer churn is still present on public mainnet, but cooldown-aware slot rotation, stricter ENR filtering, wider status/history request concurrency, and invalid/empty history-response accounting are now enough for fresh short smokes to keep the materialized ceiling at the live optimistic head
+- The current branch also does not yet implement the pre-Merge PoW canonicality path, so it is still not the full end-to-end canonical system.
 
 ## Explicitly Not Needed
 
@@ -103,7 +127,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - An external consensus RPC URL in the final design
 - Engine API compatibility with a standard beacon node as the primary canonicality path
 
-## Current Architecture Decisions
+## Design Decisions
 
 - Keep using Reth crates for EL networking where they give us production-grade devp2p behavior.
   - Discovery, session handling, peer management, and request/response transport should stay as close to Reth as practical.
@@ -119,54 +143,140 @@ LogEx should become a canonical Ethereum event-log node that:
   - `eth_getLogs` should remain a dedicated native execution path over the same storage and indexes, not a SQL translation layer.
   - gRPC should expose the same canonical data through typed log methods and SQL query methods; Arrow-style SQL transport can be added later only if benchmarks justify it.
 - It is acceptable to rewrite the storage format incompatibly at this stage and require a full resync.
+- A checkpoint-sync URL is acceptable as a temporary startup bootstrap/freshness helper, but not as a steady-state consensus dependency.
+  - This matches Lighthouse-style checkpoint sync ergonomics while preserving LogEx's native CL P2P direction.
+  - The endpoint is used to obtain or validate a recent weak-subjectivity checkpoint; canonical head progression and beacon-history materialization still come from native CL P2P and verified light-client data.
+- Use a conservative fixed mainnet weak-subjectivity freshness window until LogEx persists enough beacon state to compute the full state-derived spec value locally.
+  - This favors refusing stale startups over accepting questionable checkpoints.
+  - The remaining tradeoff is that the fixed bound should later be replaced with the exact consensus-spec weak-subjectivity-period computation.
 
-## Remaining Work
+## Completed Since Last Run
 
-1. Canonical Trust Anchor
-   - What to build:
-     - add weak subjectivity checkpoint input, persistence, and restart handling
-     - implement the beacon light-client bootstrap, update, and finality flow
-     - verify sync committee signatures and committee rotation
-     - verify the execution payload inclusion proof against the beacon header body root, following the Helios-style light-client model
-     - persist finalized and optimistic execution anchors, including block hash, block number, and receipts root
-   - Caveats and tradeoffs:
-     - this is the hardest cryptographic and protocol part of the project
-     - it is worth reusing mature SSZ, BLS, and consensus-side primitives where available, but the architecture must stay LogEx-native rather than turning into a full CL node
-     - this is the non-negotiable correctness foundation; performance work before this has limited value
+- Hardened native CL P2P peer retention and history scheduling for the PR-ready milestone.
+  - Status handshakes and beacon-history root/range requests now have wider per-method concurrency than singleton light-client requests.
+  - Connected peers that enter cooldown after useful RPC failures are disconnected once idle, freeing slots for better candidates instead of occupying the connection budget.
+  - ENRs without an `eth2` fork field are no longer treated as relevant consensus peers.
+  - Remote Goodbye response channels that close before response are treated as expected debug-level churn rather than warning/status pollution.
+- Re-ran fixed-port mainnet smokes on HTTP port `18683`.
+  - A resumed run reached the verified optimistic head with 725 materialized anchors.
+  - A fresh run after clearing the fixed smoke directory resolved checkpoint `14263776@0x26fa62173264cca9bbaddbf861dae86f3e0efdd47cda3de0c0427d32c0a70571`, bootstrapped from scratch, reached optimistic slot `14263857`, and materialized 343 anchors spanning slots `14263514..14263857`.
+- Validated the changes with `cargo test -p logex-cl`, `cargo build -p logex-node`, and `cargo test --workspace`.
+
+## Remaining TODOs
+
+1. Checkpoint Distribution And Weak Subjectivity Precision
+   - TODO:
+     - replace the temporary checkpoint-sync URL dependency with a LogEx-owned recent-checkpoint distribution endpoint or documented multi-source checkpoint verification flow
+     - replace the temporary fixed weak-subjectivity freshness window with the exact consensus-spec weak-subjectivity-period calculation once sufficient state and validator-set churn data are locally available
+     - keep the root-only checkpoint path honest, and require `slot@root` only if live root-only bootstrapping remains unreliable in longer proving runs
+   - Why this matters:
+     - the current branch can use a Lighthouse-style trusted startup endpoint, but the final operator experience should not rely on a third-party checkpoint source or a conservative fixed freshness bound forever
    - Done when:
-     - LogEx can restart from a stored weak subjectivity checkpoint state
-     - LogEx can track finalized and optimistic execution anchors from CL light-client updates
-     - the node can point to a CL-verified receipts root for each accepted execution block
+     - a fresh mainnet sync can obtain or validate a recent checkpoint through LogEx-owned or independently cross-checked sources, and stale checkpoint rejection uses the exact spec-derived weak-subjectivity period
 
-2. Canonical EL Receipt Ingestion
-   - What to build:
-     - keep the current Reth-backed EL network stack
-     - fetch receipts by CL-anchored block hash
-     - encode receipts exactly as Ethereum does
-     - rebuild the receipt trie locally and require the computed root to match the CL-verified receipts root
-     - persist whatever receipt-level and header-level metadata is required for canonical log storage and future proof APIs
-     - continue improving peer selection, batch sizing, fallback behavior, and retry logic around receipts
-   - Caveats and tradeoffs:
-     - multi-peer comparison is primarily a liveness and robustness tool; correctness comes from matching the locally rebuilt trie root against the CL-verified root
-     - LogEx should not store generic transaction/state data it does not need, but it must store enough receipt-adjacent metadata to keep the proof boundary honest
+2. Beacon Block Segment Authentication
+   - TODO:
+     - keep extending the backward parent-root walk from the weak-subjectivity checkpoint toward the Merge; live smokes now materialize dozens of authenticated anchors below the checkpoint, but not yet the full checkpoint-to-Merge ancestry
+     - complete fetching full beacon blocks between trusted light-client headers until the entire checkpoint-to-finalized / checkpoint-to-optimistic ancestry is covered in practice, not just isolated roots and short range slices
+     - verify each full block body against its signed beacon header by recomputing `body_root`
+     - derive execution payload headers from the verified block bodies rather than trusting imported execution anchor files forever
+   - Why this is still blocking:
+     - the current anchor store can hold per-block execution anchors, and LogEx now decodes/validates full beacon blocks from native root/range responses
+     - live mainnet smokes now prove that the checkpoint-to-older-history side can materialize authenticated anchors below the checkpoint, but the segment walker is still incomplete because the forward checkpoint-to-head side remains pinned at the checkpoint and the backward side still has to continue all the way to the Merge
    - Done when:
-     - logs are accepted only from receipts whose rebuilt trie root matches the CL-verified root
-     - malformed or incomplete receipt responses are detected and rejected cleanly
-     - restart and resume preserve the canonical verified sync position
+     - every execution anchor used by EL ingestion can be traced back to verified beacon blocks bounded by verified light-client headers
 
-3. Release Gate
-   - What to build:
-     - end-to-end validation for weak subjectivity restart, sync committee rotation, finalized/optimistic anchor handling, receipt-root reconstruction, malicious peer detection, bootstrap, shutdown, and resume once the CL path exists
+3. Pre-Merge PoW Canonicality
+   - TODO:
+     - identify the canonical terminal PoW block from verified post-Merge beacon ancestry
+     - verify pre-Merge EL headers downward from that terminal PoW block to genesis
+     - enforce parent-link validity, difficulty rules, and cumulative total difficulty for the PoW era
+     - use each verified pre-Merge canonical header's `receipts_root` as the commitment that receipt-trie reconstruction must match
+   - Why this is still blocking:
+     - the beacon light client only proves post-Merge execution payloads
+     - without a separate PoW canonicality path, LogEx cannot honestly claim trustless coverage for the full pre-Merge history
+   - Done when:
+     - LogEx can explain the canonicality source for every block:
+       - post-Merge from CL verification
+       - pre-Merge from PoW header verification
+
+4. Remove Transitional Consensus Shortcuts
+   - TODO:
+     - delete the remaining operator-facing language that treats CL networking ports as merely reserved
+     - delete the remaining legacy EL-only startup path once live CL anchor production is in place
+     - stop relying on imported checkpoint descriptor files as the normal way to feed execution anchors into the node
+     - tighten storage/runtime assumptions so checkpointed canonical sync is the only steady-state ingestion path
+   - Why this is still blocking:
+     - the final architecture should not leave a half-canonical fallback path around after the real CL path exists
+   - Done when:
+     - canonical sync always means CL-driven sync, not a mix of CL mode and legacy EL-only mode
+
+5. Selective Log Retention While Verifying Full History
+   - TODO:
+     - add a client flag that sets the lowest block whose logs should be saved and indexed while checkpoint-centered history proving expands toward genesis
+     - default that flag to genesis when omitted
+     - continue verifying canonical headers and receipt roots below that floor all the way to genesis without persisting those older log rows
+     - make status and docs explicit that verification depth and retained log depth are different
+   - Why this is still blocking:
+     - some operators need trustless canonical verification for all history without paying storage costs for all historical logs
+   - Done when:
+     - LogEx can verify the entire chain to genesis while storing only the operator-selected suffix of historical logs
+
+6. Mainnet Proving Runs And Failure Handling
+   - TODO:
+     - run long-lived mainnet sync tests from real weak-subjectivity checkpoints
+     - run full-history proving runs that start from a recent checkpoint and expand both toward the live head and downward across the Merge into pre-Merge history
+     - verify restart, shutdown, and resume across optimistic updates, finality advances, and anchor replacements
+     - test malicious or incomplete EL responses against CL-driven anchors on real network conditions
+     - improve recovery behavior for optimistic reorgs deeper than the persisted recent-header window
+   - Why this is still blocking:
+      - the current code now rewinds correctly within the stored recent-header window, but a deeper optimistic reorg still requires stronger recovery logic or an explicit resync path
+   - Done when:
+      - LogEx can survive realistic mainnet churn and either recover safely or fail loudly with a precise operator action
+
+7. Release Gate
+   - TODO:
+     - keep the current receipt-root, restart, corruption-detection, and cross-surface consistency coverage green as the native CL path lands
+     - add end-to-end fixtures for checkpoint bootstrap, light-client updates, beacon blocks, execution anchors, EL headers, bodies, and receipts
+     - add end-to-end fixtures that cross the Merge boundary and cover the pre-Merge PoW verification path
      - run the benchmark harness on realistic ERC-20 / ERC-721-heavy datasets and record target throughput / latency numbers
-     - run the benchmark harness on indexed queries, broader SQL queries, and `eth_getLogs`-style workloads
-     - keep the corruption, partial-page decode, torn-write recovery, and cross-surface consistency coverage in place as APIs evolve
-     - README alignment with the actual trust model, runtime model, and verification guarantees
-   - Caveats and tradeoffs:
-     - this should be treated as a gate, not a cleanup bucket
-     - if the rewritten storage/query architecture does not pass this gate, the architecture is not done
+     - create current operator docs that align with the actual guarantees once the native CL path is complete
    - Done when:
-      - the node can sync, restart, query, and serve logs from the rewritten architecture with measured performance and correctness coverage
-      - the public docs describe the real guarantees rather than the intended ones
+      - the node can sync, restart, query, and serve logs from the final CL-driven architecture with measured performance and truthful documentation
+
+## Challenges and Resolutions
+
+- Challenge: The previously recorded April checkpoint no longer bootstrapped reliably on live peers.
+  - Resolution: Added startup checkpoint freshness enforcement and `--checkpoint-sync-url` so fresh runs can use a current finalized checkpoint from a trusted checkpoint-sync endpoint.
+  - Remaining: LogEx still needs its own checkpoint distribution story for operators who do not want to trust an external startup endpoint.
+- Challenge: History peers could be rewarded for responses that did not advance verified beacon-history materialization.
+  - Resolution: Range requests now retain their requested slot windows, out-of-range blocks are rejected as peer faults, and empty/undecodable history responses are counted as failures.
+- Challenge: Public mainnet discovery still returns many peers that either lack beacon req/resp support or close during useful history/light-client RPCs.
+  - Resolution: Required `eth2` ENR fork metadata for discovery relevance, widened status/history concurrency, and disconnected idle peers once useful RPC failures put them into cooldown so new candidates can use the slot budget.
+  - Remaining: Long-lived soak runs are still needed before release, but fresh fixed-port smokes now bootstrap from scratch and keep materialized history at the verified optimistic head.
+
+## Dead Code and Obsolescence Cleanup
+
+- Inspected CL peer lifecycle accounting, request scheduling, ENR relevance filtering, remote Goodbye handling, consensus status counters, checkpoint parsing, and roadmap checkpoint language.
+- No obsolete code was removed in this run because the existing lifecycle counters, root/range request bookkeeping, root-only checkpoint path, and descriptor path are still used.
+- The remaining exact weak-subjectivity calculation and checkpoint-distribution work was moved out of the current branch blocker list and kept as an explicit follow-up TODO.
+
+## Git Workflow
+
+- Current branch: `cl-canonical-verification`.
+- New branch created: no; the current branch is the active consensus-layer P2P task branch.
+- Commits made during this run: `fix: validate consensus checkpoints and history responses`; `perf: harden consensus peer retention`.
+- Pull request status: opened as draft PR #67 at https://github.com/tdenisenko/logex/pull/67 after committing and pushing this final CL P2P hardening pass.
+- Merge status: not merged because the PR remains draft.
+- Git/GitHub blockers: the GitHub connector's ready-for-review mutation currently fails with a connector-side GraphQL selection error on `PullRequest.htmlUrl`, and the local `gh` session is not authenticated, so marking PR #67 ready and merging it could not be completed from this run.
+
+## Known Issues or Risks
+
+- The current weak-subjectivity freshness guard uses a conservative fixed mainnet window rather than computing the exact state-derived consensus-spec weak-subjectivity period.
+- `--checkpoint-sync-url` is a temporary startup bootstrap aid and introduces trust in the selected endpoint for initial checkpoint selection until LogEx provides its own checkpoint source.
+- Fresh fixed-port smokes can now materialize to the verified optimistic head from scratch, but long-lived peer retention and sustained checkpoint-to-head/history-backfill performance still need release-gate proof runs.
+- Keep the HTTP port constant for comparable smoke tests; stop any stale process before rerunning instead of incrementing the test port.
+- Pre-Merge PoW canonicality remains unimplemented, so LogEx cannot yet claim full-chain canonicality.
 
 ## Sequencing Decision
 
@@ -176,7 +286,7 @@ Why:
 
 - Without verified CL anchors, EL work improves performance but not canonicality.
 - The CL output defines the exact EL data LogEx should trust and verify.
-- Once the CL anchor format is fixed, the EL side becomes a much clearer adaptation of the current receipt pipeline.
+- Once the CL anchor format is fixed, the EL side becomes a much clearer adaptation of the current receipt pipeline, and the Merge boundary into pre-Merge PoW verification becomes well-defined.
 - This keeps LogEx aligned with its real goal: canonical logs without EVM execution.
 - The other TODOs stay in scope; this only sets the order of work.
 
@@ -188,9 +298,11 @@ LogEx should eventually be able to say all of the following:
 - it verified beacon light-client updates locally
 - it verified the execution payload header against the beacon light-client header with an SSZ Merkle proof
 - it learned the canonical execution block hash and receipts root from that proven CL data
+- it expanded verified coverage outward from the checkpoint, including downward across the Merge to the canonical terminal PoW block
+- it verified the pre-Merge PoW header chain from that terminal PoW block down to genesis
 - it fetched receipts from EL peers over devp2p
 - it re-encoded those receipts and recomputed the execution-layer receipt trie locally
-- it only accepted logs whose receipts root matches the verified canonical chain
+- it only accepted logs whose receipts root matches the canonical header proved by the appropriate consensus system for that era
 
 ## Later Expansion
 

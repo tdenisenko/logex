@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use logex_types::{NodeState, SyncStatus};
+use logex_types::{ChainAnchors, NodeState, SyncStatus, WeakSubjectivityCheckpoint};
 
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
@@ -48,6 +48,22 @@ impl ProgressTracker {
                 "updated sync target from peer announcements"
             );
         }
+    }
+
+    /// Update the exposed CL checkpoint and chain-anchor snapshot.
+    pub fn update_consensus_state(
+        &self,
+        checkpoint: WeakSubjectivityCheckpoint,
+        anchors: &ChainAnchors,
+    ) {
+        let mut status = self.status.lock().unwrap();
+        status.checkpoint = Some(checkpoint);
+        status.indexed_execution_head = anchors.indexed_head;
+        status.optimistic_execution_head = anchors.optimistic_head;
+        status.finalized_execution_head = anchors.finalized_head;
+        status.target_block = anchors
+            .optimistic_head
+            .map_or(status.current_block, |anchor| anchor.block_number);
     }
 
     /// Update the node's connectivity state and peer counts.
@@ -129,6 +145,15 @@ impl ProgressTracker {
         }
     }
 
+    pub fn rewind_to(&self, block_number: u64) {
+        let mut status = self.status.lock().unwrap();
+        status.current_block = block_number;
+        if status.target_block < block_number {
+            status.target_block = block_number;
+        }
+        status.eta_seconds = None;
+    }
+
     /// Mark sync as complete (caught up to tip).
     pub fn mark_synced(&self) {
         let mut status = self.status.lock().unwrap();
@@ -150,7 +175,8 @@ impl ProgressTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logex_types::{NodeState, SyncStatus};
+    use alloy_primitives::B256;
+    use logex_types::{ExecutionAnchor, NodeState, SyncStatus, WeakSubjectivityCheckpoint};
 
     #[test]
     fn syncing_flag_stays_true_while_syncing_without_known_target() {
@@ -175,5 +201,36 @@ mod tests {
         let status = status.lock().unwrap().clone();
         assert!(!status.syncing);
         assert_eq!(status.node_state, NodeState::Connecting);
+    }
+
+    #[test]
+    fn consensus_target_can_move_backwards_after_reorg() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            current_block: 95,
+            target_block: 100,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_consensus_state(
+            WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x11),
+                beacon_slot: Some(1),
+            },
+            &ChainAnchors {
+                indexed_head: None,
+                finalized_head: None,
+                optimistic_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x22),
+                    beacon_slot: 2,
+                    block_number: 97,
+                    block_hash: B256::repeat_byte(0x33),
+                    receipts_root: B256::repeat_byte(0x44),
+                }),
+            },
+        );
+
+        let status = status.lock().unwrap().clone();
+        assert_eq!(status.target_block, 97);
     }
 }

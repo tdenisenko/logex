@@ -1,4 +1,5 @@
 mod background;
+mod checkpoint;
 mod cli;
 mod commands;
 mod runtime;
@@ -37,6 +38,8 @@ fn main() {
     let partition_target_rows = file_config
         .partition_target_rows
         .unwrap_or(cli.partition_target_rows);
+    let checkpoint = file_config.checkpoint.or(cli.checkpoint);
+    let checkpoint_sync_url = file_config.checkpoint_sync_url.or(cli.checkpoint_sync_url);
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -52,15 +55,23 @@ fn main() {
             discovery_port,
             p2p_port,
             max_peers,
+            cl_discovery_port,
+            cl_p2p_port,
+            cl_max_peers,
         } => {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(runtime::run_sync(
                 pm_config,
+                checkpoint,
+                checkpoint_sync_url,
                 http_port,
                 grpc_port,
                 discovery_port,
                 p2p_port,
                 max_peers,
+                cl_discovery_port,
+                cl_p2p_port,
+                cl_max_peers,
             ));
         }
         Command::BuildIndexes => commands::run_build_indexes(pm_config),

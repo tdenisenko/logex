@@ -93,13 +93,14 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
-    let (total_rows, sealed_partitions, head_block, indexed_head_block, data_dir) = {
+    let (total_rows, sealed_partitions, head_block, indexed_head_block, chain_anchors, data_dir) = {
         let storage = state.storage.read().await;
         (
             storage.total_rows(),
             storage.sealed_count(),
             storage.head_block(),
             storage.indexed_head_block(),
+            storage.chain_anchors(),
             storage.data_dir().to_path_buf(),
         )
     };
@@ -110,6 +111,23 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     } else {
         None
     };
+    let canonical_top_block = sync
+        .optimistic_execution_head
+        .map(|anchor| anchor.block_number)
+        .or((sync.target_block > 0).then_some(sync.target_block))
+        .or(head_block);
+    let index_lag_blocks = canonical_top_block
+        .zip(
+            sync.indexed_execution_head
+                .map(|anchor| anchor.block_number),
+        )
+        .map(|(top, indexed)| top.saturating_sub(indexed));
+    let finality_lag_blocks = canonical_top_block
+        .zip(
+            sync.finalized_execution_head
+                .map(|anchor| anchor.block_number),
+        )
+        .map(|(top, finalized)| top.saturating_sub(finalized));
     Json(serde_json::json!({
         "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
@@ -131,6 +149,20 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
         "progress_pct": progress_pct,
+        "canonical_top_block": canonical_top_block,
+        "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
+        "checkpoint_slot": sync.checkpoint.and_then(|checkpoint| checkpoint.beacon_slot),
+        "indexed_execution_head": sync.indexed_execution_head,
+        "materialized_execution_floor": sync.materialized_execution_floor,
+        "materialized_execution_ceiling": sync.materialized_execution_ceiling,
+        "materialized_execution_anchor_count": sync.materialized_execution_anchor_count,
+        "optimistic_execution_head": sync.optimistic_execution_head,
+        "finalized_execution_head": sync.finalized_execution_head,
+        "consensus_network": sync.consensus_network,
+        "consensus_light_client": sync.consensus_light_client,
+        "index_lag_blocks": index_lag_blocks,
+        "finality_lag_blocks": finality_lag_blocks,
+        "storage_chain_anchors": chain_anchors,
     }))
 }
 
@@ -147,7 +179,11 @@ mod tests {
     use axum::http::Request;
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
-    use logex_types::{LogRow, NodeState, Source, SyncStatus};
+    use logex_types::{
+        ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
+        LightClientBootstrapStatus, LightClientExecutionData, LightClientHeaderSummary, LogRow,
+        NodeState, Source, SyncStatus, WeakSubjectivityCheckpoint,
+    };
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -454,6 +490,134 @@ mod tests {
                 blocks_per_minute: 120.0,
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
+                checkpoint: Some(WeakSubjectivityCheckpoint {
+                    beacon_root: B256::repeat_byte(0x77),
+                    beacon_slot: Some(123_456),
+                }),
+                indexed_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x01),
+                    beacon_slot: 1,
+                    block_number: 200,
+                    block_hash: B256::repeat_byte(0x02),
+                    receipts_root: B256::repeat_byte(0x03),
+                }),
+                materialized_execution_floor: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x0A),
+                    beacon_slot: 1,
+                    block_number: 150,
+                    block_hash: B256::repeat_byte(0x0B),
+                    receipts_root: B256::repeat_byte(0x0C),
+                }),
+                materialized_execution_ceiling: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x0D),
+                    beacon_slot: 2,
+                    block_number: 460,
+                    block_hash: B256::repeat_byte(0x0E),
+                    receipts_root: B256::repeat_byte(0x0F),
+                }),
+                materialized_execution_anchor_count: 311,
+                optimistic_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x04),
+                    beacon_slot: 2,
+                    block_number: 500,
+                    block_hash: B256::repeat_byte(0x05),
+                    receipts_root: B256::repeat_byte(0x06),
+                }),
+                finalized_execution_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x07),
+                    beacon_slot: 3,
+                    block_number: 480,
+                    block_hash: B256::repeat_byte(0x08),
+                    receipts_root: B256::repeat_byte(0x09),
+                }),
+                consensus_network: Some(ConsensusNetworkStatus {
+                    local_enr: Some("enr:test".to_string()),
+                    local_node_id: Some("node:test".to_string()),
+                    discovery_port: 9_000,
+                    p2p_port: 9_000,
+                    local_peer_id: Some("12D3KooWtest".to_string()),
+                    max_peers: 32,
+                    bootnode_count: 14,
+                    discovered_peers: 21,
+                    dialable_peers: 13,
+                    routing_table_peers: 11,
+                    active_sessions: 3,
+                    connected_peer_sessions: 2,
+                    dialing_peer_sessions: 1,
+                    preferred_peers: 3,
+                    cooldown_peers: 5,
+                    ignored_peers: 7,
+                    deferred_until_post_bootstrap_peers: 2,
+                    identified_peers: 2,
+                    status_capable_peers: 2,
+                    metadata_capable_peers: 2,
+                    bootstrap_capable_peers: 1,
+                    updates_by_range_capable_peers: 1,
+                    finality_update_capable_peers: 1,
+                    optimistic_update_capable_peers: 1,
+                    beacon_blocks_by_range_capable_peers: 1,
+                    beacon_blocks_by_root_capable_peers: 1,
+                    status_peers: 2,
+                    metadata_peers: 2,
+                    bootstrap_peers: 1,
+                    updates_by_range_peers: 1,
+                    finality_update_peers: 1,
+                    optimistic_update_peers: 1,
+                    beacon_blocks_by_range_peers: 1,
+                    beacon_blocks_by_root_peers: 1,
+                    pending_rpc_requests: 4,
+                    pending_status_requests: 1,
+                    pending_metadata_requests: 1,
+                    pending_bootstrap_requests: 1,
+                    pending_updates_by_range_requests: 0,
+                    pending_finality_update_requests: 1,
+                    pending_optimistic_update_requests: 0,
+                    pending_beacon_blocks_by_range_requests: 0,
+                    pending_beacon_blocks_by_root_requests: 0,
+                    status_request_failures: 3,
+                    metadata_request_failures: 1,
+                    bootstrap_request_failures: 0,
+                    updates_by_range_request_failures: 0,
+                    finality_update_request_failures: 0,
+                    optimistic_update_request_failures: 0,
+                    beacon_blocks_by_range_request_failures: 0,
+                    beacon_blocks_by_root_request_failures: 0,
+                    gossip_subscriptions: 2,
+                    finality_update_gossip_messages: 4,
+                    optimistic_update_gossip_messages: 9,
+                    gossip_decode_failures: 1,
+                    last_connection_event: Some("connected peer=peer1 endpoint=Dialer".to_string()),
+                    last_identify_event: Some(
+                        "peer=peer1 agent=lighthouse protocols=12 status=true metadata=true bootstrap=false updates_by_range=false finality=false optimistic=false blocks_by_range=true blocks_by_root=true preview=[/eth2/beacon_chain/req/status/2/ssz_snappy]".to_string(),
+                    ),
+                    last_peer_policy_event: Some(
+                        "peer=peer3 policy=defer_until_post_bootstrap reason=peer only advertises post-bootstrap work".to_string(),
+                    ),
+                    last_rpc_failure: Some(
+                        "peer=peer1 request=status failure=connection closed".to_string(),
+                    ),
+                    last_response_send_failure: Some(
+                        "peer=peer2 request=status response=Status(..)".to_string(),
+                    ),
+                }),
+                consensus_light_client: Some(ConsensusLightClientStatus {
+                    bootstrap: Some(LightClientBootstrapStatus {
+                        fork: ConsensusDataFork::Electra,
+                        header: LightClientHeaderSummary {
+                            beacon_slot: 123_450,
+                            execution: Some(LightClientExecutionData {
+                                block_number: 500,
+                                block_hash: B256::repeat_byte(0xAA),
+                                receipts_root: B256::repeat_byte(0xBB),
+                            }),
+                        },
+                        current_sync_committee_pubkeys: 512,
+                        current_sync_committee_branch_depth: 6,
+                    }),
+                    finality_update: None,
+                    optimistic_update: None,
+                }),
+                ..Default::default()
             },
         ));
         let app = crate::build_router(state);
@@ -476,9 +640,28 @@ mod tests {
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");
+        assert_eq!(status["canonical_top_block"], 500);
+        assert_eq!(status["index_lag_blocks"], 300);
+        assert_eq!(status["finality_lag_blocks"], 20);
+        assert_eq!(status["materialized_execution_floor"]["block_number"], 150);
+        assert_eq!(
+            status["materialized_execution_ceiling"]["block_number"],
+            460
+        );
+        assert_eq!(status["materialized_execution_anchor_count"], 311);
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
+        assert_eq!(status["consensus_network"]["active_sessions"], 3);
+        assert_eq!(status["consensus_network"]["dialable_peers"], 13);
+        assert_eq!(
+            status["consensus_light_client"]["bootstrap"]["fork"],
+            "electra"
+        );
+        assert_eq!(
+            status["consensus_light_client"]["bootstrap"]["header"]["execution"]["block_number"],
+            500
+        );
         assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
         assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
     }
@@ -501,6 +684,7 @@ mod tests {
                 blocks_per_minute: 0.0,
                 logs_ingested: 0,
                 eta_seconds: None,
+                ..Default::default()
             },
         ));
         let app = crate::build_router(state);

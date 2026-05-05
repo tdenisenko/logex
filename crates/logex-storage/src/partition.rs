@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_consensus::Header;
 use alloy_primitives::B256;
-use logex_types::{LogRow, PartitionMeta};
+use logex_types::{ChainAnchors, ExecutionAnchor, LogRow, PartitionMeta};
 
 use crate::native::{NativeStorage, NativeStorageConfig};
 use crate::state::SyncHead;
@@ -120,6 +120,38 @@ impl PartitionManager {
         recent_headers: &[Header],
     ) -> std::io::Result<()> {
         self.inner.record_canonical_state(header, recent_headers)
+    }
+
+    /// Persist the latest verified execution anchor together with the
+    /// canonical EL header window.
+    pub fn record_verified_canonical_state(
+        &mut self,
+        anchor: &ExecutionAnchor,
+        header: &Header,
+        recent_headers: &[Header],
+    ) -> std::io::Result<()> {
+        self.inner
+            .record_verified_canonical_state(anchor, header, recent_headers)
+    }
+
+    /// Return the persisted chain anchors, if any.
+    pub fn chain_anchors(&self) -> ChainAnchors {
+        self.inner.chain_anchors()
+    }
+
+    /// Persist the compact execution-facing chain anchors.
+    pub fn record_chain_anchors(&mut self, anchors: ChainAnchors) -> std::io::Result<()> {
+        self.inner.record_chain_anchors(anchors)
+    }
+
+    /// Rewind the persisted canonical head after a consensus-driven reorg.
+    pub fn rewind_canonical_state(
+        &mut self,
+        recent_headers: &[Header],
+        indexed_head: Option<ExecutionAnchor>,
+    ) -> std::io::Result<()> {
+        self.inner
+            .rewind_canonical_state(recent_headers, indexed_head)
     }
 
     /// Mark rows in a given block as non-canonical during a reorg.
@@ -253,5 +285,44 @@ mod tests {
 
         assert_eq!(mgr.sync_head().map(|head| head.block_number), Some(55));
         assert_eq!(mgr.recent_headers().len(), 1);
+    }
+
+    #[test]
+    fn manager_persists_chain_anchors() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        mgr.record_chain_anchors(ChainAnchors {
+            indexed_head: Some(ExecutionAnchor {
+                beacon_root: B256::repeat_byte(0x11),
+                beacon_slot: 100,
+                block_number: 55,
+                block_hash: B256::repeat_byte(0x22),
+                receipts_root: B256::repeat_byte(0x33),
+            }),
+            finalized_head: None,
+            optimistic_head: None,
+        })
+        .unwrap();
+
+        let reloaded = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        assert_eq!(
+            reloaded
+                .chain_anchors()
+                .indexed_head
+                .map(|anchor| anchor.block_number),
+            Some(55)
+        );
     }
 }

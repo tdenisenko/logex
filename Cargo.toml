@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/logex-types", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
+members = ["crates/logex-types", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
 resolver = "2"
 
 [workspace.package]
@@ -27,6 +27,10 @@ futures = "0.3"
 futures-util = "0.3"
 eyre = "0.6"
 datafusion = "51"
+discv5 = "0.10.4"
+libp2p = { version = "0.56.0", default-features = false, features = ["dns", "gossipsub", "identify", "macros", "noise", "quic", "request-response", "tcp", "tokio", "yamux"] }
+libp2p-mplex = "0.43.1"
+sha2 = "0.10"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -38,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async runtime / HTTP / gRPC
 axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.13"
 prost = "0.13"
@@ -58,6 +63,7 @@ reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag
 
 # Internal crates
 logex-types = { path = "crates/logex-types" }
+logex-cl = { path = "crates/logex-cl" }
 logex-storage = { path = "crates/logex-storage" }
 logex-index = { path = "crates/logex-index" }
 logex-query = { path = "crates/logex-query" }

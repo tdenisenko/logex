@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
-use logex_types::PartitionMeta;
+use logex_types::{ChainAnchors, ExecutionAnchor, PartitionMeta};
 use serde::{Deserialize, Serialize};
 
 use crate::SegmentReader;
@@ -108,6 +108,64 @@ impl NativeStorage {
         self.state.sync_head = Some(next_sync_head);
         self.state.recent_headers = next_recent_headers;
         self.persist_state()
+    }
+
+    pub fn record_verified_canonical_state(
+        &mut self,
+        anchor: &ExecutionAnchor,
+        header: &Header,
+        recent_headers: &[Header],
+    ) -> std::io::Result<()> {
+        self.record_canonical_state(header, recent_headers)?;
+
+        let mut anchors = self.catalog.anchors.clone();
+        anchors.indexed_head = Some(*anchor);
+        self.record_chain_anchors(anchors)
+    }
+
+    pub fn chain_anchors(&self) -> ChainAnchors {
+        self.catalog.anchors.clone()
+    }
+
+    pub fn record_chain_anchors(&mut self, anchors: ChainAnchors) -> std::io::Result<()> {
+        if self.catalog.anchors == anchors {
+            return Ok(());
+        }
+
+        self.catalog.anchors = anchors;
+        self.persist_catalog()
+    }
+
+    pub fn rewind_canonical_state(
+        &mut self,
+        recent_headers: &[Header],
+        indexed_head: Option<ExecutionAnchor>,
+    ) -> std::io::Result<()> {
+        let next_sync_head = recent_headers.last().map(|header| SyncHead {
+            block_number: header.number(),
+            block_hash: header.hash_slow(),
+            timestamp: header.timestamp(),
+        });
+        let next_recent_headers = recent_headers.to_vec();
+        let mut next_anchors = self.catalog.anchors.clone();
+        next_anchors.indexed_head = indexed_head;
+
+        let state_changed = self.state.sync_head != next_sync_head
+            || self.state.recent_headers != next_recent_headers;
+        let anchors_changed = self.catalog.anchors != next_anchors;
+
+        self.state.sync_head = next_sync_head;
+        self.state.recent_headers = next_recent_headers;
+        self.catalog.anchors = next_anchors;
+
+        if state_changed {
+            self.persist_state()?;
+        }
+        if anchors_changed {
+            self.persist_catalog()?;
+        }
+
+        Ok(())
     }
 
     pub fn write_batch(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {
@@ -369,10 +427,13 @@ impl NativeStorage {
         let Some(max_block) = descriptor.max_block else {
             return false;
         };
+        if let Some(finalized_head) = self.catalog.anchors.finalized_head {
+            return max_block <= finalized_head.block_number;
+        }
+
         let Some(head_block) = self.head_block() else {
             return false;
         };
-
         max_block.saturating_add(self.config.compaction_safety_margin_blocks) <= head_block
     }
 
@@ -632,6 +693,59 @@ mod tests {
         assert_eq!(
             reloaded.sync_head().map(|head| head.block_number),
             Some(123)
+        );
+    }
+
+    #[test]
+    fn rewind_canonical_state_rewinds_sync_head_and_indexed_anchor() {
+        let tmp = TempDir::new().unwrap();
+        let first = header(100, B256::ZERO, 0x01);
+        let second = header(101, first.hash_slow(), 0x02);
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage
+            .record_chain_anchors(ChainAnchors {
+                indexed_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0xAA),
+                    beacon_slot: 1,
+                    block_number: 101,
+                    block_hash: second.hash_slow(),
+                    receipts_root: B256::repeat_byte(0xBB),
+                }),
+                finalized_head: None,
+                optimistic_head: None,
+            })
+            .unwrap();
+        storage
+            .record_canonical_state(&second, &[first.clone(), second.clone()])
+            .unwrap();
+
+        storage
+            .rewind_canonical_state(
+                std::slice::from_ref(&first),
+                Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0xCC),
+                    beacon_slot: 2,
+                    block_number: 100,
+                    block_hash: first.hash_slow(),
+                    receipts_root: B256::repeat_byte(0xDD),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(storage.sync_head().map(|head| head.block_number), Some(100));
+        assert_eq!(storage.recent_headers(), &[first.clone()]);
+        assert_eq!(
+            storage
+                .chain_anchors()
+                .indexed_head
+                .map(|anchor| anchor.block_number),
+            Some(100)
         );
     }
 

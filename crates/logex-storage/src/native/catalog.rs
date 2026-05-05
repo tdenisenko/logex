@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use alloy_primitives::B256;
+use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
 pub const STORAGE_FORMAT_VERSION: u32 = 1;
@@ -89,23 +89,6 @@ pub enum IndexKind {
     Topic0,
     AddressTopic0,
     Custom,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionAnchor {
-    pub block_number: u64,
-    pub block_hash: B256,
-    pub receipts_root: B256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ChainAnchors {
-    #[serde(default)]
-    pub indexed_head: Option<ExecutionAnchor>,
-    #[serde(default)]
-    pub finalized_head: Option<ExecutionAnchor>,
-    #[serde(default)]
-    pub optimistic_head: Option<ExecutionAnchor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

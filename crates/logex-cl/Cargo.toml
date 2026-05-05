@@ -1,0 +1,34 @@
+[package]
+name = "logex-cl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alloy-rpc-types-beacon = { version = "1.8.3", features = ["ssz"] }
+alloy-primitives = { workspace = true }
+async-trait = { workspace = true }
+discv5 = { workspace = true, features = ["libp2p"] }
+futures = { workspace = true }
+libp2p = { workspace = true }
+libp2p-mplex = { workspace = true }
+logex-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+snap = "1.1"
+ssz = { package = "ethereum_ssz", version = "0.9" }
+ssz_derive = { package = "ethereum_ssz_derive", version = "0.9" }
+tree_hash = "0.10"
+tree_hash_derive = "0.10"
+unsigned-varint = "0.8"
+blst = "0.3"
+ssz_types = "0.11"
+typenum = "1"
+
+[dev-dependencies]
+tempfile = "3"

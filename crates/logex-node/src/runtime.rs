@@ -2,6 +2,9 @@ use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
 
+use logex_cl::{
+    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, spawn_consensus_network,
+};
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
@@ -18,20 +21,38 @@ use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_ethereum_forks::Head;
 
 use crate::background::{log_task_exit, run_background_indexer};
+use crate::checkpoint::resolve_checkpoint;
 
 pub async fn run_sync(
     pm_config: PartitionManagerConfig,
+    checkpoint: Option<String>,
+    checkpoint_sync_url: Option<String>,
     http_port: u16,
     grpc_port: u16,
     discovery_port: u16,
     p2p_port: u16,
     max_peers: usize,
+    cl_discovery_port: u16,
+    cl_p2p_port: u16,
+    cl_max_peers: usize,
 ) {
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
     let known_peers_file = known_peers_path(&data_dir);
+    let consensus_state_exists = data_dir.join("cl").join("consensus_state.json").exists();
+    let checkpoint = if consensus_state_exists && checkpoint.is_none() {
+        checkpoint
+    } else {
+        match resolve_checkpoint(checkpoint, checkpoint_sync_url.as_deref()).await {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                tracing::error!(%error, "failed to resolve weak-subjectivity checkpoint");
+                std::process::exit(1);
+            }
+        }
+    };
 
-    let storage = match PartitionManager::open(pm_config) {
+    let mut storage = match PartitionManager::open(pm_config) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to open storage");
@@ -54,10 +75,50 @@ pub async fn run_sync(
         "storage ready"
     );
 
+    let consensus = match maybe_open_consensus_store(&data_dir, &storage, checkpoint.as_deref()) {
+        Ok(store) => store.map(Arc::new),
+        Err(ConsensusStateError::MissingCheckpoint) => {
+            tracing::error!(
+                data_dir = %data_dir.display(),
+                "fresh data directories now require --checkpoint <root-or-descriptor> to start canonical sync"
+            );
+            std::process::exit(1);
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to initialize consensus state");
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(consensus) = consensus.as_ref() {
+        let checkpoint = consensus.checkpoint();
+        let mut anchors = consensus.chain_anchors();
+        anchors.indexed_head = storage.chain_anchors().indexed_head;
+        if let Err(error) = storage.record_chain_anchors(anchors.clone()) {
+            tracing::error!(error = %error, "failed to persist consensus anchors into storage");
+            std::process::exit(1);
+        }
+        tracing::info!(
+            checkpoint_root = %checkpoint.beacon_root,
+            checkpoint_slot = checkpoint.beacon_slot,
+            optimistic_head = anchors.optimistic_head.map(|anchor| anchor.block_number),
+            finalized_head = anchors.finalized_head.map(|anchor| anchor.block_number),
+            "consensus state ready"
+        );
+    } else {
+        tracing::warn!(
+            cl_discovery_port,
+            cl_p2p_port,
+            cl_max_peers,
+            "starting without persisted consensus state; EL-only sync mode remains active until checkpointed CL state is configured"
+        );
+    }
+
+    let storage_anchors = storage.chain_anchors();
     let state = Arc::new(AppState::new(
         storage,
         Some(SubscriptionManager::new()),
-        initial_sync_status(resume_block),
+        initial_sync_status(resume_block, &storage_anchors, consensus.as_deref()),
     ));
 
     let known_peers = match load_known_peers(&known_peers_file) {
@@ -94,6 +155,29 @@ pub async fn run_sync(
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let consensus_network_handle = consensus.as_ref().map(|consensus| {
+        spawn_consensus_network(
+            ConsensusNetworkConfig {
+                data_dir: data_dir.clone(),
+                checkpoint: consensus.checkpoint(),
+                discovery_port: cl_discovery_port,
+                p2p_port: cl_p2p_port,
+                max_peers: cl_max_peers,
+            },
+            Arc::clone(consensus),
+            Arc::clone(&state.sync_status),
+            shutdown_rx.clone(),
+        )
+    });
+    let consensus_network_handle = match consensus_network_handle {
+        Some(Ok(handle)) => Some(handle),
+        Some(Err(error)) => {
+            tracing::error!(%error, "failed to start consensus network");
+            std::process::exit(1);
+        }
+        None => None,
+    };
 
     let http_addr: SocketAddr = ([0, 0, 0, 0], http_port).into();
     let http_state = Arc::clone(&state);
@@ -155,6 +239,7 @@ pub async fn run_sync(
         Arc::clone(&state.storage),
         state.subscriptions.clone(),
         Arc::clone(&state.sync_status),
+        consensus,
         shutdown_rx.clone(),
     );
 
@@ -196,15 +281,36 @@ pub async fn run_sync(
     log_task_exit("HTTP server", http_handle).await;
     log_task_exit("gRPC server", grpc_handle).await;
     log_task_exit("background indexer", index_handle).await;
+    if let Some(handle) = consensus_network_handle {
+        log_task_exit("consensus network", handle).await;
+    }
     tracing::info!("shutting down");
 }
 
-fn initial_sync_status(resume_block: u64) -> SyncStatus {
-    SyncStatus {
+fn initial_sync_status(
+    resume_block: u64,
+    storage_anchors: &logex_types::ChainAnchors,
+    consensus: Option<&ConsensusStore>,
+) -> SyncStatus {
+    let mut status = SyncStatus {
         current_block: resume_block,
         target_block: 0,
         ..Default::default()
+    };
+    status.indexed_execution_head = storage_anchors.indexed_head;
+
+    if let Some(consensus) = consensus {
+        let anchors = consensus.chain_anchors();
+        status.checkpoint = Some(consensus.checkpoint());
+        status.optimistic_execution_head = anchors.optimistic_head;
+        status.finalized_execution_head = anchors.finalized_head;
+        let light_client = consensus.light_client_status();
+        status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
+        if let Some(anchor) = anchors.optimistic_head {
+            status.target_block = anchor.block_number;
+        }
     }
+    status
 }
 
 fn startup_network_head(sync_head: Option<SyncHead>) -> Head {
@@ -239,6 +345,23 @@ fn genesis_network_head() -> Head {
     }
 }
 
+fn maybe_open_consensus_store(
+    data_dir: &std::path::Path,
+    storage: &PartitionManager,
+    checkpoint: Option<&str>,
+) -> Result<Option<ConsensusStore>, ConsensusStateError> {
+    let state_path = data_dir.join("cl").join("consensus_state.json");
+    if state_path.exists() || checkpoint.is_some() {
+        return ConsensusStore::open(data_dir, checkpoint).map(Some);
+    }
+
+    if storage.sync_head().is_none() && storage.total_rows() == 0 {
+        return Err(ConsensusStateError::MissingCheckpoint);
+    }
+
+    Ok(None)
+}
+
 async fn wait_for_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
@@ -267,7 +390,7 @@ mod tests {
 
     #[test]
     fn initial_sync_status_does_not_treat_resume_block_as_network_target() {
-        let status = initial_sync_status(83_714);
+        let status = initial_sync_status(83_714, &logex_types::ChainAnchors::default(), None);
 
         assert_eq!(status.current_block, 83_714);
         assert_eq!(status.target_block, 0);

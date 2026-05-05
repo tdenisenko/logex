@@ -26,6 +26,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
+    /// Weak-subjectivity checkpoint root or descriptor file path.
+    #[arg(long, global = true)]
+    pub checkpoint: Option<String>,
+
+    /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
+    #[arg(long, global = true)]
+    pub checkpoint_sync_url: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -53,6 +61,18 @@ pub enum Command {
         /// Maximum peer connections.
         #[arg(long, default_value = "50")]
         max_peers: usize,
+
+        /// Consensus-layer discv5 discovery port (UDP).
+        #[arg(long, default_value = "9000")]
+        cl_discovery_port: u16,
+
+        /// Consensus-layer libp2p port advertised in the local ENR.
+        #[arg(long, default_value = "9000")]
+        cl_p2p_port: u16,
+
+        /// Maximum dialable CL peers to retain from discovery.
+        #[arg(long, default_value = "32")]
+        cl_max_peers: usize,
     },
 
     /// Build or rebuild indexes on the hot partition.
@@ -71,6 +91,10 @@ pub struct Config {
     pub log_level: Option<String>,
     #[serde(default)]
     pub partition_target_rows: Option<u64>,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub checkpoint_sync_url: Option<String>,
 }
 
 impl Config {

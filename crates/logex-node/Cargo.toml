@@ -9,6 +9,7 @@ name = "logex"
 path = "src/main.rs"
 
 [dependencies]
+logex-cl = { workspace = true }
 logex-types = { workspace = true }
 logex-storage = { workspace = true }
 logex-index = { workspace = true }
@@ -20,6 +21,8 @@ secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 clap = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
