@@ -178,6 +178,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "materialized_execution_floor": sync.materialized_execution_floor,
         "materialized_execution_ceiling": sync.materialized_execution_ceiling,
         "materialized_execution_anchor_count": sync.materialized_execution_anchor_count,
+        "materialized_execution_anchor_gap_count": sync.materialized_execution_anchor_gap_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
         "consensus_network": sync.consensus_network,
@@ -551,6 +552,7 @@ mod tests {
                     receipts_root: B256::repeat_byte(0x0F),
                 }),
                 materialized_execution_anchor_count: 311,
+                materialized_execution_anchor_gap_count: 0,
                 optimistic_execution_head: Some(ExecutionAnchor {
                     beacon_root: B256::repeat_byte(0x04),
                     beacon_slot: 2,
@@ -692,6 +694,7 @@ mod tests {
             460
         );
         assert_eq!(status["materialized_execution_anchor_count"], 311);
+        assert_eq!(status["materialized_execution_anchor_gap_count"], 0);
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);

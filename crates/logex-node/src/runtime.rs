@@ -317,9 +317,14 @@ fn initial_sync_status(
 
     if let Some(consensus) = consensus {
         let anchors = consensus.chain_anchors();
+        let anchor_coverage = consensus.anchor_coverage();
         status.checkpoint = Some(consensus.checkpoint());
         status.optimistic_execution_head = anchors.optimistic_head;
         status.finalized_execution_head = anchors.finalized_head;
+        status.materialized_execution_floor = anchor_coverage.floor;
+        status.materialized_execution_ceiling = anchor_coverage.ceiling;
+        status.materialized_execution_anchor_count = anchor_coverage.count;
+        status.materialized_execution_anchor_gap_count = anchor_coverage.gap_count;
         let light_client = consensus.light_client_status();
         status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
         if let Some(anchor) = anchors.optimistic_head {

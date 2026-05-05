@@ -207,6 +207,8 @@ pub struct SyncStatus {
     pub materialized_execution_ceiling: Option<ExecutionAnchor>,
     /// Number of CL-authenticated execution anchors currently materialized in the checkpoint-centered range.
     pub materialized_execution_anchor_count: usize,
+    /// Number of detected continuity gaps in the materialized execution anchor range.
+    pub materialized_execution_anchor_gap_count: usize,
     /// Highest optimistic execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optimistic_execution_head: Option<ExecutionAnchor>,
