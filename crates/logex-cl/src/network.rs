@@ -22,7 +22,9 @@ use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, tcp, yamux};
 use libp2p_mplex as mplex;
-use logex_types::{ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint};
+use logex_types::{
+    ConsensusDataFork, ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -45,7 +47,7 @@ use crate::rpc::{
     build_status_behaviour, resource_unavailable,
 };
 use crate::{
-    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock,
+    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock, VerifiedLightClientStore,
     apply_finality_update_payload, apply_light_client_update_payload,
     apply_optimistic_update_payload, decode_verified_beacon_block, force_update_light_client_store,
     verify_bootstrap_payload,
@@ -484,8 +486,21 @@ struct CachedForwardPathProgress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CachedBackwardPathProgress {
+    oldest_root: B256,
     oldest_slot: u64,
     next_parent_root: B256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryRangeDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaterializableHistoryChain {
+    blocks: Vec<VerifiedBeaconBlock>,
+    reaches_optimistic_head: bool,
 }
 
 fn select_history_sync_target(
@@ -509,12 +524,83 @@ fn select_history_sync_target(
     }
 }
 
+fn select_forward_history_range_target(
+    current: Option<HistorySyncTarget>,
+    latest: Option<HistorySyncTarget>,
+) -> Option<HistorySyncTarget> {
+    match (current, latest) {
+        (None, latest) => latest,
+        (Some(current), Some(latest))
+            if latest.checkpoint_root == current.checkpoint_root
+                && latest.checkpoint_slot == current.checkpoint_slot
+                && latest.optimistic_slot > current.optimistic_slot =>
+        {
+            Some(latest)
+        }
+        (Some(current), _) => Some(current),
+    }
+}
+
 fn live_head_progression_needed(target: Option<HistorySyncTarget>) -> bool {
     target.is_some_and(|target| target.optimistic_slot <= target.checkpoint_slot)
 }
 
 fn limited_local_status_message(fork_digest: [u8; 4]) -> StatusMessage {
     StatusMessage::genesis(fork_digest, MAINNET_CONSENSUS_CHAIN_SPEC.genesis_block_root)
+}
+
+fn consensus_data_fork_for_slot(slot: u64) -> ConsensusDataFork {
+    match MAINNET_CONSENSUS_CHAIN_SPEC
+        .fork_version_for_epoch(MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot))[0]
+    {
+        version if version >= 0x05 => ConsensusDataFork::Electra,
+        0x04 => ConsensusDataFork::Deneb,
+        _ => ConsensusDataFork::Capella,
+    }
+}
+
+fn verified_beacon_blocks_from_anchor_records(
+    anchors: &[crate::AnchorRecord],
+) -> HashMap<B256, VerifiedBeaconBlock> {
+    let mut blocks = HashMap::new();
+    let mut previous_root = None;
+    for record in anchors {
+        let anchor = record.anchor;
+        let parent_root = record
+            .parent_beacon_root
+            .or(previous_root)
+            .unwrap_or_default();
+        blocks.insert(
+            anchor.beacon_root,
+            VerifiedBeaconBlock {
+                fork: consensus_data_fork_for_slot(anchor.beacon_slot),
+                beacon_root: anchor.beacon_root,
+                parent_root,
+                slot: anchor.beacon_slot,
+                execution_anchor: anchor,
+            },
+        );
+        previous_root = Some(anchor.beacon_root);
+    }
+    blocks
+}
+
+fn verified_beacon_blocks_from_light_client_store(
+    store: &VerifiedLightClientStore,
+) -> Vec<VerifiedBeaconBlock> {
+    [&store.finalized_header, &store.optimistic_header]
+        .into_iter()
+        .filter_map(|header| {
+            let execution_anchor = header.execution_anchor()?;
+            Some(VerifiedBeaconBlock {
+                fork: header.fork,
+                beacon_root: execution_anchor.beacon_root,
+                parent_root: header.beacon.parent_root,
+                slot: header.beacon.slot,
+                execution_anchor,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -533,7 +619,8 @@ struct PostBootstrapRequestReadiness {
 fn select_post_bootstrap_request_kind(
     readiness: PostBootstrapRequestReadiness,
 ) -> Option<RpcRequestKind> {
-    if readiness.priority_root_ready && readiness.range_ready {
+    let root_ready = readiness.priority_root_ready || readiness.deferred_root_ready;
+    if root_ready && readiness.range_ready {
         if !readiness.pending_range && readiness.pending_priority_root {
             Some(RpcRequestKind::BeaconBlocksByRange)
         } else if readiness.pending_range && !readiness.pending_priority_root {
@@ -615,6 +702,121 @@ fn backward_history_range_request_for_progress(
         count,
         step: 1,
     })
+}
+
+fn history_range_end_slot(request: BeaconBlocksByRangeRequest) -> u64 {
+    request
+        .start_slot
+        .saturating_add(request.step.saturating_mul(request.count.saturating_sub(1)))
+}
+
+fn history_range_direction(
+    request: BeaconBlocksByRangeRequest,
+    checkpoint_slot: u64,
+) -> Option<HistoryRangeDirection> {
+    let end_slot = history_range_end_slot(request);
+    if request.start_slot > checkpoint_slot {
+        Some(HistoryRangeDirection::Forward)
+    } else if end_slot < checkpoint_slot {
+        Some(HistoryRangeDirection::Backward)
+    } else {
+        None
+    }
+}
+
+fn forward_progress_with_pending_ranges(
+    mut progress: CachedForwardPathProgress,
+    pending_ranges: &[BeaconBlocksByRangeRequest],
+) -> CachedForwardPathProgress {
+    loop {
+        let next_slot = progress.highest_cached_slot.saturating_add(1);
+        let Some(request) = pending_ranges.iter().copied().find(|request| {
+            request.start_slot <= next_slot && history_range_end_slot(*request) >= next_slot
+        }) else {
+            break;
+        };
+        progress.highest_cached_slot = progress.target_slot.min(
+            progress
+                .highest_cached_slot
+                .max(history_range_end_slot(request)),
+        );
+        if progress.highest_cached_slot >= progress.target_slot {
+            break;
+        }
+    }
+    progress
+}
+
+fn backward_progress_with_pending_ranges(
+    mut progress: CachedBackwardPathProgress,
+    pending_ranges: &[BeaconBlocksByRangeRequest],
+) -> CachedBackwardPathProgress {
+    while let Some(next_end_slot) = progress.oldest_slot.checked_sub(1) {
+        let Some(request) = pending_ranges.iter().copied().find(|request| {
+            request.start_slot <= next_end_slot && history_range_end_slot(*request) >= next_end_slot
+        }) else {
+            break;
+        };
+        progress.oldest_slot = progress.oldest_slot.min(request.start_slot);
+        if progress.oldest_slot == 0 {
+            break;
+        }
+    }
+    progress
+}
+
+fn backward_history_root_request_for_progress(
+    progress: CachedBackwardPathProgress,
+    pending_roots: &HashSet<B256>,
+    oldest_payload_cached: bool,
+) -> Option<Vec<B256>> {
+    if progress.oldest_slot == 0 {
+        return None;
+    }
+    let root = if progress.next_parent_root != B256::ZERO {
+        progress.next_parent_root
+    } else if !oldest_payload_cached {
+        progress.oldest_root
+    } else {
+        return None;
+    };
+    (!pending_roots.contains(&root)).then_some(vec![root])
+}
+
+fn select_history_range_request(
+    forward: Option<BeaconBlocksByRangeRequest>,
+    backward: Option<BeaconBlocksByRangeRequest>,
+    pending_forward: usize,
+    pending_backward: usize,
+    prefer_forward: bool,
+) -> Option<BeaconBlocksByRangeRequest> {
+    match (forward, backward) {
+        (Some(forward), Some(_backward)) if pending_forward == 0 && pending_backward > 0 => {
+            Some(forward)
+        }
+        (Some(_forward), Some(backward)) if pending_backward == 0 && pending_forward > 0 => {
+            Some(backward)
+        }
+        (Some(forward), Some(_backward)) if pending_forward < pending_backward => Some(forward),
+        (Some(_forward), Some(backward)) if pending_backward < pending_forward => Some(backward),
+        (Some(forward), Some(_backward)) if prefer_forward => Some(forward),
+        (Some(_), Some(backward)) => Some(backward),
+        (Some(forward), None) => Some(forward),
+        (None, Some(backward)) => Some(backward),
+        (None, None) => None,
+    }
+}
+
+fn select_history_root_request(
+    priority_forward: Option<Vec<B256>>,
+    backward: Option<Vec<B256>>,
+    prefer_backward: bool,
+) -> Option<Vec<B256>> {
+    if prefer_backward {
+        backward.or(priority_forward)
+    } else {
+        priority_forward.or(backward)
+    }
 }
 
 fn range_request_contains_slot(request: BeaconBlocksByRangeRequest, slot: u64) -> bool {
@@ -716,6 +918,63 @@ fn next_forward_history_root_request_for_target_excluding(
     }
 
     (!roots.is_empty()).then_some(roots)
+}
+
+fn materializable_history_chain(
+    verified_beacon_blocks: &HashMap<B256, VerifiedBeaconBlock>,
+    target: HistorySyncTarget,
+) -> Option<MaterializableHistoryChain> {
+    if let Some(blocks) = canonical_chain_blocks_to_root(
+        verified_beacon_blocks,
+        target.checkpoint_root,
+        target.checkpoint_slot,
+        target.optimistic_root,
+    ) {
+        return Some(MaterializableHistoryChain {
+            blocks,
+            reaches_optimistic_head: true,
+        });
+    }
+
+    canonical_chain_blocks_to_root(
+        verified_beacon_blocks,
+        target.checkpoint_root,
+        target.checkpoint_slot,
+        target.finalized_root,
+    )
+    .map(|blocks| MaterializableHistoryChain {
+        blocks,
+        reaches_optimistic_head: false,
+    })
+}
+
+fn canonical_chain_blocks_to_root(
+    verified_beacon_blocks: &HashMap<B256, VerifiedBeaconBlock>,
+    checkpoint_root: B256,
+    checkpoint_slot: u64,
+    target_root: B256,
+) -> Option<Vec<VerifiedBeaconBlock>> {
+    let checkpoint_block = *verified_beacon_blocks.get(&checkpoint_root)?;
+    if checkpoint_block.slot != checkpoint_slot {
+        return None;
+    }
+
+    let mut current_root = target_root;
+    let mut reverse_chain = Vec::new();
+    loop {
+        let block = if current_root == checkpoint_root {
+            checkpoint_block
+        } else {
+            *verified_beacon_blocks.get(&current_root)?
+        };
+        reverse_chain.push(block);
+        if current_root == checkpoint_root {
+            break;
+        }
+        current_root = block.parent_root;
+    }
+    reverse_chain.reverse();
+    Some(reverse_chain)
 }
 
 fn cached_beacon_block_payloads_by_root(
@@ -1374,6 +1633,13 @@ impl ConsensusNetwork {
         }
 
         let swarm = build_rpc_swarm(local_keypair)?;
+        let mut verified_beacon_blocks =
+            verified_beacon_blocks_from_anchor_records(&consensus.ordered_anchors());
+        if let Some(store) = consensus.light_client_store() {
+            for block in verified_beacon_blocks_from_light_client_store(&store) {
+                verified_beacon_blocks.insert(block.beacon_root, block);
+            }
+        }
 
         Ok(Self {
             config,
@@ -1419,7 +1685,7 @@ impl ConsensusNetwork {
             last_peer_policy_event: None,
             last_rpc_failure: None,
             last_response_send_failure: None,
-            verified_beacon_blocks: HashMap::new(),
+            verified_beacon_blocks,
             verified_beacon_block_payloads: HashMap::new(),
             active_history_target: None,
             prefer_forward_range_when_both_ready: true,
@@ -1896,6 +2162,7 @@ impl ConsensusNetwork {
                             "failed to persist verified finality update learned from gossip"
                         );
                     }
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                     return gossipsub::MessageAcceptance::Ignore;
@@ -1947,6 +2214,7 @@ impl ConsensusNetwork {
                             "failed to persist verified optimistic update learned from gossip"
                         );
                     }
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                     return gossipsub::MessageAcceptance::Ignore;
@@ -2417,6 +2685,7 @@ impl ConsensusNetwork {
                             "failed to persist verified bootstrap payload"
                         );
                     }
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
@@ -2490,6 +2759,7 @@ impl ConsensusNetwork {
                             "failed to persist verified light-client updates by range state"
                         );
                     }
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 } else {
@@ -2540,6 +2810,7 @@ impl ConsensusNetwork {
                                 "failed to persist verified finality update"
                             );
                         }
+                        self.seed_verified_light_client_headers();
                         self.materialize_verified_anchor_segments();
                         self.drive_rpc_requests();
                     }
@@ -2591,6 +2862,7 @@ impl ConsensusNetwork {
                                 "failed to persist verified optimistic update"
                             );
                         }
+                        self.seed_verified_light_client_headers();
                         self.materialize_verified_anchor_segments();
                         self.drive_rpc_requests();
                     }
@@ -2675,6 +2947,7 @@ impl ConsensusNetwork {
                     }
                 }
                 if inserted > 0 {
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
@@ -2753,6 +3026,7 @@ impl ConsensusNetwork {
                     }
                 }
                 if inserted > 0 {
+                    self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
@@ -2866,6 +3140,7 @@ impl ConsensusNetwork {
     }
 
     fn drive_rpc_requests(&mut self) {
+        self.seed_verified_light_client_headers();
         self.refresh_history_sync_target();
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let now = Instant::now();
@@ -3192,7 +3467,19 @@ impl ConsensusNetwork {
             kind,
             RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot
         ) {
-            self.prefer_forward_range_when_both_ready = kind != RpcRequestKind::BeaconBlocksByRange;
+            self.prefer_forward_range_when_both_ready = match (kind, requested_history_range) {
+                (RpcRequestKind::BeaconBlocksByRange, Some(request)) => {
+                    let checkpoint_slot = self
+                        .current_history_sync_target()
+                        .map(|target| target.checkpoint_slot);
+                    !matches!(
+                        checkpoint_slot.and_then(|slot| history_range_direction(request, slot)),
+                        Some(HistoryRangeDirection::Forward)
+                    )
+                }
+                (RpcRequestKind::BeaconBlocksByRange, None) => false,
+                _ => true,
+            };
         }
     }
 
@@ -3345,8 +3632,19 @@ impl ConsensusNetwork {
 
     fn next_history_root_request(&self) -> Option<Vec<B256>> {
         let pending_roots = self.pending_history_roots();
-        self.next_priority_history_root_request_excluding(&pending_roots)
-            .or_else(|| self.next_backward_history_root_request_excluding(&pending_roots))
+        let prefer_backward = self
+            .current_history_sync_target()
+            .map(|target| {
+                !self
+                    .pending_history_ranges(HistoryRangeDirection::Backward, target.checkpoint_slot)
+                    .is_empty()
+            })
+            .unwrap_or(false);
+        select_history_root_request(
+            self.next_priority_history_root_request_excluding(&pending_roots),
+            self.next_backward_history_root_request_excluding(&pending_roots),
+            prefer_backward,
+        )
     }
 
     fn next_priority_history_root_request(&self) -> Option<Vec<B256>> {
@@ -3367,16 +3665,34 @@ impl ConsensusNetwork {
     }
 
     fn next_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
-        self.next_forward_history_range_request()
-            .or_else(|| self.next_backward_history_range_request())
+        let target = self.current_history_sync_target()?;
+        let forward_target =
+            select_forward_history_range_target(Some(target), self.latest_history_sync_target())?;
+        let pending_forward = self.pending_history_ranges(
+            HistoryRangeDirection::Forward,
+            forward_target.checkpoint_slot,
+        );
+        let pending_backward =
+            self.pending_history_ranges(HistoryRangeDirection::Backward, target.checkpoint_slot);
+        select_history_range_request(
+            self.next_forward_history_range_request_with_pending(forward_target, &pending_forward),
+            self.next_backward_history_range_request_with_pending(&pending_backward),
+            pending_forward.len(),
+            pending_backward.len(),
+            self.prefer_forward_range_when_both_ready,
+        )
     }
 
-    fn next_forward_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
-        let target = self.current_history_sync_target()?;
+    fn next_forward_history_range_request_with_pending(
+        &self,
+        target: HistorySyncTarget,
+        pending_ranges: &[BeaconBlocksByRangeRequest],
+    ) -> Option<BeaconBlocksByRangeRequest> {
         if target.optimistic_slot <= target.checkpoint_slot {
             return None;
         }
         let progress = self.cached_forward_path_progress(target)?;
+        let progress = forward_progress_with_pending_ranges(progress, pending_ranges);
         next_forward_history_range_request_for_progress(progress)
     }
 
@@ -3385,16 +3701,20 @@ impl ConsensusNetwork {
         pending_roots: &HashSet<B256>,
     ) -> Option<Vec<B256>> {
         let progress = self.cached_backward_path_progress()?;
-        (progress.oldest_slot > 0
-            && !self
-                .verified_beacon_blocks
-                .contains_key(&progress.next_parent_root)
-            && !pending_roots.contains(&progress.next_parent_root))
-        .then_some(vec![progress.next_parent_root])
+        backward_history_root_request_for_progress(
+            progress,
+            pending_roots,
+            self.verified_beacon_block_payloads
+                .contains_key(&progress.oldest_root),
+        )
     }
 
-    fn next_backward_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
+    fn next_backward_history_range_request_with_pending(
+        &self,
+        pending_ranges: &[BeaconBlocksByRangeRequest],
+    ) -> Option<BeaconBlocksByRangeRequest> {
         let progress = self.cached_backward_path_progress()?;
+        let progress = backward_progress_with_pending_ranges(progress, pending_ranges);
         backward_history_range_request_for_progress(progress)
     }
 
@@ -3423,6 +3743,7 @@ impl ConsensusNetwork {
         }
 
         Some(CachedBackwardPathProgress {
+            oldest_root: oldest.beacon_root,
             oldest_slot: oldest.slot,
             next_parent_root: current_parent,
         })
@@ -3438,6 +3759,18 @@ impl ConsensusNetwork {
                 .insert(block.beacon_root, payload);
         }
         self.verified_beacon_blocks.insert(block.beacon_root, block) != Some(block)
+    }
+
+    fn seed_verified_light_client_headers(&mut self) -> bool {
+        let Some(store) = self.consensus.light_client_store() else {
+            return false;
+        };
+        let blocks = verified_beacon_blocks_from_light_client_store(&store);
+        let mut inserted = false;
+        for block in blocks {
+            inserted |= self.record_verified_beacon_block(block, None);
+        }
+        inserted
     }
 
     fn cached_verified_beacon_blocks_by_root(&self, roots: &[B256]) -> Vec<RawRpcResponse> {
@@ -3471,6 +3804,18 @@ impl ConsensusNetwork {
             .collect()
     }
 
+    fn pending_history_ranges(
+        &self,
+        direction: HistoryRangeDirection,
+        checkpoint_slot: u64,
+    ) -> Vec<BeaconBlocksByRangeRequest> {
+        self.pending_history_range_requests
+            .values()
+            .copied()
+            .filter(|request| history_range_direction(*request, checkpoint_slot) == Some(direction))
+            .collect()
+    }
+
     fn materialize_verified_anchor_segments(&mut self) {
         self.materialize_verified_backward_segment();
         self.materialize_verified_history_segment();
@@ -3483,34 +3828,17 @@ impl ConsensusNetwork {
         let Some(store) = self.consensus.light_client_store() else {
             return;
         };
-        let Some(checkpoint_block) = self
-            .verified_beacon_blocks
-            .get(&target.checkpoint_root)
-            .copied()
-        else {
+        let Some(materializable_chain) = self.materializable_history_chain(target) else {
             return;
         };
-
-        let chain = self
-            .canonical_chain_blocks_to_root(
-                target.checkpoint_root,
-                target.checkpoint_slot,
-                target.optimistic_root,
-            )
-            .or_else(|| {
-                self.canonical_chain_blocks_to_root(
-                    target.checkpoint_root,
-                    target.checkpoint_slot,
-                    target.finalized_root,
-                )
-            })
-            .unwrap_or_else(|| vec![checkpoint_block]);
+        let chain = materializable_chain.blocks;
 
         let anchor_records = chain
             .iter()
             .map(|block| crate::AnchorRecord {
                 anchor: block.execution_anchor,
                 finalized: block.slot <= store.finalized_header.beacon.slot,
+                parent_beacon_root: Some(block.parent_root),
             })
             .collect::<Vec<_>>();
         let Some(first_anchor) = anchor_records.first().map(|record| record.anchor) else {
@@ -3519,12 +3847,15 @@ impl ConsensusNetwork {
         let Some(last_anchor) = anchor_records.last().map(|record| record.anchor) else {
             return;
         };
-        let replace_end_block = self
-            .consensus
-            .highest_anchor_block_from(first_anchor.block_number)
-            .map_or(last_anchor.block_number, |existing_end| {
-                existing_end.max(last_anchor.block_number)
-            });
+        let replace_end_block = if materializable_chain.reaches_optimistic_head {
+            self.consensus
+                .highest_anchor_block_from(first_anchor.block_number)
+                .map_or(last_anchor.block_number, |existing_end| {
+                    existing_end.max(last_anchor.block_number)
+                })
+        } else {
+            last_anchor.block_number
+        };
 
         if let Err(error) = self.consensus.replace_anchor_range(
             first_anchor.block_number,
@@ -3555,6 +3886,7 @@ impl ConsensusNetwork {
             .map(|block| crate::AnchorRecord {
                 anchor: block.execution_anchor,
                 finalized: block.slot <= finalized_slot,
+                parent_beacon_root: Some(block.parent_root),
             })
             .collect::<Vec<_>>();
         let Some(first_anchor) = anchor_records.first().map(|record| record.anchor) else {
@@ -3584,33 +3916,25 @@ impl ConsensusNetwork {
         )
     }
 
+    fn materializable_history_chain(
+        &self,
+        target: HistorySyncTarget,
+    ) -> Option<MaterializableHistoryChain> {
+        materializable_history_chain(&self.verified_beacon_blocks, target)
+    }
+
     fn canonical_chain_blocks_to_root(
         &self,
         checkpoint_root: B256,
         checkpoint_slot: u64,
         target_root: B256,
     ) -> Option<Vec<VerifiedBeaconBlock>> {
-        let checkpoint_block = *self.verified_beacon_blocks.get(&checkpoint_root)?;
-        if checkpoint_block.slot != checkpoint_slot {
-            return None;
-        }
-
-        let mut current_root = target_root;
-        let mut reverse_chain = Vec::new();
-        loop {
-            let block = if current_root == checkpoint_root {
-                checkpoint_block
-            } else {
-                *self.verified_beacon_blocks.get(&current_root)?
-            };
-            reverse_chain.push(block);
-            if current_root == checkpoint_root {
-                break;
-            }
-            current_root = block.parent_root;
-        }
-        reverse_chain.reverse();
-        Some(reverse_chain)
+        canonical_chain_blocks_to_root(
+            &self.verified_beacon_blocks,
+            checkpoint_root,
+            checkpoint_slot,
+            target_root,
+        )
     }
 
     fn checkpoint_forward_chain_blocks(
@@ -3735,6 +4059,7 @@ impl ConsensusNetwork {
         {
             tracing::warn!(%error, "failed to persist forced light-client store update");
         }
+        self.seed_verified_light_client_headers();
     }
 
     fn identify_timed_out(&self, peer: PeerId) -> bool {
@@ -4179,6 +4504,23 @@ impl ConsensusNetwork {
             .values()
             .filter(|support| support.beacon_blocks_by_root)
             .count();
+        let (pending_forward_ranges, pending_backward_ranges) = self
+            .current_history_sync_target()
+            .map(|target| {
+                (
+                    self.pending_history_ranges(
+                        HistoryRangeDirection::Forward,
+                        target.checkpoint_slot,
+                    )
+                    .len(),
+                    self.pending_history_ranges(
+                        HistoryRangeDirection::Backward,
+                        target.checkpoint_slot,
+                    )
+                    .len(),
+                )
+            })
+            .unwrap_or_default();
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
@@ -4227,6 +4569,8 @@ impl ConsensusNetwork {
                 .pending_requests_for_kind(RpcRequestKind::LightClientOptimisticUpdate),
             pending_beacon_blocks_by_range_requests: self
                 .pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRange),
+            pending_forward_beacon_blocks_by_range_requests: pending_forward_ranges,
+            pending_backward_beacon_blocks_by_range_requests: pending_backward_ranges,
             pending_beacon_blocks_by_root_requests: self
                 .pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRoot),
             status_request_failures: self.request_failures.status,
@@ -5227,6 +5571,73 @@ mod tests {
     }
 
     #[test]
+    fn forward_range_target_tracks_latest_head_while_materialization_target_is_pinned() {
+        let checkpoint_root =
+            b256!("0x0101010101010101010101010101010101010101010101010101010101010101");
+        let current = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 100,
+            finalized_root: checkpoint_root,
+            optimistic_root: b256!(
+                "0x0202020202020202020202020202020202020202020202020202020202020202"
+            ),
+            optimistic_slot: 120,
+        };
+        let latest = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 100,
+            finalized_root: current.optimistic_root,
+            optimistic_root: b256!(
+                "0x0303030303030303030303030303030303030303030303030303030303030303"
+            ),
+            optimistic_slot: 125,
+        };
+
+        assert_eq!(
+            select_history_sync_target(Some(current), Some(latest), false),
+            Some(current)
+        );
+        assert_eq!(
+            select_forward_history_range_target(Some(current), Some(latest)),
+            Some(latest)
+        );
+    }
+
+    #[test]
+    fn persisted_anchor_records_seed_verified_beacon_chain_links() {
+        let first_root = B256::repeat_byte(0x11);
+        let second_root = B256::repeat_byte(0x22);
+        let first = crate::AnchorRecord {
+            anchor: logex_types::ExecutionAnchor {
+                beacon_root: first_root,
+                beacon_slot: 100,
+                block_number: 1,
+                block_hash: B256::repeat_byte(0x31),
+                receipts_root: B256::repeat_byte(0x41),
+            },
+            finalized: true,
+            parent_beacon_root: None,
+        };
+        let second = crate::AnchorRecord {
+            anchor: logex_types::ExecutionAnchor {
+                beacon_root: second_root,
+                beacon_slot: 101,
+                block_number: 2,
+                block_hash: B256::repeat_byte(0x32),
+                receipts_root: B256::repeat_byte(0x42),
+            },
+            finalized: false,
+            parent_beacon_root: None,
+        };
+
+        let blocks = verified_beacon_blocks_from_anchor_records(&[first, second]);
+
+        assert_eq!(blocks[&first_root].parent_root, B256::ZERO);
+        assert_eq!(blocks[&second_root].parent_root, first_root);
+        assert_eq!(blocks[&second_root].execution_anchor.block_number, 2);
+    }
+
+    #[test]
     fn history_target_switches_immediately_on_reorg_or_same_slot_replacement() {
         let checkpoint_root =
             b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
@@ -5345,6 +5756,20 @@ mod tests {
         assert_eq!(
             select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
                 priority_root_ready: true,
+                range_ready: true,
+                deferred_root_ready: true,
+                pending_range: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        );
+    }
+
+    #[test]
+    fn post_bootstrap_request_selection_chases_deferred_root_while_range_is_pending() {
+        assert_eq!(
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
                 range_ready: true,
                 deferred_root_ready: true,
                 pending_range: true,
@@ -5486,6 +5911,7 @@ mod tests {
     #[test]
     fn backward_history_range_request_walks_downward_from_oldest_cached_slot() {
         let request = backward_history_range_request_for_progress(CachedBackwardPathProgress {
+            oldest_root: B256::repeat_byte(0x33),
             oldest_slot: 400,
             next_parent_root: B256::repeat_byte(0x44),
         })
@@ -5494,6 +5920,146 @@ mod tests {
         assert_eq!(request.start_slot, 272);
         assert_eq!(request.count, 128);
         assert_eq!(request.step, 1);
+    }
+
+    #[test]
+    fn history_range_request_selection_alternates_forward_and_backward_work() {
+        let forward = BeaconBlocksByRangeRequest {
+            start_slot: 101,
+            count: 16,
+            step: 1,
+        };
+        let backward = BeaconBlocksByRangeRequest {
+            start_slot: 272,
+            count: 128,
+            step: 1,
+        };
+
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 0, 0, true),
+            Some(forward)
+        );
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 0, 0, false),
+            Some(backward)
+        );
+        assert_eq!(
+            select_history_range_request(Some(forward), None, 0, 1, false),
+            Some(forward)
+        );
+        assert_eq!(
+            select_history_range_request(None, Some(backward), 1, 0, true),
+            Some(backward)
+        );
+    }
+
+    #[test]
+    fn history_range_request_selection_keeps_both_directions_in_flight() {
+        let forward = BeaconBlocksByRangeRequest {
+            start_slot: 101,
+            count: 16,
+            step: 1,
+        };
+        let backward = BeaconBlocksByRangeRequest {
+            start_slot: 272,
+            count: 128,
+            step: 1,
+        };
+
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 1, 0, true),
+            Some(backward)
+        );
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 0, 1, false),
+            Some(forward)
+        );
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 1, 2, false),
+            Some(forward)
+        );
+        assert_eq!(
+            select_history_range_request(Some(forward), Some(backward), 2, 1, true),
+            Some(backward)
+        );
+    }
+
+    #[test]
+    fn history_root_request_selection_can_prioritize_backward_parent_root() {
+        let forward = vec![B256::repeat_byte(0x11)];
+        let backward = vec![B256::repeat_byte(0x22)];
+
+        assert_eq!(
+            select_history_root_request(Some(forward.clone()), Some(backward.clone()), false),
+            Some(forward)
+        );
+        assert_eq!(
+            select_history_root_request(Some(vec![B256::repeat_byte(0x11)]), Some(backward), true),
+            Some(vec![B256::repeat_byte(0x22)])
+        );
+    }
+
+    #[test]
+    fn backward_root_request_recovers_legacy_unknown_parent() {
+        let oldest_root = B256::repeat_byte(0x33);
+        let progress = CachedBackwardPathProgress {
+            oldest_root,
+            oldest_slot: 400,
+            next_parent_root: B256::ZERO,
+        };
+
+        assert_eq!(
+            backward_history_root_request_for_progress(progress, &HashSet::new(), false),
+            Some(vec![oldest_root])
+        );
+        assert_eq!(
+            backward_history_root_request_for_progress(progress, &HashSet::new(), true),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_history_ranges_reserve_forward_and_backward_windows() {
+        let forward_pending = BeaconBlocksByRangeRequest {
+            start_slot: 101,
+            count: 16,
+            step: 1,
+        };
+        let backward_pending = BeaconBlocksByRangeRequest {
+            start_slot: 272,
+            count: 128,
+            step: 1,
+        };
+
+        let forward = forward_progress_with_pending_ranges(
+            CachedForwardPathProgress {
+                checkpoint_slot: 100,
+                target_slot: 400,
+                highest_cached_slot: 100,
+            },
+            &[forward_pending],
+        );
+        assert_eq!(forward.highest_cached_slot, 116);
+        assert_eq!(
+            next_forward_history_range_request_for_progress(forward)
+                .expect("next forward range should skip pending window")
+                .start_slot,
+            117
+        );
+
+        let backward = backward_progress_with_pending_ranges(
+            CachedBackwardPathProgress {
+                oldest_root: B256::repeat_byte(0x33),
+                oldest_slot: 400,
+                next_parent_root: B256::repeat_byte(0x44),
+            },
+            &[backward_pending],
+        );
+        assert_eq!(backward.oldest_slot, 272);
+        let next_backward = backward_history_range_request_for_progress(backward)
+            .expect("next backward range should skip pending window");
+        assert_eq!(next_backward.start_slot, 144);
+        assert_eq!(next_backward.count, 128);
     }
 
     #[test]
@@ -5600,6 +6166,65 @@ mod tests {
         assert_eq!(
             next_forward_history_root_request_for_target_excluding(target, &verified, &pending),
             None
+        );
+    }
+
+    #[test]
+    fn materializable_history_chain_waits_for_complete_target_lineage() {
+        let block = |slot: u64, beacon_root: B256, parent_root: B256| VerifiedBeaconBlock {
+            fork: logex_types::ConsensusDataFork::Electra,
+            beacon_root,
+            parent_root,
+            slot,
+            execution_anchor: logex_types::ExecutionAnchor {
+                beacon_root,
+                beacon_slot: slot,
+                block_number: slot,
+                block_hash: beacon_root,
+                receipts_root: parent_root,
+            },
+        };
+        let checkpoint_root = B256::repeat_byte(0x30);
+        let finalized_root = B256::repeat_byte(0x31);
+        let optimistic_root = B256::repeat_byte(0x32);
+        let target = HistorySyncTarget {
+            checkpoint_root,
+            checkpoint_slot: 300,
+            finalized_root,
+            optimistic_root,
+            optimistic_slot: 302,
+        };
+        let mut verified = HashMap::from([(
+            checkpoint_root,
+            block(300, checkpoint_root, B256::repeat_byte(0x2f)),
+        )]);
+
+        assert_eq!(materializable_history_chain(&verified, target), None);
+
+        verified.insert(finalized_root, block(301, finalized_root, checkpoint_root));
+        let materializable = materializable_history_chain(&verified, target)
+            .expect("finalized lineage should be enough to materialize a partial target");
+        assert!(!materializable.reaches_optimistic_head);
+        assert_eq!(
+            materializable
+                .blocks
+                .iter()
+                .map(|block| block.beacon_root)
+                .collect::<Vec<_>>(),
+            vec![checkpoint_root, finalized_root]
+        );
+
+        verified.insert(optimistic_root, block(302, optimistic_root, finalized_root));
+        let materializable = materializable_history_chain(&verified, target)
+            .expect("optimistic lineage should be preferred when complete");
+        assert!(materializable.reaches_optimistic_head);
+        assert_eq!(
+            materializable
+                .blocks
+                .iter()
+                .map(|block| block.beacon_root)
+                .collect::<Vec<_>>(),
+            vec![checkpoint_root, finalized_root, optimistic_root]
         );
     }
 

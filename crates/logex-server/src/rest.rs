@@ -608,6 +608,8 @@ mod tests {
                     pending_finality_update_requests: 1,
                     pending_optimistic_update_requests: 0,
                     pending_beacon_blocks_by_range_requests: 0,
+                    pending_forward_beacon_blocks_by_range_requests: 0,
+                    pending_backward_beacon_blocks_by_range_requests: 0,
                     pending_beacon_blocks_by_root_requests: 0,
                     status_request_failures: 3,
                     metadata_request_failures: 1,

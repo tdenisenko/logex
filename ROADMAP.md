@@ -151,13 +151,17 @@ LogEx should become a canonical Ethereum event-log node that:
 - Use a conservative fixed mainnet weak-subjectivity freshness window until LogEx persists enough beacon state to compute the full state-derived spec value locally.
   - This favors refusing stale startups over accepting questionable checkpoints.
   - The remaining tradeoff is that the fixed bound should later be replaced with the exact consensus-spec weak-subjectivity-period computation.
+- Keep forward and backward beacon-history work scheduled independently.
+  - Public mainnet peers frequently close range streams, so root-based parent recovery must be allowed to run alongside range backfill.
+  - Persisting parent beacon roots with execution anchors keeps restarts from losing the authenticated backward walk; legacy anchors without that field are recovered by refetching the oldest known beacon root once.
 
 ## Completed Since Last Run
 
-- Reworked the dashboard around separate CL, EL, indexing, and query-coverage state, with metrics-only network panels.
-- Added status query-coverage fields so the dashboard can show the block range covered by local log queries.
-- Updated dashboard timestamps to relative `Now` / `x ago` labels for readability.
-- Validation run: `cargo test -p logex-server`, `cargo build -p logex-node`, and browser verification on fixed HTTP port `18683`.
+- Merged the dashboard UI work through PR #69 after CI passed.
+- Fixed CL historical sync so backward checkpoint-to-history work continues while live forward sync advances.
+- Added parent beacon-root persistence for materialized anchors and recovery for legacy anchor stores that do not yet have that parent field.
+- Fixed-port smoke on `18683` recovered the previously stuck data directory: the materialized floor moved from block `25026535` to `25026024`, while the live ceiling advanced to block `25030401`.
+- Validation run: `cargo fmt --all`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build -p logex-node`, and the fixed-port CL P2P smoke.
 
 ## Remaining TODOs
 
@@ -171,17 +175,15 @@ LogEx should become a canonical Ethereum event-log node that:
    - Done when:
      - a fresh mainnet sync can obtain or validate a recent checkpoint through LogEx-owned or independently cross-checked sources, and stale checkpoint rejection uses the exact spec-derived weak-subjectivity period
 
-2. Beacon Block Segment Authentication
+2. Long-Lived Beacon History Proving
    - TODO:
-     - keep extending the backward parent-root walk from the weak-subjectivity checkpoint toward the Merge; live smokes now materialize dozens of authenticated anchors below the checkpoint, but not yet the full checkpoint-to-Merge ancestry
-     - complete fetching full beacon blocks between trusted light-client headers until the entire checkpoint-to-finalized / checkpoint-to-optimistic ancestry is covered in practice, not just isolated roots and short range slices
-     - verify each full block body against its signed beacon header by recomputing `body_root`
-     - derive execution payload headers from the verified block bodies rather than trusting imported execution anchor files forever
+     - run longer mainnet smokes that prove sustained forward and backward materialization across peer churn
+     - continue the backward parent-root walk from recent checkpoints toward the Merge
+     - verify restart/resume after partially materialized forward and backward windows
    - Why this is still blocking:
-     - the current anchor store can hold per-block execution anchors, and LogEx now decodes/validates full beacon blocks from native root/range responses
-     - live mainnet smokes now prove that the checkpoint-to-older-history side can materialize authenticated anchors below the checkpoint, but the segment walker is still incomplete because the forward checkpoint-to-head side remains pinned at the checkpoint and the backward side still has to continue all the way to the Merge
+     - short fixed-port smokes now show both directions moving, but release readiness still needs sustained proof under real peer churn and restarts
    - Done when:
-     - every execution anchor used by EL ingestion can be traced back to verified beacon blocks bounded by verified light-client headers
+     - a fresh checkpoint-centered run keeps live head coverage current while steadily expanding historical coverage toward the Merge across restarts
 
 3. Pre-Merge PoW Canonicality
    - TODO:
@@ -251,25 +253,29 @@ LogEx should become a canonical Ethereum event-log node that:
 - Challenge: Public mainnet discovery still returns many peers that either lack beacon req/resp support or close during useful history/light-client RPCs.
   - Resolution: Required `eth2` ENR fork metadata for discovery relevance, widened status/history concurrency, and disconnected idle peers once useful RPC failures put them into cooldown so new candidates can use the slot budget.
   - Remaining: Long-lived soak runs are still needed before release, but fresh fixed-port smokes now bootstrap from scratch and keep materialized history at the verified optimistic head.
+- Challenge: Older anchor stores did not persist the parent beacon root for the oldest materialized anchor, which could pin the backward walk at that point.
+  - Resolution: Persist parent beacon roots for new anchors and refetch the oldest legacy root when the cached parent is unknown, allowing the authentic parent link to be recovered.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the touched dashboard and status endpoint paths for stale labels/selectors and obsolete status text.
+- Inspected the touched CL scheduler, anchor persistence, status type, server status fixture, and anchored sync test helper.
+- Removed the temporary detached UI validation worktree.
 - No runtime modules were removed; the remaining transitional consensus paths are still tracked in the TODO list.
 
 ## Git Workflow
 
-- Current branch: `fix/sync-dashboard-ui`.
-- New branch created: yes; the UI work was started after the clippy branch was merged.
-- Commits made during this run: none; the user requested no UI-branch commit before dashboard approval.
-- Pull request status: PR #67 and PR #68 merged; UI PR not opened yet.
-- Merge status: UI PR pending.
-- Git/GitHub blockers: none so far.
+- Current branch: `fix/beacon-history-sync`.
+- New branch created: yes; CL historical-sync work was split away from the merged UI branch.
+- Commits made during this run: `fix: recover beacon history backfill`.
+- Pull request status: dashboard PR #69 merged; CL historical-sync PR pending commit/push.
+- Merge status: dashboard PR merged; CL historical-sync branch not merged yet.
+- Git/GitHub blockers: `gh` CLI authentication is invalid, so GitHub connector APIs are being used for PR operations.
 
 ## Known Issues or Risks
 
 - The current weak-subjectivity freshness guard uses a conservative fixed mainnet window rather than computing the exact state-derived consensus-spec weak-subjectivity period.
 - `--checkpoint-sync-url` is a temporary startup bootstrap aid and introduces trust in the selected endpoint for initial checkpoint selection until LogEx provides its own checkpoint source.
-- Fresh fixed-port smokes can now materialize to the verified optimistic head from scratch, but long-lived peer retention and sustained checkpoint-to-head/history-backfill performance still need release-gate proof runs.
+- Fresh fixed-port smokes now show both forward and backward CL materialization moving, but long-lived peer retention and sustained checkpoint-to-Merge history proving still need release-gate proof runs.
 - Keep the HTTP port constant for comparable smoke tests; stop any stale process before rerunning instead of incrementing the test port.
 - Pre-Merge PoW canonicality remains unimplemented, so LogEx cannot yet claim full-chain canonicality.
 

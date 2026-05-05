@@ -432,6 +432,7 @@ mod tests {
                 receipts_root: header.receipts_root(),
             },
             finalized: false,
+            parent_beacon_root: None,
         }
     }
 
