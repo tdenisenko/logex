@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json, Response};
 
 use logex_query::{self, SqlQueryError};
+use logex_storage::PartitionManager;
 use serde::Serialize;
 
 use crate::handler::AppState;
@@ -93,13 +94,25 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
-    let (total_rows, sealed_partitions, head_block, indexed_head_block, chain_anchors, data_dir) = {
+    let (
+        total_rows,
+        sealed_partitions,
+        head_block,
+        head_timestamp,
+        indexed_head_block,
+        stored_log_range,
+        chain_anchors,
+        data_dir,
+    ) = {
         let storage = state.storage.read().await;
+        let sync_head = storage.sync_head();
         (
             storage.total_rows(),
             storage.sealed_count(),
             storage.head_block(),
+            sync_head.and_then(|head| (head.timestamp > 0).then_some(head.timestamp)),
             storage.indexed_head_block(),
+            stored_log_range(&storage),
             storage.chain_anchors(),
             storage.data_dir().to_path_buf(),
         )
@@ -144,7 +157,16 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "total_rows": total_rows,
         "sealed_partitions": sealed_partitions,
         "head_block": head_block,
+        "head_timestamp": head_timestamp,
         "indexed_head_block": indexed_head_block,
+        "query_coverage": {
+            "stored_log_from_block": stored_log_range.map(|range| range.0),
+            "stored_log_to_block": stored_log_range.map(|range| range.1),
+            "latest_block": head_block,
+            "latest_timestamp": head_timestamp,
+            "indexed_head_block": indexed_head_block,
+            "stored_rows": total_rows,
+        },
         "storage_used_bytes": storage_metrics.storage_used_bytes,
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
@@ -164,6 +186,19 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
     }))
+}
+
+fn stored_log_range(storage: &PartitionManager) -> Option<(u64, u64)> {
+    storage
+        .sealed_partitions()
+        .iter()
+        .map(|partition| &partition.meta)
+        .chain(std::iter::once(&storage.hot_partition().meta))
+        .filter(|meta| meta.row_count > 0 && meta.min_block <= meta.max_block)
+        .fold(None, |range, meta| match range {
+            Some((min, max)) => Some((min.min(meta.min_block), max.max(meta.max_block))),
+            None => Some((meta.min_block, meta.max_block)),
+        })
 }
 
 /// Handle GET / — serve the embedded web UI.
@@ -635,7 +670,14 @@ mod tests {
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["head_block"], 250);
+        assert_eq!(status["head_timestamp"], 1_650_000_000);
         assert_eq!(status["indexed_head_block"], 200);
+        assert_eq!(status["query_coverage"]["stored_log_from_block"], 100);
+        assert_eq!(status["query_coverage"]["stored_log_to_block"], 200);
+        assert_eq!(status["query_coverage"]["latest_block"], 250);
+        assert_eq!(status["query_coverage"]["latest_timestamp"], 1_650_000_000);
+        assert_eq!(status["query_coverage"]["indexed_head_block"], 200);
+        assert_eq!(status["query_coverage"]["stored_rows"], 2);
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");

@@ -117,7 +117,8 @@ LogEx should become a canonical Ethereum event-log node that:
   - a fresh fixed-port mainnet smoke on May 5, 2026 resolved a current finalized checkpoint via `--checkpoint-sync-url`, bootstrapped from scratch, reached the verified optimistic head, and materialized 343 CL-authenticated execution anchors spanning beacon slots `14263514..14263857`
   - peer churn is still present on public mainnet, but cooldown-aware slot rotation, stricter ENR filtering, wider status/history request concurrency, and invalid/empty history-response accounting are now enough for fresh short smokes to keep the materialized ceiling at the live optimistic head
 - The merged CL P2P milestone also does not yet implement the pre-Merge PoW canonicality path, so the project is still not the full end-to-end canonical system.
-- The current branch is a separate clippy cleanup branch, `fix/clippy-cleanup`, created before starting the requested UI redesign.
+- The clippy cleanup branch `fix/clippy-cleanup` has been merged through PR #68, keeping lint-only changes separate from UI work.
+- The current branch is `fix/sync-dashboard-ui`, which is redesigning the embedded dashboard so operators can distinguish CL sync, EL sync, indexing, and query coverage from one status page.
 
 ## Explicitly Not Needed
 
@@ -153,16 +154,10 @@ LogEx should become a canonical Ethereum event-log node that:
 
 ## Completed Since Last Run
 
-- Merged the completed consensus-layer P2P milestone PR #67 before starting new feature work.
-- Split clippy cleanup onto `fix/clippy-cleanup` before touching the UI.
-- Fixed workspace clippy errors without changing runtime behavior:
-  - replaced linted test slice clones and nested `format!` calls
-  - collapsed nested conditionals in light-client verification and consensus reorg detection
-  - replaced manual size and divisibility calculations with standard helpers
-  - replaced the post-bootstrap request selection helper's long argument list with a typed readiness struct
-  - replaced the node runtime's long `run_sync` argument list with `RunSyncOptions`
-  - removed a needless struct update in the status endpoint test fixture
-- Validated the cleanup with `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Reworked the dashboard around separate CL, EL, indexing, and query-coverage state, with metrics-only network panels.
+- Added status query-coverage fields so the dashboard can show the block range covered by local log queries.
+- Updated dashboard timestamps to relative `Now` / `x ago` labels for readability.
+- Validation run: `cargo test -p logex-server`, `cargo build -p logex-node`, and browser verification on fixed HTTP port `18683`.
 
 ## Remaining TODOs
 
@@ -246,17 +241,6 @@ LogEx should become a canonical Ethereum event-log node that:
    - Done when:
       - the node can sync, restart, query, and serve logs from the final CL-driven architecture with measured performance and truthful documentation
 
-8. Sync Dashboard Redesign
-   - TODO:
-     - redesign the embedded web UI so CL P2P status and EL P2P status are clearly separated
-     - remove overlapping text and cramped marker labels
-     - make checkpoint, finalized, optimistic, materialized, indexed, peer, and query coverage ranges easy to read at a glance
-     - show what block ranges are queryable based on the currently indexed log coverage
-   - Why this matters:
-     - operators need to understand whether the consensus side, execution side, or log indexing side is the current bottleneck
-   - Done when:
-     - the dashboard displays CL sync, EL sync, materialized consensus anchors, indexed log coverage, and query coverage without overlapping text on desktop and narrow viewports
-
 ## Challenges and Resolutions
 
 - Challenge: The previously recorded April checkpoint no longer bootstrapped reliably on live peers.
@@ -267,21 +251,19 @@ LogEx should become a canonical Ethereum event-log node that:
 - Challenge: Public mainnet discovery still returns many peers that either lack beacon req/resp support or close during useful history/light-client RPCs.
   - Resolution: Required `eth2` ENR fork metadata for discovery relevance, widened status/history concurrency, and disconnected idle peers once useful RPC failures put them into cooldown so new candidates can use the slot budget.
   - Remaining: Long-lived soak runs are still needed before release, but fresh fixed-port smokes now bootstrap from scratch and keep materialized history at the verified optimistic head.
-
 ## Dead Code and Obsolescence Cleanup
 
-- Ran clippy across all workspace targets and removed the linted redundant patterns it exposed.
-- Inspected the touched clippy cleanup areas: CL SSZ helpers, light-client verification, CL request selection, RPC request decoding, node runtime startup wiring, REST status tests, native storage tests, and anchored consensus reorg handling.
-- No dead modules or obsolete runtime paths were removed in this cleanup branch; the remaining transitional consensus and UI cleanup work is tracked in the TODO list.
+- Inspected the touched dashboard and status endpoint paths for stale labels/selectors and obsolete status text.
+- No runtime modules were removed; the remaining transitional consensus paths are still tracked in the TODO list.
 
 ## Git Workflow
 
-- Current branch: `fix/clippy-cleanup`.
-- New branch created: yes; the branch was renamed from the initial UI branch before any UI edits so clippy cleanup stays separate and branch names do not include `codex`.
-- Commits made during this run: PR #67 merge commit `f974fd285b741e4abd0e877f136ab0b4bffba8ff`; clippy cleanup commit pending.
-- Pull request status: PR #67 merged; clippy cleanup PR not opened yet.
-- Merge status: PR #67 merged successfully; clippy cleanup not merged yet.
-- Git/GitHub blockers: none for the clippy cleanup branch so far.
+- Current branch: `fix/sync-dashboard-ui`.
+- New branch created: yes; the UI work was started after the clippy branch was merged.
+- Commits made during this run: none; the user requested no UI-branch commit before dashboard approval.
+- Pull request status: PR #67 and PR #68 merged; UI PR not opened yet.
+- Merge status: UI PR pending.
+- Git/GitHub blockers: none so far.
 
 ## Known Issues or Risks
 
@@ -289,7 +271,6 @@ LogEx should become a canonical Ethereum event-log node that:
 - `--checkpoint-sync-url` is a temporary startup bootstrap aid and introduces trust in the selected endpoint for initial checkpoint selection until LogEx provides its own checkpoint source.
 - Fresh fixed-port smokes can now materialize to the verified optimistic head from scratch, but long-lived peer retention and sustained checkpoint-to-head/history-backfill performance still need release-gate proof runs.
 - Keep the HTTP port constant for comparable smoke tests; stop any stale process before rerunning instead of incrementing the test port.
-- The embedded web UI still needs redesign because CL P2P, EL P2P, indexing, marker labels, and query coverage are not visually separated clearly enough.
 - Pre-Merge PoW canonicality remains unimplemented, so LogEx cannot yet claim full-chain canonicality.
 
 ## Sequencing Decision
