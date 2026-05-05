@@ -266,9 +266,9 @@ LogEx should become a canonical Ethereum event-log node that:
 - Current branch: `cl-canonical-verification`.
 - New branch created: no; the current branch is the active consensus-layer P2P task branch.
 - Commits made during this run: `fix: validate consensus checkpoints and history responses`; `perf: harden consensus peer retention`.
-- Pull request status: ready after committing and pushing this final CL P2P hardening pass.
-- Merge status: not merged.
-- Git/GitHub blockers: none encountered so far.
+- Pull request status: opened as draft PR #67 at https://github.com/tdenisenko/logex/pull/67 after committing and pushing this final CL P2P hardening pass.
+- Merge status: not merged because the PR remains draft.
+- Git/GitHub blockers: the GitHub connector's ready-for-review mutation currently fails with a connector-side GraphQL selection error on `PullRequest.htmlUrl`, and the local `gh` session is not authenticated, so marking PR #67 ready and merging it could not be completed from this run.
 
 ## Known Issues or Risks
 
