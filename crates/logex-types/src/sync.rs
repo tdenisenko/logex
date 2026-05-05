@@ -120,6 +120,10 @@ pub struct ConsensusNetworkStatus {
     pub pending_optimistic_update_requests: usize,
     /// Number of in-flight beacon-blocks-by-range requests.
     pub pending_beacon_blocks_by_range_requests: usize,
+    /// Number of in-flight beacon-blocks-by-range requests above the checkpoint.
+    pub pending_forward_beacon_blocks_by_range_requests: usize,
+    /// Number of in-flight beacon-blocks-by-range requests below the checkpoint.
+    pub pending_backward_beacon_blocks_by_range_requests: usize,
     /// Number of in-flight beacon-blocks-by-root requests.
     pub pending_beacon_blocks_by_root_requests: usize,
     /// Number of failed Status request attempts since startup.

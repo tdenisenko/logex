@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use alloy_primitives::B256;
 use logex_types::{
     ChainAnchors, ConsensusLightClientStatus, ExecutionAnchor, LightClientBootstrapStatus,
     LightClientFinalityUpdateStatus, LightClientOptimisticUpdateStatus, WeakSubjectivityCheckpoint,
@@ -81,6 +82,8 @@ pub struct AnchorRecord {
     pub anchor: ExecutionAnchor,
     #[serde(default)]
     pub finalized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_beacon_root: Option<B256>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,6 +900,7 @@ mod tests {
                         receipts_root: B256::repeat_byte(0x13),
                     },
                     finalized: false,
+                    parent_beacon_root: None,
                 },
                 AnchorRecord {
                     anchor: ExecutionAnchor {
@@ -907,6 +911,7 @@ mod tests {
                         receipts_root: B256::repeat_byte(0x12),
                     },
                     finalized: false,
+                    parent_beacon_root: None,
                 },
             ])
             .unwrap();
@@ -943,6 +948,7 @@ mod tests {
                 receipts_root: B256::repeat_byte(byte.wrapping_add(2)),
             },
             finalized,
+            parent_beacon_root: None,
         };
 
         store
