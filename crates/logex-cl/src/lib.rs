@@ -18,7 +18,7 @@ mod network;
 mod rpc;
 
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
-pub(crate) use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
+pub use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
 pub(crate) use light_client::{
     AppliedLightClientUpdate, VerifiedLightClientStore, apply_finality_update_payload,
     apply_light_client_update_payload, apply_optimistic_update_payload,
@@ -33,6 +33,10 @@ use rpc::RawRpcResponse;
 
 const CONSENSUS_STATE_DIR: &str = "cl";
 const CONSENSUS_STATE_FILE: &str = "consensus_state.json";
+// The full consensus-spec weak-subjectivity period is state-derived. Until LogEx
+// persists enough beacon state to compute it exactly, use the published mainnet
+// upper-bound reference window for Electra-style weak subjectivity protection.
+pub const CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS: u64 = 3_532;
 
 #[derive(Debug, Error)]
 pub enum ConsensusStateError {
@@ -60,6 +64,15 @@ pub enum ConsensusStateError {
         persisted_slot: Option<u64>,
         requested_root: alloy_primitives::B256,
         requested_slot: Option<u64>,
+    },
+    #[error(
+        "persisted consensus trusted slot {trusted_slot} at epoch {trusted_epoch} is stale at current epoch {current_epoch}; it exceeds the conservative weak-subjectivity freshness window of {max_epochs} epochs. Start with a recent --checkpoint in a fresh data directory."
+    )]
+    StaleWeakSubjectivityCheckpoint {
+        trusted_slot: u64,
+        trusted_epoch: u64,
+        current_epoch: u64,
+        max_epochs: u64,
     },
 }
 
@@ -121,6 +134,7 @@ impl ConsensusStore {
                     message: error.to_string(),
                 })?;
             let snapshot = rehydrate_verified_light_client_state(snapshot);
+            ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
             let store = Self {
                 path,
                 inner: Arc::new(Mutex::new(snapshot)),
@@ -128,6 +142,7 @@ impl ConsensusStore {
             if let Some(checkpoint) = checkpoint {
                 let requested = load_checkpoint_descriptor(checkpoint)?.checkpoint;
                 if store.reconcile_checkpoint(requested)? {
+                    ensure_snapshot_within_weak_subjectivity_period(&store.inner.lock().unwrap())?;
                     store.persist()?;
                 }
             }
@@ -136,6 +151,7 @@ impl ConsensusStore {
 
         let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
         let snapshot = load_checkpoint_descriptor(checkpoint)?;
+        ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
         let store = Self {
             path,
             inner: Arc::new(Mutex::new(snapshot)),
@@ -475,6 +491,63 @@ fn parse_checkpoint_string(input: &str) -> Result<WeakSubjectivityCheckpoint, Co
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WeakSubjectivityStaleness {
+    trusted_slot: u64,
+    trusted_epoch: u64,
+    current_epoch: u64,
+    max_epochs: u64,
+}
+
+fn ensure_snapshot_within_weak_subjectivity_period(
+    snapshot: &ConsensusSnapshot,
+) -> Result<(), ConsensusStateError> {
+    match weak_subjectivity_staleness_for_epoch(
+        snapshot,
+        MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch(),
+        CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS,
+    ) {
+        Some(staleness) => Err(ConsensusStateError::StaleWeakSubjectivityCheckpoint {
+            trusted_slot: staleness.trusted_slot,
+            trusted_epoch: staleness.trusted_epoch,
+            current_epoch: staleness.current_epoch,
+            max_epochs: staleness.max_epochs,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn weak_subjectivity_staleness_for_epoch(
+    snapshot: &ConsensusSnapshot,
+    current_epoch: u64,
+    max_epochs: u64,
+) -> Option<WeakSubjectivityStaleness> {
+    let trusted_slot = weak_subjectivity_trusted_slot(snapshot)?;
+    let trusted_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(trusted_slot);
+    (current_epoch > trusted_epoch.saturating_add(max_epochs)).then_some(
+        WeakSubjectivityStaleness {
+            trusted_slot,
+            trusted_epoch,
+            current_epoch,
+            max_epochs,
+        },
+    )
+}
+
+fn weak_subjectivity_trusted_slot(snapshot: &ConsensusSnapshot) -> Option<u64> {
+    snapshot
+        .verified_light_client_store
+        .as_ref()
+        .map(|store| {
+            store
+                .finalized_header
+                .beacon
+                .slot
+                .max(store.bootstrap_slot())
+        })
+        .or(snapshot.checkpoint.beacon_slot)
+}
+
 fn normalize_anchor_records(mut anchors: Vec<AnchorRecord>) -> Vec<AnchorRecord> {
     let mut deduped = BTreeMap::new();
     for record in anchors.drain(..) {
@@ -628,6 +701,14 @@ mod tests {
         }
     }
 
+    fn recent_test_slot(offset: u64) -> u64 {
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .wall_clock_epoch()
+            .saturating_sub(8)
+            .saturating_mul(32)
+            .saturating_add(offset)
+    }
+
     #[test]
     fn parses_inline_checkpoint_root() {
         let checkpoint = parse_checkpoint_string(
@@ -649,18 +730,120 @@ mod tests {
     }
 
     #[test]
+    fn weak_subjectivity_freshness_allows_recent_trusted_slot() {
+        let snapshot = ConsensusSnapshot {
+            checkpoint: WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x10),
+                beacon_slot: Some(3_200),
+            },
+            anchors: ChainAnchors::default(),
+            ordered_anchors: Vec::new(),
+            light_client: ConsensusLightClientStatus::default(),
+            light_client_payloads: PersistedLightClientPayloads::default(),
+            verified_light_client_store: None,
+        };
+
+        assert_eq!(
+            weak_subjectivity_staleness_for_epoch(&snapshot, 110, 10),
+            None
+        );
+        assert_eq!(
+            weak_subjectivity_staleness_for_epoch(&snapshot, 111, 10),
+            Some(WeakSubjectivityStaleness {
+                trusted_slot: 3_200,
+                trusted_epoch: 100,
+                current_epoch: 111,
+                max_epochs: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn weak_subjectivity_freshness_uses_verified_finalized_slot_on_restart() {
+        let snapshot = ConsensusSnapshot {
+            checkpoint: WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x10),
+                beacon_slot: Some(32),
+            },
+            anchors: ChainAnchors::default(),
+            ordered_anchors: Vec::new(),
+            light_client: ConsensusLightClientStatus::default(),
+            light_client_payloads: PersistedLightClientPayloads::default(),
+            verified_light_client_store: Some(VerifiedLightClientStore {
+                checkpoint_root: B256::repeat_byte(0x10),
+                bootstrap_slot: 32,
+                current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                next_sync_committee: None,
+                finalized_header: verified_header(3_200, 0x20, 3_200),
+                optimistic_header: verified_header(3_232, 0x21, 3_232),
+                best_valid_update: None,
+                previous_max_active_participants: 0,
+                current_max_active_participants: 0,
+            }),
+        };
+
+        assert_eq!(weak_subjectivity_trusted_slot(&snapshot), Some(3_200));
+        assert_eq!(
+            weak_subjectivity_staleness_for_epoch(&snapshot, 110, 10),
+            None
+        );
+        assert_eq!(
+            weak_subjectivity_staleness_for_epoch(&snapshot, 111, 10)
+                .map(|staleness| staleness.trusted_slot),
+            Some(3_200)
+        );
+    }
+
+    #[test]
+    fn root_only_checkpoint_cannot_be_declared_stale_before_bootstrap() {
+        let snapshot = ConsensusSnapshot {
+            checkpoint: WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x10),
+                beacon_slot: None,
+            },
+            anchors: ChainAnchors::default(),
+            ordered_anchors: Vec::new(),
+            light_client: ConsensusLightClientStatus::default(),
+            light_client_payloads: PersistedLightClientPayloads::default(),
+            verified_light_client_store: None,
+        };
+
+        assert_eq!(
+            weak_subjectivity_staleness_for_epoch(&snapshot, u64::MAX, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn opening_stale_slotted_checkpoint_requires_new_checkpoint() {
+        let temp = TempDir::new().unwrap();
+        let error = ConsensusStore::open(
+            temp.path(),
+            Some("0@0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConsensusStateError::StaleWeakSubjectivityCheckpoint { .. }
+        ));
+    }
+
+    #[test]
     fn loads_descriptor_and_persists_state() {
         let temp = TempDir::new().unwrap();
         let descriptor = temp.path().join("checkpoint.json");
+        let checkpoint_slot = recent_test_slot(0);
+        let anchor_slot = checkpoint_slot + 23;
         let descriptor_json = format!(
             r#"{{
   "beacon_root": "{beacon_root}",
-  "beacon_slot": 777,
+  "beacon_slot": {checkpoint_slot},
   "anchors": [
     {{
       "anchor": {{
         "beacon_root": "{anchor_beacon_root}",
-        "beacon_slot": 800,
+        "beacon_slot": {anchor_slot},
         "block_number": 10,
         "block_hash": "{block_hash}",
         "receipts_root": "{receipts_root}"
@@ -677,7 +860,7 @@ mod tests {
         fs::write(&descriptor, descriptor_json).unwrap();
 
         let store = ConsensusStore::open(temp.path(), Some(descriptor.to_str().unwrap())).unwrap();
-        assert_eq!(store.checkpoint().beacon_slot, Some(777));
+        assert_eq!(store.checkpoint().beacon_slot, Some(checkpoint_slot));
         assert_eq!(
             store
                 .chain_anchors()
@@ -810,6 +993,7 @@ mod tests {
     #[test]
     fn bootstrap_status_recovers_checkpoint_slot_when_missing() {
         let temp = TempDir::new().unwrap();
+        let bootstrap_slot = recent_test_slot(0);
         let store = ConsensusStore::open(
             temp.path(),
             Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
@@ -822,7 +1006,7 @@ mod tests {
                 LightClientBootstrapStatus {
                     fork: logex_types::ConsensusDataFork::Deneb,
                     header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 12_345,
+                        beacon_slot: bootstrap_slot,
                         execution: None,
                     },
                     current_sync_committee_pubkeys: 512,
@@ -834,13 +1018,13 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 12_345,
+                    bootstrap_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
                     finalized_header: crate::light_client::VerifiedLightClientHeader {
                         fork: logex_types::ConsensusDataFork::Deneb,
                         beacon: crate::light_client::BeaconBlockHeaderSsz {
-                            slot: 12_345,
+                            slot: bootstrap_slot,
                             proposer_index: 0,
                             parent_root: B256::ZERO,
                             state_root: B256::ZERO,
@@ -851,7 +1035,7 @@ mod tests {
                     optimistic_header: crate::light_client::VerifiedLightClientHeader {
                         fork: logex_types::ConsensusDataFork::Deneb,
                         beacon: crate::light_client::BeaconBlockHeaderSsz {
-                            slot: 12_345,
+                            slot: bootstrap_slot,
                             proposer_index: 0,
                             parent_root: B256::ZERO,
                             state_root: B256::ZERO,
@@ -866,22 +1050,24 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(store.checkpoint().beacon_slot, Some(12_345));
+        assert_eq!(store.checkpoint().beacon_slot, Some(bootstrap_slot));
         let reopened = ConsensusStore::open(temp.path(), None).unwrap();
-        assert_eq!(reopened.checkpoint().beacon_slot, Some(12_345));
+        assert_eq!(reopened.checkpoint().beacon_slot, Some(bootstrap_slot));
     }
 
     #[test]
     fn reopening_with_same_root_and_known_slot_enriches_persisted_checkpoint() {
         let temp = TempDir::new().unwrap();
         let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let known_slot = recent_test_slot(0);
         ConsensusStore::open(temp.path(), Some(root)).unwrap();
 
-        let reopened = ConsensusStore::open(temp.path(), Some(&format!("777@{root}"))).unwrap();
-        assert_eq!(reopened.checkpoint().beacon_slot, Some(777));
+        let reopened =
+            ConsensusStore::open(temp.path(), Some(&format!("{known_slot}@{root}"))).unwrap();
+        assert_eq!(reopened.checkpoint().beacon_slot, Some(known_slot));
 
         let persisted = ConsensusStore::open(temp.path(), None).unwrap();
-        assert_eq!(persisted.checkpoint().beacon_slot, Some(777));
+        assert_eq!(persisted.checkpoint().beacon_slot, Some(known_slot));
     }
 
     #[test]
@@ -909,14 +1095,18 @@ mod tests {
     fn verified_finality_update_persists_without_deadlocking() {
         let temp = TempDir::new().unwrap();
         let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+        let checkpoint_slot = recent_test_slot(0);
+        let finality_slot = checkpoint_slot + 32;
+        let signature_slot = finality_slot + 1;
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{checkpoint_slot}@{root}"))).unwrap();
 
         store
             .record_verified_bootstrap(
                 LightClientBootstrapStatus {
                     fork: logex_types::ConsensusDataFork::Electra,
                     header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 64,
+                        beacon_slot: checkpoint_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 100,
                             block_hash: B256::repeat_byte(0x11),
@@ -932,11 +1122,11 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 64,
+                    bootstrap_slot: checkpoint_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
-                    finalized_header: verified_header(64, 0x10, 100),
-                    optimistic_header: verified_header(64, 0x10, 100),
+                    finalized_header: verified_header(checkpoint_slot, 0x10, 100),
+                    optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
                     best_valid_update: None,
                     previous_max_active_participants: 0,
                     current_max_active_participants: 0,
@@ -950,7 +1140,7 @@ mod tests {
                 LightClientFinalityUpdateStatus {
                     fork: logex_types::ConsensusDataFork::Electra,
                     attested_header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 96,
+                        beacon_slot: finality_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 101,
                             block_hash: B256::repeat_byte(0x21),
@@ -958,14 +1148,14 @@ mod tests {
                         }),
                     },
                     finalized_header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 96,
+                        beacon_slot: finality_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 101,
                             block_hash: B256::repeat_byte(0x21),
                             receipts_root: B256::repeat_byte(0x22),
                         }),
                     },
-                    signature_slot: 97,
+                    signature_slot,
                     sync_committee_participants: 509,
                     finality_branch_depth: 7,
                 },
@@ -975,11 +1165,11 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 64,
+                    bootstrap_slot: checkpoint_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
-                    finalized_header: verified_header(96, 0x20, 101),
-                    optimistic_header: verified_header(96, 0x20, 101),
+                    finalized_header: verified_header(finality_slot, 0x20, 101),
+                    optimistic_header: verified_header(finality_slot, 0x20, 101),
                     best_valid_update: None,
                     previous_max_active_participants: 0,
                     current_max_active_participants: 0,
@@ -1006,7 +1196,7 @@ mod tests {
                 .light_client_status()
                 .finality_update
                 .map(|status| status.finalized_header.beacon_slot),
-            Some(96)
+            Some(finality_slot)
         );
     }
 
@@ -1014,14 +1204,18 @@ mod tests {
     fn verified_optimistic_update_persists_without_deadlocking() {
         let temp = TempDir::new().unwrap();
         let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+        let checkpoint_slot = recent_test_slot(0);
+        let optimistic_slot = checkpoint_slot + 33;
+        let signature_slot = optimistic_slot + 1;
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{checkpoint_slot}@{root}"))).unwrap();
 
         store
             .record_verified_bootstrap(
                 LightClientBootstrapStatus {
                     fork: logex_types::ConsensusDataFork::Electra,
                     header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 64,
+                        beacon_slot: checkpoint_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 100,
                             block_hash: B256::repeat_byte(0x11),
@@ -1037,11 +1231,11 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 64,
+                    bootstrap_slot: checkpoint_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
-                    finalized_header: verified_header(64, 0x10, 100),
-                    optimistic_header: verified_header(64, 0x10, 100),
+                    finalized_header: verified_header(checkpoint_slot, 0x10, 100),
+                    optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
                     best_valid_update: None,
                     previous_max_active_participants: 0,
                     current_max_active_participants: 0,
@@ -1055,14 +1249,14 @@ mod tests {
                 LightClientOptimisticUpdateStatus {
                     fork: logex_types::ConsensusDataFork::Electra,
                     attested_header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 97,
+                        beacon_slot: optimistic_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 102,
                             block_hash: B256::repeat_byte(0x31),
                             receipts_root: B256::repeat_byte(0x32),
                         }),
                     },
-                    signature_slot: 98,
+                    signature_slot,
                     sync_committee_participants: 509,
                 },
                 RawRpcResponse {
@@ -1071,11 +1265,11 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 64,
+                    bootstrap_slot: checkpoint_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
-                    finalized_header: verified_header(64, 0x10, 100),
-                    optimistic_header: verified_header(97, 0x30, 102),
+                    finalized_header: verified_header(checkpoint_slot, 0x10, 100),
+                    optimistic_header: verified_header(optimistic_slot, 0x30, 102),
                     best_valid_update: None,
                     previous_max_active_participants: 0,
                     current_max_active_participants: 0,
@@ -1102,7 +1296,7 @@ mod tests {
                 .light_client_status()
                 .optimistic_update
                 .map(|status| status.attested_header.beacon_slot),
-            Some(97)
+            Some(optimistic_slot)
         );
     }
 
@@ -1110,14 +1304,19 @@ mod tests {
     fn verified_updates_by_range_payloads_persist_by_period() {
         let temp = TempDir::new().unwrap();
         let root = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let store = ConsensusStore::open(temp.path(), Some(&format!("64@{root}"))).unwrap();
+        let checkpoint_slot = recent_test_slot(0);
+        let finalized_slot = checkpoint_slot + 32;
+        let optimistic_slot = finalized_slot + 1;
+        let signature_slot = optimistic_slot + 1;
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{checkpoint_slot}@{root}"))).unwrap();
 
         store
             .record_verified_bootstrap(
                 LightClientBootstrapStatus {
                     fork: logex_types::ConsensusDataFork::Electra,
                     header: logex_types::LightClientHeaderSummary {
-                        beacon_slot: 64,
+                        beacon_slot: checkpoint_slot,
                         execution: Some(logex_types::LightClientExecutionData {
                             block_number: 100,
                             block_hash: B256::repeat_byte(0x11),
@@ -1133,11 +1332,11 @@ mod tests {
                 },
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
-                    bootstrap_slot: 64,
+                    bootstrap_slot: checkpoint_slot,
                     current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                     next_sync_committee: None,
-                    finalized_header: verified_header(64, 0x10, 100),
-                    optimistic_header: verified_header(64, 0x10, 100),
+                    finalized_header: verified_header(checkpoint_slot, 0x10, 100),
+                    optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
                     best_valid_update: None,
                     previous_max_active_participants: 0,
                     current_max_active_participants: 0,
@@ -1150,13 +1349,13 @@ mod tests {
                 AppliedLightClientUpdate {
                     store: VerifiedLightClientStore {
                         checkpoint_root: B256::repeat_byte(0xaa),
-                        bootstrap_slot: 64,
+                        bootstrap_slot: checkpoint_slot,
                         current_sync_committee: crate::light_client::SyncCommitteeData::default(),
                         next_sync_committee: Some(
                             crate::light_client::SyncCommitteeData::default(),
                         ),
-                        finalized_header: verified_header(96, 0x20, 101),
-                        optimistic_header: verified_header(97, 0x21, 102),
+                        finalized_header: verified_header(finalized_slot, 0x20, 101),
+                        optimistic_header: verified_header(optimistic_slot, 0x21, 102),
                         best_valid_update: None,
                         previous_max_active_participants: 0,
                         current_max_active_participants: 0,
@@ -1164,20 +1363,20 @@ mod tests {
                     optimistic_status: LightClientOptimisticUpdateStatus {
                         fork: logex_types::ConsensusDataFork::Electra,
                         attested_header: logex_types::LightClientHeaderSummary {
-                            beacon_slot: 97,
+                            beacon_slot: optimistic_slot,
                             execution: Some(logex_types::LightClientExecutionData {
                                 block_number: 102,
                                 block_hash: B256::repeat_byte(0x31),
                                 receipts_root: B256::repeat_byte(0x32),
                             }),
                         },
-                        signature_slot: 98,
+                        signature_slot,
                         sync_committee_participants: 509,
                     },
                     finality_status: Some(LightClientFinalityUpdateStatus {
                         fork: logex_types::ConsensusDataFork::Electra,
                         attested_header: logex_types::LightClientHeaderSummary {
-                            beacon_slot: 97,
+                            beacon_slot: optimistic_slot,
                             execution: Some(logex_types::LightClientExecutionData {
                                 block_number: 102,
                                 block_hash: B256::repeat_byte(0x31),
@@ -1185,14 +1384,14 @@ mod tests {
                             }),
                         },
                         finalized_header: logex_types::LightClientHeaderSummary {
-                            beacon_slot: 96,
+                            beacon_slot: finalized_slot,
                             execution: Some(logex_types::LightClientExecutionData {
                                 block_number: 101,
                                 block_hash: B256::repeat_byte(0x21),
                                 receipts_root: B256::repeat_byte(0x22),
                             }),
                         },
-                        signature_slot: 98,
+                        signature_slot,
                         sync_committee_participants: 509,
                         finality_branch_depth: 7,
                     }),

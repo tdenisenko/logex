@@ -447,6 +447,7 @@ struct ConsensusNetwork {
     beacon_blocks_by_root_peers: HashSet<PeerId>,
     pending_requests: HashMap<PendingRequestKey, PeerId>,
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
+    pending_history_range_requests: HashMap<PendingRequestKey, BeaconBlocksByRangeRequest>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
     request_failures: RpcFailureCounts,
     gossip_topics: ConsensusGossipTopics,
@@ -591,6 +592,21 @@ fn backward_history_range_request_for_progress(
         count,
         step: 1,
     })
+}
+
+fn range_request_contains_slot(request: BeaconBlocksByRangeRequest, slot: u64) -> bool {
+    if request.count == 0 || request.step == 0 || slot < request.start_slot {
+        return false;
+    }
+
+    let Some(relative_slot) = slot.checked_sub(request.start_slot) else {
+        return false;
+    };
+    let Some(max_relative_slot) = request.step.checked_mul(request.count.saturating_sub(1)) else {
+        return false;
+    };
+
+    relative_slot <= max_relative_slot && relative_slot % request.step == 0
 }
 
 fn push_missing_history_root(
@@ -1369,6 +1385,7 @@ impl ConsensusNetwork {
             beacon_blocks_by_root_peers: HashSet::new(),
             pending_requests: HashMap::new(),
             pending_history_root_requests: HashMap::new(),
+            pending_history_range_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
             request_failures: RpcFailureCounts::default(),
             gossip_topics,
@@ -2043,6 +2060,9 @@ impl ConsensusNetwork {
                 if kind == RpcRequestKind::BeaconBlocksByRoot {
                     self.take_pending_history_root_request(request_id);
                 }
+                if kind == RpcRequestKind::BeaconBlocksByRange {
+                    self.take_pending_history_range_request(request_id);
+                }
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
                 let peer_context = self.peer_context(peer);
@@ -2298,6 +2318,11 @@ impl ConsensusNetwork {
             self.take_pending_history_root_request(request_id)
         } else {
             Vec::new()
+        };
+        let requested_history_range = if kind == RpcRequestKind::BeaconBlocksByRange {
+            self.take_pending_history_range_request(request_id)
+        } else {
+            None
         };
         self.reset_peer_failure(peer, kind);
 
@@ -2557,14 +2582,26 @@ impl ConsensusNetwork {
                     total_bytes,
                     "received beacon blocks by range response stream"
                 );
-                self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
-                self.beacon_blocks_by_range_peers.insert(peer);
-                let mut decoded = 0usize;
+                let mut decoded_blocks = Vec::new();
+                let mut invalid_response = false;
                 for chunk in &chunks {
                     match decode_verified_beacon_block(chunk) {
                         Ok(block) => {
-                            decoded += 1;
-                            self.record_verified_beacon_block(block, Some(chunk.clone()));
+                            if requested_history_range.is_some_and(|request| {
+                                !range_request_contains_slot(request, block.slot)
+                            }) {
+                                invalid_response = true;
+                                tracing::warn!(
+                                    %peer,
+                                    actual_root = %block.beacon_root,
+                                    actual_slot = block.slot,
+                                    actual_parent_root = %block.parent_root,
+                                    requested_range = ?requested_history_range,
+                                    "discarding beacon block by range response outside the requested slot window"
+                                );
+                                continue;
+                            }
+                            decoded_blocks.push((block, chunk.clone()));
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -2576,7 +2613,38 @@ impl ConsensusNetwork {
                         }
                     }
                 }
-                if decoded > 0 {
+                if invalid_response {
+                    self.disconnect_faulty_history_peer(
+                        peer,
+                        RpcRequestKind::BeaconBlocksByRange,
+                        format!(
+                            "invalid_range_response requested_range={requested_history_range:?}"
+                        ),
+                    );
+                    return;
+                }
+                if decoded_blocks.is_empty() {
+                    self.record_unusable_history_response(
+                        peer,
+                        RpcRequestKind::BeaconBlocksByRange,
+                        format!(
+                            "no_decodable_blocks chunks={} total_bytes={} requested_range={requested_history_range:?}",
+                            chunks.len(),
+                            total_bytes
+                        ),
+                    );
+                    return;
+                }
+
+                self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
+                self.beacon_blocks_by_range_peers.insert(peer);
+                let mut inserted = 0usize;
+                for (block, payload) in decoded_blocks {
+                    if self.record_verified_beacon_block(block, Some(payload)) {
+                        inserted += 1;
+                    }
+                }
+                if inserted > 0 {
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
@@ -2589,7 +2657,7 @@ impl ConsensusNetwork {
                     total_bytes,
                     "received beacon blocks by root response stream"
                 );
-                let mut decoded = 0usize;
+                let mut decoded_blocks = Vec::new();
                 let mut invalid_response = false;
                 for chunk in &chunks {
                     match decode_verified_beacon_block(chunk) {
@@ -2608,8 +2676,7 @@ impl ConsensusNetwork {
                                 );
                                 continue;
                             }
-                            decoded += 1;
-                            self.record_verified_beacon_block(block, Some(chunk.clone()));
+                            decoded_blocks.push((block, chunk.clone()));
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -2622,37 +2689,40 @@ impl ConsensusNetwork {
                     }
                 }
                 if invalid_response {
-                    self.request_failures
-                        .increment(RpcRequestKind::BeaconBlocksByRoot);
-                    let peer_failures =
-                        self.record_peer_failure(peer, RpcRequestKind::BeaconBlocksByRoot);
-                    self.peer_lifecycle
-                        .entry(peer)
-                        .or_default()
-                        .mark_ignored_for_run();
                     let requested_roots = requested_history_roots
                         .iter()
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(",");
-                    self.last_rpc_failure = Some(format!(
-                        "{} request={} invalid_root_response requested_roots=[{}]",
-                        self.peer_context(peer),
-                        RpcRequestKind::BeaconBlocksByRoot.as_str(),
-                        requested_roots,
-                    ));
-                    tracing::info!(
-                        %peer,
-                        failures = peer_failures,
-                        requested_roots = ?requested_history_roots,
-                        "disconnecting and ignoring consensus peer after invalid beacon-block-by-root response"
+                    self.disconnect_faulty_history_peer(
+                        peer,
+                        RpcRequestKind::BeaconBlocksByRoot,
+                        format!("invalid_root_response requested_roots=[{requested_roots}]"),
                     );
-                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
                     return;
                 }
+                if decoded_blocks.is_empty() {
+                    self.record_unusable_history_response(
+                        peer,
+                        RpcRequestKind::BeaconBlocksByRoot,
+                        format!(
+                            "no_decodable_blocks chunks={} total_bytes={} requested_roots={requested_history_roots:?}",
+                            chunks.len(),
+                            total_bytes
+                        ),
+                    );
+                    return;
+                }
+
                 self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRoot);
                 self.beacon_blocks_by_root_peers.insert(peer);
-                if decoded > 0 {
+                let mut inserted = 0usize;
+                for (block, payload) in decoded_blocks {
+                    if self.record_verified_beacon_block(block, Some(payload)) {
+                        inserted += 1;
+                    }
+                }
+                if inserted > 0 {
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
@@ -2996,6 +3066,10 @@ impl ConsensusNetwork {
             Eth2RpcRequest::BeaconBlocksByRoot(roots) => Some(roots.clone()),
             _ => None,
         };
+        let requested_history_range = match &request {
+            Eth2RpcRequest::BeaconBlocksByRange(request) => Some(*request),
+            _ => None,
+        };
         let request_id = match kind {
             RpcRequestKind::Status => self
                 .swarm
@@ -3063,6 +3137,9 @@ impl ConsensusNetwork {
         self.pending_requests.insert(key, peer);
         if let Some(roots) = requested_history_roots {
             self.pending_history_root_requests.insert(key, roots);
+        }
+        if let Some(request) = requested_history_range {
+            self.pending_history_range_requests.insert(key, request);
         }
         self.pending_peer_kinds.insert((peer, kind));
         if matches!(
@@ -3309,12 +3386,12 @@ impl ConsensusNetwork {
         &mut self,
         block: VerifiedBeaconBlock,
         payload: Option<RawRpcResponse>,
-    ) {
+    ) -> bool {
         if let Some(payload) = payload {
             self.verified_beacon_block_payloads
                 .insert(block.beacon_root, payload);
         }
-        self.verified_beacon_blocks.insert(block.beacon_root, block);
+        self.verified_beacon_blocks.insert(block.beacon_root, block) != Some(block)
     }
 
     fn cached_verified_beacon_blocks_by_root(&self, roots: &[B256]) -> Vec<RawRpcResponse> {
@@ -3784,6 +3861,55 @@ impl ConsensusNetwork {
         failures
     }
 
+    fn record_unusable_history_response(
+        &mut self,
+        peer: PeerId,
+        kind: RpcRequestKind,
+        detail: String,
+    ) {
+        self.request_failures.increment(kind);
+        let peer_failures = self.record_peer_failure(peer, kind);
+        self.last_rpc_failure = Some(format!(
+            "{} request={} {detail}",
+            self.peer_context(peer),
+            kind.as_str()
+        ));
+        tracing::info!(
+            %peer,
+            request = kind.as_str(),
+            failures = peer_failures,
+            %detail,
+            "consensus history RPC response did not contain usable beacon blocks"
+        );
+    }
+
+    fn disconnect_faulty_history_peer(
+        &mut self,
+        peer: PeerId,
+        kind: RpcRequestKind,
+        detail: String,
+    ) {
+        self.request_failures.increment(kind);
+        let peer_failures = self.record_peer_failure(peer, kind);
+        self.peer_lifecycle
+            .entry(peer)
+            .or_default()
+            .mark_ignored_for_run();
+        self.last_rpc_failure = Some(format!(
+            "{} request={} {detail}",
+            self.peer_context(peer),
+            kind.as_str()
+        ));
+        tracing::info!(
+            %peer,
+            request = kind.as_str(),
+            failures = peer_failures,
+            %detail,
+            "disconnecting and ignoring consensus peer after invalid beacon history response"
+        );
+        self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+    }
+
     fn reset_peer_failure(&mut self, peer: PeerId, kind: RpcRequestKind) {
         if let Some(failures) = self.peer_failures.get_mut(&peer) {
             failures.reset(kind);
@@ -3840,6 +3966,17 @@ impl ConsensusNetwork {
             .unwrap_or_default()
     }
 
+    fn take_pending_history_range_request(
+        &mut self,
+        request_id: Eth2OutboundRequestId,
+    ) -> Option<BeaconBlocksByRangeRequest> {
+        self.pending_history_range_requests
+            .remove(&PendingRequestKey {
+                kind: RpcRequestKind::BeaconBlocksByRange,
+                request_id,
+            })
+    }
+
     fn take_pending_request(
         &mut self,
         kind: RpcRequestKind,
@@ -3861,6 +3998,7 @@ impl ConsensusNetwork {
         for key in stale {
             let _ = self.take_pending_request(key.kind, key.request_id);
             self.pending_history_root_requests.remove(&key);
+            self.pending_history_range_requests.remove(&key);
         }
     }
 
@@ -5200,6 +5338,38 @@ mod tests {
         assert_eq!(request.start_slot, 141);
         assert_eq!(request.count, FORWARD_BEACON_BLOCK_RANGE_WINDOW);
         assert_eq!(request.step, 1);
+    }
+
+    #[test]
+    fn range_request_slot_filter_respects_count_and_step() {
+        let request = BeaconBlocksByRangeRequest {
+            start_slot: 100,
+            count: 4,
+            step: 2,
+        };
+
+        assert!(!range_request_contains_slot(request, 99));
+        assert!(range_request_contains_slot(request, 100));
+        assert!(!range_request_contains_slot(request, 101));
+        assert!(range_request_contains_slot(request, 102));
+        assert!(range_request_contains_slot(request, 106));
+        assert!(!range_request_contains_slot(request, 108));
+        assert!(!range_request_contains_slot(
+            BeaconBlocksByRangeRequest {
+                start_slot: 100,
+                count: 0,
+                step: 1,
+            },
+            100,
+        ));
+        assert!(!range_request_contains_slot(
+            BeaconBlocksByRangeRequest {
+                start_slot: 100,
+                count: 1,
+                step: 0,
+            },
+            100,
+        ));
     }
 
     #[test]

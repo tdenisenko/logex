@@ -21,10 +21,12 @@ use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_ethereum_forks::Head;
 
 use crate::background::{log_task_exit, run_background_indexer};
+use crate::checkpoint::resolve_checkpoint;
 
 pub async fn run_sync(
     pm_config: PartitionManagerConfig,
     checkpoint: Option<String>,
+    checkpoint_sync_url: Option<String>,
     http_port: u16,
     grpc_port: u16,
     discovery_port: u16,
@@ -37,6 +39,18 @@ pub async fn run_sync(
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
     let known_peers_file = known_peers_path(&data_dir);
+    let consensus_state_exists = data_dir.join("cl").join("consensus_state.json").exists();
+    let checkpoint = if consensus_state_exists && checkpoint.is_none() {
+        checkpoint
+    } else {
+        match resolve_checkpoint(checkpoint, checkpoint_sync_url.as_deref()).await {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                tracing::error!(%error, "failed to resolve weak-subjectivity checkpoint");
+                std::process::exit(1);
+            }
+        }
+    };
 
     let mut storage = match PartitionManager::open(pm_config) {
         Ok(s) => s,

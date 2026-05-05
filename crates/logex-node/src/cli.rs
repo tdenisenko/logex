@@ -30,6 +30,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub checkpoint: Option<String>,
 
+    /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
+    #[arg(long, global = true)]
+    pub checkpoint_sync_url: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -89,6 +93,8 @@ pub struct Config {
     pub partition_target_rows: Option<u64>,
     #[serde(default)]
     pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub checkpoint_sync_url: Option<String>,
 }
 
 impl Config {

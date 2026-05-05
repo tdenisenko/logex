@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async runtime / HTTP / gRPC
 axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.13"
 prost = "0.13"
