@@ -376,17 +376,17 @@ fn locate_consensus_reorg(
     for index in (0..recent_headers.len()).rev() {
         let header = &recent_headers[index];
         let header_hash = header.hash_slow();
-        if let Some(anchor) = consensus.anchor_at(header.number()) {
-            if anchor.block_hash == header_hash {
-                return Ok(Some(ConsensusReorg {
-                    retained_headers: recent_headers[..=index].to_vec(),
-                    indexed_head: Some(anchor),
-                    reverted_hashes: recent_headers[index + 1..]
-                        .iter()
-                        .map(|header| header.hash_slow())
-                        .collect(),
-                }));
-            }
+        if let Some(anchor) = consensus.anchor_at(header.number())
+            && anchor.block_hash == header_hash
+        {
+            return Ok(Some(ConsensusReorg {
+                retained_headers: recent_headers[..=index].to_vec(),
+                indexed_head: Some(anchor),
+                reverted_hashes: recent_headers[index + 1..]
+                    .iter()
+                    .map(|header| header.hash_slow())
+                    .collect(),
+            }));
         }
     }
 

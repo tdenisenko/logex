@@ -739,7 +739,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage.sync_head().map(|head| head.block_number), Some(100));
-        assert_eq!(storage.recent_headers(), &[first.clone()]);
+        assert_eq!(storage.recent_headers(), std::slice::from_ref(&first));
         assert_eq!(
             storage
                 .chain_anchors()

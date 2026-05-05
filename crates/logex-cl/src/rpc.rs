@@ -939,7 +939,7 @@ fn encode_beacon_blocks_by_root_request(roots: &[B256]) -> io::Result<Vec<u8>> {
 }
 
 fn decode_beacon_blocks_by_root_request(payload: &[u8]) -> io::Result<Vec<B256>> {
-    if payload.len() % 32 != 0 {
+    if !payload.len().is_multiple_of(32) {
         return Err(invalid_data(format!(
             "beacon blocks by root request payload must be a multiple of 32 bytes, got {}",
             payload.len()

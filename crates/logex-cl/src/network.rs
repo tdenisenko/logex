@@ -517,7 +517,8 @@ fn limited_local_status_message(fork_digest: [u8; 4]) -> StatusMessage {
     StatusMessage::genesis(fork_digest, MAINNET_CONSENSUS_CHAIN_SPEC.genesis_block_root)
 }
 
-fn select_post_bootstrap_request_kind(
+#[derive(Debug, Clone, Copy, Default)]
+struct PostBootstrapRequestReadiness {
     priority_root_ready: bool,
     range_ready: bool,
     deferred_root_ready: bool,
@@ -527,28 +528,32 @@ fn select_post_bootstrap_request_kind(
     pending_priority_root: bool,
     pending_range: bool,
     prefer_range_when_both_ready: bool,
+}
+
+fn select_post_bootstrap_request_kind(
+    readiness: PostBootstrapRequestReadiness,
 ) -> Option<RpcRequestKind> {
-    if priority_root_ready && range_ready {
-        if !pending_range && pending_priority_root {
+    if readiness.priority_root_ready && readiness.range_ready {
+        if !readiness.pending_range && readiness.pending_priority_root {
             Some(RpcRequestKind::BeaconBlocksByRange)
-        } else if pending_range && !pending_priority_root {
+        } else if readiness.pending_range && !readiness.pending_priority_root {
             Some(RpcRequestKind::BeaconBlocksByRoot)
-        } else if prefer_range_when_both_ready {
+        } else if readiness.prefer_range_when_both_ready {
             Some(RpcRequestKind::BeaconBlocksByRange)
         } else {
             Some(RpcRequestKind::BeaconBlocksByRoot)
         }
-    } else if priority_root_ready {
+    } else if readiness.priority_root_ready {
         Some(RpcRequestKind::BeaconBlocksByRoot)
-    } else if range_ready {
+    } else if readiness.range_ready {
         Some(RpcRequestKind::BeaconBlocksByRange)
-    } else if deferred_root_ready {
+    } else if readiness.deferred_root_ready {
         Some(RpcRequestKind::BeaconBlocksByRoot)
-    } else if updates_ready {
+    } else if readiness.updates_ready {
         Some(RpcRequestKind::LightClientUpdatesByRange)
-    } else if finality_ready {
+    } else if readiness.finality_ready {
         Some(RpcRequestKind::LightClientFinalityUpdate)
-    } else if optimistic_ready {
+    } else if readiness.optimistic_ready {
         Some(RpcRequestKind::LightClientOptimisticUpdate)
     } else {
         None
@@ -741,7 +746,7 @@ fn cached_beacon_block_payloads_by_range(
         .filter(|block| {
             block.slot >= request.start_slot
                 && block.slot <= end_slot
-                && (block.slot - request.start_slot) % request.step == 0
+                && (block.slot - request.start_slot).is_multiple_of(request.step)
         })
         .filter_map(|block| payloads.get(&block.beacon_root).cloned())
         .collect()
@@ -1616,8 +1621,7 @@ impl ConsensusNetwork {
 
     fn observe_enr(&mut self, enr: &Enr) {
         if !enr_is_relevant_consensus_peer(enr, &self.fork_digest) {
-            let remote_fork_digest =
-                enr_fork_digest(enr).map(|fork_digest| hex::encode(fork_digest));
+            let remote_fork_digest = enr_fork_digest(enr).map(hex::encode);
             tracing::debug!(
                 node_id = %enr.node_id(),
                 local_fork_digest = %hex::encode(self.fork_digest),
@@ -3252,21 +3256,21 @@ impl ConsensusNetwork {
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
             && !priority_root_ready
             && self.next_history_root_request().is_some();
-        select_post_bootstrap_request_kind(
+        select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
             priority_root_ready,
             range_ready,
             deferred_root_ready,
-            support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
+            updates_ready: support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
                 && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
                 && self.next_updates_by_range_request().is_some(),
-            support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
+            finality_ready: support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
-            support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
+            optimistic_ready: support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
             pending_priority_root,
             pending_range,
-            self.prefer_forward_range_when_both_ready,
-        )
+            prefer_range_when_both_ready: self.prefer_forward_range_when_both_ready,
+        })
     }
 
     fn local_status_message(&self) -> StatusMessage {
@@ -3773,7 +3777,7 @@ impl ConsensusNetwork {
             + lifecycle.disconnects;
         let bootnode_penalty = self.bootnode_peers.contains(&peer) as i32 * 250;
         let preferred = lifecycle.preferred() as i32;
-        preferred * 10_000 + i32::from(support_score) * 1_000 + usefulness as i32 * 10
+        preferred * 10_000 + support_score * 1_000 + usefulness as i32 * 10
             - penalties as i32
             - bootnode_penalty
     }
@@ -5254,21 +5258,30 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_skips_unbuildable_higher_priority_work() {
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                false, true, false, false, true, true, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                range_ready: true,
+                finality_ready: true,
+                optimistic_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                false, false, false, false, true, true, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                finality_ready: true,
+                optimistic_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::LightClientFinalityUpdate)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                false, false, false, false, false, true, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                optimistic_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::LightClientOptimisticUpdate)
         );
     }
@@ -5276,21 +5289,30 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_prefers_ranges_before_deferred_root_chasing() {
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                false, true, true, false, false, false, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                range_ready: true,
+                deferred_root_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                true, true, true, false, false, false, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                priority_root_ready: true,
+                range_ready: true,
+                deferred_root_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                false, false, true, false, false, false, false, false, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                deferred_root_ready: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRoot)
         );
     }
@@ -5298,9 +5320,12 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_can_prefer_priority_root_when_range_was_just_sent() {
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                true, true, true, false, false, false, false, false, false,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                priority_root_ready: true,
+                range_ready: true,
+                deferred_root_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRoot)
         );
     }
@@ -5308,15 +5333,24 @@ mod tests {
     #[test]
     fn post_bootstrap_request_selection_keeps_root_and_range_flows_alive_together() {
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                true, true, true, false, false, false, true, false, false,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                priority_root_ready: true,
+                range_ready: true,
+                deferred_root_ready: true,
+                pending_priority_root: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRange)
         );
         assert_eq!(
-            select_post_bootstrap_request_kind(
-                true, true, true, false, false, false, false, true, true,
-            ),
+            select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
+                priority_root_ready: true,
+                range_ready: true,
+                deferred_root_ready: true,
+                pending_range: true,
+                prefer_range_when_both_ready: true,
+                ..Default::default()
+            }),
             Some(RpcRequestKind::BeaconBlocksByRoot)
         );
     }

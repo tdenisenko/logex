@@ -23,19 +23,35 @@ use reth_ethereum_forks::Head;
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::resolve_checkpoint;
 
-pub async fn run_sync(
-    pm_config: PartitionManagerConfig,
-    checkpoint: Option<String>,
-    checkpoint_sync_url: Option<String>,
-    http_port: u16,
-    grpc_port: u16,
-    discovery_port: u16,
-    p2p_port: u16,
-    max_peers: usize,
-    cl_discovery_port: u16,
-    cl_p2p_port: u16,
-    cl_max_peers: usize,
-) {
+pub struct RunSyncOptions {
+    pub pm_config: PartitionManagerConfig,
+    pub checkpoint: Option<String>,
+    pub checkpoint_sync_url: Option<String>,
+    pub http_port: u16,
+    pub grpc_port: u16,
+    pub discovery_port: u16,
+    pub p2p_port: u16,
+    pub max_peers: usize,
+    pub cl_discovery_port: u16,
+    pub cl_p2p_port: u16,
+    pub cl_max_peers: usize,
+}
+
+pub async fn run_sync(options: RunSyncOptions) {
+    let RunSyncOptions {
+        pm_config,
+        checkpoint,
+        checkpoint_sync_url,
+        http_port,
+        grpc_port,
+        discovery_port,
+        p2p_port,
+        max_peers,
+        cl_discovery_port,
+        cl_p2p_port,
+        cl_max_peers,
+    } = options;
+
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
     let known_peers_file = known_peers_path(&data_dir);

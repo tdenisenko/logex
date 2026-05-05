@@ -60,7 +60,7 @@ fn main() {
             cl_max_peers,
         } => {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-            rt.block_on(runtime::run_sync(
+            rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
                 checkpoint,
                 checkpoint_sync_url,
@@ -72,7 +72,7 @@ fn main() {
                 cl_discovery_port,
                 cl_p2p_port,
                 cl_max_peers,
-            ));
+            }));
         }
         Command::BuildIndexes => commands::run_build_indexes(pm_config),
         Command::Info => commands::run_info(pm_config),

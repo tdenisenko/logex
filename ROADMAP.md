@@ -113,10 +113,11 @@ LogEx should become a canonical Ethereum event-log node that:
   - full beacon-block decoding, truthful cached history serving, backward checkpoint-to-older-history materialization, forward root-chasing, and reorg-safe forward anchor pruning are implemented
   - fixed-port mainnet smokes from `14132160@0x6181b33b475e9cf71a01033ad948aeb163f50f5cfa3c11bf56cbc3dc35fa3ed4` now persist a verified bootstrap store, expose checkpoint/finality/optimistic execution anchors through `/status`, and show verified head movement beyond the checkpoint
   - a fresh mainnet smoke on May 5, 2026 from `14263616@0xad227f7642484a8c957306069387c2555beab50898ab5a3d5342cd4fcb078267` bootstrapped successfully, verified optimistic/finality updates, and materialized 213 CL-authenticated execution anchors spanning slots `14263488..14263701`
-- The native CL P2P milestone on `cl-canonical-verification` is now PR-ready:
+- The native CL P2P milestone from `cl-canonical-verification` has been merged through PR #67:
   - a fresh fixed-port mainnet smoke on May 5, 2026 resolved a current finalized checkpoint via `--checkpoint-sync-url`, bootstrapped from scratch, reached the verified optimistic head, and materialized 343 CL-authenticated execution anchors spanning beacon slots `14263514..14263857`
   - peer churn is still present on public mainnet, but cooldown-aware slot rotation, stricter ENR filtering, wider status/history request concurrency, and invalid/empty history-response accounting are now enough for fresh short smokes to keep the materialized ceiling at the live optimistic head
-- The current branch also does not yet implement the pre-Merge PoW canonicality path, so it is still not the full end-to-end canonical system.
+- The merged CL P2P milestone also does not yet implement the pre-Merge PoW canonicality path, so the project is still not the full end-to-end canonical system.
+- The current branch is a separate clippy cleanup branch, `fix/clippy-cleanup`, created before starting the requested UI redesign.
 
 ## Explicitly Not Needed
 
@@ -152,15 +153,16 @@ LogEx should become a canonical Ethereum event-log node that:
 
 ## Completed Since Last Run
 
-- Hardened native CL P2P peer retention and history scheduling for the PR-ready milestone.
-  - Status handshakes and beacon-history root/range requests now have wider per-method concurrency than singleton light-client requests.
-  - Connected peers that enter cooldown after useful RPC failures are disconnected once idle, freeing slots for better candidates instead of occupying the connection budget.
-  - ENRs without an `eth2` fork field are no longer treated as relevant consensus peers.
-  - Remote Goodbye response channels that close before response are treated as expected debug-level churn rather than warning/status pollution.
-- Re-ran fixed-port mainnet smokes on HTTP port `18683`.
-  - A resumed run reached the verified optimistic head with 725 materialized anchors.
-  - A fresh run after clearing the fixed smoke directory resolved checkpoint `14263776@0x26fa62173264cca9bbaddbf861dae86f3e0efdd47cda3de0c0427d32c0a70571`, bootstrapped from scratch, reached optimistic slot `14263857`, and materialized 343 anchors spanning slots `14263514..14263857`.
-- Validated the changes with `cargo test -p logex-cl`, `cargo build -p logex-node`, and `cargo test --workspace`.
+- Merged the completed consensus-layer P2P milestone PR #67 before starting new feature work.
+- Split clippy cleanup onto `fix/clippy-cleanup` before touching the UI.
+- Fixed workspace clippy errors without changing runtime behavior:
+  - replaced linted test slice clones and nested `format!` calls
+  - collapsed nested conditionals in light-client verification and consensus reorg detection
+  - replaced manual size and divisibility calculations with standard helpers
+  - replaced the post-bootstrap request selection helper's long argument list with a typed readiness struct
+  - replaced the node runtime's long `run_sync` argument list with `RunSyncOptions`
+  - removed a needless struct update in the status endpoint test fixture
+- Validated the cleanup with `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
 
 ## Remaining TODOs
 
@@ -244,6 +246,17 @@ LogEx should become a canonical Ethereum event-log node that:
    - Done when:
       - the node can sync, restart, query, and serve logs from the final CL-driven architecture with measured performance and truthful documentation
 
+8. Sync Dashboard Redesign
+   - TODO:
+     - redesign the embedded web UI so CL P2P status and EL P2P status are clearly separated
+     - remove overlapping text and cramped marker labels
+     - make checkpoint, finalized, optimistic, materialized, indexed, peer, and query coverage ranges easy to read at a glance
+     - show what block ranges are queryable based on the currently indexed log coverage
+   - Why this matters:
+     - operators need to understand whether the consensus side, execution side, or log indexing side is the current bottleneck
+   - Done when:
+     - the dashboard displays CL sync, EL sync, materialized consensus anchors, indexed log coverage, and query coverage without overlapping text on desktop and narrow viewports
+
 ## Challenges and Resolutions
 
 - Challenge: The previously recorded April checkpoint no longer bootstrapped reliably on live peers.
@@ -257,18 +270,18 @@ LogEx should become a canonical Ethereum event-log node that:
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected CL peer lifecycle accounting, request scheduling, ENR relevance filtering, remote Goodbye handling, consensus status counters, checkpoint parsing, and roadmap checkpoint language.
-- No obsolete code was removed in this run because the existing lifecycle counters, root/range request bookkeeping, root-only checkpoint path, and descriptor path are still used.
-- The remaining exact weak-subjectivity calculation and checkpoint-distribution work was moved out of the current branch blocker list and kept as an explicit follow-up TODO.
+- Ran clippy across all workspace targets and removed the linted redundant patterns it exposed.
+- Inspected the touched clippy cleanup areas: CL SSZ helpers, light-client verification, CL request selection, RPC request decoding, node runtime startup wiring, REST status tests, native storage tests, and anchored consensus reorg handling.
+- No dead modules or obsolete runtime paths were removed in this cleanup branch; the remaining transitional consensus and UI cleanup work is tracked in the TODO list.
 
 ## Git Workflow
 
-- Current branch: `cl-canonical-verification`.
-- New branch created: no; the current branch is the active consensus-layer P2P task branch.
-- Commits made during this run: `fix: validate consensus checkpoints and history responses`; `perf: harden consensus peer retention`.
-- Pull request status: opened as draft PR #67 at https://github.com/tdenisenko/logex/pull/67 after committing and pushing this final CL P2P hardening pass.
-- Merge status: not merged because the PR remains draft.
-- Git/GitHub blockers: the GitHub connector's ready-for-review mutation currently fails with a connector-side GraphQL selection error on `PullRequest.htmlUrl`, and the local `gh` session is not authenticated, so marking PR #67 ready and merging it could not be completed from this run.
+- Current branch: `fix/clippy-cleanup`.
+- New branch created: yes; the branch was renamed from the initial UI branch before any UI edits so clippy cleanup stays separate and branch names do not include `codex`.
+- Commits made during this run: PR #67 merge commit `f974fd285b741e4abd0e877f136ab0b4bffba8ff`; clippy cleanup commit pending.
+- Pull request status: PR #67 merged; clippy cleanup PR not opened yet.
+- Merge status: PR #67 merged successfully; clippy cleanup not merged yet.
+- Git/GitHub blockers: none for the clippy cleanup branch so far.
 
 ## Known Issues or Risks
 
@@ -276,6 +289,7 @@ LogEx should become a canonical Ethereum event-log node that:
 - `--checkpoint-sync-url` is a temporary startup bootstrap aid and introduces trust in the selected endpoint for initial checkpoint selection until LogEx provides its own checkpoint source.
 - Fresh fixed-port smokes can now materialize to the verified optimistic head from scratch, but long-lived peer retention and sustained checkpoint-to-head/history-backfill performance still need release-gate proof runs.
 - Keep the HTTP port constant for comparable smoke tests; stop any stale process before rerunning instead of incrementing the test port.
+- The embedded web UI still needs redesign because CL P2P, EL P2P, indexing, marker labels, and query coverage are not visually separated clearly enough.
 - Pre-Merge PoW canonicality remains unimplemented, so LogEx cannot yet claim full-chain canonicality.
 
 ## Sequencing Decision
