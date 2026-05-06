@@ -23,7 +23,8 @@ use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, tcp, yamux};
 use libp2p_mplex as mplex;
 use logex_types::{
-    ConsensusDataFork, ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint,
+    ConsensusDataFork, ConsensusNetworkStatus, ExecutionAnchor, SyncStatus,
+    WeakSubjectivityCheckpoint,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -62,7 +63,7 @@ const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_DEFAULT_RPC_REQUESTS: usize = 2;
 const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
-const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
+const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 8;
 // Deneb+ `beacon_blocks_by_range/2` inherits `MAX_REQUEST_BLOCKS_DENEB = 128`.
 const MAX_BEACON_BLOCK_RANGE_WINDOW: u64 = 128;
 const MAX_BEACON_BLOCKS_BY_ROOT_REQUEST: usize = 128;
@@ -834,6 +835,26 @@ fn range_request_contains_slot(request: BeaconBlocksByRangeRequest, slot: u64) -
     relative_slot <= max_relative_slot && relative_slot % request.step == 0
 }
 
+fn backward_anchor_records_to_persist(
+    mut chain: Vec<VerifiedBeaconBlock>,
+    existing_floor: Option<ExecutionAnchor>,
+    finalized_slot: u64,
+) -> Vec<crate::AnchorRecord> {
+    let existing_floor_block = existing_floor.map(|anchor| anchor.block_number);
+    chain.reverse();
+    chain
+        .into_iter()
+        .filter(|block| {
+            existing_floor_block.is_none_or(|floor| block.execution_anchor.block_number < floor)
+        })
+        .map(|block| crate::AnchorRecord {
+            anchor: block.execution_anchor,
+            finalized: block.slot <= finalized_slot,
+            parent_beacon_root: Some(block.parent_root),
+        })
+        .collect()
+}
+
 fn push_missing_history_root(
     roots: &mut Vec<B256>,
     root: B256,
@@ -1385,6 +1406,30 @@ impl PeerLifecycleState {
 
     fn preferred(&self) -> bool {
         self.bootstrap_successes > 0 || self.useful_successes > 0 || self.status_successes > 0
+    }
+}
+
+fn record_dial_error_on_lifecycle(lifecycle: &mut PeerLifecycleState, error: &DialError) -> bool {
+    match error {
+        DialError::LocalPeerId { address } | DialError::WrongPeerId { address, .. } => {
+            if let Some(class) = dial_address_class(address) {
+                lifecycle.record_dial_failure(class);
+            }
+            lifecycle.mark_ignored_for_run();
+            true
+        }
+        DialError::Transport(errors) => {
+            for (address, _) in errors {
+                if let Some(class) = dial_address_class(address) {
+                    lifecycle.record_dial_failure(class);
+                }
+            }
+            false
+        }
+        DialError::NoAddresses
+        | DialError::DialPeerConditionFalse(_)
+        | DialError::Aborted
+        | DialError::Denied { .. } => false,
     }
 }
 
@@ -1964,8 +2009,10 @@ impl ConsensusNetwork {
                 if let Some(peer_id) = peer_id {
                     self.dialing_peers.remove(&peer_id);
                     self.clear_pending_requests_for_peer(peer_id);
-                    self.record_dial_error(peer_id, &error);
-                    self.record_transport_backoff(peer_id, format!("dial_error error={error}"));
+                    let ignored_for_run = self.record_dial_error(peer_id, &error);
+                    if !ignored_for_run {
+                        self.record_transport_backoff(peer_id, format!("dial_error error={error}"));
+                    }
                 }
             }
             SwarmEvent::Behaviour(ConsensusBehaviourEvent::StatusRpc(event)) => {
@@ -3362,13 +3409,15 @@ impl ConsensusNetwork {
             }
             Err(error) => {
                 tracing::debug!(%peer, %error, "failed to start consensus libp2p dial");
-                self.record_dial_error(peer, &error);
-                if !matches!(
-                    &error,
-                    DialError::DialPeerConditionFalse(_)
-                        | DialError::NoAddresses
-                        | DialError::Aborted
-                ) {
+                let ignored_for_run = self.record_dial_error(peer, &error);
+                if !ignored_for_run
+                    && !matches!(
+                        &error,
+                        DialError::DialPeerConditionFalse(_)
+                            | DialError::NoAddresses
+                            | DialError::Aborted
+                    )
+                {
                     self.record_transport_backoff(peer, format!("dial_start_error error={error}"));
                 }
             }
@@ -3872,23 +3921,15 @@ impl ConsensusNetwork {
         let Some(store) = self.consensus.light_client_store() else {
             return;
         };
-        let Some(mut chain) = self.backward_chain_blocks() else {
+        let Some(chain) = self.backward_chain_blocks() else {
             return;
         };
-        if chain.is_empty() {
-            return;
-        }
-        chain.reverse();
 
-        let finalized_slot = store.finalized_header.beacon.slot;
-        let anchor_records = chain
-            .into_iter()
-            .map(|block| crate::AnchorRecord {
-                anchor: block.execution_anchor,
-                finalized: block.slot <= finalized_slot,
-                parent_beacon_root: Some(block.parent_root),
-            })
-            .collect::<Vec<_>>();
+        let anchor_records = backward_anchor_records_to_persist(
+            chain,
+            self.consensus.anchor_coverage().floor,
+            store.finalized_header.beacon.slot,
+        );
         let Some(first_anchor) = anchor_records.first().map(|record| record.anchor) else {
             return;
         };
@@ -4172,26 +4213,25 @@ impl ConsensusNetwork {
         ));
     }
 
-    fn record_dial_error(&mut self, peer: PeerId, error: &DialError) {
+    fn record_dial_error(&mut self, peer: PeerId, error: &DialError) -> bool {
         let lifecycle = self.peer_lifecycle.entry(peer).or_default();
-        match error {
-            DialError::LocalPeerId { address } | DialError::WrongPeerId { address, .. } => {
-                if let Some(class) = dial_address_class(address) {
-                    lifecycle.record_dial_failure(class);
+        let ignored_for_run = record_dial_error_on_lifecycle(lifecycle, error);
+        if ignored_for_run {
+            let reason = match error {
+                DialError::LocalPeerId { address } => {
+                    format!("local_peer_id address={address}")
                 }
-            }
-            DialError::Transport(errors) => {
-                for (address, _) in errors {
-                    if let Some(class) = dial_address_class(address) {
-                        lifecycle.record_dial_failure(class);
-                    }
+                DialError::WrongPeerId { obtained, address } => {
+                    format!("wrong_peer_id obtained={obtained} address={address}")
                 }
-            }
-            DialError::NoAddresses
-            | DialError::DialPeerConditionFalse(_)
-            | DialError::Aborted
-            | DialError::Denied { .. } => {}
+                _ => "unusable_peer_identity".to_owned(),
+            };
+            self.last_peer_policy_event = Some(format!(
+                "{} policy=ignore_for_run reason={reason}",
+                self.peer_context(peer)
+            ));
         }
+        ignored_for_run
     }
 
     fn record_peer_disconnect(&mut self, peer: PeerId, detail: String) {
@@ -5285,6 +5325,7 @@ mod tests {
             max_concurrent_requests_for_kind(RpcRequestKind::Status),
             MAX_CONCURRENT_STATUS_REQUESTS
         );
+        assert_eq!(MAX_CONCURRENT_HISTORY_REQUESTS, 8);
         assert_eq!(
             max_concurrent_requests_for_kind(RpcRequestKind::BeaconBlocksByRange),
             MAX_CONCURRENT_HISTORY_REQUESTS
@@ -5346,6 +5387,24 @@ mod tests {
             stats.priority(DialAddressClass::Tcp4, true)
                 > stats.priority(DialAddressClass::Quic4, true)
         );
+    }
+
+    #[test]
+    fn wrong_peer_id_dial_error_ignores_peer_for_run() {
+        let expected = PeerId::random();
+        let obtained = PeerId::random();
+        let address = multiaddr_from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, expected);
+        let mut lifecycle = PeerLifecycleState::default();
+
+        let ignored_for_run = record_dial_error_on_lifecycle(
+            &mut lifecycle,
+            &DialError::WrongPeerId { obtained, address },
+        );
+
+        assert!(ignored_for_run);
+        assert!(lifecycle.ignored_for_run);
+        assert_eq!(lifecycle.dial_stats.tcp4_failures, 1);
+        assert!(!lifecycle.in_cooldown(Instant::now()));
     }
 
     #[test]
@@ -6059,6 +6118,48 @@ mod tests {
             .expect("next backward range should skip pending window");
         assert_eq!(next_backward.start_slot, 144);
         assert_eq!(next_backward.count, 128);
+    }
+
+    #[test]
+    fn backward_anchor_records_only_persist_new_floor_extension() {
+        let block = |slot: u64, parent_byte: u8, block_number: u64| VerifiedBeaconBlock {
+            fork: logex_types::ConsensusDataFork::Electra,
+            beacon_root: B256::repeat_byte(slot as u8),
+            parent_root: B256::repeat_byte(parent_byte),
+            slot,
+            execution_anchor: logex_types::ExecutionAnchor {
+                beacon_root: B256::repeat_byte(slot as u8),
+                beacon_slot: slot,
+                block_number,
+                block_hash: B256::repeat_byte(block_number as u8),
+                receipts_root: B256::repeat_byte(block_number as u8 + 1),
+            },
+        };
+        let existing_floor = logex_types::ExecutionAnchor {
+            beacon_root: B256::repeat_byte(0x30),
+            beacon_slot: 300,
+            block_number: 300,
+            block_hash: B256::repeat_byte(0x40),
+            receipts_root: B256::repeat_byte(0x41),
+        };
+        let chain = vec![
+            block(300, 0x20, 300),
+            block(299, 0x19, 299),
+            block(298, 0x18, 298),
+        ];
+
+        let records = backward_anchor_records_to_persist(chain, Some(existing_floor), 299);
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.anchor.block_number)
+                .collect::<Vec<_>>(),
+            vec![298, 299]
+        );
+        assert!(records[0].finalized);
+        assert!(records[1].finalized);
+        assert_eq!(records[0].parent_beacon_root, Some(B256::repeat_byte(0x18)));
     }
 
     #[test]

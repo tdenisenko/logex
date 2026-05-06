@@ -753,7 +753,7 @@
       <div class="graph-row history">
         <div class="graph-row-label">
           <strong>CL history path</strong>
-          <span>checkpoint down to genesis</span>
+          <span>checkpoint down to first PoS execution block</span>
           <div class="graph-row-value" id="graphHistoryValue">--</div>
         </div>
         <div class="graph-bar">
@@ -861,6 +861,8 @@
             <div class="metric cl"><span class="k">Updates</span><span class="v" id="clUpdatePeers">--</span><span class="note">range/finality/optimistic</span></div>
             <div class="metric cl"><span class="k">Beacon Blocks</span><span class="v" id="clBlockPeers">--</span><span class="note">range/root peers</span></div>
             <div class="metric cl"><span class="k">Peer Pool</span><span class="v" id="clPeerPool">--</span><span class="note">preferred/cooldown/ignored</span></div>
+            <div class="metric cl"><span class="k">History Rate</span><span class="v" id="clHistoryRate">--</span><span class="note">verified blocks/sec</span></div>
+            <div class="metric cl"><span class="k">History ETA</span><span class="v" id="clHistoryEta">--</span><span class="note">to first PoS block</span></div>
           </div>
         </div>
 
@@ -900,7 +902,7 @@
           <div class="marker history"><span class="swatch"></span><span><span class="name">Lowest Verified Block</span><span class="value" id="markerHistoryFloor">--</span><span class="detail" id="markerHistoryFloorDetail">--</span></span></div>
           <div class="marker index"><span class="swatch"></span><span><span class="name">Indexed Block</span><span class="value" id="markerIndexed">--</span><span class="detail" id="markerIndexedDetail">--</span></span></div>
           <div class="marker query"><span class="swatch"></span><span><span class="name">Query Logs</span><span class="value" id="markerQuery">--</span><span class="detail" id="markerQueryDetail">--</span></span></div>
-          <div class="marker neutral"><span class="swatch"></span><span><span class="name">Genesis</span><span class="value">0</span><span class="detail">history target</span></span></div>
+          <div class="marker neutral"><span class="swatch"></span><span><span class="name">First PoS Block</span><span class="value">15,537,394</span><span class="detail">CL execution-payload target</span></span></div>
         </div>
       </section>
 
@@ -927,7 +929,7 @@
             <div class="range-row">
               <span class="range-item"><span class="label">From</span><span class="value" id="historyLaneFrom">--</span></span>
               <span class="range-item"><span class="label">Lowest Verified</span><span class="value" id="historyLaneDone">--</span></span>
-              <span class="range-item"><span class="label">Target</span><span class="value">0</span></span>
+              <span class="range-item"><span class="label">Target</span><span class="value" id="historyLaneTarget">--</span></span>
             </div>
           </div>
           <div class="lane">
@@ -1008,8 +1010,15 @@
 var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
 var MAINNET_GENESIS_TIME_SECONDS = 1606824023;
 var SECONDS_PER_SLOT = 12;
+var FIRST_POS_EXECUTION_BLOCK = 15537394;
+var HISTORY_RATE_SAMPLE_INTERVAL_SECONDS = 30;
+var HISTORY_RATE_MIN_SAMPLE_SECONDS = 2 * 60;
+var HISTORY_RATE_WINDOW_SECONDS = 10 * 60;
 var latestStatus = null;
 var lastStatusTimestamp = null;
+var syncRateSamples = {
+  history: []
+};
 
 function byId(id) {
   return document.getElementById(id);
@@ -1058,6 +1067,13 @@ function fmtBlocks(value) {
 function fmtRate(value) {
   var number = numberOrNull(value);
   if (number == null) return '--';
+  return number.toFixed(2);
+}
+
+function fmtBlockRate(value) {
+  var number = numberOrNull(value);
+  if (number == null) return '--';
+  if (number >= 10) return number.toFixed(1);
   return number.toFixed(2);
 }
 
@@ -1136,6 +1152,36 @@ function fmtEta(seconds) {
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm ' + s + 's';
   return s + 's';
+}
+
+function sampleDescendingSyncRate(name, blockNumber) {
+  var block = numberOrNull(blockNumber);
+  if (block == null) return null;
+
+  var now = Date.now() / 1000;
+  var samples = syncRateSamples[name] || [];
+  var latest = samples[samples.length - 1];
+  if (!latest || now - latest.time >= HISTORY_RATE_SAMPLE_INTERVAL_SECONDS) {
+    samples.push({ time: now, block: block });
+  }
+  var cutoff = now - HISTORY_RATE_WINDOW_SECONDS;
+  samples = samples.filter(function(sample) { return sample.time >= cutoff; });
+  syncRateSamples[name] = samples;
+  if (samples.length < 2) return null;
+
+  var newest = samples[samples.length - 1];
+  var hasStableWindow = false;
+  for (var i = 0; i < samples.length - 1; i += 1) {
+    var oldest = samples[i];
+    var elapsed = newest.time - oldest.time;
+    var blocks = oldest.block - newest.block;
+    if (elapsed < HISTORY_RATE_MIN_SAMPLE_SECONDS) continue;
+    hasStableWindow = true;
+    if (blocks > 0) {
+      return blocks / elapsed;
+    }
+  }
+  return hasStableWindow ? 0 : null;
 }
 
 function shortHash(value) {
@@ -1250,14 +1296,26 @@ function updateStatus(data) {
     ? Math.max(0, latestKnown - materializedTip)
     : null;
   var historyDone = checkpointBlock != null && materializedFloor != null
-    ? Math.max(0, checkpointBlock - materializedFloor)
+    ? Math.max(0, checkpointBlock - Math.max(materializedFloor, FIRST_POS_EXECUTION_BLOCK))
     : 0;
-  var historyPct = checkpointBlock != null ? ratio(historyDone, checkpointBlock) : 0;
+  var historyTotal = checkpointBlock != null
+    ? Math.max(0, checkpointBlock - FIRST_POS_EXECUTION_BLOCK)
+    : 0;
+  var historyPct = ratio(historyDone, historyTotal);
   var historyRemaining = materializedFloor != null
-    ? Math.max(0, materializedFloor)
+    ? Math.max(0, materializedFloor - FIRST_POS_EXECUTION_BLOCK)
+    : null;
+  var historyRate = sampleDescendingSyncRate('history', materializedFloor);
+  var historyEtaSeconds = historyRate != null && historyRate > 0 && historyRemaining != null
+    ? historyRemaining / historyRate
     : null;
   var liveRemainingText = liveRemaining == null ? 'Waiting for highest verified block' : fmtBlocks(liveRemaining) + ' remaining before CL verification reaches target block';
-  var historyRemainingText = historyRemaining == null ? 'Waiting for lowest verified block' : fmtBlocks(historyRemaining) + ' remaining before history verification reaches genesis';
+  var historyEtaText = historyEtaSeconds == null
+    ? 'ETA sampling recent pace'
+    : 'ETA ' + fmtEta(historyEtaSeconds) + ' at ' + fmtBlockRate(historyRate) + ' blocks/sec';
+  var historyRemainingText = historyRemaining == null
+    ? 'Waiting for lowest verified block'
+    : fmtBlocks(historyRemaining) + ' remaining before CL history reaches first PoS block';
   var elPct = target > 0 ? ratio(current, target) : 0;
   var queryPct = queryLatest != null && queryTo != null ? ratio(queryTo, queryLatest) : 0;
   var queryRange = blockRange(queryFrom, queryTo);
@@ -1312,7 +1370,7 @@ function updateStatus(data) {
   setText('liveEndLimit', latestKnown == null ? 'Target --' : 'Target block ' + blockWithTimestamp(latestKnown, latestKnownTime));
   setText('liveCurrentLabel', materializedTip == null ? 'Highest verified block --' : 'Highest verified block ' + blockWithTimestamp(materializedTip, materializedTipTime));
   setText('historyStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
-  setText('historyEndLimit', 'Target genesis 0');
+  setText('historyEndLimit', 'Target first PoS block ' + fmt(FIRST_POS_EXECUTION_BLOCK));
   setText('historyCurrentLabel', materializedFloor == null ? 'Lowest verified block --' : 'Lowest verified block ' + blockWithTimestamp(materializedFloor, materializedFloorTime));
   setText('elStartLimit', 'Start block 0');
   setText('elEndLimit', target > 0 ? 'Target peer tip ' + fmt(target) : 'Target peer tip --');
@@ -1343,6 +1401,8 @@ function updateStatus(data) {
   setText('clUpdatePeers', fmt((numberOrNull(clNetwork.updates_by_range_peers) || 0) + (numberOrNull(clNetwork.finality_update_peers) || 0) + (numberOrNull(clNetwork.optimistic_update_peers) || 0)));
   setText('clBlockPeers', fmt((numberOrNull(clNetwork.beacon_blocks_by_range_peers) || 0) + (numberOrNull(clNetwork.beacon_blocks_by_root_peers) || 0)));
   setText('clPeerPool', fmt(clNetwork.preferred_peers) + ' / ' + fmt(clNetwork.cooldown_peers) + ' / ' + fmt(clNetwork.ignored_peers));
+  setText('clHistoryRate', fmtBlockRate(historyRate));
+  setText('clHistoryEta', historyEtaSeconds == null ? '--' : fmtEta(historyEtaSeconds));
 
   setText('elConnected', fmt(data.connected_peers));
   setText('elServing', fmt(data.serving_peers));
@@ -1362,7 +1422,7 @@ function updateStatus(data) {
   setText('markerMaterializedTip', fmt(materializedTip));
   setText('markerMaterializedTipDetail', detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_ceiling)), fmtTimestamp(materializedTipTime), fmt(data.materialized_execution_anchor_count) + ' anchors']));
   setText('markerHistoryFloor', fmt(materializedFloor));
-  setText('markerHistoryFloorDetail', materializedFloor == null || checkpointBlock == null ? 'not started' : detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_floor)), fmtTimestamp(materializedFloorTime), historyRemainingText]));
+  setText('markerHistoryFloorDetail', materializedFloor == null || checkpointBlock == null ? 'not started' : detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_floor)), fmtTimestamp(materializedFloorTime), historyRemainingText, historyEtaText]));
   setText('markerIndexed', fmt(indexedHead));
   setText('markerIndexedDetail', detailParts([indexedAnchorTime == null ? null : fmtTimestamp(indexedAnchorTime), 'lag ' + fmt(data.index_lag_blocks) + ' blocks']));
   setText('markerQuery', queryRange);
@@ -1374,10 +1434,11 @@ function updateStatus(data) {
   setText('liveLaneDone', fmt(materializedTip));
   setText('liveLaneTarget', fmt(latestKnown));
 
-  setText('historyLaneSummary', checkpointBlock != null ? historyPct.toFixed(1) + '% complete; ' + historyRemainingText : 'waiting for checkpoint');
+  setText('historyLaneSummary', checkpointBlock != null ? historyPct.toFixed(1) + '% complete; ' + historyRemainingText + '; ' + historyEtaText : 'waiting for checkpoint');
   setWidth('historyLaneBar', historyPct);
   setText('historyLaneFrom', fmt(checkpointBlock));
   setText('historyLaneDone', fmt(materializedFloor));
+  setText('historyLaneTarget', fmt(FIRST_POS_EXECUTION_BLOCK));
 
   setText('elLaneSummary', target > 0 ? elPct.toFixed(1) + '% to peer tip' : 'awaiting tip');
   setWidth('elLaneBar', elPct);
