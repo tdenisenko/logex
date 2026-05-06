@@ -129,7 +129,11 @@ impl ServeCacheProvider {
 
     fn block_hash_for_number(&self, number: u64) -> Option<B256> {
         let state = self.inner.read().expect("serve cache poisoned");
-        state.number_to_hash.get(&number).copied()
+        state
+            .number_to_hash
+            .get(&number)
+            .copied()
+            .or_else(|| (number == 0).then(|| self.chain_spec.genesis_hash()))
     }
 
     fn block_by_hash_inner(
@@ -137,7 +141,18 @@ impl ServeCacheProvider {
         hash: B256,
     ) -> Option<Block<reth_ethereum_primitives::TransactionSigned>> {
         let state = self.inner.read().expect("serve cache poisoned");
-        state.blocks.get(&hash).map(|cached| cached.block.clone())
+        state
+            .blocks
+            .get(&hash)
+            .map(|cached| cached.block.clone())
+            .or_else(|| {
+                (hash == self.chain_spec.genesis_hash()).then(|| {
+                    Block::new(
+                        self.chain_spec.genesis_header().clone(),
+                        BlockBody::default(),
+                    )
+                })
+            })
     }
 
     fn header_by_number_inner(&self, number: u64) -> Option<Header> {
@@ -156,6 +171,7 @@ impl ServeCacheProvider {
             .blocks
             .get(&hash)
             .map(|cached| cached.receipts.clone())
+            .or_else(|| (hash == self.chain_spec.genesis_hash()).then(Vec::new))
     }
 
     fn number_range(
@@ -223,7 +239,11 @@ impl BlockNumReader for ServeCacheProvider {
 
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
         let state = self.inner.read().expect("serve cache poisoned");
-        Ok(state.hash_to_number.get(&hash).copied())
+        Ok(state
+            .hash_to_number
+            .get(&hash)
+            .copied()
+            .or_else(|| (hash == self.chain_spec.genesis_hash()).then_some(0)))
     }
 }
 
@@ -580,6 +600,35 @@ mod tests {
         assert_eq!(
             provider.block_by_number(7).unwrap().unwrap().header.number,
             7
+        );
+    }
+
+    #[test]
+    fn serves_genesis_fallback_when_cache_is_empty() {
+        let provider = ServeCacheProvider::new();
+        let genesis_hash = provider.chain_spec.genesis_hash();
+
+        assert_eq!(provider.block_hash(0).unwrap(), Some(genesis_hash));
+        assert_eq!(provider.block_number(genesis_hash).unwrap(), Some(0));
+        assert_eq!(
+            provider.header_by_number(0).unwrap().unwrap().hash_slow(),
+            genesis_hash
+        );
+        assert_eq!(
+            provider
+                .block_by_hash(genesis_hash)
+                .unwrap()
+                .unwrap()
+                .header
+                .number,
+            0
+        );
+        assert!(
+            provider
+                .receipts_by_block(genesis_hash.into())
+                .unwrap()
+                .unwrap()
+                .is_empty()
         );
     }
 

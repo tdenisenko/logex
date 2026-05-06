@@ -1,3 +1,4 @@
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,7 +58,25 @@ pub async fn run_background_indexer(
                     last_indexed = Some(current);
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to build indexes");
+                    let latest = {
+                        let storage = state.storage.read().await;
+                        HotIndexState {
+                            partition_id: storage.hot_partition().meta.id,
+                            row_count: storage.hot_partition().meta.row_count,
+                            path: storage.hot_partition().meta.path.clone(),
+                        }
+                    };
+                    if index_build_error_is_transient(&e, &current, &latest) {
+                        tracing::debug!(
+                            error = %e,
+                            partition_id = current.partition_id,
+                            previous_rows = current.row_count,
+                            current_rows = latest.row_count,
+                            "hot partition changed during index rebuild, retrying later"
+                        );
+                    } else {
+                        tracing::warn!(error = %e, "failed to build indexes");
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "index build task panicked");
@@ -110,11 +129,19 @@ async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HotIndexState {
     partition_id: u64,
     row_count: u64,
     path: PathBuf,
+}
+
+fn index_build_error_is_transient(
+    error: &io::Error,
+    before: &HotIndexState,
+    after: &HotIndexState,
+) -> bool {
+    error.kind() == io::ErrorKind::InvalidData && before != after
 }
 
 fn should_rebuild_hot_indexes(
@@ -166,5 +193,25 @@ mod tests {
         };
 
         assert!(!should_rebuild_hot_indexes(Some(&last), &current));
+    }
+
+    #[test]
+    fn transient_index_build_errors_require_invalid_data_and_changed_hot_state() {
+        let before = HotIndexState {
+            partition_id: 7,
+            row_count: 200,
+            path: PathBuf::from("/tmp/hot"),
+        };
+        let after = HotIndexState {
+            partition_id: 7,
+            row_count: 220,
+            path: PathBuf::from("/tmp/hot"),
+        };
+        let invalid = io::Error::new(io::ErrorKind::InvalidData, "corrupt header");
+        let other = io::Error::new(io::ErrorKind::NotFound, "missing");
+
+        assert!(index_build_error_is_transient(&invalid, &before, &after));
+        assert!(!index_build_error_is_transient(&invalid, &before, &before));
+        assert!(!index_build_error_is_transient(&other, &before, &after));
     }
 }

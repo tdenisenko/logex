@@ -746,7 +746,7 @@
       <div class="graph-row el">
         <div class="graph-row-label">
           <strong>EL validation</strong>
-          <span>execution cursor to peer tip</span>
+          <span>genesis target to pivot block</span>
           <div class="graph-row-value" id="graphElValue">--</div>
         </div>
         <div class="graph-bar">
@@ -761,7 +761,7 @@
       <div class="graph-row index">
         <div class="graph-row-label">
           <strong>Indexing</strong>
-          <span>stored logs to canonical top</span>
+          <span>pivot block to canonical top</span>
           <div class="graph-row-value" id="graphIndexValue">--</div>
         </div>
         <div class="graph-bar">
@@ -776,7 +776,7 @@
       <div class="graph-row query">
         <div class="graph-row-label">
           <strong>Queryable logs</strong>
-          <span>block range covered by local rows</span>
+          <span>local range expands backward and forward</span>
           <div class="graph-row-value" id="graphQueryValue">--</div>
         </div>
         <div class="graph-bar">
@@ -855,10 +855,10 @@
             <div class="metric el"><span class="k">Serving</span><span class="v" id="elServing">--</span><span class="note">validated data peers</span></div>
             <div class="metric el"><span class="k">Candidates</span><span class="v" id="elCandidates">--</span><span class="note">waiting to dial</span></div>
             <div class="metric el"><span class="k">Network Tip</span><span class="v" id="elTip">--</span><span class="note">peer-advertised block</span></div>
-            <div class="metric el"><span class="k">EL Cursor</span><span class="v" id="elCursor">--</span><span class="note">validated block</span></div>
-            <div class="metric el"><span class="k">EL Lag</span><span class="v" id="elLag">--</span><span class="note">blocks remaining</span></div>
+            <div class="metric el"><span class="k">Live Head</span><span class="v" id="elCursor">--</span><span class="note">highest verified block</span></div>
+            <div class="metric el"><span class="k">To Genesis</span><span class="v" id="elLag">--</span><span class="note">blocks left</span></div>
             <div class="metric el"><span class="k">Rate</span><span class="v" id="elRate">--</span><span class="note">blocks/sec</span></div>
-            <div class="metric el"><span class="k">ETA</span><span class="v" id="elEta">--</span><span class="note">to known tip</span></div>
+            <div class="metric el"><span class="k">ETA</span><span class="v" id="elEta">--</span><span class="note">to genesis</span></div>
           </div>
         </div>
       </section>
@@ -901,8 +901,8 @@
             <div class="lane-head"><strong>EL validated sync</strong><span id="elLaneSummary">--</span></div>
             <div class="bar bar-el"><span id="elLaneBar"></span></div>
             <div class="range-row">
-              <span class="range-item"><span class="label">Cursor</span><span class="value" id="elLaneCursor">--</span></span>
-              <span class="range-item"><span class="label">Tip</span><span class="value" id="elLaneTip">--</span></span>
+              <span class="range-item"><span class="label">Lowest Verified</span><span class="value" id="elLaneCursor">--</span></span>
+              <span class="range-item"><span class="label">Pivot</span><span class="value" id="elLaneTip">--</span></span>
               <span class="range-item"><span class="label">Remaining</span><span class="value" id="elLaneRemaining">--</span></span>
             </div>
           </div>
@@ -910,8 +910,8 @@
             <div class="lane-head"><strong>Log query coverage</strong><span id="queryLaneSummary">--</span></div>
             <div class="bar bar-query"><span id="queryLaneBar"></span></div>
             <div class="range-row">
-              <span class="range-item"><span class="label">Stored From</span><span class="value" id="queryLaneFrom">--</span></span>
-              <span class="range-item"><span class="label">Stored To</span><span class="value" id="queryLaneTo">--</span></span>
+              <span class="range-item"><span class="label">Verified From</span><span class="value" id="queryLaneFrom">--</span></span>
+              <span class="range-item"><span class="label">Verified To</span><span class="value" id="queryLaneTo">--</span></span>
               <span class="range-item"><span class="label">Block Tag: latest</span><span class="value" id="queryLaneLatest">--</span></span>
             </div>
           </div>
@@ -1191,8 +1191,28 @@ function updateStatus(data) {
   var indexedAnchor = anchorBlock(data.indexed_execution_head);
   var indexedAnchorTime = anchorTimestamp(data.indexed_execution_head);
   var indexedHead = numberOrNull(data.indexed_head_block) || indexedAnchor;
-  var queryFrom = numberOrNull(query.stored_log_from_block);
-  var queryTo = numberOrNull(query.stored_log_to_block);
+  var historyFloor = data.historical_execution_floor || null;
+  var historyAnchor = data.historical_execution_anchor || null;
+  var historyFloorBlock = historyFloor && historyFloor.block_number != null ? numberOrNull(historyFloor.block_number) : null;
+  var historyFloorTime = historyFloor && historyFloor.timestamp != null ? numberOrNull(historyFloor.timestamp) : null;
+  var historyAnchorBlock = historyAnchor && historyAnchor.block_number != null ? numberOrNull(historyAnchor.block_number) : null;
+  var historyAnchorTime = historyAnchor && historyAnchor.timestamp != null ? numberOrNull(historyAnchor.timestamp) : null;
+  var historyTarget = numberOrNull(data.historical_target_block);
+  if (historyTarget == null) historyTarget = 0;
+  var pivotBlock = checkpointBlock;
+  var pivotTime = checkpointTime;
+  if (pivotBlock == null && historyAnchorBlock != null) {
+    pivotBlock = historyAnchorBlock;
+    pivotTime = historyAnchorTime;
+  } else if (pivotBlock == null && indexedAnchor != null) {
+    pivotBlock = indexedAnchor;
+    pivotTime = indexedAnchorTime;
+  }
+  var queryFrom = numberOrNull(query.verified_from_block);
+  var queryTo = numberOrNull(query.verified_to_block);
+  var storedLogFrom = numberOrNull(query.stored_log_from_block);
+  var storedLogTo = numberOrNull(query.stored_log_to_block);
+  var storedLogRange = blockRange(storedLogFrom, storedLogTo);
   var queryLatest = numberOrNull(query.latest_block);
   var queryLatestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
   var hasConsensus = !!data.checkpoint_root;
@@ -1215,13 +1235,21 @@ function updateStatus(data) {
     ? Math.max(0, latestKnown - materializedTip)
     : null;
   var liveRemainingText = liveRemaining == null ? 'Waiting for highest verified block' : fmtBlocks(liveRemaining) + ' remaining before CL verification reaches target block';
-  var elPct = target > 0 ? ratio(current, target) : 0;
-  var queryPct = queryLatest != null && queryTo != null ? ratio(queryTo, queryLatest) : 0;
+  var historyTotal = historyAnchorBlock != null ? Math.max(0, historyAnchorBlock - historyTarget) : 0;
+  var historyRemaining = historyFloorBlock != null ? Math.max(0, historyFloorBlock - historyTarget) : null;
+  var historyPct = historyRemaining == null ? 0 : ratio(historyTotal - historyRemaining, historyTotal);
+  var historyFloorPct = historyTotal > 0 && historyFloorBlock != null ? ratio(historyFloorBlock - historyTarget, historyTotal) : 100;
+  var historyRange = historyFloorBlock == null || historyAnchorBlock == null ? '--' : blockRange(historyFloorBlock, historyAnchorBlock);
   var queryRange = blockRange(queryFrom, queryTo);
-  var indexPct = latestKnown != null && indexedHead != null ? ratio(indexedHead, latestKnown) : 0;
-  var queryScale = latestKnown || queryLatest || target || queryTo || 0;
-  var queryStartPct = queryScale > 0 && queryFrom != null ? ratio(queryFrom, queryScale) : 0;
-  var queryEndPct = queryScale > 0 && queryTo != null ? ratio(queryTo, queryScale) : queryStartPct;
+  var indexTotal = pivotBlock != null && latestKnown != null ? Math.max(0, latestKnown - pivotBlock) : 0;
+  var indexDone = pivotBlock != null && indexedHead != null ? Math.max(0, indexedHead - pivotBlock) : 0;
+  var indexPct = pivotBlock != null && indexedHead != null && indexTotal === 0 ? 100 : pivotBlock != null ? ratio(indexDone, indexTotal) : 0;
+  var queryScaleEnd = latestKnown || queryLatest || target || queryTo || 0;
+  var queryScaleTotal = Math.max(0, queryScaleEnd - historyTarget);
+  var queryCovered = queryFrom != null && queryTo != null ? Math.max(0, queryTo - queryFrom + 1) : 0;
+  var queryPct = ratio(queryCovered, queryScaleTotal + 1);
+  var queryStartPct = queryScaleTotal > 0 && queryFrom != null ? ratio(queryFrom - historyTarget, queryScaleTotal) : 0;
+  var queryEndPct = queryScaleTotal > 0 && queryTo != null ? ratio(queryTo - historyTarget, queryScaleTotal) : queryStartPct;
 
   var clState = !hasConsensus
     ? 'Not configured'
@@ -1231,7 +1259,7 @@ function updateStatus(data) {
         ? 'Tracking head'
         : 'Materializing';
   var clStateClass = !hasConsensus ? 'state-empty' : checkpointBlock == null ? 'state-bootstrapping' : livePct >= 99 ? 'state-tracking' : 'state-materializing';
-  var elLag = target > 0 ? Math.max(0, target - current) : null;
+  var elLag = historyRemaining;
   var elState = nodeLabel;
   var queryState = queryFrom != null && queryTo != null ? 'Queryable' : 'No rows';
 
@@ -1243,37 +1271,37 @@ function updateStatus(data) {
   setText('heroElState', elState);
   setText('heroQueryRange', queryRange);
   setWidth('heroClBar', livePct);
-  setWidth('heroElBar', elPct);
+  setWidth('heroElBar', historyPct);
   setWidth('heroQueryBar', queryPct);
   setText('heroClMeta', checkpointBlock == null ? 'Checkpoint ' + shortHash(data.checkpoint_root) : liveRemainingText);
-  setText('heroElMeta', target > 0 ? fmt(elLag) + ' blocks behind peer tip ' + fmt(target) : 'Awaiting peer tip');
-  setText('heroQueryMeta', queryFrom != null ? fmt(query.stored_rows) + ' rows available; block tag latest resolves to ' + blockWithTimestamp(queryLatest, queryLatestTime) : 'No local log rows are queryable yet');
+  setText('heroElMeta', historyFloorBlock == null ? 'Waiting for first verified EL pivot' : fmtBlocks(historyRemaining) + ' left to genesis; lowest verified block ' + blockWithTimestamp(historyFloorBlock, historyFloorTime));
+  setText('heroQueryMeta', queryFrom != null ? fmt(query.stored_rows) + ' rows available; verified range ' + queryRange + (storedLogFrom == null ? '' : '; stored logs ' + storedLogRange) : 'No verified local log range yet');
 
   setWidth('graphLiveFill', livePct);
   setLeft('graphLiveDot', livePct);
-  setWidth('graphElFill', elPct);
-  setLeft('graphElDot', elPct);
+  setSegment('graphElFill', historyFloorPct, Math.max(0, 100 - historyFloorPct));
+  setLeft('graphElDot', historyFloorPct);
   setWidth('graphIndexFill', indexPct);
   setLeft('graphIndexDot', indexPct);
   setSegment('graphQueryFill', queryStartPct, Math.max(0, queryEndPct - queryStartPct));
   setLeft('graphQueryStartDot', queryStartPct);
   setLeft('graphQueryEndDot', queryEndPct);
   setText('graphLiveValue', checkpointBlock == null ? 'Waiting for checkpoint' : liveRemainingText);
-  setText('graphElValue', target > 0 ? fmt(current) + ' of ' + fmt(target) + ' blocks validated' : 'Awaiting peer tip');
-  setText('graphIndexValue', indexedHead == null ? 'Log indexing has not started' : fmt(indexedHead) + ' indexed; target block ' + fmt(latestKnown));
+  setText('graphElValue', historyFloorBlock == null ? 'Waiting for first verified EL pivot' : historyRange + ' verified toward genesis');
+  setText('graphIndexValue', pivotBlock == null ? 'Waiting for pivot block' : indexedHead == null ? 'Log indexing has not started' : fmt(indexedHead) + ' indexed from pivot ' + fmt(pivotBlock) + '; target block ' + fmt(latestKnown));
   setText('graphQueryValue', queryFrom == null ? 'No local log rows' : queryRange);
   setText('liveStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
   setText('liveEndLimit', latestKnown == null ? 'Target --' : 'Target block ' + blockWithTimestamp(latestKnown, latestKnownTime));
   setText('liveCurrentLabel', materializedTip == null ? 'Highest verified block --' : 'Highest verified block ' + blockWithTimestamp(materializedTip, materializedTipTime));
-  setText('elStartLimit', 'Start block 0');
-  setText('elEndLimit', target > 0 ? 'Target peer tip ' + fmt(target) : 'Target peer tip --');
-  setText('elCurrentLabel', 'Current validated cursor ' + fmt(current));
-  setText('indexStartLimit', 'Start block 0');
+  setText('elStartLimit', 'Target genesis block ' + fmt(historyTarget));
+  setText('elEndLimit', historyAnchorBlock == null ? 'Pivot --' : 'Pivot ' + blockWithTimestamp(historyAnchorBlock, historyAnchorTime));
+  setText('elCurrentLabel', historyFloorBlock == null ? 'Lowest verified block --' : 'Lowest verified block ' + blockWithTimestamp(historyFloorBlock, historyFloorTime));
+  setText('indexStartLimit', pivotBlock == null ? 'Pivot --' : 'Pivot ' + blockWithTimestamp(pivotBlock, pivotTime));
   setText('indexEndLimit', latestKnown == null ? 'Target canonical block --' : 'Target canonical block ' + blockWithTimestamp(latestKnown, latestKnownTime));
   setText('indexCurrentLabel', indexedHead == null ? 'Current indexed block --' : 'Current indexed block ' + blockWithTimestamp(indexedHead, indexedAnchorTime));
   setText('queryStartLimit', queryFrom == null ? 'Stored from --' : 'Stored from ' + fmt(queryFrom));
   setText('queryEndLimit', queryTo == null ? 'Stored to --' : 'Stored to ' + fmt(queryTo));
-  setText('queryCurrentLabel', queryFrom == null ? 'No queryable local range yet' : 'Queryable local range ' + queryRange);
+  setText('queryCurrentLabel', queryFrom == null ? 'No queryable local range yet' : 'Queryable verified range ' + queryRange + (storedLogFrom == null ? '' : '; stored logs ' + storedLogRange));
 
   setPill('clBadge', clState, clStateClass);
   setPill('elBadge', nodeLabel, nodeStateClass(nodeState));
@@ -1300,8 +1328,8 @@ function updateStatus(data) {
   setText('elTip', target > 0 ? fmt(target) : '--');
   setText('elCursor', fmt(current));
   setText('elLag', elLag == null ? '--' : fmt(elLag));
-  setText('elRate', fmtRate(data.blocks_per_sec));
-  setText('elEta', fmtEta(data.eta_seconds));
+  setText('elRate', fmtRate(data.historical_blocks_per_sec));
+  setText('elEta', fmtEta(data.historical_eta_seconds));
 
   setText('markerCheckpoint', checkpointBlock == null ? '--' : fmt(checkpointBlock));
   setText('markerCheckpointDetail', data.checkpoint_root ? detailParts(['slot ' + fmt(checkpointSlot), fmtTimestamp(checkpointTime), 'root ' + shortHash(data.checkpoint_root)]) : 'no checkpoint loaded');
@@ -1314,7 +1342,7 @@ function updateStatus(data) {
   setText('markerIndexed', fmt(indexedHead));
   setText('markerIndexedDetail', detailParts([indexedAnchorTime == null ? null : fmtTimestamp(indexedAnchorTime), 'lag ' + fmt(data.index_lag_blocks) + ' blocks']));
   setText('markerQuery', queryRange);
-  setText('markerQueryDetail', queryFrom == null ? 'no local rows' : fmt(query.stored_rows) + ' rows');
+  setText('markerQueryDetail', queryFrom == null ? 'no verified range' : fmt(query.stored_rows) + ' stored rows; verified ' + queryRange + (storedLogFrom == null ? '' : '; stored logs ' + storedLogRange));
 
   setText('liveLaneSummary', liveRemaining == null ? 'waiting for live target' : livePct.toFixed(1) + '% complete; ' + liveRemainingText);
   setWidth('liveLaneBar', livePct);
@@ -1322,13 +1350,13 @@ function updateStatus(data) {
   setText('liveLaneDone', fmt(materializedTip));
   setText('liveLaneTarget', fmt(latestKnown));
 
-  setText('elLaneSummary', target > 0 ? elPct.toFixed(1) + '% to peer tip' : 'awaiting tip');
-  setWidth('elLaneBar', elPct);
-  setText('elLaneCursor', fmt(current));
-  setText('elLaneTip', target > 0 ? fmt(target) : '--');
+  setText('elLaneSummary', historyFloorBlock == null ? 'waiting for first verified pivot' : historyPct.toFixed(1) + '% complete toward genesis; ' + fmtBlocks(elLag) + ' left');
+  setWidth('elLaneBar', historyPct);
+  setText('elLaneCursor', fmt(historyFloorBlock));
+  setText('elLaneTip', fmt(historyAnchorBlock));
   setText('elLaneRemaining', elLag == null ? '--' : fmt(elLag));
 
-  setText('queryLaneSummary', queryFrom == null ? 'no local rows' : queryPct.toFixed(1) + '% of block tag latest');
+  setText('queryLaneSummary', queryFrom == null ? 'no verified local range' : queryPct.toFixed(1) + '% of genesis-to-latest block range stored locally');
   setWidth('queryLaneBar', queryPct);
   setText('queryLaneFrom', fmt(queryFrom));
   setText('queryLaneTo', fmt(queryTo));

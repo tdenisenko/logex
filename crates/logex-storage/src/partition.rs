@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_consensus::Header;
 use alloy_primitives::B256;
-use logex_types::{ChainAnchors, ExecutionAnchor, LogRow, PartitionMeta};
+use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 
 use crate::native::{NativeStorage, NativeStorageConfig};
 use crate::state::SyncHead;
@@ -113,6 +113,26 @@ impl PartitionManager {
         self.inner.recent_headers()
     }
 
+    /// Return the lowest verified historical EL header, if any.
+    pub fn historical_floor_header(&self) -> Option<&Header> {
+        self.inner.historical_floor_header()
+    }
+
+    /// Return the anchor header where EL reverse backfill started, if any.
+    pub fn historical_anchor_header(&self) -> Option<&Header> {
+        self.inner.historical_anchor_header()
+    }
+
+    /// Return the lowest verified historical EL block marker, if any.
+    pub fn historical_floor(&self) -> Option<ExecutionBlockMarker> {
+        self.inner.historical_floor()
+    }
+
+    /// Return the historical reverse backfill anchor marker, if any.
+    pub fn historical_anchor(&self) -> Option<ExecutionBlockMarker> {
+        self.inner.historical_anchor()
+    }
+
     /// Persist the latest canonical head and recent canonical header window.
     pub fn record_canonical_state(
         &mut self,
@@ -132,6 +152,11 @@ impl PartitionManager {
     ) -> std::io::Result<()> {
         self.inner
             .record_verified_canonical_state(anchor, header, recent_headers)
+    }
+
+    /// Persist the lowest verified historical EL header without moving the live sync head.
+    pub fn record_historical_floor(&mut self, header: &Header) -> std::io::Result<()> {
+        self.inner.record_historical_floor(header)
     }
 
     /// Return the persisted chain anchors, if any.

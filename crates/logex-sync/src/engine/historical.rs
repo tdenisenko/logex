@@ -80,9 +80,11 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
 
-            if self.peers.peer_count() < self.config.max_peers / 2 {
-                let min_peers =
-                    desired_refill_min_peers(self.peers.peer_count(), self.config.max_peers);
+            if let Some(min_peers) = peer_refill_goal(
+                self.peers.peer_count(),
+                self.peers.serving_peer_count(),
+                self.config.max_peers,
+            ) {
                 self.refresh_connectivity_state();
                 if cancelable(
                     &mut self.shutdown,
@@ -206,7 +208,6 @@ impl SyncEngine {
             let mut chunk_failed = false;
             let mut last_ingested_head = None;
             let mut newly_serving_peers = HashSet::new();
-            self.note_serving_peer(header_peer, &mut newly_serving_peers);
 
             for (chunk_headers, chunk_hashes) in headers
                 .chunks(self.config.fetch_batch_size)
@@ -221,7 +222,11 @@ impl SyncEngine {
 
                 let bodies = match cancelable(
                     &mut self.shutdown,
-                    self.peers.get_bodies(chunk_hashes.clone(), required_block),
+                    self.peers.get_bodies_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &[header_peer],
+                    ),
                 )
                 .await
                 {
@@ -233,10 +238,42 @@ impl SyncEngine {
                     }
                     None => return self.finish_shutdown(),
                 };
+
+                for (i, header) in chunk_headers.iter().enumerate() {
+                    let block_hash = chunk_hashes[i];
+                    let block_number = header.number();
+                    let (body_peer, body) = &bodies[i];
+                    if let Err(error) = validate_block_pre_execution(header, body) {
+                        tracing::warn!(
+                            block_number,
+                            %block_hash,
+                            body_peer = %body_peer,
+                            %error,
+                            "block pre-execution validation failed — retrying from last ingested block"
+                        );
+                        self.peers
+                            .report_invalid_block_data(*body_peer, "block bodies");
+                        chunk_failed = true;
+                        break;
+                    }
+                }
+                if chunk_failed {
+                    break;
+                }
+
+                let expected_receipt_counts: Vec<usize> = bodies
+                    .iter()
+                    .map(|(_peer_id, body)| body.transaction_count())
+                    .collect();
+                let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
                 let (receipt_peer, receipts) = match cancelable(
                     &mut self.shutdown,
-                    self.peers
-                        .get_receipts(chunk_hashes.clone(), required_block),
+                    self.peers.get_receipts_matching_counts_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &expected_receipt_counts,
+                        &receipt_peer_preference,
+                    ),
                 )
                 .await
                 {
@@ -265,20 +302,6 @@ impl SyncEngine {
                     let block_number = header.number();
                     let timestamp = header.timestamp();
                     let (body_peer, body) = &bodies[i];
-
-                    if let Err(error) = validate_block_pre_execution(header, body) {
-                        tracing::warn!(
-                            block_number,
-                            %block_hash,
-                            body_peer = %body_peer,
-                            %error,
-                            "block pre-execution validation failed — retrying from last ingested block"
-                        );
-                        self.peers
-                            .report_invalid_block_data(*body_peer, "block bodies");
-                        chunk_failed = true;
-                        break;
-                    }
 
                     if !receipts_match_transaction_count(body, &receipts[i]) {
                         tracing::warn!(
@@ -322,15 +345,11 @@ impl SyncEngine {
                         .ingest_block(header, block_hash, &txs, &recent_headers, None)
                         .await?;
                     self.progress.record_block(block_number, log_count);
+                    self.note_serving_peer(header_peer, &mut newly_serving_peers);
                     self.note_serving_peer(*body_peer, &mut newly_serving_peers);
                     self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
                     next_block = block_number + 1;
-                    last_ingested_head = Some(Head {
-                        number: block_number,
-                        hash: block_hash,
-                        timestamp,
-                        ..Default::default()
-                    });
+                    last_ingested_head = Some(execution_head(block_number, block_hash, timestamp));
                 }
 
                 if chunk_failed {

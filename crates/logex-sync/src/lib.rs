@@ -6,6 +6,8 @@ pub mod primitives;
 pub mod progress;
 pub mod validation;
 
+pub use logex_types::EXECUTION_HISTORY_TARGET_BLOCK;
+
 /// Configuration for the sync engine.
 pub struct SyncConfig {
     /// Maximum concurrent peer connections.

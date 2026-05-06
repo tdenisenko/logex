@@ -42,30 +42,36 @@ pub struct LogexReceipt {
 }
 
 impl LogexReceipt {
-    fn rlp_encoded_fields_length(&self) -> usize {
-        self.status.length() + self.cumulative_gas_used.length() + self.logs.length()
+    fn network_encoded_fields_length(&self) -> usize {
+        self.tx_type.ty().length()
+            + self.status.length()
+            + self.cumulative_gas_used.length()
+            + self.logs.length()
     }
 
-    fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
+    fn network_encode_fields(&self, out: &mut dyn BufMut) {
+        self.tx_type.ty().encode(out);
         self.status.encode(out);
         self.cumulative_gas_used.encode(out);
         self.logs.encode(out);
     }
 
-    fn rlp_header(&self) -> Header {
+    fn network_header(&self) -> Header {
         Header {
             list: true,
-            payload_length: self.rlp_encoded_fields_length(),
+            payload_length: self.network_encoded_fields_length(),
         }
     }
 
-    fn rlp_decode_inner(buf: &mut &[u8], tx_type: TxType) -> alloy_rlp::Result<Self> {
+    fn network_decode_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
             return Err(alloy_rlp::Error::UnexpectedString);
         }
 
         let remaining = buf.len();
+        let tx_type = TxType::try_from(u8::decode(buf)?)
+            .map_err(|_| alloy_rlp::Error::Custom("invalid receipt tx type"))?;
         let status = Decodable::decode(buf)?;
         let cumulative_gas_used = Decodable::decode(buf)?;
         let logs = Decodable::decode(buf)?;
@@ -132,18 +138,6 @@ impl LogexReceipt {
             logs_bloom,
         })
     }
-
-    fn eip2718_encoded_length(&self) -> usize {
-        !self.tx_type.is_legacy() as usize + self.rlp_header().length_with_payload()
-    }
-
-    fn eip2718_encode(&self, out: &mut dyn BufMut) {
-        if !self.tx_type.is_legacy() {
-            out.put_u8(self.tx_type.ty());
-        }
-        self.rlp_header().encode(out);
-        self.rlp_encode_fields(out);
-    }
 }
 
 impl TxReceipt for LogexReceipt {
@@ -191,53 +185,18 @@ impl InMemorySize for LogexReceipt {
 
 impl Encodable for LogexReceipt {
     fn encode(&self, out: &mut dyn BufMut) {
-        if self.tx_type.is_legacy() {
-            self.rlp_header().encode(out);
-            self.rlp_encode_fields(out);
-            return;
-        }
-
-        Header {
-            list: false,
-            payload_length: self.eip2718_encoded_length(),
-        }
-        .encode(out);
-        self.eip2718_encode(out);
+        self.network_header().encode(out);
+        self.network_encode_fields(out);
     }
 
     fn length(&self) -> usize {
-        if self.tx_type.is_legacy() {
-            return self.rlp_header().length_with_payload();
-        }
-
-        Header {
-            list: false,
-            payload_length: self.eip2718_encoded_length(),
-        }
-        .length()
-            + self.eip2718_encoded_length()
+        self.network_header().length_with_payload()
     }
 }
 
 impl Decodable for LogexReceipt {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let header_buf = &mut &**buf;
-        let header = Header::decode(header_buf)?;
-
-        if header.list {
-            return Self::rlp_decode_inner(buf, TxType::Legacy);
-        }
-
-        *buf = *header_buf;
-        let remaining = buf.len();
-        let tx_type = TxType::decode(buf)?;
-        let this = Self::rlp_decode_inner(buf, tx_type)?;
-
-        if buf.len() + header.payload_length != remaining {
-            return Err(alloy_rlp::Error::UnexpectedLength);
-        }
-
-        Ok(this)
+        Self::network_decode_inner(buf)
     }
 }
 
@@ -343,6 +302,30 @@ mod tests {
 
         assert_eq!(decoded, receipt);
         assert!(decoded.status.is_post_state());
+    }
+
+    #[test]
+    fn no_bloom_decode_accepts_eth69_network_shape() {
+        let mut encoded = Vec::new();
+        Header {
+            list: true,
+            payload_length: 0u8.length()
+                + Eip658Value::success().length()
+                + 21_000u64.length()
+                + Vec::<Log>::new().length(),
+        }
+        .encode(&mut encoded);
+        0u8.encode(&mut encoded);
+        Eip658Value::success().encode(&mut encoded);
+        21_000u64.encode(&mut encoded);
+        Vec::<Log>::new().encode(&mut encoded);
+
+        let decoded = LogexReceipt::decode(&mut encoded.as_slice()).expect("receipt decodes");
+
+        assert_eq!(decoded.tx_type, TxType::Legacy);
+        assert!(decoded.status());
+        assert_eq!(decoded.cumulative_gas_used, 21_000);
+        assert!(decoded.logs.is_empty());
     }
 
     #[test]

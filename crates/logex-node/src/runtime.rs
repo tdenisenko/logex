@@ -1,9 +1,12 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use alloy_primitives::U256;
 use logex_cl::{
-    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, spawn_consensus_network,
+    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC,
+    spawn_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
@@ -131,10 +134,18 @@ pub async fn run_sync(options: RunSyncOptions) {
     }
 
     let storage_anchors = storage.chain_anchors();
+    let historical_floor = storage.historical_floor();
+    let historical_anchor = storage.historical_anchor();
     let state = Arc::new(AppState::new(
         storage,
         Some(SubscriptionManager::new()),
-        initial_sync_status(resume_block, &storage_anchors, consensus.as_deref()),
+        initial_sync_status(
+            resume_block,
+            &storage_anchors,
+            historical_floor,
+            historical_anchor,
+            consensus.as_deref(),
+        ),
     ));
 
     let known_peers = match load_known_peers(&known_peers_file) {
@@ -225,7 +236,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         "query endpoints ready"
     );
 
-    let our_head = startup_network_head(sync_head);
+    let our_head = startup_network_head(sync_head, consensus.as_deref());
     let peers = match PeerManager::new(
         secret_key,
         p2p_port,
@@ -306,11 +317,16 @@ pub async fn run_sync(options: RunSyncOptions) {
 fn initial_sync_status(
     resume_block: u64,
     storage_anchors: &logex_types::ChainAnchors,
+    historical_floor: Option<logex_types::ExecutionBlockMarker>,
+    historical_anchor: Option<logex_types::ExecutionBlockMarker>,
     consensus: Option<&ConsensusStore>,
 ) -> SyncStatus {
     let mut status = SyncStatus {
         current_block: resume_block,
         target_block: 0,
+        historical_execution_floor: historical_floor,
+        historical_execution_anchor: historical_anchor,
+        historical_target_block: logex_sync::EXECUTION_HISTORY_TARGET_BLOCK,
         ..Default::default()
     };
     status.indexed_execution_head = storage_anchors.indexed_head;
@@ -334,35 +350,89 @@ fn initial_sync_status(
     status
 }
 
-fn startup_network_head(sync_head: Option<SyncHead>) -> Head {
+fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&ConsensusStore>) -> Head {
     match sync_head {
-        Some(head) if head.block_number == 0 || head.timestamp > 0 => Head {
-            number: head.block_number,
-            hash: head.block_hash,
-            timestamp: if head.block_number == 0 {
+        Some(head) if head.block_number == 0 || head.timestamp > 0 => network_head(
+            head.block_number,
+            head.block_hash,
+            if head.block_number == 0 {
                 MAINNET.genesis().timestamp
             } else {
                 head.timestamp
             },
-            ..Default::default()
-        },
+        ),
         Some(head) => {
             tracing::warn!(
                 block_number = head.block_number,
-                "sync metadata is missing the block timestamp, starting network status from genesis until a new verified block updates it"
+                "sync metadata is missing the block timestamp, starting execution network status from consensus until a new verified block updates it"
             );
-            genesis_network_head()
+            consensus
+                .and_then(|consensus| consensus.anchor_coverage().ceiling)
+                .map(consensus_anchor_network_head)
+                .or_else(|| consensus.map(consensus_checkpoint_network_head))
+                .unwrap_or_else(genesis_network_head)
         }
-        None => genesis_network_head(),
+        None => consensus
+            .and_then(|consensus| consensus.anchor_coverage().ceiling)
+            .map(consensus_anchor_network_head)
+            .or_else(|| consensus.map(consensus_checkpoint_network_head))
+            .unwrap_or_else(genesis_network_head),
     }
 }
 
+fn consensus_anchor_network_head(anchor: logex_types::ExecutionAnchor) -> Head {
+    network_head(
+        anchor.block_number,
+        anchor.block_hash,
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .genesis_time
+            .saturating_add(anchor.beacon_slot.saturating_mul(12)),
+    )
+}
+
+fn consensus_checkpoint_network_head(consensus: &ConsensusStore) -> Head {
+    let timestamp = consensus
+        .checkpoint()
+        .beacon_slot
+        .map(consensus_slot_timestamp)
+        .unwrap_or_else(current_unix_timestamp);
+    network_head(0, MAINNET.genesis_hash(), timestamp)
+}
+
+fn consensus_slot_timestamp(slot: u64) -> u64 {
+    MAINNET_CONSENSUS_CHAIN_SPEC
+        .genesis_time
+        .saturating_add(slot.saturating_mul(12))
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(MAINNET_CONSENSUS_CHAIN_SPEC.genesis_time)
+}
+
 fn genesis_network_head() -> Head {
+    network_head(0, MAINNET.genesis_hash(), MAINNET.genesis().timestamp)
+}
+
+fn network_head(number: u64, hash: alloy_primitives::B256, timestamp: u64) -> Head {
     Head {
-        number: 0,
-        hash: MAINNET.genesis_hash(),
-        timestamp: MAINNET.genesis().timestamp,
-        ..Default::default()
+        number,
+        hash,
+        timestamp,
+        difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            U256::ZERO
+        },
+        total_difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            MAINNET
+                .final_paris_total_difficulty()
+                .unwrap_or(MAINNET.genesis().difficulty)
+        },
     }
 }
 
@@ -411,7 +481,13 @@ mod tests {
 
     #[test]
     fn initial_sync_status_does_not_treat_resume_block_as_network_target() {
-        let status = initial_sync_status(83_714, &logex_types::ChainAnchors::default(), None);
+        let status = initial_sync_status(
+            83_714,
+            &logex_types::ChainAnchors::default(),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(status.current_block, 83_714);
         assert_eq!(status.target_block, 0);

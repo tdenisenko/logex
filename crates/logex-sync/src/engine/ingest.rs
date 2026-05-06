@@ -1,7 +1,7 @@
 use super::*;
 use crate::extract;
 use logex_index::IndexBuilder;
-use logex_types::ExecutionAnchor;
+use logex_types::{ExecutionAnchor, ExecutionBlockMarker};
 
 impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
@@ -55,14 +55,84 @@ impl SyncEngine {
             }
         }
         match anchor {
-            Some(anchor) => storage
-                .record_verified_canonical_state(anchor, header, recent_headers)
-                .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?,
+            Some(anchor) => {
+                storage
+                    .record_verified_canonical_state(anchor, header, recent_headers)
+                    .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
+                storage
+                    .record_historical_floor(header)
+                    .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
+            }
             None => storage
                 .record_canonical_state(header, recent_headers)
                 .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?,
         }
 
+        Ok(count)
+    }
+
+    /// Write a historically verified block without moving the live canonical head.
+    pub(super) async fn ingest_historical_block(
+        &mut self,
+        header: &Header,
+        block_hash: B256,
+        txs: &[(B256, Vec<Log>)],
+    ) -> Result<u64> {
+        let rows =
+            extract::extract_from_block(header.number(), block_hash, header.timestamp(), txs);
+        let count = rows.len() as u64;
+        let (floor, anchor) = {
+            let mut storage = self.storage.write().await;
+            if !rows.is_empty() {
+                let sealed_before = storage.sealed_count();
+                storage
+                    .write_batch(&rows)
+                    .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
+                let sealed_after = storage.sealed_count();
+
+                let sealed_segments: Vec<_> = storage.sealed_partitions()
+                    [sealed_before..sealed_after]
+                    .iter()
+                    .map(|partition| (partition.meta.id, partition.meta.path.clone()))
+                    .collect();
+
+                for (segment_id, segment_path) in sealed_segments {
+                    if let Err(e) = IndexBuilder::build_all_indexes(&segment_path) {
+                        tracing::warn!(
+                            error = %e,
+                            partition_id = segment_id,
+                            "failed to build indexes for sealed partition"
+                        );
+                        continue;
+                    }
+
+                    if let Err(e) = storage.refresh_segment_indexes(segment_id) {
+                        tracing::warn!(
+                            error = %e,
+                            partition_id = segment_id,
+                            "failed to refresh segment manifest after index build"
+                        );
+                    }
+                }
+
+                if let Some(ref subs) = self.subscriptions {
+                    subs.notify(&rows);
+                }
+            }
+
+            storage
+                .record_historical_floor(header)
+                .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
+            (storage.historical_floor(), storage.historical_anchor())
+        };
+
+        let floor = floor.unwrap_or_else(|| execution_marker_from_header(header));
+        self.progress.record_historical_block(
+            floor,
+            anchor,
+            crate::EXECUTION_HISTORY_TARGET_BLOCK,
+            count,
+        );
         Ok(count)
     }
 
@@ -89,5 +159,13 @@ impl SyncEngine {
             "handled reorg"
         );
         Ok(())
+    }
+}
+
+pub(super) fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
+    ExecutionBlockMarker {
+        block_number: header.number(),
+        block_hash: header.hash_slow(),
+        timestamp: header.timestamp(),
     }
 }

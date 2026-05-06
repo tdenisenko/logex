@@ -1,4 +1,8 @@
 use super::*;
+use alloy_primitives::U256;
+use logex_cl::MAINNET_CONSENSUS_CHAIN_SPEC;
+use logex_types::ExecutionAnchor;
+use reth_chainspec::{EthChainSpec, MAINNET};
 use std::future::Future;
 
 impl SyncEngine {
@@ -38,6 +42,19 @@ impl SyncEngine {
         self.set_runtime_state(state);
     }
 
+    pub(super) fn set_peer_head_from_consensus(&mut self) -> bool {
+        let Some(anchor) = self
+            .consensus
+            .as_ref()
+            .and_then(|consensus| consensus.anchor_coverage().ceiling)
+        else {
+            return false;
+        };
+
+        self.peers.set_head(consensus_anchor_head(anchor));
+        true
+    }
+
     pub(super) fn sync_cursor(&self) -> (u64, u64) {
         let status = self.sync_status.lock().unwrap();
         (status.current_block, status.target_block)
@@ -65,6 +82,15 @@ impl SyncEngine {
         let (current_block, target_block) = self.sync_cursor();
         if target_block == 0 || current_block < target_block {
             return false;
+        }
+        {
+            let status = self.sync_status.lock().unwrap();
+            if status
+                .historical_execution_floor
+                .is_some_and(|floor| floor.block_number > status.historical_target_block)
+            {
+                return false;
+            }
         }
 
         let already_synced = {
@@ -122,6 +148,14 @@ pub(super) fn should_switch_to_live_without_target(
     consecutive_empty: u32,
 ) -> bool {
     target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
+}
+
+pub(super) fn should_run_historical_backfill(
+    current_block: u64,
+    target_block: u64,
+    max_live_lag: u64,
+) -> bool {
+    target_block == 0 || target_block.saturating_sub(current_block) <= max_live_lag
 }
 
 pub(super) fn runtime_state_for_connectivity(
@@ -196,11 +230,77 @@ pub(super) fn desired_refill_min_peers(connected_peers: usize, max_peers: usize)
         .min(max_peers)
 }
 
+pub(super) fn peer_refill_goal(
+    connected_peers: usize,
+    serving_peers: usize,
+    max_peers: usize,
+) -> Option<usize> {
+    if max_peers == 0 {
+        return None;
+    }
+
+    if serving_peers < MIN_ACTIVE_SYNC_PEERS && connected_peers < max_peers {
+        return Some(max_peers);
+    }
+
+    if connected_peers < max_peers / 2 {
+        return Some(desired_refill_min_peers(connected_peers, max_peers));
+    }
+
+    None
+}
+
 pub(super) fn should_note_serving_peer(
     peer_id: PeerId,
     newly_serving: &mut HashSet<PeerId>,
 ) -> bool {
     peer_id != PeerId::ZERO && newly_serving.insert(peer_id)
+}
+
+pub(super) fn preferred_body_peers<B>(
+    bodies: &[(PeerId, B)],
+    fallback_peer: PeerId,
+) -> Vec<PeerId> {
+    let mut peers = Vec::with_capacity(bodies.len().saturating_add(1));
+    for (peer_id, _) in bodies {
+        if *peer_id != PeerId::ZERO && !peers.contains(peer_id) {
+            peers.push(*peer_id);
+        }
+    }
+    if fallback_peer != PeerId::ZERO && !peers.contains(&fallback_peer) {
+        peers.push(fallback_peer);
+    }
+    peers
+}
+
+pub(super) fn consensus_anchor_head(anchor: ExecutionAnchor) -> Head {
+    execution_head(
+        anchor.block_number,
+        anchor.block_hash,
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .genesis_time
+            .saturating_add(anchor.beacon_slot.saturating_mul(12)),
+    )
+}
+
+pub(super) fn execution_head(number: u64, hash: B256, timestamp: u64) -> Head {
+    Head {
+        number,
+        hash,
+        timestamp,
+        difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            U256::ZERO
+        },
+        total_difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            MAINNET
+                .final_paris_total_difficulty()
+                .unwrap_or(MAINNET.genesis().difficulty)
+        },
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +343,14 @@ mod tests {
     }
 
     #[test]
+    fn historical_backfill_waits_when_live_lag_is_high() {
+        assert!(should_run_historical_backfill(100, 0, 32));
+        assert!(should_run_historical_backfill(100, 132, 32));
+        assert!(should_run_historical_backfill(140, 132, 32));
+        assert!(!should_run_historical_backfill(100, 133, 32));
+    }
+
+    #[test]
     fn runtime_state_only_reports_synced_when_caught_up_to_known_tip() {
         assert_eq!(
             runtime_state_for_connectivity(false, 0, 0, 0, 0, 0),
@@ -277,6 +385,26 @@ mod tests {
         assert_eq!(desired_refill_min_peers(3, 50), 4);
         assert_eq!(desired_refill_min_peers(4, 50), 5);
         assert_eq!(desired_refill_min_peers(0, 2), 2);
+    }
+
+    #[test]
+    fn peer_refill_goal_prioritizes_serving_peer_floor() {
+        assert_eq!(peer_refill_goal(2, 1, 50), Some(50));
+        assert_eq!(peer_refill_goal(49, 1, 50), Some(50));
+        assert_eq!(peer_refill_goal(50, 1, 50), None);
+        assert_eq!(peer_refill_goal(10, 4, 50), Some(11));
+        assert_eq!(peer_refill_goal(30, 4, 50), None);
+    }
+
+    #[test]
+    fn post_merge_execution_heads_advertise_terminal_total_difficulty() {
+        let head = execution_head(25_000_000, B256::repeat_byte(0x11), 1_778_000_000);
+
+        assert_eq!(head.difficulty, U256::ZERO);
+        assert_eq!(
+            head.total_difficulty,
+            MAINNET.final_paris_total_difficulty().unwrap()
+        );
     }
 
     #[test]

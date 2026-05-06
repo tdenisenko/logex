@@ -19,6 +19,14 @@ pub struct ExecutionAnchor {
     pub receipts_root: B256,
 }
 
+/// Execution block marker that does not imply direct CL authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionBlockMarker {
+    pub block_number: u64,
+    pub block_hash: B256,
+    pub timestamp: u64,
+}
+
 /// Persisted execution-facing anchors exposed to the rest of the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChainAnchors {

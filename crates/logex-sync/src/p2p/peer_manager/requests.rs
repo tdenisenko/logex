@@ -1,8 +1,8 @@
 use alloy_eips::BlockHashOrNumber;
-use eyre::bail;
+use eyre::{Result, bail};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tracing::debug;
+use tracing::{debug, trace, warn};
 
 use super::*;
 
@@ -16,16 +16,26 @@ impl PeerManager {
         PeerId,
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     )> {
-        self.drain_events_now();
-
         let request = HeadersRequest::rising(start_block.into(), count);
-        let response = timeout(REQUEST_TIMEOUT, self.fetch_client.get_headers(request))
+        self.get_headers_from_peers(request, Some(start_block))
             .await
-            .map_err(|_| eyre::eyre!("header request timed out"))?
-            .map_err(|error| eyre::eyre!("header request failed: {error}"))?;
-        let (peer_id, headers) = response.split();
-        self.note_peer_success(peer_id);
-        Ok((peer_id, headers))
+    }
+
+    /// Request block headers ending at `start_block` in descending block order.
+    pub async fn get_headers_reverse(
+        &mut self,
+        start: BlockHashOrNumber,
+        count: u64,
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        let required_block = match start {
+            BlockHashOrNumber::Number(block) => Some(block),
+            BlockHashOrNumber::Hash(_) => None,
+        };
+        let request = HeadersRequest::falling(start, count);
+        self.get_headers_from_peers(request, required_block).await
     }
 
     /// Request a single block header by hash or number.
@@ -36,15 +46,14 @@ impl PeerManager {
         PeerId,
         Option<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     )> {
-        self.drain_events_now();
-
-        let response = timeout(REQUEST_TIMEOUT, self.fetch_client.get_header(id))
-            .await
-            .map_err(|_| eyre::eyre!("header request timed out"))?
-            .map_err(|error| eyre::eyre!("header request failed: {error}"))?;
-        let (peer_id, header) = response.split();
-        self.note_peer_success(peer_id);
-        Ok((peer_id, header))
+        let required_block = match id {
+            BlockHashOrNumber::Number(block) => Some(block),
+            BlockHashOrNumber::Hash(_) => None,
+        };
+        let (peer_id, mut headers) = self
+            .get_headers_from_peers(HeadersRequest::one(id), required_block)
+            .await?;
+        Ok((peer_id, headers.pop()))
     }
 
     /// Request a single block header by hash.
@@ -64,6 +73,18 @@ impl PeerManager {
         hashes: Vec<B256>,
         required_block: u64,
     ) -> Result<Vec<SourcedBlockBody>> {
+        self.get_bodies_prefer_peers(hashes, required_block, &[])
+            .await
+    }
+
+    /// Request block bodies while trying the supplied proven peers before the
+    /// regular rotating candidate set.
+    pub async fn get_bodies_prefer_peers(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+    ) -> Result<Vec<SourcedBlockBody>> {
         self.drain_events_now();
         if hashes.is_empty() {
             return Ok(Vec::new());
@@ -71,58 +92,127 @@ impl PeerManager {
 
         let mut remaining_hashes = hashes.clone();
         let mut collected = Vec::with_capacity(hashes.len());
+        let peer_ids = self
+            .peer_ids_for_block_requests(Some(required_block), preferred_peers)
+            .await;
+        let mut dead_peers = HashSet::new();
 
-        while !remaining_hashes.is_empty() {
-            let request_hashes = remaining_hashes.clone();
-            let response = timeout(
-                REQUEST_TIMEOUT,
-                self.fetch_client
-                    .get_block_bodies_with_priority_and_range_hint(
-                        request_hashes.clone(),
-                        reth_network::p2p::priority::Priority::Normal,
-                        Some(body_range_hint(required_block, request_hashes.len())),
-                    ),
-            )
-            .await
-            .map_err(|_| eyre::eyre!("block body request timed out"))?
-            .map_err(|error| eyre::eyre!("block body request failed: {error}"))?;
-            let (peer_id, bodies) = response.split();
+        for peer_id in peer_ids {
+            while !remaining_hashes.is_empty() {
+                let request_hashes = remaining_hashes.clone();
+                let bodies = match self.request_bodies(peer_id, request_hashes.clone()).await {
+                    Ok(bodies) => bodies,
+                    Err(error) => {
+                        let should_drop = self.on_request_error(peer_id, &error);
+                        debug!(peer = %peer_id, ?error, "block body request failed");
+                        if should_drop {
+                            dead_peers.insert(peer_id);
+                        }
+                        break;
+                    }
+                };
 
-            match classify_response_progress(request_hashes.len(), bodies.len()) {
-                ResponseProgress::Complete => {
-                    self.note_peer_success(peer_id);
-                    collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
-                    return Ok(collected);
-                }
-                ResponseProgress::Partial { returned } => {
-                    self.on_partial_response(
-                        peer_id,
-                        "block bodies",
-                        request_hashes.len(),
-                        returned,
-                    );
-                    collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
-                    remaining_hashes = request_hashes[returned..].to_vec();
-                }
-                ResponseProgress::Empty => {
-                    self.on_zero_progress_response(peer_id, "block bodies", request_hashes.len());
-                    bail!("peer returned zero block bodies for a non-empty request")
-                }
-                ResponseProgress::Overflow { returned } => {
-                    self.on_invalid_response_length(
-                        peer_id,
-                        "block bodies",
-                        request_hashes.len(),
-                        returned,
-                    );
-                    self.network.disconnect_peer(peer_id);
-                    self.remove_peer(peer_id);
-                    bail!("peer returned more block bodies than requested")
+                match classify_response_progress(request_hashes.len(), bodies.len()) {
+                    ResponseProgress::Complete => {
+                        self.note_peer_success(peer_id);
+                        self.advance_request_cursor();
+                        collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
+                        self.remove_dead_peers(&dead_peers);
+                        return Ok(collected);
+                    }
+                    ResponseProgress::Partial { returned } => {
+                        self.on_partial_response(
+                            peer_id,
+                            "block bodies",
+                            request_hashes.len(),
+                            returned,
+                        );
+                        collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
+                        remaining_hashes = request_hashes[returned..].to_vec();
+                    }
+                    ResponseProgress::Empty => {
+                        self.on_zero_progress_response(
+                            peer_id,
+                            "block bodies",
+                            request_hashes.len(),
+                        );
+                        self.drop_unproductive_peer(peer_id, "block bodies", request_hashes.len());
+                        break;
+                    }
+                    ResponseProgress::Overflow { returned } => {
+                        self.on_invalid_response_length(
+                            peer_id,
+                            "block bodies",
+                            request_hashes.len(),
+                            returned,
+                        );
+                        dead_peers.insert(peer_id);
+                        break;
+                    }
                 }
             }
         }
 
-        Ok(collected)
+        self.remove_dead_peers(&dead_peers);
+        if remaining_hashes.is_empty() {
+            Ok(collected)
+        } else {
+            bail!("no peers available to handle block body request")
+        }
+    }
+
+    async fn get_headers_from_peers(
+        &mut self,
+        request: HeadersRequest,
+        required_block: Option<u64>,
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        self.drain_events_now();
+
+        let peer_ids = self.peer_ids_for_block_requests(required_block, &[]).await;
+        let mut dead_peers = HashSet::new();
+        let mut saw_empty_response = false;
+
+        for peer_id in peer_ids {
+            match self.request_headers(peer_id, request.clone()).await {
+                Ok(headers) => {
+                    if headers.len() > request.limit as usize {
+                        self.on_invalid_response_length(
+                            peer_id,
+                            "headers",
+                            request.limit as usize,
+                            headers.len(),
+                        );
+                        dead_peers.insert(peer_id);
+                        continue;
+                    }
+                    if headers.is_empty() && request.limit > 0 {
+                        saw_empty_response = true;
+                        self.on_zero_progress_response(peer_id, "headers", request.limit as usize);
+                        continue;
+                    }
+                    self.note_peer_success(peer_id);
+                    self.advance_request_cursor();
+                    self.remove_dead_peers(&dead_peers);
+                    return Ok((peer_id, headers));
+                }
+                Err(error) => {
+                    let should_drop = self.on_request_error(peer_id, &error);
+                    debug!(peer = %peer_id, ?error, "header request failed");
+                    if should_drop {
+                        dead_peers.insert(peer_id);
+                    }
+                }
+            }
+        }
+
+        self.remove_dead_peers(&dead_peers);
+        if saw_empty_response {
+            return Ok((PeerId::ZERO, Vec::new()));
+        }
+        bail!("no peers available to handle header request")
     }
 
     /// Request receipts for the given block hashes.
@@ -140,29 +230,143 @@ impl PeerManager {
             >,
         >,
     )> {
+        self.get_receipts_inner(hashes, required_block, None, &[])
+            .await
+    }
+
+    /// Request receipts and only return a peer response whose per-block receipt
+    /// counts match the already fetched bodies. Peers that return receipt sets
+    /// inconsistent with the bodies are disconnected and the request is retried
+    /// against the next eligible peer.
+    pub async fn get_receipts_matching_counts(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        expected_receipt_counts: &[usize],
+    ) -> Result<(
+        PeerId,
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+    )> {
+        self.get_receipts_matching_counts_prefer_peers(
+            hashes,
+            required_block,
+            expected_receipt_counts,
+            &[],
+        )
+        .await
+    }
+
+    /// Request receipts while trying body-proven peers before rotating through
+    /// the rest of the eligible peer set.
+    pub async fn get_receipts_matching_counts_prefer_peers(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        expected_receipt_counts: &[usize],
+        preferred_peers: &[PeerId],
+    ) -> Result<(
+        PeerId,
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+    )> {
+        self.get_receipts_inner(
+            hashes,
+            required_block,
+            Some(expected_receipt_counts),
+            preferred_peers,
+        )
+        .await
+    }
+
+    async fn get_receipts_inner(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        expected_receipt_counts: Option<&[usize]>,
+        preferred_peers: &[PeerId],
+    ) -> Result<(
+        PeerId,
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+    )> {
         self.drain_events_now();
         if hashes.is_empty() {
             return Ok((PeerId::ZERO, Vec::new()));
         }
+        if let Some(expected) = expected_receipt_counts
+            && expected.len() != hashes.len()
+        {
+            bail!(
+                "receipt count expectation length mismatch: expected {} entries for {} hashes",
+                expected.len(),
+                hashes.len()
+            );
+        }
 
-        let peer_ids = self.peer_ids_for_requests(Some(required_block));
+        let peer_ids = self
+            .peer_ids_for_receipt_requests(required_block, preferred_peers)
+            .await;
         let mut dead_peers = HashSet::new();
 
         for peer_id in peer_ids {
             let version = match self.peers.get(&peer_id) {
-                Some(peer) => peer.version,
+                Some(peer) => {
+                    trace!(
+                        peer = %peer_id,
+                        client_version = %peer.client_version,
+                        version = ?peer.version,
+                        serving = peer.is_serving,
+                        latest_block = ?peer.remote_status.latest_block,
+                        earliest_block = ?peer.remote_status.earliest_block,
+                        required_block,
+                        hashes = hashes.len(),
+                        preferred = preferred_peers.contains(&peer_id),
+                        "requesting receipts from execution peer"
+                    );
+                    peer.version
+                }
                 None => continue,
             };
 
             if version >= EthVersion::Eth70 {
                 match self.request_receipts70(peer_id, hashes.clone()).await {
                     Ok(receipts) => {
+                        if let Err(error) = validate_receipt_response_counts(
+                            "receipts70",
+                            hashes.len(),
+                            &receipts,
+                            expected_receipt_counts,
+                        ) {
+                            self.on_receipt_count_mismatch(peer_id, error);
+                            dead_peers.insert(peer_id);
+                            continue;
+                        }
                         self.on_receipt_request_success(peer_id);
                         return Ok((peer_id, receipts));
                     }
                     Err(error) => {
                         let should_drop = self.on_request_error(peer_id, &error);
-                        debug!(peer = %peer_id, ?error, "receipt request failed");
+                        debug!(
+                            peer = %peer_id,
+                            ?error,
+                            "eth/70 receipt request failed"
+                        );
                         if should_drop {
                             dead_peers.insert(peer_id);
                         }
@@ -187,11 +391,36 @@ impl PeerManager {
                     Ok(receipts) => {
                         match classify_response_progress(request_hashes.len(), receipts.len()) {
                             ResponseProgress::Complete => {
+                                if let Err(error) = validate_receipt_response_counts(
+                                    "receipts",
+                                    request_hashes.len(),
+                                    &receipts,
+                                    expected_receipt_counts.map(|expected| {
+                                        &expected[hashes.len() - remaining_hashes.len()..]
+                                    }),
+                                ) {
+                                    self.on_receipt_count_mismatch(peer_id, error);
+                                    dead_peers.insert(peer_id);
+                                    break;
+                                }
                                 self.on_receipt_request_success(peer_id);
                                 collected.extend(receipts);
                                 return Ok((peer_id, collected));
                             }
                             ResponseProgress::Partial { returned } => {
+                                if let Err(error) = validate_receipt_response_counts(
+                                    "receipts",
+                                    returned,
+                                    &receipts,
+                                    expected_receipt_counts.map(|expected| {
+                                        let offset = hashes.len() - remaining_hashes.len();
+                                        &expected[offset..offset + returned]
+                                    }),
+                                ) {
+                                    self.on_receipt_count_mismatch(peer_id, error);
+                                    dead_peers.insert(peer_id);
+                                    break;
+                                }
                                 self.on_partial_response(
                                     peer_id,
                                     "receipts",
@@ -203,6 +432,11 @@ impl PeerManager {
                             }
                             ResponseProgress::Empty => {
                                 self.on_zero_progress_response(
+                                    peer_id,
+                                    "receipts",
+                                    request_hashes.len(),
+                                );
+                                self.drop_unproductive_peer(
                                     peer_id,
                                     "receipts",
                                     request_hashes.len(),
@@ -235,6 +469,80 @@ impl PeerManager {
 
         self.remove_dead_peers(&dead_peers);
         bail!("no peers available to handle receipt request")
+    }
+
+    async fn peer_ids_for_receipt_requests(
+        &mut self,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+    ) -> Vec<PeerId> {
+        self.peer_ids_for_block_requests(Some(required_block), preferred_peers)
+            .await
+    }
+
+    async fn peer_ids_for_block_requests(
+        &mut self,
+        required_block: Option<u64>,
+        preferred_peers: &[PeerId],
+    ) -> Vec<PeerId> {
+        let mut peer_ids = prioritize_preferred_peer_ids(
+            self.peer_ids_for_requests(required_block),
+            preferred_peers,
+        );
+        if !peer_ids.is_empty() {
+            return peer_ids;
+        }
+
+        for _ in 0..REQUEST_PEER_REFILL_ATTEMPTS {
+            self.dial_pending_peers(self.max_peers);
+            if !self.wait_for_activity(Duration::from_millis(250)).await {
+                self.drain_events_now();
+            }
+            peer_ids = prioritize_preferred_peer_ids(
+                self.peer_ids_for_requests(required_block),
+                preferred_peers,
+            );
+            if !peer_ids.is_empty() {
+                return peer_ids;
+            }
+        }
+
+        peer_ids
+    }
+
+    pub(super) async fn request_headers(
+        &self,
+        peer_id: PeerId,
+        request: HeadersRequest,
+    ) -> std::result::Result<
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+        RequestAttempt,
+    > {
+        self.request_with_channel(peer_id, &move |response| PeerRequest::GetBlockHeaders {
+            request: GetBlockHeaders {
+                start_block: request.start,
+                limit: request.limit,
+                skip: 0,
+                direction: request.direction,
+            },
+            response,
+        })
+        .await
+    }
+
+    pub(super) async fn request_bodies(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+    ) -> std::result::Result<
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
+        RequestAttempt,
+    > {
+        self.request_with_channel(peer_id, &move |response| PeerRequest::GetBlockBodies {
+            request: GetBlockBodies(hashes.clone()),
+            response,
+        })
+        .await
     }
 
     pub(super) async fn request_with_channel<T, W, MakeRequest>(
@@ -359,6 +667,21 @@ impl PeerManager {
 
         Ok(merged)
     }
+
+    fn on_receipt_count_mismatch(&mut self, peer_id: PeerId, error: ReceiptCountMismatch) {
+        self.network
+            .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
+        warn!(
+            peer = %peer_id,
+            response_kind = error.response_kind,
+            requested_blocks = error.requested_blocks,
+            returned_blocks = error.returned_blocks,
+            block_index = error.block_index,
+            expected_receipts = error.expected_receipts,
+            returned_receipts = error.returned_receipts,
+            "peer returned receipts inconsistent with requested blocks, disconnecting it"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +706,16 @@ pub(super) enum ResponseProgress {
     Overflow { returned: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReceiptCountMismatch {
+    response_kind: &'static str,
+    requested_blocks: usize,
+    returned_blocks: usize,
+    block_index: Option<usize>,
+    expected_receipts: Option<usize>,
+    returned_receipts: Option<usize>,
+}
+
 impl Receipts70MergeError {
     pub(super) fn into_request_attempt(self) -> RequestAttempt {
         RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
@@ -396,6 +729,65 @@ pub(super) fn classify_response_progress(requested: usize, returned: usize) -> R
         std::cmp::Ordering::Less => ResponseProgress::Partial { returned },
         std::cmp::Ordering::Greater => ResponseProgress::Overflow { returned },
     }
+}
+
+pub(super) fn prioritize_preferred_peer_ids(
+    mut peer_ids: Vec<PeerId>,
+    preferred_peers: &[PeerId],
+) -> Vec<PeerId> {
+    if peer_ids.len() <= 1 || preferred_peers.is_empty() {
+        return peer_ids;
+    }
+
+    let mut prioritized = Vec::with_capacity(peer_ids.len());
+    for preferred in preferred_peers {
+        if let Some(index) = peer_ids.iter().position(|peer_id| peer_id == preferred) {
+            prioritized.push(peer_ids.remove(index));
+        }
+    }
+    prioritized.extend(peer_ids);
+    prioritized
+}
+
+fn validate_receipt_response_counts<T>(
+    response_kind: &'static str,
+    requested_blocks: usize,
+    receipts: &[Vec<alloy_consensus::ReceiptWithBloom<T>>],
+    expected_receipt_counts: Option<&[usize]>,
+) -> std::result::Result<(), ReceiptCountMismatch> {
+    if receipts.len() != requested_blocks {
+        return Err(ReceiptCountMismatch {
+            response_kind,
+            requested_blocks,
+            returned_blocks: receipts.len(),
+            block_index: None,
+            expected_receipts: None,
+            returned_receipts: None,
+        });
+    }
+
+    let Some(expected_receipt_counts) = expected_receipt_counts else {
+        return Ok(());
+    };
+
+    for (block_index, (block_receipts, expected_count)) in receipts
+        .iter()
+        .zip(expected_receipt_counts.iter().copied())
+        .enumerate()
+    {
+        if block_receipts.len() != expected_count {
+            return Err(ReceiptCountMismatch {
+                response_kind,
+                requested_blocks,
+                returned_blocks: receipts.len(),
+                block_index: Some(block_index),
+                expected_receipts: Some(expected_count),
+                returned_receipts: Some(block_receipts.len()),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) fn merge_receipts70_response<T>(
@@ -465,6 +857,18 @@ pub(super) trait IntoResponseValue<T> {
     fn into_value(self) -> T;
 }
 
+impl<T> IntoResponseValue<Vec<T>> for BlockHeaders<T> {
+    fn into_value(self) -> Vec<T> {
+        self.0
+    }
+}
+
+impl<T> IntoResponseValue<Vec<T>> for BlockBodies<T> {
+    fn into_value(self) -> Vec<T> {
+        self.0
+    }
+}
+
 impl<T> IntoResponseValue<Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>>> for Receipts<T> {
     fn into_value(self) -> Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>> {
         self.0
@@ -509,6 +913,19 @@ mod tests {
             classify_response_progress(8, 9),
             ResponseProgress::Overflow { returned: 9 }
         );
+    }
+
+    #[test]
+    fn preferred_peer_ids_are_tried_before_rotation_order() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let missing = PeerId::repeat_byte(0x44);
+
+        let ordered =
+            prioritize_preferred_peer_ids(vec![first, second, third], &[missing, third, first]);
+
+        assert_eq!(ordered, vec![third, first, second]);
     }
 
     fn fake_receipt(gas: u64) -> Receipt {

@@ -28,6 +28,24 @@ fn read_le_u32(data: &[u8], offset: usize) -> io::Result<u32> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn checked_slice(data: &[u8], offset: usize, len: usize) -> io::Result<&[u8]> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "column offset overflow"))?;
+    data.get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "column read out of bounds"))
+}
+
+fn checked_range(data: &[u8], start: usize, end: usize) -> io::Result<&[u8]> {
+    if end < start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "column offsets are not monotonic",
+        ));
+    }
+    checked_slice(data, start, end - start)
+}
+
 /// Typed column data returned from reads.
 #[derive(Debug, Clone)]
 pub enum ColumnData {
@@ -76,13 +94,7 @@ impl ColumnReader {
                 let mut result = Vec::with_capacity(ids.len());
                 for &id in ids {
                     let offset = id as usize * item_size;
-                    if offset + item_size > body.len() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "row id out of bounds",
-                        ));
-                    }
-                    result.push(Address::from_slice(&body[offset..offset + item_size]));
+                    result.push(Address::from_slice(checked_slice(body, offset, item_size)?));
                 }
                 Ok(result)
             }
@@ -91,7 +103,7 @@ impl ColumnReader {
                 let mut result = Vec::with_capacity(count);
                 for i in 0..count {
                     let offset = i * item_size;
-                    result.push(Address::from_slice(&body[offset..offset + item_size]));
+                    result.push(Address::from_slice(checked_slice(body, offset, item_size)?));
                 }
                 Ok(result)
             }
@@ -117,7 +129,7 @@ impl ColumnReader {
                 let mut result = Vec::with_capacity(ids.len());
                 for &id in ids {
                     let offset = id as usize * item_size;
-                    result.push(B256::from_slice(&body[offset..offset + item_size]));
+                    result.push(B256::from_slice(checked_slice(body, offset, item_size)?));
                 }
                 Ok(result)
             }
@@ -126,7 +138,7 @@ impl ColumnReader {
                 let mut result = Vec::with_capacity(count);
                 for i in 0..count {
                     let offset = i * item_size;
-                    result.push(B256::from_slice(&body[offset..offset + item_size]));
+                    result.push(B256::from_slice(checked_slice(body, offset, item_size)?));
                 }
                 Ok(result)
             }
@@ -158,7 +170,9 @@ impl ColumnReader {
                 for &id in ids {
                     let offset = id as usize * item_size;
                     if nulls.is_present(id as u64) {
-                        result.push(Some(B256::from_slice(&body[offset..offset + item_size])));
+                        result.push(Some(B256::from_slice(checked_slice(
+                            body, offset, item_size,
+                        )?)));
                     } else {
                         result.push(None);
                     }
@@ -171,7 +185,9 @@ impl ColumnReader {
                 for i in 0..count {
                     let offset = i * item_size;
                     if nulls.is_present(i as u64) {
-                        result.push(Some(B256::from_slice(&body[offset..offset + item_size])));
+                        result.push(Some(B256::from_slice(checked_slice(
+                            body, offset, item_size,
+                        )?)));
                     } else {
                         result.push(None);
                     }
@@ -232,13 +248,15 @@ impl ColumnReader {
             Some(ids) => {
                 let mut result = Vec::with_capacity(ids.len());
                 for &id in ids {
-                    result.push(body[id as usize]);
+                    result.push(*body.get(id as usize).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "row id out of bounds")
+                    })?);
                 }
                 Ok(result)
             }
             None => {
                 let count = header.row_count as usize;
-                Ok(body[..count].to_vec())
+                Ok(checked_slice(body, 0, count)?.to_vec())
             }
         }
     }
@@ -272,9 +290,15 @@ impl ColumnReader {
                 let mut result = Vec::with_capacity(ids.len());
                 for &id in ids {
                     let id = id as usize;
+                    if id + 1 >= offsets.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "row id out of bounds",
+                        ));
+                    }
                     let start = offsets[id] as usize;
                     let end = offsets[id + 1] as usize;
-                    result.push(Bytes::copy_from_slice(&blob[start..end]));
+                    result.push(Bytes::copy_from_slice(checked_range(blob, start, end)?));
                 }
                 Ok(result)
             }
@@ -283,7 +307,7 @@ impl ColumnReader {
                 for i in 0..row_count {
                     let start = offsets[i] as usize;
                     let end = offsets[i + 1] as usize;
-                    result.push(Bytes::copy_from_slice(&blob[start..end]));
+                    result.push(Bytes::copy_from_slice(checked_range(blob, start, end)?));
                 }
                 Ok(result)
             }
@@ -512,5 +536,37 @@ mod tests {
 
         let count = ColumnReader::read_row_count(&dir).unwrap();
         assert_eq!(count, 42);
+    }
+
+    #[test]
+    fn truncated_fixed_column_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("partition");
+        let rows = make_test_rows(4);
+
+        ColumnFile::write_batch(&dir, &rows).unwrap();
+        let path = dir.join("block_hash.col");
+        let mut data = fs::read(&path).unwrap();
+        data.truncate(data.len() - 20);
+        fs::write(&path, data).unwrap();
+
+        let error = ColumnReader::read_b256(&dir, "block_hash.col", None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncated_variable_column_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("partition");
+        let rows = make_test_rows(4);
+
+        ColumnFile::write_batch(&dir, &rows).unwrap();
+        let path = dir.join("data.col");
+        let mut data = fs::read(&path).unwrap();
+        data.truncate(data.len() - 3);
+        fs::write(&path, data).unwrap();
+
+        let error = ColumnReader::read_var_bytes(&dir, "data.col", None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

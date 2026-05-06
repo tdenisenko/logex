@@ -5090,6 +5090,7 @@ dependencies = [
 name = "logex-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "clap",
  "logex-cl",
  "logex-index",
@@ -5190,6 +5191,7 @@ dependencies = [
  "reth-consensus",
  "reth-db-models",
  "reth-discv4",
+ "reth-dns-discovery",
  "reth-eth-wire",
  "reth-ethereum-consensus",
  "reth-ethereum-forks",

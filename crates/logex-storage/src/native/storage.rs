@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
-use logex_types::{ChainAnchors, ExecutionAnchor, PartitionMeta};
+use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, PartitionMeta};
 use serde::{Deserialize, Serialize};
 
 use crate::SegmentReader;
@@ -26,6 +26,10 @@ struct StorageState {
     sync_head: Option<SyncHead>,
     #[serde(default)]
     recent_headers: Vec<Header>,
+    #[serde(default)]
+    historical_floor_header: Option<Header>,
+    #[serde(default)]
+    historical_anchor_header: Option<Header>,
 }
 
 pub struct NativeStorage {
@@ -66,6 +70,28 @@ impl NativeStorage {
 
     pub fn recent_headers(&self) -> &[Header] {
         &self.state.recent_headers
+    }
+
+    pub fn historical_floor_header(&self) -> Option<&Header> {
+        self.state.historical_floor_header.as_ref()
+    }
+
+    pub fn historical_anchor_header(&self) -> Option<&Header> {
+        self.state.historical_anchor_header.as_ref()
+    }
+
+    pub fn historical_floor(&self) -> Option<ExecutionBlockMarker> {
+        self.state
+            .historical_floor_header
+            .as_ref()
+            .map(execution_marker_from_header)
+    }
+
+    pub fn historical_anchor(&self) -> Option<ExecutionBlockMarker> {
+        self.state
+            .historical_anchor_header
+            .as_ref()
+            .map(execution_marker_from_header)
     }
 
     pub fn record_sync_head(
@@ -121,6 +147,20 @@ impl NativeStorage {
         let mut anchors = self.catalog.anchors.clone();
         anchors.indexed_head = Some(*anchor);
         self.record_chain_anchors(anchors)
+    }
+
+    pub fn record_historical_floor(&mut self, header: &Header) -> std::io::Result<()> {
+        if let Some(current) = self.state.historical_floor_header.as_ref()
+            && current.number() <= header.number()
+        {
+            return Ok(());
+        }
+
+        self.state.historical_floor_header = Some(header.clone());
+        if self.state.historical_anchor_header.is_none() {
+            self.state.historical_anchor_header = Some(header.clone());
+        }
+        self.persist_state()
     }
 
     pub fn chain_anchors(&self) -> ChainAnchors {
@@ -507,8 +547,8 @@ impl NativeStorage {
                 ),
             )
         })?;
-        let block_numbers = reader.read_u64("block_number", Some(&[0, last_row]))?;
-        if block_numbers.len() != 2 {
+        let boundary_blocks = reader.read_u64("block_number", Some(&[0, last_row]))?;
+        if boundary_blocks.len() != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -518,26 +558,45 @@ impl NativeStorage {
             ));
         }
 
-        let first_block = block_numbers[0];
-        let last_block = block_numbers[1];
-        if first_block > last_block {
+        let Some(min_block) = descriptor.min_block else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "segment {} block ordering is inverted: first={first_block} last={last_block}",
+                    "segment {} has rows but no minimum block metadata",
+                    descriptor.id,
+                ),
+            ));
+        };
+        let Some(max_block) = descriptor.max_block else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {} has rows but no maximum block metadata",
+                    descriptor.id,
+                ),
+            ));
+        };
+
+        if min_block > max_block {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {} block metadata is inverted: min={min_block} max={max_block}",
                     descriptor.id
                 ),
             ));
         }
 
-        if descriptor.min_block != Some(first_block) || descriptor.max_block != Some(last_block) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} block metadata mismatch: descriptor=[{:?}, {:?}] actual=[{first_block}, {last_block}]",
-                    descriptor.id, descriptor.min_block, descriptor.max_block
-                ),
-            ));
+        for block_number in boundary_blocks {
+            if block_number < min_block || block_number > max_block {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "segment {} boundary block {block_number} is outside descriptor range [{min_block}, {max_block}]",
+                        descriptor.id
+                    ),
+                ));
+            }
         }
 
         Ok(())
@@ -552,6 +611,14 @@ fn load_state(paths: &StorageCatalogPaths) -> std::io::Result<StorageState> {
 
     let json = fs::read_to_string(path)?;
     serde_json::from_str(&json).map_err(std::io::Error::other)
+}
+
+fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
+    ExecutionBlockMarker {
+        block_number: header.number(),
+        block_hash: header.hash_slow(),
+        timestamp: header.timestamp(),
+    }
 }
 
 fn verify_recent_headers(state: &StorageState) -> io::Result<()> {
@@ -660,6 +727,39 @@ mod tests {
     }
 
     #[test]
+    fn native_storage_reopens_after_reverse_historical_append() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut storage = NativeStorage::open(NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 100,
+                compaction_safety_margin_blocks: 2_048,
+            })
+            .unwrap();
+
+            storage.write_batch(&make_rows(5, 200)).unwrap();
+            storage.write_batch(&make_rows(5, 190)).unwrap();
+
+            let meta = storage.hot_partition_meta();
+            assert_eq!(meta.min_block, 190);
+            assert_eq!(meta.max_block, 200);
+            assert_eq!(meta.row_count, 10);
+        }
+
+        let reloaded = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        let meta = reloaded.hot_partition_meta();
+        assert_eq!(meta.min_block, 190);
+        assert_eq!(meta.max_block, 200);
+        assert_eq!(meta.row_count, 10);
+    }
+
+    #[test]
     fn native_storage_persists_sync_state() {
         let tmp = TempDir::new().unwrap();
         {
@@ -761,6 +861,7 @@ mod tests {
                 timestamp: bad_second.timestamp(),
             }),
             recent_headers: vec![first, bad_second],
+            ..Default::default()
         };
 
         fs::write(
@@ -777,6 +878,64 @@ mod tests {
         .err()
         .expect("broken recent-header window should fail integrity checks");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn historical_floor_only_moves_toward_older_blocks() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        let anchor = header(200, B256::repeat_byte(0xAA), 0x01);
+        let older = header(199, B256::repeat_byte(0xBB), 0x02);
+        let newer = header(201, B256::repeat_byte(0xCC), 0x03);
+
+        storage.record_historical_floor(&anchor).unwrap();
+        storage.record_historical_floor(&newer).unwrap();
+        assert_eq!(
+            storage.historical_floor().map(|marker| marker.block_number),
+            Some(200)
+        );
+        assert_eq!(
+            storage
+                .historical_anchor()
+                .map(|marker| marker.block_number),
+            Some(200)
+        );
+
+        storage.record_historical_floor(&older).unwrap();
+        assert_eq!(
+            storage.historical_floor().map(|marker| marker.block_number),
+            Some(199)
+        );
+        assert_eq!(
+            storage
+                .historical_anchor()
+                .map(|marker| marker.block_number),
+            Some(200)
+        );
+
+        let reloaded = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        assert_eq!(
+            reloaded
+                .historical_floor()
+                .map(|marker| marker.block_number),
+            Some(199)
+        );
+        assert_eq!(
+            reloaded
+                .historical_anchor()
+                .map(|marker| marker.block_number),
+            Some(200)
+        );
     }
 
     #[test]

@@ -14,9 +14,11 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
 
-            if self.peers.peer_count() < self.config.max_peers / 2 {
-                let min_peers =
-                    desired_refill_min_peers(self.peers.peer_count(), self.config.max_peers);
+            if let Some(min_peers) = peer_refill_goal(
+                self.peers.peer_count(),
+                self.peers.serving_peer_count(),
+                self.config.max_peers,
+            ) {
                 self.refresh_connectivity_state();
                 if cancelable(
                     &mut self.shutdown,
@@ -95,11 +97,11 @@ impl SyncEngine {
                 .map(|header| header.number())
                 .unwrap_or(current + 1);
             let mut newly_serving_peers = HashSet::new();
-            self.note_serving_peer(header_peer, &mut newly_serving_peers);
 
             let bodies = match cancelable(
                 &mut self.shutdown,
-                self.peers.get_bodies(hashes.clone(), required_block),
+                self.peers
+                    .get_bodies_prefer_peers(hashes.clone(), required_block, &[header_peer]),
             )
             .await
             {
@@ -107,9 +109,19 @@ impl SyncEngine {
                 Some(Ok(_)) | Some(Err(_)) => continue,
                 None => return self.finish_shutdown(),
             };
+            let expected_receipt_counts: Vec<usize> = bodies
+                .iter()
+                .map(|(_peer_id, body)| body.transaction_count())
+                .collect();
+            let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
             let (receipt_peer, receipts) = match cancelable(
                 &mut self.shutdown,
-                self.peers.get_receipts(hashes.clone(), required_block),
+                self.peers.get_receipts_matching_counts_prefer_peers(
+                    hashes.clone(),
+                    required_block,
+                    &expected_receipt_counts,
+                    &receipt_peer_preference,
+                ),
             )
             .await
             {
@@ -182,15 +194,12 @@ impl SyncEngine {
                     .ingest_block(header, block_hash, &txs, &recent_headers, None)
                     .await?;
                 self.progress.record_block(block_number, log_count);
+                self.note_serving_peer(header_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);
                 self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
 
-                self.peers.set_head(Head {
-                    number: block_number,
-                    hash: block_hash,
-                    timestamp,
-                    ..Default::default()
-                });
+                self.peers
+                    .set_head(execution_head(block_number, block_hash, timestamp));
             }
 
             if batch_failed {

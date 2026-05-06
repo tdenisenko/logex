@@ -32,6 +32,8 @@ pub enum ReceiptValidationError {
 #[derive(Debug, Clone)]
 pub enum HeaderValidationError {
     StartBlockMismatch { expected: u64, got: u64 },
+    ReverseStartBlockMismatch { expected: u64, got: u64 },
+    BrokenReverseParentLink { child: u64, parent: u64 },
     Standalone(ConsensusError),
     AgainstParent(ConsensusError),
 }
@@ -50,6 +52,18 @@ impl fmt::Display for HeaderValidationError {
                 write!(
                     f,
                     "header batch started at unexpected block: expected {expected}, got {got}"
+                )
+            }
+            Self::ReverseStartBlockMismatch { expected, got } => {
+                write!(
+                    f,
+                    "reverse header batch started at unexpected block: expected {expected}, got {got}"
+                )
+            }
+            Self::BrokenReverseParentLink { child, parent } => {
+                write!(
+                    f,
+                    "reverse header batch has a broken parent link: block {parent} is not the parent of block {child}"
                 )
             }
             Self::Standalone(error) => write!(f, "{error}"),
@@ -145,6 +159,45 @@ pub fn validate_downloaded_headers(
         }
 
         parent = Some(sealed);
+    }
+
+    Ok(())
+}
+
+pub fn validate_reverse_downloaded_headers(
+    child_header: &Header,
+    headers: &[Header],
+) -> Result<(), HeaderValidationError> {
+    let Some(first_header) = headers.first() else {
+        return Ok(());
+    };
+
+    let expected_start_block = child_header.number().saturating_sub(1);
+    if first_header.number() != expected_start_block {
+        return Err(HeaderValidationError::ReverseStartBlockMismatch {
+            expected: expected_start_block,
+            got: first_header.number(),
+        });
+    }
+
+    let mut child = SealedHeader::seal_slow(child_header.clone());
+    for parent_header in headers {
+        let parent_hash = parent_header.hash_slow();
+        if child.parent_hash() != parent_hash {
+            return Err(HeaderValidationError::BrokenReverseParentLink {
+                child: child.number(),
+                parent: parent_header.number(),
+            });
+        }
+
+        let parent = SealedHeader::seal_slow(parent_header.clone());
+        EXECUTION_CONSENSUS
+            .validate_header(&parent)
+            .map_err(HeaderValidationError::Standalone)?;
+        EXECUTION_CONSENSUS
+            .validate_header_against_parent(&child, &parent)
+            .map_err(HeaderValidationError::AgainstParent)?;
+        child = parent;
     }
 
     Ok(())
@@ -260,6 +313,49 @@ mod tests {
             },
             logs_bloom,
         }
+    }
+
+    #[test]
+    fn reverse_headers_reject_wrong_start_block_before_consensus_validation() {
+        let child = Header {
+            number: 10,
+            parent_hash: B256::repeat_byte(0xAA),
+            ..Default::default()
+        };
+        let wrong_parent = Header {
+            number: 8,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[wrong_parent]),
+            Err(HeaderValidationError::ReverseStartBlockMismatch {
+                expected: 9,
+                got: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn reverse_headers_reject_broken_parent_link_before_consensus_validation() {
+        let child = Header {
+            number: 10,
+            parent_hash: B256::repeat_byte(0xAA),
+            ..Default::default()
+        };
+        let wrong_parent = Header {
+            number: 9,
+            parent_hash: B256::repeat_byte(0xBB),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[wrong_parent]),
+            Err(HeaderValidationError::BrokenReverseParentLink {
+                child: 10,
+                parent: 9
+            })
+        ));
     }
 
     #[test]

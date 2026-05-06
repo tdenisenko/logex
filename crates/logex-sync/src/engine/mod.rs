@@ -20,7 +20,7 @@ use crate::p2p::peer_manager::PeerManager;
 use crate::progress::ProgressTracker;
 use crate::validation::{
     receipts_match_transaction_count, validate_block_pre_execution, validate_downloaded_headers,
-    validate_receipts_for_header,
+    validate_receipts_for_header, validate_reverse_downloaded_headers,
 };
 
 mod anchored;
@@ -30,7 +30,8 @@ mod ingest;
 mod live;
 
 use self::helpers::{
-    assemble_txs, cancelable, desired_refill_min_peers, should_mark_historical_complete,
+    assemble_txs, cancelable, execution_head, peer_refill_goal, preferred_body_peers,
+    refill_peer_floor, should_mark_historical_complete, should_run_historical_backfill,
     should_switch_to_live_without_target,
 };
 
@@ -39,6 +40,8 @@ const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
 const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 4;
 const RECENT_HEADER_WINDOW: usize = 8_192;
+const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 128;
+const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
 
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {

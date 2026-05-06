@@ -1,4 +1,6 @@
-use crate::{ConsensusLightClientStatus, ExecutionAnchor, WeakSubjectivityCheckpoint};
+use crate::{
+    ConsensusLightClientStatus, ExecutionAnchor, ExecutionBlockMarker, WeakSubjectivityCheckpoint,
+};
 use serde::Serialize;
 
 /// High-level runtime state for the node.
@@ -191,6 +193,18 @@ pub struct SyncStatus {
     pub logs_ingested: u64,
     /// Estimated seconds remaining to reach target.
     pub eta_seconds: Option<f64>,
+    /// Lowest execution block verified by the EL reverse backfill path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_execution_floor: Option<ExecutionBlockMarker>,
+    /// Execution block where the current reverse backfill path started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_execution_anchor: Option<ExecutionBlockMarker>,
+    /// Lowest block the current historical verifier is allowed to target.
+    pub historical_target_block: u64,
+    /// Historical reverse-sync throughput.
+    pub historical_blocks_per_sec: f64,
+    /// Estimated seconds remaining for the historical reverse verifier.
+    pub historical_eta_seconds: Option<f64>,
     /// Weak-subjectivity checkpoint the node bootstrapped from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<WeakSubjectivityCheckpoint>,

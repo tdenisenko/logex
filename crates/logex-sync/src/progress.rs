@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use logex_types::{ChainAnchors, NodeState, SyncStatus, WeakSubjectivityCheckpoint};
+use logex_types::{
+    ChainAnchors, ExecutionBlockMarker, NodeState, SyncStatus, WeakSubjectivityCheckpoint,
+};
 
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
@@ -13,6 +15,11 @@ pub struct ProgressTracker {
     last_log_block: u64,
     /// Timestamp of the last terminal progress line.
     last_log_at: Instant,
+    historical_start: Instant,
+    historical_blocks_processed: u64,
+    historical_logs_ingested: u64,
+    last_historical_log_block: u64,
+    last_historical_log_at: Instant,
 }
 
 impl ProgressTracker {
@@ -24,6 +31,11 @@ impl ProgressTracker {
             logs_ingested: 0,
             last_log_block: 0,
             last_log_at: Instant::now(),
+            historical_start: Instant::now(),
+            historical_blocks_processed: 0,
+            historical_logs_ingested: 0,
+            last_historical_log_block: u64::MAX,
+            last_historical_log_at: Instant::now(),
         }
     }
 
@@ -145,6 +157,70 @@ impl ProgressTracker {
         }
     }
 
+    pub fn initialize_historical_state(
+        &self,
+        floor: Option<ExecutionBlockMarker>,
+        anchor: Option<ExecutionBlockMarker>,
+        target_block: u64,
+    ) {
+        let mut status = self.status.lock().unwrap();
+        status.historical_execution_floor = floor;
+        status.historical_execution_anchor = anchor;
+        status.historical_target_block = target_block;
+        status.historical_eta_seconds = historical_eta(
+            status.historical_execution_floor,
+            status.historical_target_block,
+            status.historical_blocks_per_sec,
+        );
+    }
+
+    pub fn record_historical_block(
+        &mut self,
+        floor: ExecutionBlockMarker,
+        anchor: Option<ExecutionBlockMarker>,
+        target_block: u64,
+        log_count: u64,
+    ) {
+        self.historical_blocks_processed += 1;
+        self.historical_logs_ingested += log_count;
+        self.logs_ingested += log_count;
+
+        let elapsed = self.historical_start.elapsed().as_secs_f64();
+        let bps = if elapsed > 0.0 {
+            self.historical_blocks_processed as f64 / elapsed
+        } else {
+            0.0
+        };
+
+        let mut status = self.status.lock().unwrap();
+        status.node_state = NodeState::Syncing;
+        status.syncing = true;
+        status.historical_execution_floor = Some(floor);
+        status.historical_execution_anchor = anchor.or(status.historical_execution_anchor);
+        status.historical_target_block = target_block;
+        status.historical_blocks_per_sec = bps;
+        status.historical_eta_seconds = historical_eta(Some(floor), target_block, bps);
+        status.logs_ingested = self.logs_ingested;
+
+        let should_log = floor.block_number / 1000 < self.last_historical_log_block / 1000
+            || self.last_historical_log_at.elapsed().as_secs() >= 15;
+        if should_log {
+            self.last_historical_log_block = floor.block_number;
+            self.last_historical_log_at = Instant::now();
+            tracing::info!(
+                historical_floor = floor.block_number,
+                historical_target = target_block,
+                remaining_blocks = floor.block_number.saturating_sub(target_block),
+                total_historical_blocks = self.historical_blocks_processed,
+                total_historical_logs = self.historical_logs_ingested,
+                historical_blocks_per_sec = format!("{bps:.2}"),
+                historical_eta_seconds =
+                    status.historical_eta_seconds.map(|eta| eta.round() as u64),
+                "historical reverse sync progress"
+            );
+        }
+    }
+
     pub fn rewind_to(&self, block_number: u64) {
         let mut status = self.status.lock().unwrap();
         status.current_block = block_number;
@@ -170,6 +246,19 @@ impl ProgressTracker {
     pub fn logs_ingested(&self) -> u64 {
         self.logs_ingested
     }
+}
+
+fn historical_eta(
+    floor: Option<ExecutionBlockMarker>,
+    target_block: u64,
+    blocks_per_sec: f64,
+) -> Option<f64> {
+    let floor = floor?;
+    if blocks_per_sec <= 0.0 || floor.block_number <= target_block {
+        return None;
+    }
+
+    Some((floor.block_number - target_block) as f64 / blocks_per_sec)
 }
 
 #[cfg(test)]

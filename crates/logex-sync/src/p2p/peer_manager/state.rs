@@ -1,7 +1,5 @@
-use std::ops::RangeInclusive;
-
 use reth_chainspec::{EthChainSpec, MAINNET};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::*;
 use crate::p2p::persistence::persist_known_peers_if_changed;
@@ -26,9 +24,23 @@ impl PeerManager {
             .max()
     }
 
+    /// Whether any connected peer is eligible to try a block request.
+    pub fn has_block_request_peer(&self, required_block: u64) -> bool {
+        self.peers.values().any(|peer| {
+            peer.remote_status
+                .earliest_block
+                .is_none_or(|earliest| earliest <= required_block)
+                && peer_can_attempt_block_request(
+                    peer.is_serving,
+                    peer.remote_status.latest_block,
+                    required_block,
+                )
+        })
+    }
+
     /// Number of queued peer candidates awaiting or undergoing connection attempts.
     pub fn pending_count(&self) -> usize {
-        self.pending.len()
+        self.pending.len().saturating_add(self.pending_dials.len())
     }
 
     /// Snapshot of productive peers suitable for writing to disk on shutdown.
@@ -51,6 +63,10 @@ impl PeerManager {
     /// Wait until we have at least `min` peers or run out of budget.
     pub async fn fill_peers(&mut self, min: usize, target: usize) {
         self.drain_events_now();
+        if !self.network_activated {
+            return;
+        }
+        self.dial_pending_peers(target);
         if self.peers.len() >= min || self.peers.len() >= target {
             return;
         }
@@ -59,6 +75,7 @@ impl PeerManager {
 
         loop {
             self.drain_events_now();
+            self.dial_pending_peers(target);
 
             if self.peers.len() >= min || self.peers.len() >= target {
                 return;
@@ -76,7 +93,7 @@ impl PeerManager {
 
             let remaining = (deadline - Instant::now()).min(DISCOVERY_WAIT);
             if !self.wait_for_activity(remaining).await {
-                debug!(
+                trace!(
                     connected_peers = self.peers.len(),
                     pending_peers = self.pending.len(),
                     "no network activity while waiting for peers during this refill interval"
@@ -132,7 +149,7 @@ impl PeerManager {
         returned: usize,
     ) {
         self.reset_peer_timeout(peer_id);
-        debug!(
+        trace!(
             peer = %peer_id,
             response_kind,
             requested,
@@ -155,6 +172,29 @@ impl PeerManager {
             response_kind,
             requested,
             "peer returned no data for a non-empty request"
+        );
+    }
+
+    pub(super) fn drop_unproductive_peer(
+        &mut self,
+        peer_id: PeerId,
+        response_kind: &'static str,
+        requested: usize,
+    ) {
+        if peer_id == PeerId::ZERO {
+            return;
+        }
+
+        self.network.disconnect_peer(peer_id);
+        let known_changed = self.forget_peer(peer_id);
+        if known_changed {
+            self.persist_productive_peers();
+        }
+        debug!(
+            peer = %peer_id,
+            response_kind,
+            requested,
+            "peer returned no block data for requested hashes, disconnecting it from sync rotation"
         );
     }
 
@@ -182,6 +222,14 @@ impl PeerManager {
                 .earliest_block
                 .is_some_and(|earliest| earliest > required_block)
             {
+                continue;
+            }
+
+            if !peer_can_attempt_block_request(
+                peer.is_serving,
+                peer.remote_status.latest_block,
+                required_block,
+            ) {
                 continue;
             }
 
@@ -373,9 +421,17 @@ pub(super) fn is_stale_nonserving_peer(
     latest_block: Option<u64>,
     connected_for: Duration,
 ) -> bool {
-    !is_serving
-        && latest_block.unwrap_or_default() == 0
-        && connected_for >= USELESS_PEER_GRACE_PERIOD
+    !is_serving && latest_block == Some(0) && connected_for >= USELESS_PEER_GRACE_PERIOD
+}
+
+pub(super) fn is_saturated_remote_rejection(
+    reason: Option<DisconnectReason>,
+    is_serving: bool,
+    connected_for: Duration,
+) -> bool {
+    matches!(reason, Some(DisconnectReason::TooManyPeers))
+        && !is_serving
+        && connected_for <= EARLY_SESSION_DROP_THRESHOLD
 }
 
 pub(super) fn disconnect_note(
@@ -392,7 +448,7 @@ pub(super) fn disconnect_note(
         None if is_stale_nonserving_peer(is_serving, latest_block, connected_for) => {
             "peer never advertised a usable tip and was not useful for sync"
         }
-        None if !is_serving && latest_block.unwrap_or_default() == 0 => {
+        None if !is_serving && latest_block == Some(0) => {
             "peer disconnected before advertising a usable tip"
         }
         None if !is_serving => "peer disconnected before serving sync data",
@@ -426,8 +482,23 @@ pub(super) fn peer_is_preferred_for_block(
     if earliest_block.is_some_and(|earliest| earliest > required_block) {
         return false;
     }
+    if latest_block.is_some_and(|latest| latest < required_block) {
+        return false;
+    }
 
     is_serving || latest_block.is_some_and(|block| block > 0 && block >= required_block)
+}
+
+pub(super) fn peer_can_attempt_block_request(
+    is_serving: bool,
+    latest_block: Option<u64>,
+    required_block: u64,
+) -> bool {
+    if is_serving {
+        return true;
+    }
+
+    latest_block.is_some_and(|latest| latest >= required_block)
 }
 
 pub(super) fn should_persist_productive_update(
@@ -435,11 +506,6 @@ pub(super) fn should_persist_productive_update(
     known_changed: bool,
 ) -> bool {
     existing_index.is_none() || known_changed
-}
-
-pub(super) fn body_range_hint(required_block: u64, requested_hashes: usize) -> RangeInclusive<u64> {
-    let span = requested_hashes.saturating_sub(1) as u64;
-    required_block.saturating_sub(span)..=required_block
 }
 
 pub(super) fn normalize_network_head(mut head: Head) -> Head {
@@ -450,6 +516,20 @@ pub(super) fn normalize_network_head(mut head: Head) -> Head {
         head.timestamp = MAINNET.genesis().timestamp;
     }
     head
+}
+
+pub(super) fn advertised_status_range(
+    cached_range: Option<(u64, u64, B256)>,
+    _head: Head,
+) -> Option<(u64, u64, B256)> {
+    if let Some((earliest, latest, latest_hash)) = cached_range
+        && earliest <= latest
+        && !latest_hash.is_zero()
+    {
+        return Some((earliest, latest, latest_hash));
+    }
+
+    Some((0, 0, MAINNET.genesis_hash()))
 }
 
 #[cfg(test)]
@@ -531,20 +611,13 @@ mod tests {
     }
 
     #[test]
-    fn body_range_hint_tracks_requested_tail_range() {
-        assert_eq!(body_range_hint(150, 1), 150..=150);
-        assert_eq!(body_range_hint(150, 4), 147..=150);
-        assert_eq!(body_range_hint(2, 8), 0..=2);
-    }
-
-    #[test]
     fn stale_nonserving_peer_detection_requires_zero_tip_and_grace_period() {
         assert!(is_stale_nonserving_peer(
             false,
             Some(0),
             USELESS_PEER_GRACE_PERIOD
         ));
-        assert!(is_stale_nonserving_peer(
+        assert!(!is_stale_nonserving_peer(
             false,
             None,
             USELESS_PEER_GRACE_PERIOD + Duration::from_secs(1)
@@ -562,14 +635,39 @@ mod tests {
         assert!(!is_stale_nonserving_peer(
             false,
             Some(0),
-            Duration::from_secs(5)
+            USELESS_PEER_GRACE_PERIOD - Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn saturated_remote_rejection_requires_early_non_serving_disconnect() {
+        assert!(is_saturated_remote_rejection(
+            Some(DisconnectReason::TooManyPeers),
+            false,
+            Duration::from_secs(1)
+        ));
+        assert!(!is_saturated_remote_rejection(
+            Some(DisconnectReason::TooManyPeers),
+            true,
+            Duration::from_secs(1)
+        ));
+        assert!(!is_saturated_remote_rejection(
+            Some(DisconnectReason::TooManyPeers),
+            false,
+            EARLY_SESSION_DROP_THRESHOLD + Duration::from_secs(1)
+        ));
+        assert!(!is_saturated_remote_rejection(
+            None,
+            false,
+            Duration::from_secs(1)
         ));
     }
 
     #[test]
     fn peer_preference_requires_serving_or_sufficient_tip() {
         assert!(peer_is_preferred_for_block(false, Some(0), Some(500), 400));
-        assert!(peer_is_preferred_for_block(true, Some(350), Some(0), 400));
+        assert!(peer_is_preferred_for_block(true, Some(350), None, 400));
+        assert!(!peer_is_preferred_for_block(true, Some(350), Some(0), 400));
         assert!(!peer_is_preferred_for_block(
             true,
             Some(450),
@@ -585,6 +683,15 @@ mod tests {
         assert!(!peer_is_preferred_for_block(false, Some(0), Some(0), 400));
         assert!(!peer_is_preferred_for_block(false, Some(0), Some(399), 400));
         assert!(!peer_is_preferred_for_block(false, None, None, 400));
+    }
+
+    #[test]
+    fn block_request_candidates_require_serving_or_sufficient_tip() {
+        assert!(peer_can_attempt_block_request(false, Some(500), 400));
+        assert!(!peer_can_attempt_block_request(false, Some(0), 400));
+        assert!(!peer_can_attempt_block_request(false, Some(399), 400));
+        assert!(!peer_can_attempt_block_request(false, None, 400));
+        assert!(peer_can_attempt_block_request(true, None, 400));
     }
 
     #[test]
@@ -605,6 +712,50 @@ mod tests {
                 Duration::from_millis(10)
             ),
             "likely peer sent an invalid post-merge subprotocol message"
+        );
+    }
+
+    #[test]
+    fn advertised_status_range_uses_cached_window_when_available() {
+        let head = Head {
+            number: 10,
+            hash: B256::repeat_byte(0x10),
+            ..Default::default()
+        };
+        let cached = Some((7, 9, B256::repeat_byte(0x09)));
+
+        assert_eq!(
+            advertised_status_range(cached, head),
+            Some((7, 9, B256::repeat_byte(0x09)))
+        );
+    }
+
+    #[test]
+    fn advertised_status_range_falls_back_to_genesis_range() {
+        let head = Head {
+            number: 10,
+            hash: B256::repeat_byte(0x10),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            advertised_status_range(None, head),
+            Some((0, 0, MAINNET.genesis_hash()))
+        );
+    }
+
+    #[test]
+    fn advertised_status_range_ignores_invalid_cached_window() {
+        let head = Head {
+            number: 10,
+            hash: B256::repeat_byte(0x10),
+            ..Default::default()
+        };
+        let cached = Some((11, 9, B256::repeat_byte(0x09)));
+
+        assert_eq!(
+            advertised_status_range(cached, head),
+            Some((0, 0, MAINNET.genesis_hash()))
         );
     }
 }

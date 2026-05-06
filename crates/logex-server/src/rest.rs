@@ -101,6 +101,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         head_timestamp,
         indexed_head_block,
         stored_log_range,
+        historical_floor,
+        historical_anchor,
         chain_anchors,
         data_dir,
     ) = {
@@ -113,6 +115,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
             sync_head.and_then(|head| (head.timestamp > 0).then_some(head.timestamp)),
             storage.indexed_head_block(),
             stored_log_range(&storage),
+            storage.historical_floor(),
+            storage.historical_anchor(),
             storage.chain_anchors(),
             storage.data_dir().to_path_buf(),
         )
@@ -141,6 +145,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
                 .map(|anchor| anchor.block_number),
         )
         .map(|(top, finalized)| top.saturating_sub(finalized));
+    let historical_floor = historical_floor.or(sync.historical_execution_floor);
+    let historical_anchor = historical_anchor.or(sync.historical_execution_anchor);
+    let verified_from_block = historical_floor
+        .map(|floor| floor.block_number)
+        .or(stored_log_range.map(|range| range.0));
+    let verified_to_block = head_block.or(canonical_top_block);
     Json(serde_json::json!({
         "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
@@ -162,6 +172,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "query_coverage": {
             "stored_log_from_block": stored_log_range.map(|range| range.0),
             "stored_log_to_block": stored_log_range.map(|range| range.1),
+            "verified_from_block": verified_from_block,
+            "verified_to_block": verified_to_block,
             "latest_block": head_block,
             "latest_timestamp": head_timestamp,
             "indexed_head_block": indexed_head_block,
@@ -170,6 +182,11 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "storage_used_bytes": storage_metrics.storage_used_bytes,
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "eta_seconds": sync.eta_seconds,
+        "historical_execution_floor": historical_floor,
+        "historical_execution_anchor": historical_anchor,
+        "historical_target_block": sync.historical_target_block,
+        "historical_blocks_per_sec": sync.historical_blocks_per_sec,
+        "historical_eta_seconds": sync.historical_eta_seconds,
         "progress_pct": progress_pct,
         "canonical_top_block": canonical_top_block,
         "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
@@ -526,6 +543,11 @@ mod tests {
                 blocks_per_minute: 120.0,
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
+                historical_execution_floor: None,
+                historical_execution_anchor: None,
+                historical_target_block: logex_types::EXECUTION_HISTORY_TARGET_BLOCK,
+                historical_blocks_per_sec: 0.0,
+                historical_eta_seconds: None,
                 checkpoint: Some(WeakSubjectivityCheckpoint {
                     beacon_root: B256::repeat_byte(0x77),
                     beacon_slot: Some(123_456),

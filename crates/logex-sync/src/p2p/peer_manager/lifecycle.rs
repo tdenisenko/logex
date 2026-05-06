@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{FutureExt, StreamExt};
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::*;
 
@@ -51,16 +51,25 @@ impl PeerManager {
     }
 
     pub(super) fn seed_known_peers(&mut self) {
+        let now = Instant::now();
+        self.prune_saturated_peers(now);
         for peer in self.known_peers.clone() {
             if is_bootstrap_node(peer.id)
                 || peer.tcp_port == 0
                 || self.peers.contains_key(&peer.id)
                 || self.pending.contains_key(&peer.id)
+                || self.recently_saturated(peer.id, now)
+                || self.recently_submitted(peer.id, now)
             {
                 continue;
             }
 
-            self.pending.insert(peer.id, peer);
+            if !self.network_activated {
+                self.remember_pending(peer);
+                continue;
+            }
+
+            self.pending_dials.insert(peer.id, now);
             self.network.connect_peer_kind(
                 peer.id,
                 PeerKind::Basic,
@@ -77,7 +86,58 @@ impl PeerManager {
         while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
             self.handle_discovery_event(event);
         }
+        self.prune_saturated_peers(Instant::now());
         self.prune_stale_nonserving_peers();
+    }
+
+    pub(super) fn dial_pending_peers(&mut self, target: usize) {
+        if !self.network_activated || self.peers.len() >= target || self.pending.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let open_slots = target.saturating_sub(self.peers.len()).max(1);
+        let dial_budget = open_slots
+            .saturating_mul(4)
+            .clamp(1, MAX_PENDING_DIALS_PER_REFILL);
+        self.prune_submitted_dials(now);
+
+        let candidates: Vec<_> = self
+            .pending
+            .values()
+            .copied()
+            .filter(|node| {
+                !is_bootstrap_node(node.id)
+                    && node.tcp_port > 0
+                    && !self.peers.contains_key(&node.id)
+                    && !self.recently_saturated(node.id, now)
+                    && !self.recently_submitted(node.id, now)
+            })
+            .take(dial_budget)
+            .collect();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        for node in &candidates {
+            self.pending.remove(&node.id);
+            self.pending_dials.insert(node.id, now);
+            self.network.connect_peer_kind(
+                node.id,
+                PeerKind::Basic,
+                node.tcp_addr(),
+                Some(node.udp_addr()),
+            );
+        }
+
+        trace!(
+            submitted_peers = candidates.len(),
+            connected_peers = self.peers.len(),
+            pending_peers = self.pending.len(),
+            target,
+            "submitted discovered execution peers to execution peer scheduler"
+        );
     }
 
     pub(super) async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
@@ -116,11 +176,18 @@ impl PeerManager {
                 peer_id,
                 reason,
             }) => {
+                let backoff_saturated = self.should_backoff_saturated_peer(peer_id, reason);
                 self.log_session_closed(peer_id, reason);
                 self.remove_peer(peer_id);
+                if backoff_saturated {
+                    self.backoff_saturated_peer(peer_id);
+                }
             }
             NetworkEvent::Peer(reth_network::events::PeerEvent::PeerRemoved(peer_id)) => {
                 self.remove_peer(peer_id);
+            }
+            NetworkEvent::Peer(reth_network::events::PeerEvent::PeerAdded(peer_id)) => {
+                self.pending.remove(&peer_id);
             }
             NetworkEvent::Peer(_) => {}
             NetworkEvent::ActivePeerSession { info, messages } => {
@@ -131,16 +198,38 @@ impl PeerManager {
 
     pub(super) fn handle_discovery_event(&mut self, event: DiscoveryEvent) {
         match event {
-            DiscoveryEvent::NewNode(DiscoveredEvent::EventQueued { peer_id, addr, .. }) => {
+            DiscoveryEvent::NewNode(DiscoveredEvent::EventQueued {
+                peer_id,
+                addr,
+                fork_id,
+                ..
+            }) => {
+                if fork_id.is_some_and(|fork_id| !self.is_compatible_fork_id(fork_id)) {
+                    return;
+                }
                 let node = NodeRecord::new_with_ports(
                     addr.tcp().ip(),
                     addr.tcp().port(),
                     addr.udp().map(|socket| socket.port()),
                     peer_id,
                 );
+                trace!(
+                    peer = %peer_id,
+                    ?fork_id,
+                    "queued execution peer discovered for compatible or unverified fork"
+                );
                 self.remember_pending(node);
             }
-            DiscoveryEvent::EnrForkId(node, _) => {
+            DiscoveryEvent::EnrForkId(node, fork_id) => {
+                if !self.is_compatible_fork_id(fork_id) {
+                    trace!(
+                        peer = %node.id,
+                        ?fork_id,
+                        local_fork_id = ?self.fork_filter.current(),
+                        "ignoring execution peer with incompatible fork id"
+                    );
+                    return;
+                }
                 self.remember_pending(node);
             }
         }
@@ -151,10 +240,34 @@ impl PeerManager {
         info: reth_network::events::SessionInfo,
         messages: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     ) {
+        if info.version < EthVersion::Eth69 {
+            debug!(
+                peer = %info.peer_id,
+                remote_addr = %info.remote_addr,
+                version = ?info.version,
+                "disconnecting execution peer below eth/69"
+            );
+            self.remove_unsupported_session(info.peer_id);
+            return;
+        }
+
+        let latest_block = info.status.latest_block;
+        if latest_block.is_none_or(|latest| latest == 0) {
+            debug!(
+                peer = %info.peer_id,
+                remote_addr = %info.remote_addr,
+                version = ?info.version,
+                "disconnecting execution peer without a usable advertised block tip"
+            );
+            self.remove_unsupported_session(info.peer_id);
+            return;
+        }
+
         let mut record = self
             .pending
             .remove(&info.peer_id)
             .unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
+        self.pending_dials.remove(&info.peer_id);
         record = record.with_tcp_port(info.remote_addr.port());
 
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
@@ -181,14 +294,19 @@ impl PeerManager {
         debug!(
             peer = %info.peer_id,
             remote_addr = %info.remote_addr,
-            latest_block = info.status.latest_block.unwrap_or_default(),
+            latest_block = ?latest_block,
             version = ?info.version,
             "peer session established"
         );
     }
 
     pub(super) fn remember_pending(&mut self, node: NodeRecord) {
+        let now = Instant::now();
+        self.prune_saturated_peers(now);
         if is_bootstrap_node(node.id) || node.tcp_port == 0 || self.peers.contains_key(&node.id) {
+            return;
+        }
+        if self.recently_saturated(node.id, now) {
             return;
         }
         if self.pending.len() >= MAX_TRACKED_PENDING && !self.pending.contains_key(&node.id) {
@@ -211,6 +329,8 @@ impl PeerManager {
     pub(super) fn forget_peer(&mut self, peer_id: PeerId) -> bool {
         self.peers.remove(&peer_id);
         self.pending.remove(&peer_id);
+        self.pending_dials.remove(&peer_id);
+        self.saturated_peers.remove(&peer_id);
         self.peer_order.retain(|id| *id != peer_id);
         self.rebalance_request_cursor();
         let productive_before = self.productive.len();
@@ -222,6 +342,7 @@ impl PeerManager {
 
     pub(super) fn remove_peer(&mut self, peer_id: PeerId) {
         self.pending.remove(&peer_id);
+        self.pending_dials.remove(&peer_id);
         if let Some(peer) = self.peers.remove(&peer_id)
             && peer.is_serving
         {
@@ -231,11 +352,16 @@ impl PeerManager {
         self.rebalance_request_cursor();
     }
 
-    pub(super) fn prune_stale_nonserving_peers(&mut self) {
-        if self.peers.len() < self.max_peers.min(STALE_PEER_PRUNE_FLOOR) {
-            return;
+    pub(super) fn remove_unsupported_session(&mut self, peer_id: PeerId) {
+        self.network.disconnect_peer(peer_id);
+        self.network.remove_peer(peer_id, PeerKind::Basic);
+        let known_changed = self.forget_peer(peer_id);
+        if known_changed {
+            self.persist_productive_peers();
         }
+    }
 
+    pub(super) fn prune_stale_nonserving_peers(&mut self) {
         let stale_peers: Vec<_> = self
             .peers
             .iter()
@@ -266,6 +392,34 @@ impl PeerManager {
             self.network.disconnect_peer(peer_id);
             self.remove_peer(peer_id);
         }
+    }
+
+    pub(super) fn should_backoff_saturated_peer(
+        &self,
+        peer_id: PeerId,
+        reason: Option<DisconnectReason>,
+    ) -> bool {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return false;
+        };
+        is_saturated_remote_rejection(reason, peer.is_serving, peer.connected_at.elapsed())
+    }
+
+    pub(super) fn backoff_saturated_peer(&mut self, peer_id: PeerId) {
+        let until = Instant::now() + SATURATED_PEER_RETRY_DELAY;
+        self.saturated_peers.insert(peer_id, until);
+        self.pending.remove(&peer_id);
+        self.pending_dials.remove(&peer_id);
+    }
+
+    pub(super) fn recently_saturated(&self, peer_id: PeerId, now: Instant) -> bool {
+        self.saturated_peers
+            .get(&peer_id)
+            .is_some_and(|until| *until > now)
+    }
+
+    pub(super) fn prune_saturated_peers(&mut self, now: Instant) {
+        self.saturated_peers.retain(|_, until| *until > now);
     }
 
     pub(super) fn log_session_closed(&self, peer_id: PeerId, reason: Option<DisconnectReason>) {
