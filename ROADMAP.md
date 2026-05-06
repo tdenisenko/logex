@@ -119,8 +119,8 @@ LogEx should become a canonical Ethereum event-log node that:
 - The merged CL P2P milestone also does not yet implement the pre-Merge PoW canonicality path, so the project is still not the full end-to-end canonical system.
 - The clippy cleanup branch `fix/clippy-cleanup` has been merged through PR #68, keeping lint-only changes separate from UI work.
 - The dashboard UI work is merged, and the CL historical-sync fix is merged through PR #70.
-- The CL stability gate branch is validating the native beacon-history path with a fixed-port release smoke from a fresh checkpoint and a restart/resume pass over the same data directory.
-  - Latest observed fixed-port smoke state at roadmap update: checkpoint slot `14265280`, materialized floor block `24993445`, materialized ceiling block `25030926`, `37482` anchors, and `0` detected anchor-continuity gaps.
+- The CL history performance branch is validating native beacon-history throughput with a fixed-port release smoke on `18683`.
+  - Latest observed fixed-port smoke state at roadmap update: materialized floor block `24996057`, materialized ceiling block `25035461`, `39405` anchors, and `0` detected anchor-continuity gaps.
 
 ## Explicitly Not Needed
 
@@ -158,13 +158,20 @@ LogEx should become a canonical Ethereum event-log node that:
   - Persisting parent beacon roots with execution anchors keeps restarts from losing the authenticated backward walk; legacy anchors without that field are recovered by refetching the oldest known beacon root once.
 - Report CL materialized-anchor coverage from the consensus store rather than deriving floor, ceiling, and count separately in each status surface.
   - The status API now includes an anchor-continuity gap count based on contiguous execution block numbers and matching beacon parent roots, so live smokes can prove that backward expansion is not silently creating holes.
+- Treat the CL history target for execution-payload verification as the first PoS execution block, `15537394`, not genesis.
+  - Bellatrix beacon blocks carry execution payloads only after the Merge transition; pre-Merge log canonicality belongs to the separate EL PoW verification path.
+- Show CL history ETA from a rolling browser-side floor-movement sample.
+  - The ETA is sampled every 30 seconds over a 10-minute window to avoid the per-poll jitter that made earlier UI counters misleading.
+- Ignore peers for the current run when libp2p proves the dialed endpoint has the wrong peer identity.
+  - These stale discovery records are not useful transient failures, and retrying them wastes CL dial slots during history sync.
 
 ## Completed Since Last Run
 
-- Added consensus-store anchor coverage and exposed `materialized_execution_anchor_gap_count` through initial runtime status and `/status`.
-- Ran a fixed-port release smoke on `18683` from a checkpoint-sync endpoint, then restarted the same data directory with the updated binary.
-- Confirmed live and historical CL paths are active together after restart: the materialized floor moved below block `24993445`, the ceiling tracked the optimistic head at block `25030926`, and the persisted anchor store reported `0` gaps and `0` missing parent roots.
-- Validation run: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, targeted CL/server tests, release build, and the fixed-port CL P2P smoke.
+- Removed the main CL history materialization bottleneck: backward sync now persists only the newly extended floor range instead of rewriting the full checkpoint-to-floor anchor chain on every batch.
+- Raised CL history range concurrency from `4` to `8` after smoke runs showed range-capable peers were available but underused.
+- Hardened peer retention by ignoring wrong-peer-ID dial targets for the current run instead of repeatedly backoff-retrying stale discovery records.
+- Updated the dashboard history target to first PoS execution block `15537394` and added a remaining-time estimate for long CL history sync.
+- Validation run: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, release build, browser UI check, and the fixed-port CL P2P smoke.
 
 ## Remaining TODOs
 
@@ -180,8 +187,9 @@ LogEx should become a canonical Ethereum event-log node that:
 
 2. Long-Lived Beacon History Proving
    - TODO:
-     - keep the current fixed-port release smoke running so the backward parent-root walk can continue from the recent checkpoint toward the Merge
+     - keep the current fixed-port release smoke running so the backward parent-root walk can continue from the recent checkpoint toward the first PoS execution block
      - record a longer checkpoint-to-Merge soak result once the run has covered enough history to be meaningful
+     - continue tuning CL peer retention only if the soak shows request slots are underfilled or useful peers churn faster than discovery can replace them
    - Why this is still blocking:
      - restart/resume and short sustained smokes now show both directions moving with continuous anchors, but the full checkpoint-to-Merge expansion is still a long-lived network soak
    - Done when:
@@ -259,20 +267,24 @@ LogEx should become a canonical Ethereum event-log node that:
   - Resolution: Persist parent beacon roots for new anchors and refetch the oldest legacy root when the cached parent is unknown, allowing the authentic parent link to be recovered.
 - Challenge: A moving floor/ceiling alone could hide continuity bugs in the materialized anchor range.
   - Resolution: Added consensus-store anchor coverage and a status-visible gap count that treats skipped execution block numbers or broken beacon-parent links as continuity failures.
+- Challenge: Historical CL sync slowed as the verified backward chain grew.
+  - Resolution: Persist only the new floor extension during backward materialization and widen history request concurrency to use more range-capable peers when available.
+- Challenge: Public discovery returned endpoints whose actual libp2p identity did not match the ENR-derived peer.
+  - Resolution: Treat `WrongPeerId` and local-peer dial errors as unusable for the current run so the dialer can rotate to better candidates.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the touched CL store, CL scheduler status refresh, runtime status initialization, REST status fixture, and status/UI references.
-- No obsolete runtime modules were removed; `ordered_anchors()` remains used for verified beacon-chain seeding and tests.
+- Inspected the touched CL materialization path, scheduler concurrency constants, UI history labels, and stale history-target wording.
+- No obsolete runtime modules were removed; the removed UI wording was only superseded display text.
 - The remaining transitional consensus paths are still tracked in the TODO list.
 
 ## Git Workflow
 
-- Current branch after the stability gate: `master` fast-forwarded to the merged PR.
-- Task branch created: `fix/cl-sync-stability-gate`.
-- Commits made during this run: `45402c5 fix: add beacon sync stability coverage`.
-- Pull request status: PR #72 created after local validation and GitHub CI passed.
-- Merge status: PR #72 merged as `6367eab`.
+- Current branch: `perf/cl-history-sync-eta`.
+- Task branch created: `perf/cl-history-sync-eta`.
+- Commits made during this run: pending.
+- Pull request status: pending local commit/push after validation.
+- Merge status: pending PR checks.
 - Git/GitHub blockers: `gh` CLI authentication is invalid, so GitHub connector APIs are being used for PR operations.
 
 ## Known Issues or Risks
