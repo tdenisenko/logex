@@ -310,10 +310,6 @@
     background: linear-gradient(90deg, var(--cl), var(--finalized));
   }
 
-  .graph-fill.history {
-    background: linear-gradient(90deg, #ff8a65, var(--index));
-  }
-
   .graph-fill.el {
     left: 0;
     background: linear-gradient(90deg, var(--el), #9fc7ff);
@@ -343,13 +339,11 @@
   }
 
   .graph-dot.live { background: var(--cl); }
-  .graph-dot.history { background: #ff8a65; }
   .graph-dot.el { background: var(--el); }
   .graph-dot.index { background: var(--index); }
   .graph-dot.query { background: var(--query); }
 
   .graph-row.live { border-left-color: var(--cl); }
-  .graph-row.history { border-left-color: #ff8a65; }
   .graph-row.el { border-left-color: var(--el); }
   .graph-row.index { border-left-color: var(--index); }
   .graph-row.query { border-left-color: var(--query); }
@@ -448,7 +442,6 @@
   .marker.finalized .swatch { background: var(--finalized); }
   .marker.index .swatch { background: var(--index); }
   .marker.query .swatch { background: var(--query); }
-  .marker.history .swatch { background: #ff8a65; }
   .marker.neutral .swatch { background: var(--muted); }
 
   .marker .name {
@@ -731,7 +724,7 @@
     <div class="panel-title">
       <div>
         <h2>Sync Progress Graph</h2>
-        <div class="sub">Checkpoint, target block, indexed block, and queryable block ranges</div>
+        <div class="sub">CL forward anchors, EL validation, indexing, and queryable block ranges</div>
       </div>
     </div>
     <div class="graph-wrap">
@@ -748,21 +741,6 @@
             <span class="graph-dot live" id="graphLiveDot"></span>
           </div>
           <div class="graph-current" id="liveCurrentLabel">Current --</div>
-        </div>
-      </div>
-      <div class="graph-row history">
-        <div class="graph-row-label">
-          <strong>CL history path</strong>
-          <span>checkpoint down to first PoS execution block</span>
-          <div class="graph-row-value" id="graphHistoryValue">--</div>
-        </div>
-        <div class="graph-bar">
-          <div class="graph-limits"><span id="historyStartLimit">Start --</span><span id="historyEndLimit">Target --</span></div>
-          <div class="graph-track">
-            <span class="graph-fill history" id="graphHistoryFill"></span>
-            <span class="graph-dot history" id="graphHistoryDot"></span>
-          </div>
-          <div class="graph-current" id="historyCurrentLabel">Current --</div>
         </div>
       </div>
       <div class="graph-row el">
@@ -848,7 +826,7 @@
           <div class="panel-title">
             <div>
               <h2>CL P2P Network</h2>
-              <div class="sub">Native beacon light-client and beacon-history peers</div>
+              <div class="sub">Native beacon light-client and forward anchor peers</div>
             </div>
             <span class="pill" id="clBadge"><span class="dot"></span><strong id="clBadgeText">--</strong></span>
           </div>
@@ -861,8 +839,6 @@
             <div class="metric cl"><span class="k">Updates</span><span class="v" id="clUpdatePeers">--</span><span class="note">range/finality/optimistic</span></div>
             <div class="metric cl"><span class="k">Beacon Blocks</span><span class="v" id="clBlockPeers">--</span><span class="note">range/root peers</span></div>
             <div class="metric cl"><span class="k">Peer Pool</span><span class="v" id="clPeerPool">--</span><span class="note">preferred/cooldown/ignored</span></div>
-            <div class="metric cl"><span class="k">History Rate</span><span class="v" id="clHistoryRate">--</span><span class="note">verified blocks/sec</span></div>
-            <div class="metric cl"><span class="k">History ETA</span><span class="v" id="clHistoryEta">--</span><span class="note">to first PoS block</span></div>
           </div>
         </div>
 
@@ -891,7 +867,7 @@
         <div class="panel-title">
           <div>
             <h2>Consensus Markers</h2>
-            <div class="sub">Execution block markers derived from the checkpoint-centered CL view</div>
+            <div class="sub">Execution block markers derived from the forward CL light-client view</div>
           </div>
         </div>
         <div class="marker-grid">
@@ -899,10 +875,8 @@
           <div class="marker finalized"><span class="swatch"></span><span><span class="name">Finalized Block</span><span class="value" id="markerFinalized">--</span><span class="detail" id="markerFinalizedDetail">--</span></span></div>
           <div class="marker el"><span class="swatch"></span><span><span class="name">Optimistic Block</span><span class="value" id="markerOptimistic">--</span><span class="detail" id="markerOptimisticDetail">--</span></span></div>
           <div class="marker cl"><span class="swatch"></span><span><span class="name">Highest Verified Block</span><span class="value" id="markerMaterializedTip">--</span><span class="detail" id="markerMaterializedTipDetail">--</span></span></div>
-          <div class="marker history"><span class="swatch"></span><span><span class="name">Lowest Verified Block</span><span class="value" id="markerHistoryFloor">--</span><span class="detail" id="markerHistoryFloorDetail">--</span></span></div>
           <div class="marker index"><span class="swatch"></span><span><span class="name">Indexed Block</span><span class="value" id="markerIndexed">--</span><span class="detail" id="markerIndexedDetail">--</span></span></div>
           <div class="marker query"><span class="swatch"></span><span><span class="name">Query Logs</span><span class="value" id="markerQuery">--</span><span class="detail" id="markerQueryDetail">--</span></span></div>
-          <div class="marker neutral"><span class="swatch"></span><span><span class="name">First PoS Block</span><span class="value">15,537,394</span><span class="detail">CL execution-payload target</span></span></div>
         </div>
       </section>
 
@@ -910,7 +884,7 @@
         <div class="panel-title">
           <div>
             <h2>Sync Coverage</h2>
-            <div class="sub">Separate progress for CL live tracking, CL history backfill, EL validation, and indexed logs</div>
+            <div class="sub">Separate progress for CL live tracking, EL validation, and indexed logs</div>
           </div>
         </div>
         <div class="lane-list">
@@ -921,15 +895,6 @@
               <span class="range-item"><span class="label">From</span><span class="value" id="liveLaneFrom">--</span></span>
               <span class="range-item"><span class="label">Verified Tip</span><span class="value" id="liveLaneDone">--</span></span>
               <span class="range-item"><span class="label">Target</span><span class="value" id="liveLaneTarget">--</span></span>
-            </div>
-          </div>
-          <div class="lane">
-            <div class="lane-head"><strong>CL history path</strong><span id="historyLaneSummary">--</span></div>
-            <div class="bar bar-index"><span id="historyLaneBar"></span></div>
-            <div class="range-row">
-              <span class="range-item"><span class="label">From</span><span class="value" id="historyLaneFrom">--</span></span>
-              <span class="range-item"><span class="label">Lowest Verified</span><span class="value" id="historyLaneDone">--</span></span>
-              <span class="range-item"><span class="label">Target</span><span class="value" id="historyLaneTarget">--</span></span>
             </div>
           </div>
           <div class="lane">
@@ -1010,15 +975,8 @@
 var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
 var MAINNET_GENESIS_TIME_SECONDS = 1606824023;
 var SECONDS_PER_SLOT = 12;
-var FIRST_POS_EXECUTION_BLOCK = 15537394;
-var HISTORY_RATE_SAMPLE_INTERVAL_SECONDS = 30;
-var HISTORY_RATE_MIN_SAMPLE_SECONDS = 2 * 60;
-var HISTORY_RATE_WINDOW_SECONDS = 10 * 60;
 var latestStatus = null;
 var lastStatusTimestamp = null;
-var syncRateSamples = {
-  history: []
-};
 
 function byId(id) {
   return document.getElementById(id);
@@ -1067,13 +1025,6 @@ function fmtBlocks(value) {
 function fmtRate(value) {
   var number = numberOrNull(value);
   if (number == null) return '--';
-  return number.toFixed(2);
-}
-
-function fmtBlockRate(value) {
-  var number = numberOrNull(value);
-  if (number == null) return '--';
-  if (number >= 10) return number.toFixed(1);
   return number.toFixed(2);
 }
 
@@ -1154,36 +1105,6 @@ function fmtEta(seconds) {
   return s + 's';
 }
 
-function sampleDescendingSyncRate(name, blockNumber) {
-  var block = numberOrNull(blockNumber);
-  if (block == null) return null;
-
-  var now = Date.now() / 1000;
-  var samples = syncRateSamples[name] || [];
-  var latest = samples[samples.length - 1];
-  if (!latest || now - latest.time >= HISTORY_RATE_SAMPLE_INTERVAL_SECONDS) {
-    samples.push({ time: now, block: block });
-  }
-  var cutoff = now - HISTORY_RATE_WINDOW_SECONDS;
-  samples = samples.filter(function(sample) { return sample.time >= cutoff; });
-  syncRateSamples[name] = samples;
-  if (samples.length < 2) return null;
-
-  var newest = samples[samples.length - 1];
-  var hasStableWindow = false;
-  for (var i = 0; i < samples.length - 1; i += 1) {
-    var oldest = samples[i];
-    var elapsed = newest.time - oldest.time;
-    var blocks = oldest.block - newest.block;
-    if (elapsed < HISTORY_RATE_MIN_SAMPLE_SECONDS) continue;
-    hasStableWindow = true;
-    if (blocks > 0) {
-      return blocks / elapsed;
-    }
-  }
-  return hasStableWindow ? 0 : null;
-}
-
 function shortHash(value) {
   if (!value) return '--';
   var hash = String(value);
@@ -1261,8 +1182,6 @@ function updateStatus(data) {
   var checkpointBlock = checkpointExecutionBlock(clLight);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
   var checkpointTime = headerTimestamp(checkpointHeader) || slotTimestamp(checkpointSlot);
-  var materializedFloor = anchorBlock(data.materialized_execution_floor);
-  var materializedFloorTime = anchorTimestamp(data.materialized_execution_floor);
   var materializedTip = anchorBlock(data.materialized_execution_ceiling);
   var materializedTipTime = anchorTimestamp(data.materialized_execution_ceiling);
   var optimistic = anchorBlock(data.optimistic_execution_head);
@@ -1295,27 +1214,7 @@ function updateStatus(data) {
   var liveRemaining = latestKnown != null && materializedTip != null
     ? Math.max(0, latestKnown - materializedTip)
     : null;
-  var historyDone = checkpointBlock != null && materializedFloor != null
-    ? Math.max(0, checkpointBlock - Math.max(materializedFloor, FIRST_POS_EXECUTION_BLOCK))
-    : 0;
-  var historyTotal = checkpointBlock != null
-    ? Math.max(0, checkpointBlock - FIRST_POS_EXECUTION_BLOCK)
-    : 0;
-  var historyPct = ratio(historyDone, historyTotal);
-  var historyRemaining = materializedFloor != null
-    ? Math.max(0, materializedFloor - FIRST_POS_EXECUTION_BLOCK)
-    : null;
-  var historyRate = sampleDescendingSyncRate('history', materializedFloor);
-  var historyEtaSeconds = historyRate != null && historyRate > 0 && historyRemaining != null
-    ? historyRemaining / historyRate
-    : null;
   var liveRemainingText = liveRemaining == null ? 'Waiting for highest verified block' : fmtBlocks(liveRemaining) + ' remaining before CL verification reaches target block';
-  var historyEtaText = historyEtaSeconds == null
-    ? 'ETA sampling recent pace'
-    : 'ETA ' + fmtEta(historyEtaSeconds) + ' at ' + fmtBlockRate(historyRate) + ' blocks/sec';
-  var historyRemainingText = historyRemaining == null
-    ? 'Waiting for lowest verified block'
-    : fmtBlocks(historyRemaining) + ' remaining before CL history reaches first PoS block';
   var elPct = target > 0 ? ratio(current, target) : 0;
   var queryPct = queryLatest != null && queryTo != null ? ratio(queryTo, queryLatest) : 0;
   var queryRange = blockRange(queryFrom, queryTo);
@@ -1352,8 +1251,6 @@ function updateStatus(data) {
 
   setWidth('graphLiveFill', livePct);
   setLeft('graphLiveDot', livePct);
-  setWidth('graphHistoryFill', historyPct);
-  setLeft('graphHistoryDot', historyPct);
   setWidth('graphElFill', elPct);
   setLeft('graphElDot', elPct);
   setWidth('graphIndexFill', indexPct);
@@ -1362,16 +1259,12 @@ function updateStatus(data) {
   setLeft('graphQueryStartDot', queryStartPct);
   setLeft('graphQueryEndDot', queryEndPct);
   setText('graphLiveValue', checkpointBlock == null ? 'Waiting for checkpoint' : liveRemainingText);
-  setText('graphHistoryValue', checkpointBlock == null ? 'Waiting for checkpoint' : historyRemainingText);
   setText('graphElValue', target > 0 ? fmt(current) + ' of ' + fmt(target) + ' blocks validated' : 'Awaiting peer tip');
   setText('graphIndexValue', indexedHead == null ? 'Log indexing has not started' : fmt(indexedHead) + ' indexed; target block ' + fmt(latestKnown));
   setText('graphQueryValue', queryFrom == null ? 'No local log rows' : queryRange);
   setText('liveStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
   setText('liveEndLimit', latestKnown == null ? 'Target --' : 'Target block ' + blockWithTimestamp(latestKnown, latestKnownTime));
   setText('liveCurrentLabel', materializedTip == null ? 'Highest verified block --' : 'Highest verified block ' + blockWithTimestamp(materializedTip, materializedTipTime));
-  setText('historyStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
-  setText('historyEndLimit', 'Target first PoS block ' + fmt(FIRST_POS_EXECUTION_BLOCK));
-  setText('historyCurrentLabel', materializedFloor == null ? 'Lowest verified block --' : 'Lowest verified block ' + blockWithTimestamp(materializedFloor, materializedFloorTime));
   setText('elStartLimit', 'Start block 0');
   setText('elEndLimit', target > 0 ? 'Target peer tip ' + fmt(target) : 'Target peer tip --');
   setText('elCurrentLabel', 'Current validated cursor ' + fmt(current));
@@ -1387,22 +1280,19 @@ function updateStatus(data) {
   setText('clBadgeText', clState);
   setText('elBadgeText', nodeLabel);
   var pendingForwardRanges = numberOrNull(clNetwork.pending_forward_beacon_blocks_by_range_requests);
-  var pendingBackwardRanges = numberOrNull(clNetwork.pending_backward_beacon_blocks_by_range_requests);
-  var pendingHistoryRanges = pendingForwardRanges == null && pendingBackwardRanges == null
-    ? 'history ranges ' + fmt(clNetwork.pending_beacon_blocks_by_range_requests)
-    : 'history fwd/bwd ' + fmt(pendingForwardRanges) + ' / ' + fmt(pendingBackwardRanges);
+  var pendingAnchorRanges = pendingForwardRanges == null
+    ? 'anchor ranges ' + fmt(clNetwork.pending_beacon_blocks_by_range_requests)
+    : 'anchor ranges ' + fmt(pendingForwardRanges);
 
   setText('clConnected', fmt(clNetwork.connected_peer_sessions));
   setText('clDiscovered', fmt(clNetwork.discovered_peers));
   setText('clStatusPeers', fmt(clNetwork.status_peers));
   setText('clInflight', fmt(clNetwork.pending_rpc_requests));
-  setText('clInflightNote', 'pending RPCs; ' + pendingHistoryRanges);
+  setText('clInflightNote', 'pending RPCs; ' + pendingAnchorRanges);
   setText('clBootstrapPeers', fmt(clNetwork.bootstrap_peers));
   setText('clUpdatePeers', fmt((numberOrNull(clNetwork.updates_by_range_peers) || 0) + (numberOrNull(clNetwork.finality_update_peers) || 0) + (numberOrNull(clNetwork.optimistic_update_peers) || 0)));
   setText('clBlockPeers', fmt((numberOrNull(clNetwork.beacon_blocks_by_range_peers) || 0) + (numberOrNull(clNetwork.beacon_blocks_by_root_peers) || 0)));
   setText('clPeerPool', fmt(clNetwork.preferred_peers) + ' / ' + fmt(clNetwork.cooldown_peers) + ' / ' + fmt(clNetwork.ignored_peers));
-  setText('clHistoryRate', fmtBlockRate(historyRate));
-  setText('clHistoryEta', historyEtaSeconds == null ? '--' : fmtEta(historyEtaSeconds));
 
   setText('elConnected', fmt(data.connected_peers));
   setText('elServing', fmt(data.serving_peers));
@@ -1421,8 +1311,6 @@ function updateStatus(data) {
   setText('markerOptimisticDetail', detailParts(['slot ' + fmt(anchorSlot(data.optimistic_execution_head)), fmtTimestamp(optimisticTime)]));
   setText('markerMaterializedTip', fmt(materializedTip));
   setText('markerMaterializedTipDetail', detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_ceiling)), fmtTimestamp(materializedTipTime), fmt(data.materialized_execution_anchor_count) + ' anchors']));
-  setText('markerHistoryFloor', fmt(materializedFloor));
-  setText('markerHistoryFloorDetail', materializedFloor == null || checkpointBlock == null ? 'not started' : detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_floor)), fmtTimestamp(materializedFloorTime), historyRemainingText, historyEtaText]));
   setText('markerIndexed', fmt(indexedHead));
   setText('markerIndexedDetail', detailParts([indexedAnchorTime == null ? null : fmtTimestamp(indexedAnchorTime), 'lag ' + fmt(data.index_lag_blocks) + ' blocks']));
   setText('markerQuery', queryRange);
@@ -1433,12 +1321,6 @@ function updateStatus(data) {
   setText('liveLaneFrom', fmt(checkpointBlock));
   setText('liveLaneDone', fmt(materializedTip));
   setText('liveLaneTarget', fmt(latestKnown));
-
-  setText('historyLaneSummary', checkpointBlock != null ? historyPct.toFixed(1) + '% complete; ' + historyRemainingText + '; ' + historyEtaText : 'waiting for checkpoint');
-  setWidth('historyLaneBar', historyPct);
-  setText('historyLaneFrom', fmt(checkpointBlock));
-  setText('historyLaneDone', fmt(materializedFloor));
-  setText('historyLaneTarget', fmt(FIRST_POS_EXECUTION_BLOCK));
 
   setText('elLaneSummary', target > 0 ? elPct.toFixed(1) + '% to peer tip' : 'awaiting tip');
   setWidth('elLaneBar', elPct);
