@@ -9,8 +9,8 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Remote data directory: `/root/logex-data-remote`
 - HTTP port: `18683`
 - `/status` reports `historical_target_block: 0`
-- Last sampled status: historical floor `24,694,448`, 96 connected EL peers, 92 serving EL peers, and historical reverse sync at `31.31 blocks/sec` since the latest restart
-- Recent warmed batches complete in roughly 8-13 seconds per 1024 blocks, but full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
+- Last sampled status: historical floor `24,647,344`, 32 connected EL peers, 32 serving EL peers, and historical reverse sync at `65.99 blocks/sec` since the latest restart
+- Recent warmed batches complete in roughly 6.5-13 seconds per 1024 blocks after capping combined body/receipt chunks, but full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
 
 ## Completed Since Last Run
 
@@ -18,6 +18,7 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Added batched historical ingestion and a pipelined body/receipt downloader for reverse sync.
 - Tuned EL peer selection with request-rate scoring, productive-peer persistence, Geth-style inbound/outbound capacity, bounded dialing, and `eth/68-69` capability alignment.
 - Added a reverse-sync prefetch path so the next historical body/receipt batch can be fetched while the current validated batch is written.
+- Capped combined body/receipt chunks to keep each 1024-block window spread across more peers instead of letting adaptive request limits collapse the window into a handful of large requests.
 - Kept the effective 1024-block historical window after live testing showed larger header requests are capped by peers.
 - Reverted peer-retention and batch-size experiments that did not improve live samples.
 - Added storage compression, query limits, pagination support, and UI status corrections for EL historical coverage.
@@ -103,12 +104,17 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Resolution: Identified body/receipt fetch latency and serialized historical windows as the current bottleneck, then added one-window prefetch during historical storage writes.
   - Remaining: The downloader still needs deeper multi-window scheduling to approach a sub-6-hour target.
 
+- Challenge: Adaptive request limits made combined body/receipt windows too coarse for the current single-window downloader.
+  - Resolution: Capped combined body/receipt chunks at 32 blocks so one 1024-block historical window fans out across more peers.
+  - Remaining: This improved the latest sample to `65.99 blocks/sec`, but still leaves the ETA far above the target.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected EL peer management, historical ingestion, storage append/WAL paths, and background indexing.
 - Removed or reverted ineffective peer-retention experiments that did not improve live samples.
 - Removed the ineffective 4096-header historical window experiment after peers continued returning 1024 headers.
 - Replaced an oversized P2P constructor argument list with a config struct while fixing clippy.
+- Kept combined body/receipt chunk capping because the remote sample improved; no new ineffective code remains from this pass.
 - Confirmed obsolete single-block historical ingestion is no longer referenced; batched historical ingestion is the active path.
 - No additional obsolete pipeline code was removed because the remaining request paths are still used as fallback or validation paths.
 

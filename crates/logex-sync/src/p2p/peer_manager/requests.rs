@@ -11,6 +11,7 @@ use super::*;
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_MIN_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
+const MAX_PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 2;
 const MAX_PARALLEL_BODY_RECEIPT_REQUESTS: usize = 128;
@@ -1111,8 +1112,10 @@ impl PeerManager {
         self.dynamic_chunk_ranges_with(total_items, |chunk_index| {
             let body_peer = body_peer_ids[chunk_index % body_peer_ids.len()];
             let receipt_peer = receipt_peer_ids[chunk_index % receipt_peer_ids.len()];
-            self.peer_request_limit(body_peer, PeerRequestKind::Bodies)
-                .min(self.peer_request_limit(receipt_peer, PeerRequestKind::Receipts))
+            body_receipt_chunk_limit(
+                self.peer_request_limit(body_peer, PeerRequestKind::Bodies),
+                self.peer_request_limit(receipt_peer, PeerRequestKind::Receipts),
+            )
         })
     }
 
@@ -2386,6 +2389,12 @@ fn request_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
         .clamp(1, max_in_flight)
 }
 
+fn body_receipt_chunk_limit(body_limit: usize, receipt_limit: usize) -> usize {
+    body_limit
+        .min(receipt_limit)
+        .min(MAX_PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS)
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{ReceiptWithBloom, TxType};
@@ -2455,6 +2464,13 @@ mod tests {
         assert_eq!(request_window_limit(1, 16), 2);
         assert_eq!(request_window_limit(2, 16), 4);
         assert_eq!(request_window_limit(8, 16), 16);
+    }
+
+    #[test]
+    fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
+        assert_eq!(body_receipt_chunk_limit(128, 128), 32);
+        assert_eq!(body_receipt_chunk_limit(16, 128), 16);
+        assert_eq!(body_receipt_chunk_limit(128, 8), 8);
     }
 
     #[test]
