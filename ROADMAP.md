@@ -116,10 +116,10 @@ Fresh fixed-port remote smoke on May 8, 2026:
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: no
-- Commits made during this run: pending
-- Pull request status: draft PR pending
+- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`)
+- Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not applicable yet
-- Git/GitHub blockers: none known before PR creation; the PR should remain draft because the sub-6-hour sync target is not met yet
+- Git/GitHub blockers: local `gh` auth token is invalid, but the GitHub connector created the draft PR successfully; the PR should remain draft because the sub-6-hour sync target is not met yet
 
 ## Known Issues or Risks
 
