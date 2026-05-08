@@ -18,6 +18,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Improved EL peer ramp behavior with a larger sync peer target, more outbound dial capacity, and temporary demotion/backoff for unresponsive dial candidates instead of deleting persisted productive peers.
 - Increased the remote test dial ceiling again after the 1024-prefix run showed network headroom but only 17 serving peers.
 - Reused successful receipt responses across body-peer retries inside a body/receipt chunk so a failed body peer does not force duplicate receipt downloads for the same hashes.
+- Added a historical tail result cache so completed out-of-order body/receipt chunks below the accepted prefix can be queued for validation instead of being refetched after floor advancement.
 
 ## Remaining TODOs
 
@@ -49,9 +50,8 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 
 - EL historical validation targets genesis because the CL checkpoint only proves a recent execution pivot.
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
-- Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches 1024 blocks; the scheduler keeps extra chunk headroom for gaps but does not eagerly launch the full tail.
+- Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches 1024 blocks; already completed tail chunks are queued for ordered validation instead of discarded.
 - Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure during dense log ranges.
-- Reverse-sync windows currently use 1024 blocks to match the accepted contiguous prefix. Larger windows need true streaming chunk queues before they are worth re-enabling.
 - Unresponsive dial candidates receive temporary in-memory backoff and productive-queue demotion, not deletion from the persisted known-peer set.
 - Outbound dial capacity is intentionally higher than a general-purpose full node because LogEx is a sync-focused reader and needs to rebuild a large serving peer pool quickly after restart.
 - Query limits remain capped at `10,000` rows with `50` row default pages; storage keeps dictionary/topic compression and periodic compaction.
@@ -73,6 +73,9 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 
 - Challenge: The chunk pipeline could discard a successful receipt response when the paired body peer failed.
   - Resolution: Cached that receipt response for the next body retry and still validates it before ingestion.
+
+- Challenge: Re-enabling larger reverse windows previously wasted tail work after the first accepted prefix.
+  - Resolution: Added tail-batch reuse before restoring 2048-block windows.
 
 ## Dead Code and Obsolescence Cleanup
 

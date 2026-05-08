@@ -15,9 +15,9 @@ const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 3;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
-const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
-const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 1_024;
-const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
+const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
+const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 2_048;
+const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
@@ -178,14 +178,16 @@ fn validate_historical_block(
     })
 }
 
-fn spawn_historical_prepare_task(batch: HistoricalFetchedBatch) -> HistoricalPrepareTask {
+fn spawn_historical_prepare_task(mut batch: HistoricalFetchedBatch) -> HistoricalPrepareTask {
     let child_header = batch.child_header.clone();
     let next_child_header = historical_batch_next_child_header(&batch);
+    let tail_batches = std::mem::take(&mut batch.tail_batches);
     let handle = tokio::spawn(async move { prepare_historical_batch(batch).await });
 
     HistoricalPrepareTask {
         child_header,
         next_child_header,
+        tail_batches,
         handle,
     }
 }
@@ -314,6 +316,68 @@ fn historical_header_batch_matches_child(
 
 fn historical_header_batch_next_child_header(batch: &HistoricalHeaderBatch) -> Option<Header> {
     batch.headers.last().cloned()
+}
+
+fn historical_tail_batches_from_completion(
+    header_peer: PeerId,
+    headers: &[Header],
+    hashes: &[B256],
+    consumed_blocks: usize,
+    completion: BodyReceiptRequestCompletion,
+) -> (Vec<SourcedBodyReceipts>, Vec<HistoricalFetchedBatch>) {
+    let mut tail_batches = Vec::new();
+    let mut tail_chunks = completion.tail_chunks;
+    let mut tail_start = consumed_blocks;
+
+    while tail_start < headers.len() {
+        let Some(mut tail_blocks) = tail_chunks.remove(&tail_start) else {
+            break;
+        };
+        let batch_start = tail_start;
+        tail_start = tail_start.saturating_add(tail_blocks.len());
+
+        while let Some(mut next_blocks) = tail_chunks.remove(&tail_start) {
+            tail_start = tail_start.saturating_add(next_blocks.len());
+            tail_blocks.append(&mut next_blocks);
+        }
+
+        let Some(child_header) = batch_start
+            .checked_sub(1)
+            .and_then(|index| headers.get(index))
+            .cloned()
+        else {
+            break;
+        };
+        let batch_end = batch_start.saturating_add(tail_blocks.len());
+        let batch_headers = headers
+            .get(batch_start..batch_end)
+            .unwrap_or_default()
+            .to_vec();
+        let batch_hashes = hashes
+            .get(batch_start..batch_end)
+            .unwrap_or_default()
+            .to_vec();
+        let required_block = batch_headers
+            .last()
+            .map(|header| header.number())
+            .unwrap_or_else(|| child_header.number().saturating_sub(1));
+
+        if !batch_headers.is_empty() && batch_headers.len() == tail_blocks.len() {
+            tail_batches.push(HistoricalFetchedBatch {
+                child_header,
+                header_peer,
+                headers: batch_headers,
+                hashes: batch_hashes,
+                blocks: tail_blocks,
+                tail_batches: Vec::new(),
+                required_block,
+                header_elapsed: Duration::ZERO,
+                body_receipt_elapsed: Duration::ZERO,
+            });
+        }
+    }
+
+    (completion.blocks, tail_batches)
 }
 
 impl SyncEngine {
@@ -880,12 +944,7 @@ impl SyncEngine {
         next_child_header: &mut Option<Header>,
     ) -> bool {
         match result {
-            Ok(Some(batch)) => {
-                let task = spawn_historical_prepare_task(batch);
-                *next_child_header = historical_prepare_task_next_child_header(&task);
-                self.historical_prefetch.push_back(task);
-                true
-            }
+            Ok(Some(batch)) => self.enqueue_historical_fetched_batch(batch, next_child_header) > 0,
             Ok(None) => {
                 *next_child_header = None;
                 false
@@ -896,6 +955,30 @@ impl SyncEngine {
                 false
             }
         }
+    }
+
+    fn enqueue_historical_fetched_batch(
+        &mut self,
+        batch: HistoricalFetchedBatch,
+        next_child_header: &mut Option<Header>,
+    ) -> usize {
+        let mut task = spawn_historical_prepare_task(batch);
+        *next_child_header = historical_prepare_task_next_child_header(&task);
+        let tail_batches = std::mem::take(&mut task.tail_batches);
+        self.historical_prefetch.push_back(task);
+        1 + self.enqueue_historical_tail_batches(tail_batches, next_child_header)
+    }
+
+    fn enqueue_historical_tail_batches(
+        &mut self,
+        tail_batches: Vec<HistoricalFetchedBatch>,
+        next_child_header: &mut Option<Header>,
+    ) -> usize {
+        let mut queued = 0usize;
+        for batch in tail_batches {
+            queued += self.enqueue_historical_fetched_batch(batch, next_child_header);
+        }
+        queued
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
@@ -1083,12 +1166,26 @@ impl SyncEngine {
         } = header_batch;
 
         match self.peers.complete_bodies_and_receipts_request(outcome) {
-            Ok(Some(blocks)) if !blocks.is_empty() && blocks.len() <= headers.len() => {
-                let next_child_header = blocks
+            Ok(Some(completion))
+                if !completion.blocks.is_empty() && completion.blocks.len() <= headers.len() =>
+            {
+                let consumed_blocks = completion.blocks.len();
+                let (blocks, tail_batches) = historical_tail_batches_from_completion(
+                    header_peer,
+                    &headers,
+                    &hashes,
+                    consumed_blocks,
+                    completion,
+                );
+                let prefix_next_child_header = blocks
                     .len()
                     .checked_sub(1)
                     .and_then(|index| headers.get(index))
                     .cloned();
+                let next_child_header = tail_batches
+                    .last()
+                    .and_then(historical_batch_next_child_header)
+                    .or(prefix_next_child_header);
                 self.historical_fetch_expected_sequence =
                     self.historical_fetch_expected_sequence.saturating_add(1);
                 self.historical_fetch_expected_child = next_child_header;
@@ -1098,15 +1195,16 @@ impl SyncEngine {
                     headers,
                     hashes,
                     blocks,
+                    tail_batches,
                     required_block,
                     header_elapsed,
                     body_receipt_elapsed,
                 }))
             }
-            Ok(Some(blocks)) => {
+            Ok(Some(completion)) => {
                 tracing::debug!(
                     headers = headers.len(),
-                    blocks = blocks.len(),
+                    blocks = completion.blocks.len(),
                     "historical body/receipt pipeline returned unusable response, resetting lookahead"
                 );
                 self.reset_historical_fetch_pipeline();
@@ -1287,11 +1385,15 @@ impl SyncEngine {
 
     async fn ingest_historical_prepared_task(
         &mut self,
-        task: HistoricalPrepareTask,
+        mut task: HistoricalPrepareTask,
         prefetched: bool,
     ) -> Result<bool> {
         let batch_started = std::time::Instant::now();
-        let next_child_header = task.next_child_header.clone();
+        let mut next_child_header = task.next_child_header.clone();
+        let queued_tail_batches = self.enqueue_historical_tail_batches(
+            std::mem::take(&mut task.tail_batches),
+            &mut next_child_header,
+        );
         let storage = Arc::clone(&self.storage);
         let subscriptions = self.subscriptions.clone();
         let prepare_and_write = write_prepared_historical_batch(storage, subscriptions, task);
@@ -1393,6 +1495,7 @@ impl SyncEngine {
             prefetched,
             prefetched_next = prefetched_next_batches > 0,
             prefetched_next_batches,
+            queued_tail_batches,
             prefetch_queue_depth = self.historical_prefetch.len(),
             header_ms = header_elapsed.as_millis(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),

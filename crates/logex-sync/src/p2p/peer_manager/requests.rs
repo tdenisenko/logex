@@ -82,6 +82,11 @@ pub(crate) struct BodyReceiptRequestOutcome {
     stats: TypedRequestStats,
 }
 
+pub(crate) struct BodyReceiptRequestCompletion {
+    pub(crate) blocks: Vec<SourcedBodyReceipts>,
+    pub(crate) tail_chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+}
+
 #[derive(Clone)]
 struct RequestPeerSnapshot {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
@@ -327,6 +332,7 @@ impl PeerManager {
         };
         let outcome = plan.execute().await;
         self.complete_bodies_and_receipts_request(outcome)
+            .map(|completion| completion.map(|completion| completion.blocks))
     }
 
     pub(crate) async fn prepare_bodies_and_receipts_request(
@@ -447,7 +453,7 @@ impl PeerManager {
     pub(crate) fn complete_bodies_and_receipts_request(
         &mut self,
         outcome: BodyReceiptRequestOutcome,
-    ) -> Result<Option<Vec<SourcedBodyReceipts>>> {
+    ) -> Result<Option<BodyReceiptRequestCompletion>> {
         let BodyReceiptRequestOutcome {
             total_hashes,
             chunks,
@@ -461,19 +467,14 @@ impl PeerManager {
         self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
         self.remove_dead_peers(&dead_peers);
 
-        let mut blocks = Vec::with_capacity(total_hashes);
-        let mut expected_start = 0usize;
-        for (start, chunk_blocks) in chunks {
-            if start != expected_start {
-                break;
-            }
-            expected_start += chunk_blocks.len();
-            blocks.extend(chunk_blocks);
-        }
+        let (blocks, tail_chunks) = split_contiguous_body_receipt_chunks(total_hashes, chunks);
 
         if !blocks.is_empty() {
             self.advance_request_cursor();
-            Ok(Some(blocks))
+            Ok(Some(BodyReceiptRequestCompletion {
+                blocks,
+                tail_chunks,
+            }))
         } else {
             bail!(
                 "body/receipt chunk pipeline completed {}/{} blocks",
@@ -2605,6 +2606,29 @@ fn contiguous_chunk_blocks(chunks: &BTreeMap<usize, Vec<SourcedBodyReceipts>>) -
     expected_start
 }
 
+fn split_contiguous_body_receipt_chunks(
+    total_hashes: usize,
+    chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+) -> (
+    Vec<SourcedBodyReceipts>,
+    BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+) {
+    let mut blocks = Vec::with_capacity(total_hashes);
+    let mut tail_chunks = BTreeMap::new();
+    let mut expected_start = 0usize;
+
+    for (start, chunk_blocks) in chunks {
+        if start == expected_start {
+            expected_start += chunk_blocks.len();
+            blocks.extend(chunk_blocks);
+        } else {
+            tail_chunks.insert(start, chunk_blocks);
+        }
+    }
+
+    (blocks, tail_chunks)
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum RequestAttempt {
     Disconnected,
@@ -3026,6 +3050,19 @@ mod tests {
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 2);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 6);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 4096), 6);
+    }
+
+    #[test]
+    fn split_contiguous_body_receipt_chunks_preserves_tail_chunks() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, Vec::new());
+        chunks.insert(4, Vec::new());
+        chunks.insert(8, Vec::new());
+
+        let (blocks, tail_chunks) = split_contiguous_body_receipt_chunks(12, chunks);
+
+        assert!(blocks.is_empty());
+        assert_eq!(tail_chunks.keys().copied().collect::<Vec<_>>(), vec![4, 8]);
     }
 
     #[test]

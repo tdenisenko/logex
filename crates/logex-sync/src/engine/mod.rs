@@ -19,7 +19,8 @@ use logex_types::{NodeState, SyncStatus};
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::{
-    BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager, SourcedBodyReceipts,
+    BodyReceiptRequestCompletion, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
+    SourcedBodyReceipts,
 };
 use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
@@ -66,6 +67,7 @@ pub(super) struct HistoricalFetchedBatch {
     headers: Vec<Header>,
     hashes: Vec<B256>,
     blocks: Vec<SourcedBodyReceipts>,
+    tail_batches: Vec<HistoricalFetchedBatch>,
     required_block: u64,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
@@ -138,6 +140,7 @@ pub(super) struct HistoricalValidationFailure {
 pub(super) struct HistoricalPrepareTask {
     child_header: Header,
     next_child_header: Option<Header>,
+    tail_batches: Vec<HistoricalFetchedBatch>,
     handle: JoinHandle<
         Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
     >,

@@ -41,7 +41,9 @@ mod requests;
 mod state;
 
 use self::requests::RequestAttempt;
-pub(crate) use self::requests::{BodyReceiptRequestOutcome, BodyReceiptRequestPlan};
+pub(crate) use self::requests::{
+    BodyReceiptRequestCompletion, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
+};
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
     is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
