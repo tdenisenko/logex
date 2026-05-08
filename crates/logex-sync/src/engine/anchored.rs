@@ -28,6 +28,16 @@ struct ValidatedHistoricalBlock {
     ingest: HistoricalBlockIngest,
 }
 
+struct PreparedHistoricalIngest {
+    outcome: HistoricalIngestOutcome,
+    peer_notes: Vec<PeerId>,
+    lowest_block: u64,
+    highest_block: u64,
+    block_count: usize,
+    validation_elapsed: Duration,
+    storage_elapsed: Duration,
+}
+
 struct HistoricalValidationFailure {
     peer: PeerId,
     response_kind: &'static str,
@@ -791,78 +801,110 @@ impl SyncEngine {
             .checked_sub(1)
             .and_then(|index| headers.get(index))
             .cloned();
-        let validation_started = std::time::Instant::now();
-        let validated =
-            match validate_historical_blocks_parallel(&headers, &hashes, blocks).await? {
-                Ok(validated) => validated,
-                Err(failure) => {
-                    tracing::warn!(
-                        block_number = failure.block_number,
-                        block_hash = %failure.block_hash,
-                        peer = %failure.peer,
-                        error = %failure.message,
-                        "historical block validation failed"
-                    );
-                    self.peers
-                        .report_invalid_block_data(failure.peer, failure.response_kind);
-                    return Ok(false);
-                }
-            };
-        let validation_elapsed = validation_started.elapsed();
+        let requested_headers = headers.len();
+        let storage = Arc::clone(&self.storage);
+        let subscriptions = self.subscriptions.clone();
+        let prepare_and_write = async move {
+            let validation_started = std::time::Instant::now();
+            let validated =
+                match validate_historical_blocks_parallel(&headers, &hashes, blocks).await? {
+                    Ok(validated) => validated,
+                    Err(failure) => return Ok::<_, eyre::Report>(Err(failure)),
+                };
+            let validation_elapsed = validation_started.elapsed();
 
-        let mut newly_serving_peers = HashSet::new();
-        let mut ingest_batch = Vec::with_capacity(validated.len());
-        for block in validated {
-            self.note_serving_peer(header_peer, &mut newly_serving_peers);
-            self.note_serving_peer(block.body_peer, &mut newly_serving_peers);
-            self.note_serving_peer(block.receipt_peer, &mut newly_serving_peers);
-            ingest_batch.push(block.ingest);
-        }
+            let mut peer_notes = Vec::with_capacity(validated.len().saturating_mul(2) + 1);
+            peer_notes.push(header_peer);
+            let mut ingest_batch = Vec::with_capacity(validated.len());
+            for block in validated {
+                peer_notes.push(block.body_peer);
+                peer_notes.push(block.receipt_peer);
+                ingest_batch.push(block.ingest);
+            }
 
-        let lowest_block = ingest_batch
-            .iter()
-            .map(|block| block.header.number())
-            .min()
-            .unwrap_or(required_block);
-        let highest_block = ingest_batch
-            .iter()
-            .map(|block| block.header.number())
-            .max()
-            .unwrap_or(required_block);
-        let block_count = ingest_batch.len();
-        let ingest_started = std::time::Instant::now();
-        let write_future = self.historical_write_future(ingest_batch);
+            let lowest_block = ingest_batch
+                .iter()
+                .map(|block| block.header.number())
+                .min()
+                .unwrap_or(required_block);
+            let highest_block = ingest_batch
+                .iter()
+                .map(|block| block.header.number())
+                .max()
+                .unwrap_or(required_block);
+            let block_count = ingest_batch.len();
+            let outcome =
+                super::ingest::write_historical_blocks(storage, subscriptions, ingest_batch)
+                    .await?;
+            let storage_elapsed = outcome.extraction_elapsed + outcome.write_elapsed;
+
+            Ok::<_, eyre::Report>(Ok(PreparedHistoricalIngest {
+                outcome,
+                peer_notes,
+                lowest_block,
+                highest_block,
+                block_count,
+                validation_elapsed,
+                storage_elapsed,
+            }))
+        };
         let mut prefetched_next = false;
-
-        let outcome = if let Some(next_child_header) = next_child_header
+        let overlap_started = std::time::Instant::now();
+        let prepared = if let Some(next_child_header) = next_child_header
             && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
             && self.peers.peer_count() > 0
         {
             let (write_result, prefetch_result) = tokio::join!(
-                write_future,
+                prepare_and_write,
                 self.fetch_historical_combined_batch(next_child_header)
             );
-            match prefetch_result {
-                Ok(Some(next_batch)) => {
-                    self.historical_prefetch = Some(next_batch);
-                    prefetched_next = true;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::debug!(error = %error, "historical prefetch failed");
+            let prepared = write_result?;
+            if prepared.is_ok() {
+                match prefetch_result {
+                    Ok(Some(next_batch)) => {
+                        self.historical_prefetch = Some(next_batch);
+                        prefetched_next = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(error = %error, "historical prefetch failed");
+                    }
                 }
             }
-            write_result?
+            prepared
         } else {
-            write_future.await?
+            prepare_and_write.await?
         };
-        let overlap_elapsed = ingest_started.elapsed();
-        let storage_elapsed = outcome.extraction_elapsed + outcome.write_elapsed;
-        let log_count = self.record_historical_ingest_outcome(outcome);
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                tracing::warn!(
+                    block_number = failure.block_number,
+                    block_hash = %failure.block_hash,
+                    peer = %failure.peer,
+                    error = %failure.message,
+                    "historical block validation failed"
+                );
+                self.peers
+                    .report_invalid_block_data(failure.peer, failure.response_kind);
+                return Ok(false);
+            }
+        };
+        let overlap_elapsed = overlap_started.elapsed();
+        let mut newly_serving_peers = HashSet::new();
+        for peer_id in &prepared.peer_notes {
+            self.note_serving_peer(*peer_id, &mut newly_serving_peers);
+        }
+        let storage_elapsed = prepared.storage_elapsed;
+        let validation_elapsed = prepared.validation_elapsed;
+        let lowest_block = prepared.lowest_block;
+        let highest_block = prepared.highest_block;
+        let block_count = prepared.block_count;
+        let log_count = self.record_historical_ingest_outcome(prepared.outcome);
         self.refresh_historical_status().await;
 
         tracing::debug!(
-            requested_headers = headers.len(),
+            requested_headers,
             lowest_block,
             highest_block,
             blocks = block_count,

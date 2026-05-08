@@ -115,7 +115,7 @@ impl SyncEngine {
     }
 }
 
-async fn write_historical_blocks(
+pub(super) async fn write_historical_blocks(
     storage: Arc<RwLock<PartitionManager>>,
     subscriptions: Option<SubscriptionManager>,
     blocks: Vec<HistoricalBlockIngest>,
