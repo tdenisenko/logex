@@ -5,7 +5,7 @@ use logex_cl::ConsensusStore;
 use reth_ethereum_forks::Head;
 use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, watch};
@@ -80,7 +80,7 @@ pub struct SyncEngine {
     consensus: Option<Arc<ConsensusStore>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
-    historical_prefetch: Option<HistoricalFetchedBatch>,
+    historical_prefetch: VecDeque<HistoricalFetchedBatch>,
     connected_once: bool,
     last_validated_header: Option<Header>,
     shutdown: watch::Receiver<bool>,
@@ -106,7 +106,7 @@ impl SyncEngine {
             consensus,
             head_tracker: HeadTracker::new(RECENT_HEADER_WINDOW),
             progress,
-            historical_prefetch: None,
+            historical_prefetch: VecDeque::new(),
             connected_once: false,
             last_validated_header: None,
             shutdown,

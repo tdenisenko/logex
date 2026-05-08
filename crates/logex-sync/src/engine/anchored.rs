@@ -14,6 +14,7 @@ const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
+const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 
@@ -197,6 +198,20 @@ fn validate_historical_block(
         receipt_peer,
         ingest: HistoricalBlockIngest { header, rows },
     })
+}
+
+fn historical_batch_matches_child(batch: &HistoricalFetchedBatch, child_header: &Header) -> bool {
+    batch.child_header.number() == child_header.number()
+        && batch.child_header.hash_slow() == child_header.hash_slow()
+}
+
+fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<Header> {
+    batch
+        .blocks
+        .len()
+        .checked_sub(1)
+        .and_then(|index| batch.headers.get(index))
+        .cloned()
 }
 
 impl SyncEngine {
@@ -713,19 +728,74 @@ impl SyncEngine {
         &mut self,
         child_header: &Header,
     ) -> Option<HistoricalFetchedBatch> {
-        let batch = self.historical_prefetch.take()?;
-        if batch.child_header.number() == child_header.number()
-            && batch.child_header.hash_slow() == child_header.hash_slow()
-        {
+        let batch = self.historical_prefetch.pop_front()?;
+        if historical_batch_matches_child(&batch, child_header) {
             return Some(batch);
         }
 
+        let remaining_prefetches = self.historical_prefetch.len();
+        self.historical_prefetch.clear();
         tracing::debug!(
             expected_child = child_header.number(),
             prefetched_child = batch.child_header.number(),
+            remaining_prefetches,
             "discarding stale historical prefetch"
         );
         None
+    }
+
+    fn align_historical_prefetch_queue(&mut self, child_header: &Header) {
+        if self
+            .historical_prefetch
+            .front()
+            .is_none_or(|batch| historical_batch_matches_child(batch, child_header))
+        {
+            return;
+        }
+
+        let prefetched_child = self
+            .historical_prefetch
+            .front()
+            .map(|batch| batch.child_header.number())
+            .unwrap_or_default();
+        let dropped_prefetches = self.historical_prefetch.len();
+        self.historical_prefetch.clear();
+        tracing::debug!(
+            expected_child = child_header.number(),
+            prefetched_child,
+            dropped_prefetches,
+            "discarding stale historical prefetch queue"
+        );
+    }
+
+    fn next_historical_prefetch_child(&self, first_child_header: Header) -> Option<Header> {
+        match self.historical_prefetch.back() {
+            Some(batch) => historical_batch_next_child_header(batch),
+            None => Some(first_child_header),
+        }
+    }
+
+    fn store_historical_prefetch_result(
+        &mut self,
+        result: Result<Option<HistoricalFetchedBatch>>,
+        next_child_header: &mut Option<Header>,
+    ) -> bool {
+        match result {
+            Ok(Some(batch)) => {
+                *next_child_header = historical_batch_next_child_header(&batch);
+                self.historical_prefetch.push_back(batch);
+                true
+            }
+            Ok(None) => {
+                *next_child_header = None;
+                false
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "historical prefetch failed");
+                *next_child_header = None;
+                false
+            }
+        }
     }
 
     async fn fetch_historical_combined_batch(
@@ -909,30 +979,60 @@ impl SyncEngine {
                 storage_elapsed,
             }))
         };
-        let mut prefetched_next = false;
+        let mut prefetched_next_batches = 0usize;
         let overlap_started = std::time::Instant::now();
         let prepared = if let Some(next_child_header) = next_child_header
             && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
             && self.peers.peer_count() > 0
         {
-            let (write_result, prefetch_result) = tokio::join!(
-                prepare_and_write,
-                self.fetch_historical_combined_batch(next_child_header)
-            );
-            let prepared = write_result?;
-            if prepared.is_ok() {
-                match prefetch_result {
-                    Ok(Some(next_batch)) => {
-                        self.historical_prefetch = Some(next_batch);
-                        prefetched_next = true;
+            self.align_historical_prefetch_queue(&next_child_header);
+            let mut next_prefetch_child = self.next_historical_prefetch_child(next_child_header);
+            let mut prepared = None;
+            let mut write = Box::pin(prepare_and_write);
+
+            while self.historical_prefetch.len() < HISTORICAL_PREFETCH_QUEUE_DEPTH {
+                let Some(prefetch_child) = next_prefetch_child.take() else {
+                    break;
+                };
+                if prefetch_child.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+                    break;
+                }
+
+                let must_complete_prefetch = self.historical_prefetch.is_empty();
+                let mut prefetch = Box::pin(self.fetch_historical_combined_batch(prefetch_child));
+                tokio::select! {
+                    write_result = &mut write => {
+                        let write_result = write_result?;
+                        if must_complete_prefetch {
+                            let prefetch_result = prefetch.await;
+                            if self.store_historical_prefetch_result(
+                                prefetch_result,
+                                &mut next_prefetch_child,
+                            ) {
+                                prefetched_next_batches += 1;
+                            }
+                        }
+                        prepared = Some(write_result);
+                        break;
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::debug!(error = %error, "historical prefetch failed");
+                    prefetch_result = &mut prefetch => {
+                        drop(prefetch);
+                        if self.store_historical_prefetch_result(
+                            prefetch_result,
+                            &mut next_prefetch_child,
+                        ) {
+                            prefetched_next_batches += 1;
+                            continue;
+                        }
+                        break;
                     }
                 }
             }
-            prepared
+
+            match prepared {
+                Some(prepared) => prepared,
+                None => write.await?,
+            }
         } else {
             prepare_and_write.await?
         };
@@ -948,6 +1048,7 @@ impl SyncEngine {
                 );
                 self.peers
                     .report_invalid_block_data(failure.peer, failure.response_kind);
+                self.historical_prefetch.clear();
                 return Ok(false);
             }
         };
@@ -971,7 +1072,9 @@ impl SyncEngine {
             blocks = block_count,
             logs = log_count,
             prefetched,
-            prefetched_next,
+            prefetched_next = prefetched_next_batches > 0,
+            prefetched_next_batches,
+            prefetch_queue_depth = self.historical_prefetch.len(),
             header_ms = header_elapsed.as_millis(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),
             validation_ms = validation_elapsed.as_millis(),

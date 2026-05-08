@@ -9,7 +9,7 @@ use tracing::{debug, trace, warn};
 use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
-const PIPELINED_MIN_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_MIN_RETURN_BLOCKS: usize = 768;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 16;
