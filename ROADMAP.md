@@ -4,7 +4,7 @@
 
 LogEx bootstraps from a recent weak-subjectivity checkpoint, follows CL head/finality over native CL P2P, and uses CL-authenticated execution anchors as the pivot for EL validation. EL P2P can follow head, fetch historical headers/bodies/receipts backward from the pivot, verify receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote run on May 8, 2026 uses `/root/logex-data-remote` and fixed HTTP port `18683`. After correcting an over-aggressive stale-dial cleanup that had reduced persisted known peers, the remote restarted with `30` known peers, rebuilt to `17` connected / `14` serving peers within about 90 seconds, and continued syncing. This early sample is not enough to judge final peer retention because the prior bad run had already damaged the persisted known-peer set.
+The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote run on May 8, 2026 uses `/root/logex-data-remote` and fixed HTTP port `18683`. A bounded sample after the 1024-window alignment showed `25` connected / `23` serving EL peers and about `57` historical blocks/sec, so the active bottleneck remains body/receipt scheduling rather than raw peer discovery.
 
 ## Completed Since Last Run
 
@@ -17,6 +17,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Lowered storage zstd level for faster continuous log compaction while keeping the existing topic dictionary encoding and query limits.
 - Improved EL peer ramp behavior with a larger sync peer target, more outbound dial capacity, and temporary demotion/backoff for unresponsive dial candidates instead of deleting persisted productive peers.
 - Increased the remote test dial ceiling again after the 1024-prefix run showed network headroom but only 17 serving peers.
+- Reused successful receipt responses across body-peer retries inside a body/receipt chunk so a failed body peer does not force duplicate receipt downloads for the same hashes.
 
 ## Remaining TODOs
 
@@ -69,6 +70,9 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 
 - Challenge: Larger receipt chunks looked attractive compared with Geth/Nethermind limits but regressed the remote run.
   - Resolution: Reverted the larger receipt/gas chunk tuning and kept the smaller dense-block chunks.
+
+- Challenge: The chunk pipeline could discard a successful receipt response when the paired body peer failed.
+  - Resolution: Cached that receipt response for the next body retry and still validates it before ingestion.
 
 ## Dead Code and Obsolescence Cleanup
 

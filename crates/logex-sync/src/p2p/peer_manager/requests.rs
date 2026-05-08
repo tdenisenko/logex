@@ -622,20 +622,20 @@ impl BodyReceiptRequestPlan {
     ) -> BodyReceiptChunk {
         let mut failures = Vec::new();
         let mut stats = Vec::new();
+        let mut cached_receipts: Option<(PeerId, ReceiptBatch)> = None;
         let body_candidates = body_peer_ids
             .into_iter()
             .take(PIPELINED_CHUNK_REQUEST_PEERS)
             .collect::<Vec<_>>();
 
         for body_peer in body_candidates {
-            let mut receipt_candidates = receipt_candidates_for_body_peer(
+            let receipt_candidates = receipt_candidates_for_body_peer(
                 receipt_peer_ids.clone(),
                 &preferred_peers,
                 body_peer,
                 PIPELINED_CHUNK_REQUEST_PEERS,
-            )
-            .into_iter();
-            let Some(first_receipt_peer) = receipt_candidates.next() else {
+            );
+            let Some(first_receipt_peer) = receipt_candidates.first().copied() else {
                 failures.push(ChunkRequestFailure {
                     role: ChunkRequestRole::Bodies,
                     peer_id: body_peer,
@@ -644,25 +644,42 @@ impl BodyReceiptRequestPlan {
                 });
                 continue;
             };
+            let has_cached_receipts = cached_receipts.is_some();
+            let fallback_receipt_candidates = receipt_candidates
+                .into_iter()
+                .skip(if has_cached_receipts { 0 } else { 1 });
 
             let body_hashes = hashes.clone();
-            let receipt_hashes = hashes.clone();
-            let body_request = async {
+            let (body_elapsed, body_result, receipt_result) = if has_cached_receipts {
                 let started_at = Instant::now();
                 let result = self
                     .request_bodies_until_complete(body_peer, body_hashes)
                     .await;
-                (started_at.elapsed(), result)
+                (started_at.elapsed(), result, None)
+            } else {
+                let receipt_hashes = hashes.clone();
+                let body_request = async {
+                    let started_at = Instant::now();
+                    let result = self
+                        .request_bodies_until_complete(body_peer, body_hashes)
+                        .await;
+                    (started_at.elapsed(), result)
+                };
+                let receipt_request = async {
+                    let started_at = Instant::now();
+                    let result = self
+                        .request_receipts_until_complete(first_receipt_peer, receipt_hashes, None)
+                        .await;
+                    (started_at.elapsed(), result)
+                };
+                let ((body_elapsed, body_result), (receipt_elapsed, receipt_result)) =
+                    tokio::join!(body_request, receipt_request);
+                (
+                    body_elapsed,
+                    body_result,
+                    Some((first_receipt_peer, receipt_elapsed, receipt_result)),
+                )
             };
-            let receipt_request = async {
-                let started_at = Instant::now();
-                let result = self
-                    .request_receipts_until_complete(first_receipt_peer, receipt_hashes, None)
-                    .await;
-                (started_at.elapsed(), result)
-            };
-            let ((body_elapsed, body_result), (receipt_elapsed, receipt_result)) =
-                tokio::join!(body_request, receipt_request);
 
             let bodies = match body_result {
                 Ok(bodies) => {
@@ -685,22 +702,24 @@ impl BodyReceiptRequestPlan {
                         kind,
                     });
                     match receipt_result {
-                        Ok(receipts) => {
+                        Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
                             stats.push((
-                                first_receipt_peer,
+                                receipt_peer,
                                 PeerRequestKind::Receipts,
                                 receipts.len(),
                                 receipt_elapsed,
                             ));
+                            cached_receipts.get_or_insert((receipt_peer, receipts));
                         }
-                        Err(kind) => {
+                        Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
                             failures.push(ChunkRequestFailure {
                                 role: ChunkRequestRole::Receipts,
-                                peer_id: first_receipt_peer,
+                                peer_id: receipt_peer,
                                 requested: hashes.len(),
                                 kind,
                             });
                         }
+                        None => {}
                     }
                     continue;
                 }
@@ -711,17 +730,45 @@ impl BodyReceiptRequestPlan {
                 .map(|(_, body)| body.transaction_count())
                 .collect::<Vec<_>>();
 
+            let mut skip_fallback_receipt_peer = None;
+            if let Some((receipt_peer, receipts)) = cached_receipts.take() {
+                match body_receipt_blocks_if_counts_match(
+                    &bodies,
+                    receipt_peer,
+                    receipts,
+                    hashes.len(),
+                ) {
+                    Ok(blocks) => {
+                        return BodyReceiptChunk {
+                            start,
+                            blocks,
+                            failures,
+                            stats,
+                        };
+                    }
+                    Err(kind) => {
+                        skip_fallback_receipt_peer = Some(receipt_peer);
+                        failures.push(ChunkRequestFailure {
+                            role: ChunkRequestRole::Receipts,
+                            peer_id: receipt_peer,
+                            requested: hashes.len(),
+                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                        });
+                    }
+                }
+            }
+
             match receipt_result {
-                Ok(receipts) => {
+                Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
                     stats.push((
-                        first_receipt_peer,
+                        receipt_peer,
                         PeerRequestKind::Receipts,
                         receipts.len(),
                         receipt_elapsed,
                     ));
                     match body_receipt_blocks_if_counts_match(
                         &bodies,
-                        first_receipt_peer,
+                        receipt_peer,
                         receipts,
                         hashes.len(),
                     ) {
@@ -735,21 +782,27 @@ impl BodyReceiptRequestPlan {
                         }
                         Err(kind) => failures.push(ChunkRequestFailure {
                             role: ChunkRequestRole::Receipts,
-                            peer_id: first_receipt_peer,
+                            peer_id: receipt_peer,
                             requested: hashes.len(),
                             kind: ChunkFailureKind::ReceiptCountMismatch(kind),
                         }),
                     }
                 }
-                Err(kind) => failures.push(ChunkRequestFailure {
-                    role: ChunkRequestRole::Receipts,
-                    peer_id: first_receipt_peer,
-                    requested: hashes.len(),
-                    kind,
-                }),
+                Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
+                    failures.push(ChunkRequestFailure {
+                        role: ChunkRequestRole::Receipts,
+                        peer_id: receipt_peer,
+                        requested: hashes.len(),
+                        kind,
+                    })
+                }
+                None => {}
             }
 
-            for receipt_peer in receipt_candidates {
+            for receipt_peer in fallback_receipt_candidates {
+                if skip_fallback_receipt_peer == Some(receipt_peer) {
+                    continue;
+                }
                 let started_at = Instant::now();
                 match self
                     .request_receipts_until_complete(
@@ -2875,9 +2928,7 @@ fn body_receipt_scheduled_chunk_limit(
         .take_while(|range| range.start < min_return_blocks)
         .count()
         .max(1);
-    prefix_chunks
-        .saturating_mul(2)
-        .clamp(1, ranges.len())
+    prefix_chunks.saturating_mul(2).clamp(1, ranges.len())
 }
 
 #[cfg(test)]
