@@ -17,6 +17,8 @@ const ADAPTIVE_FIXED_ZSTD_B256_LOW20: u8 = 3;
 const ADAPTIVE_BYTES_ZSTD_U64_OFFSETS: u8 = 0;
 const ADAPTIVE_BYTES_ZSTD_U32_OFFSETS: u8 = 1;
 const ZSTD_STORAGE_LEVEL: i32 = 6;
+const DICTIONARY_FAST_PATH_NUMERATOR: usize = 3;
+const DICTIONARY_FAST_PATH_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageIndexEntry {
@@ -174,6 +176,17 @@ fn encode_adaptive_fixed_width_page(raw_values: &[u8], item_size: usize) -> io::
         let values: Vec<&[u8]> = raw_values.chunks_exact(item_size).collect();
         dict_encode(&values, item_size)
     };
+    if dictionary.len().saturating_mul(DICTIONARY_FAST_PATH_DENOMINATOR)
+        <= raw_values
+            .len()
+            .saturating_mul(DICTIONARY_FAST_PATH_NUMERATOR)
+    {
+        let mut out = Vec::with_capacity(dictionary.len() + 1);
+        out.push(ADAPTIVE_FIXED_DICTIONARY);
+        out.extend_from_slice(&dictionary);
+        return Ok(out);
+    }
+
     let zstd = zstd_compress_level(raw_values, ZSTD_STORAGE_LEVEL)?;
 
     let mut candidates = Vec::with_capacity(4);
@@ -706,6 +719,20 @@ mod tests {
         }
 
         let encoded = encode_fixed_width_page(&raw, 32, CompressionCodec::AdaptiveFixed).unwrap();
+        let decoded =
+            decode_fixed_width_page(&encoded, 128, 32, CompressionCodec::AdaptiveFixed).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn adaptive_fixed_width_uses_dictionary_fast_path_for_repeated_values() {
+        let mut raw = Vec::new();
+        for _ in 0..128 {
+            raw.extend_from_slice(&[0xAB; 32]);
+        }
+
+        let encoded = encode_fixed_width_page(&raw, 32, CompressionCodec::AdaptiveFixed).unwrap();
+        assert_eq!(encoded.first().copied(), Some(ADAPTIVE_FIXED_DICTIONARY));
         let decoded =
             decode_fixed_width_page(&encoded, 128, 32, CompressionCodec::AdaptiveFixed).unwrap();
         assert_eq!(decoded, raw);

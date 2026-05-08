@@ -1,5 +1,6 @@
 use super::*;
 use crate::EXECUTION_HISTORY_TARGET_BLOCK;
+use crate::extract;
 use crate::p2p::peer_manager::SourcedBodyReceipts;
 use crate::primitives::LogexNetworkPrimitives;
 use crate::validation::validate_header_matches_anchor;
@@ -126,15 +127,20 @@ fn validate_historical_block(
         }));
     }
 
-    let txs = assemble_txs(&body, &receipts);
+    let rows = extract::extract_from_body_receipts(
+        block_number,
+        block_hash,
+        header.timestamp(),
+        &body,
+        &receipts,
+    );
     Ok(ValidatedHistoricalBlock {
         index,
         body_peer,
         receipt_peer,
         ingest: HistoricalBlockIngest {
             header,
-            block_hash,
-            txs,
+            rows,
         },
     })
 }

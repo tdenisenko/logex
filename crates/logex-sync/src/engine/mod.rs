@@ -12,7 +12,7 @@ use tokio::sync::{RwLock, watch};
 
 use logex_server::SubscriptionManager;
 use logex_storage::PartitionManager;
-use logex_types::{NodeState, SyncStatus};
+use logex_types::{LogRow, NodeState, SyncStatus};
 
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
@@ -47,8 +47,7 @@ const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
 
 pub(super) struct HistoricalBlockIngest {
     header: Header,
-    block_hash: B256,
-    txs: Vec<(B256, Vec<Log>)>,
+    rows: Vec<LogRow>,
 }
 
 pub(super) struct HistoricalFetchedBatch {

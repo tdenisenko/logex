@@ -1,12 +1,6 @@
 use super::*;
 use crate::extract;
 use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
-use tokio::task::JoinSet;
-
-struct HistoricalRows {
-    index: usize,
-    rows: Vec<LogRow>,
-}
 
 impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
@@ -142,7 +136,7 @@ pub(super) async fn write_historical_blocks(
         .expect("non-empty historical block batch has a lowest header");
     let block_count = blocks.len() as u64;
     let extraction_started = std::time::Instant::now();
-    let rows = extract_historical_rows_parallel(blocks).await?;
+    let rows = collect_historical_rows(blocks);
     let extraction_elapsed = extraction_started.elapsed();
     let row_count = rows.len() as u64;
     let lowest_header_for_write = lowest_header.clone();
@@ -178,36 +172,13 @@ pub(super) async fn write_historical_blocks(
     })
 }
 
-async fn extract_historical_rows_parallel(
-    blocks: Vec<HistoricalBlockIngest>,
-) -> Result<Vec<LogRow>> {
-    let mut tasks = JoinSet::new();
-    for (index, block) in blocks.into_iter().enumerate() {
-        tasks.spawn_blocking(move || HistoricalRows {
-            index,
-            rows: extract::extract_from_block(
-                block.header.number(),
-                block.block_hash,
-                block.header.timestamp(),
-                &block.txs,
-            ),
-        });
-    }
-
-    let mut batches = Vec::with_capacity(tasks.len());
-    while let Some(result) = tasks.join_next().await {
-        let batch =
-            result.map_err(|error| eyre::eyre!("historical extraction worker failed: {error}"))?;
-        batches.push(batch);
-    }
-    batches.sort_by_key(|batch| batch.index);
-
-    let total_rows = batches.iter().map(|batch| batch.rows.len()).sum();
+fn collect_historical_rows(blocks: Vec<HistoricalBlockIngest>) -> Vec<LogRow> {
+    let total_rows = blocks.iter().map(|block| block.rows.len()).sum();
     let mut rows = Vec::with_capacity(total_rows);
-    for batch in batches {
-        rows.extend(batch.rows);
+    for block in blocks {
+        rows.extend(block.rows);
     }
-    Ok(rows)
+    rows
 }
 
 pub(super) fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
