@@ -12,6 +12,8 @@ use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
+const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
+const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 
@@ -27,6 +29,16 @@ struct ValidatedHistoricalBlock {
     body_peer: PeerId,
     receipt_peer: PeerId,
     ingest: HistoricalBlockIngest,
+}
+
+struct HistoricalValidationJob {
+    index: usize,
+    header: Header,
+    block_hash: B256,
+    body_peer: PeerId,
+    body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
+    receipt_peer: PeerId,
+    receipts: Vec<ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
 }
 
 struct PreparedHistoricalIngest {
@@ -52,35 +64,80 @@ async fn validate_historical_blocks_parallel(
     hashes: &[B256],
     blocks: Vec<SourcedBodyReceipts>,
 ) -> Result<std::result::Result<Vec<ValidatedHistoricalBlock>, Box<HistoricalValidationFailure>>> {
+    let block_count = blocks.len();
+    let task_count = historical_validation_task_count(block_count);
+    let chunk_size = block_count.div_ceil(task_count);
     let mut tasks = JoinSet::new();
+    let mut chunk = Vec::with_capacity(chunk_size);
+
     for (index, ((body_peer, body), (receipt_peer, receipts))) in blocks.into_iter().enumerate() {
         let Some(header) = headers.get(index).cloned() else {
             break;
         };
         let block_hash = hashes.get(index).copied().unwrap_or_default();
-        tasks.spawn_blocking(move || {
-            validate_historical_block(
-                index,
-                header,
-                block_hash,
-                body_peer,
-                body,
-                receipt_peer,
-                receipts,
-            )
+
+        chunk.push(HistoricalValidationJob {
+            index,
+            header,
+            block_hash,
+            body_peer,
+            body,
+            receipt_peer,
+            receipts,
         });
+
+        if chunk.len() >= chunk_size {
+            let task_chunk = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
+            tasks.spawn_blocking(move || validate_historical_block_chunk(task_chunk));
+        }
     }
 
-    let mut validated = Vec::with_capacity(tasks.len());
+    if !chunk.is_empty() {
+        tasks.spawn_blocking(move || validate_historical_block_chunk(chunk));
+    }
+
+    let mut validated = Vec::with_capacity(block_count);
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(block)) => validated.push(block),
+            Ok(Ok(mut blocks)) => validated.append(&mut blocks),
             Ok(Err(failure)) => return Ok(Err(failure)),
             Err(error) => return Err(eyre::eyre!("historical validation worker failed: {error}")),
         }
     }
     validated.sort_by_key(|block| block.index);
     Ok(Ok(validated))
+}
+
+fn historical_validation_task_count(block_count: usize) -> usize {
+    if block_count == 0 {
+        return 1;
+    }
+
+    let cpu_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    cpu_count
+        .saturating_mul(HISTORICAL_VALIDATION_TASKS_PER_CPU)
+        .clamp(1, HISTORICAL_VALIDATION_TASK_LIMIT)
+        .min(block_count)
+}
+
+fn validate_historical_block_chunk(
+    jobs: Vec<HistoricalValidationJob>,
+) -> std::result::Result<Vec<ValidatedHistoricalBlock>, Box<HistoricalValidationFailure>> {
+    let mut validated = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        validated.push(validate_historical_block(
+            job.index,
+            job.header,
+            job.block_hash,
+            job.body_peer,
+            job.body,
+            job.receipt_peer,
+            job.receipts,
+        )?);
+    }
+    Ok(validated)
 }
 
 fn validate_historical_block(
@@ -138,10 +195,7 @@ fn validate_historical_block(
         index,
         body_peer,
         receipt_peer,
-        ingest: HistoricalBlockIngest {
-            header,
-            rows,
-        },
+        ingest: HistoricalBlockIngest { header, rows },
     })
 }
 
@@ -651,7 +705,8 @@ impl SyncEngine {
             }
         };
 
-        self.ingest_historical_fetched_batch(batch, prefetched).await
+        self.ingest_historical_fetched_batch(batch, prefetched)
+            .await
     }
 
     fn take_historical_prefetch(

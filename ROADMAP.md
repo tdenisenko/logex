@@ -9,8 +9,8 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Remote data directory: `/root/logex-data-remote`
 - HTTP port: `18683`
 - `/status` reports `historical_target_block: 0`
-- Last sampled status: historical floor `24,384,176`, 37 connected EL peers, 36 serving EL peers, and historical reverse sync at `62.95 blocks/sec` since the latest restart
-- Recent warmed batches complete in roughly 5.3-13.5 seconds per 1024 blocks after capping combined body/receipt chunks, overlapping current-batch ingest with next-batch fetch, and reducing historical ingest CPU work; full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
+- Last sampled status: historical floor `24,185,358`, 49 connected EL peers, 47 serving EL peers, and historical reverse sync at `65.91 blocks/sec` since the latest restart
+- Recent warmed batches complete in roughly 5.1-19.1 seconds per 1024 blocks with dynamic body/receipt fanout. Peer retention is no longer the primary blocker; the remaining gap is single-window scheduling plus receipt-root validation/storage time.
 
 ## Completed Since Last Run
 
@@ -20,6 +20,8 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Added a reverse-sync prefetch path so the next historical body/receipt batch can be fetched while the current batch is validated, extracted, and written.
 - Capped combined body/receipt chunks to keep each 1024-block window spread across more peers instead of letting adaptive request limits collapse the window into a handful of large requests.
 - Reduced historical ingest CPU by extracting log rows directly during validation instead of cloning receipt logs into an intermediate transaction list.
+- Removed duplicate non-Osaka pre-execution validation work, chunked historical validation tasks by CPU capacity, and initialized new peer request limits from the warmed pool.
+- Added dynamic combined body/receipt chunk sizing: 32-block chunks while the serving pool is small, 16-block chunks once enough peers are available for wider fanout.
 - Added a dictionary fast path for repeated fixed-width storage pages so compression can skip unnecessary Zstd candidates when dictionary encoding already wins clearly.
 - Kept the effective 1024-block historical window after live testing showed larger header requests are capped by peers.
 - Reverted peer-retention and batch-size experiments that did not improve live samples.
@@ -29,7 +31,7 @@ Fresh fixed-port remote smoke on May 8, 2026:
 ## Remaining TODOs
 
 1. Improve EL reverse-sync throughput
-   - Reason: Peer retention can reach useful levels, but latest profiling shows the hot path is now single-window utilization, Keccak-heavy receipt-root validation, and remaining local ingest cost.
+   - Reason: Peer retention can reach useful levels, but the latest clean sample is still only `65.91 blocks/sec` against a roughly `1,160 blocks/sec` sub-6-hour target.
    - Completion criteria: Reverse validation sustains roughly `1,160 blocks/sec` or better on mainnet-like data for a sub-6-hour full-history ETA, or a documented architecture decision replaces full P2P receipt backfill with a faster trustless strategy.
 
 2. Complete pre-Merge PoW canonicality validation
@@ -85,6 +87,16 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Alternatives considered: Request 4096 headers per window. That did not increase returned batch size.
   - Tradeoff: Further throughput needs multiple overlapped windows or a different trustless data acquisition strategy.
 
+- Validate post-Merge execution bodies without a second sealed-block pass except for Osaka.
+  - Why: Header validation and body/header validation already cover the current mainnet fork-field and root checks; the second pass recalculated the same roots on the hot path.
+  - Alternatives considered: Keep the full Reth pre-execution block validation for every historical block. That was simpler but spent CPU on duplicate work.
+  - Tradeoff: The shortcut must stay aligned with Reth consensus changes; Osaka still falls back to the sealed-block path for block-size validation.
+
+- Inherit warmed request limits for newly connected peers and use dynamic combined body/receipt chunks.
+  - Why: Geth seeds new downloader peers from the existing peer-set capacity, and live LogEx samples showed larger serving pools were underused by 32-block chunks.
+  - Alternatives considered: Keep cold peer limits at 4/8 and static 32-block combined chunks, or switch all runs to static 16-block chunks. The first underused large peer pools; the second hurt cold starts with small peer pools.
+  - Tradeoff: Dynamic chunking adds one heuristic that needs continued live validation against peer churn and rate limits.
+
 - Retain speculative historical prefetches only after the current batch is accepted.
   - Why: A next-window fetch is valid only if the current contiguous batch validates and writes successfully.
   - Alternatives considered: Store the prefetched batch immediately after the network request returns. That could leave stale speculative data queued after a validation or storage failure.
@@ -117,16 +129,16 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Remaining: The downloader still needs deeper multi-window scheduling to approach a sub-6-hour target.
 
 - Challenge: Adaptive request limits made combined body/receipt windows too coarse for the current single-window downloader.
-  - Resolution: Capped combined body/receipt chunks at 32 blocks so one 1024-block historical window fans out across more peers.
-  - Remaining: This improved the latest sample to `65.99 blocks/sec`, but still leaves the ETA far above the target.
+  - Resolution: Use 32-block chunks during small-peer cold starts and 16-block chunks after the body/receipt serving pool is large enough.
+  - Remaining: The latest clean sample reached `65.91 blocks/sec`, still multi-day. The next meaningful change is deeper multi-window scheduling.
 
 - Challenge: Current-batch validation and storage were serialized ahead of the next network fetch.
   - Resolution: Overlapped validation/extraction/write for batch N with header/body/receipt fetch for batch N+1 and guarded against retaining speculative prefetches after failed current batches.
   - Remaining: The latest restart-wide sample improved to `75.75 blocks/sec`, with warmed tail batches roughly `120-150 blocks/sec`, but the sub-6-hour target still requires deeper scheduling or lower local ingest cost.
 
-- Challenge: CPU profiling showed Keccak, Zstd compression, and allocation on the historical ingest hot path.
-  - Resolution: Removed the redundant historical extraction phase and added a dictionary compression fast path; Zstd dropped from roughly `9%` to `4.5%` in a follow-up profile.
-  - Remaining: Keccak receipt-root validation remains the largest CPU cost, and the current run still needs more serving peers or deeper scheduling to approach the target.
+- Challenge: CPU profiling showed Keccak, duplicate root checks, Zstd compression, and allocation on the historical hot path.
+  - Resolution: Removed redundant extraction, added a dictionary compression fast path, skipped duplicate non-Osaka pre-execution validation, and grouped validation into CPU-sized blocking tasks.
+  - Remaining: Receipt-root validation and single-window fetch scheduling remain the main throughput risks.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -137,12 +149,13 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Kept combined body/receipt chunk capping, ingest/fetch overlap, direct historical row materialization, and dictionary compression fast path because profiling or remote samples showed improvement.
 - Confirmed obsolete single-block historical ingestion is no longer referenced; batched historical ingestion is the active path.
 - Removed the redundant second historical extraction task phase from the reverse-sync write path; remaining request paths are still used as fallback or validation paths.
+- Removed duplicate normal-path sealed-block pre-execution validation; the Osaka-only fallback remains intentionally.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: no
-- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`), `603c03f` (`docs: update execution sync roadmap`), `73f78e8` (`perf: increase historical receipt fanout`), `acd7586` (`perf: overlap historical ingest and prefetch`), `54e35fa` (`docs: update execution sync roadmap`), `aca3288` (`perf: reduce historical ingest CPU cost`)
+- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`), `603c03f` (`docs: update execution sync roadmap`), `73f78e8` (`perf: increase historical receipt fanout`), `acd7586` (`perf: overlap historical ingest and prefetch`), `54e35fa` (`docs: update execution sync roadmap`), `aca3288` (`perf: reduce historical ingest CPU cost`), `b63488c` (`docs: update execution sync roadmap`), plus latest commit `perf: reduce validation and peer warmup cost`
 - Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not applicable yet
 - Git/GitHub blockers: local `gh` auth token is invalid, but the GitHub connector created the draft PR successfully; the PR should remain draft because the sub-6-hour sync target is not met yet

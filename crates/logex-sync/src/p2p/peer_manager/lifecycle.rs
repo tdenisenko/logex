@@ -324,6 +324,14 @@ impl PeerManager {
 
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
+        let body_request_limit = inherited_peer_request_limit(
+            self.peers.values().map(|peer| peer.body_request_limit),
+            PeerRequestKind::Bodies,
+        );
+        let receipt_request_limit = inherited_peer_request_limit(
+            self.peers.values().map(|peer| peer.receipt_request_limit),
+            PeerRequestKind::Receipts,
+        );
         let peer = ActivePeer {
             sender: messages,
             remote_record: record,
@@ -335,8 +343,8 @@ impl PeerManager {
             header_blocks_per_sec: 0.0,
             body_blocks_per_sec: 0.0,
             receipt_blocks_per_sec: 0.0,
-            body_request_limit: BODY_REQUEST_LIMIT_INITIAL,
-            receipt_request_limit: RECEIPT_REQUEST_LIMIT_INITIAL,
+            body_request_limit,
+            receipt_request_limit,
             body_paused_until: None,
             receipt_paused_until: None,
             receipt_quarantined_until,

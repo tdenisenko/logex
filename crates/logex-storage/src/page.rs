@@ -176,7 +176,9 @@ fn encode_adaptive_fixed_width_page(raw_values: &[u8], item_size: usize) -> io::
         let values: Vec<&[u8]> = raw_values.chunks_exact(item_size).collect();
         dict_encode(&values, item_size)
     };
-    if dictionary.len().saturating_mul(DICTIONARY_FAST_PATH_DENOMINATOR)
+    if dictionary
+        .len()
+        .saturating_mul(DICTIONARY_FAST_PATH_DENOMINATOR)
         <= raw_values
             .len()
             .saturating_mul(DICTIONARY_FAST_PATH_NUMERATOR)

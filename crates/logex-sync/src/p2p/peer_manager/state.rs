@@ -692,6 +692,26 @@ pub(super) fn request_limit_initial(kind: PeerRequestKind) -> usize {
     }
 }
 
+pub(super) fn inherited_peer_request_limit(
+    limits: impl Iterator<Item = usize>,
+    kind: PeerRequestKind,
+) -> usize {
+    let mut total = 0usize;
+    let mut count = 0usize;
+    for limit in limits {
+        total = total.saturating_add(limit);
+        count = count.saturating_add(1);
+    }
+
+    if count == 0 {
+        return request_limit_initial(kind);
+    }
+
+    total
+        .div_ceil(count)
+        .clamp(request_limit_initial(kind), REQUEST_LIMIT_MAX)
+}
+
 fn increase_request_limit(current: usize) -> usize {
     current
         .saturating_mul(3)
@@ -1009,6 +1029,29 @@ mod tests {
 
         rotate_request_candidates(&mut peers, 2);
         assert_eq!(peers, vec![first, second, third]);
+    }
+
+    #[test]
+    fn inherited_request_limits_use_warmed_pool_average() {
+        assert_eq!(
+            inherited_peer_request_limit([24, 48, 96].into_iter(), PeerRequestKind::Bodies),
+            56
+        );
+        assert_eq!(
+            inherited_peer_request_limit([1, 2].into_iter(), PeerRequestKind::Receipts),
+            RECEIPT_REQUEST_LIMIT_INITIAL
+        );
+        assert_eq!(
+            inherited_peer_request_limit(std::iter::empty(), PeerRequestKind::Bodies),
+            BODY_REQUEST_LIMIT_INITIAL
+        );
+        assert_eq!(
+            inherited_peer_request_limit(
+                [usize::MAX, usize::MAX].into_iter(),
+                PeerRequestKind::Bodies
+            ),
+            REQUEST_LIMIT_MAX
+        );
     }
 
     #[test]

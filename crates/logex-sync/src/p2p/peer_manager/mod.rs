@@ -42,9 +42,10 @@ mod state;
 
 use self::requests::RequestAttempt;
 use self::state::{
-    advertised_status_range, disconnect_note, is_bootstrap_node, is_saturated_remote_rejection,
-    is_stale_nonserving_peer, normalize_network_head, peer_receipts_are_quarantined,
-    rotate_request_candidates, seed_productive_peers, should_retry_disconnected_peer,
+    advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
+    is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
+    peer_receipts_are_quarantined, rotate_request_candidates, seed_productive_peers,
+    should_retry_disconnected_peer,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,8 +71,8 @@ const MAX_PENDING_DIALS_PER_REFILL: usize = 48;
 const REQUEST_PEER_REFILL_ATTEMPTS: usize = 20;
 pub(super) const REQUEST_LIMIT_MIN: usize = 1;
 pub(super) const REQUEST_LIMIT_MAX: usize = 128;
-pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 4;
-pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 8;
+pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 16;
+pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 16;
 const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
 const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
 const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);

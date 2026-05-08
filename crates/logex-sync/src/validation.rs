@@ -5,11 +5,11 @@ use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, proofs};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
 use logex_types::ExecutionAnchor;
-use reth_chainspec::{ChainSpec, MAINNET};
+use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_primitives::{Block as EthereumBlock, BlockBody as EthereumBlockBody};
-use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_primitives_traits::{BlockBody, GotExpected, SealedBlock, SealedHeader};
 
 static EXECUTION_CONSENSUS: LazyLock<EthBeaconConsensus<ChainSpec>> =
     LazyLock::new(|| EthBeaconConsensus::new(MAINNET.clone()));
@@ -214,11 +214,28 @@ pub fn validate_block_pre_execution(
         &sealed_header,
     )?;
 
-    let sealed_block = SealedBlock::seal_slow(EthereumBlock {
-        header: header.clone(),
-        body: body.clone(),
-    });
-    EXECUTION_CONSENSUS.validate_block_pre_execution(&sealed_block)
+    if let Some(header_blob_gas_used) = header.blob_gas_used() {
+        let total_blob_gas = body.blob_gas_used();
+        if total_blob_gas != header_blob_gas_used {
+            return Err(ConsensusError::BlobGasUsedDiff(GotExpected {
+                got: header_blob_gas_used,
+                expected: total_blob_gas,
+            }));
+        }
+    }
+
+    if EXECUTION_CONSENSUS
+        .chain_spec()
+        .is_osaka_active_at_timestamp(header.timestamp())
+    {
+        let sealed_block = SealedBlock::seal_slow(EthereumBlock {
+            header: header.clone(),
+            body: body.clone(),
+        });
+        EXECUTION_CONSENSUS.validate_block_pre_execution(&sealed_block)?;
+    }
+
+    Ok(())
 }
 
 impl std::fmt::Display for ReceiptValidationError {
@@ -443,6 +460,23 @@ mod tests {
         assert!(matches!(
             validate_header_matches_anchor(&wrong_anchor, &header, header.hash_slow()),
             Err(AnchorValidationError::ReceiptsRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_execution_validation_rejects_blob_gas_mismatch() {
+        let body = EthereumBlockBody::default();
+        let header = Header {
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            blob_gas_used: Some(1),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_block_pre_execution(&header, &body),
+            Err(ConsensusError::BlobGasUsedDiff(_))
         ));
     }
 
