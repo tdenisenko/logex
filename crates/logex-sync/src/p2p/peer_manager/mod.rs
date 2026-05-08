@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -43,29 +43,38 @@ mod state;
 use self::requests::RequestAttempt;
 use self::state::{
     advertised_status_range, disconnect_note, is_bootstrap_node, is_saturated_remote_rejection,
-    is_stale_nonserving_peer, normalize_network_head, seed_productive_peers,
+    is_stale_nonserving_peer, normalize_network_head, peer_receipts_are_quarantined,
+    rotate_request_candidates, seed_productive_peers, should_retry_disconnected_peer,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
-const FILL_BUDGET: Duration = Duration::from_secs(20);
+const FILL_BUDGET: Duration = Duration::from_secs(2);
 const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DNS_DISCOVERY_REQUESTS_PER_SEC: usize = 16;
-const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(800);
+const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(500);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
 const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const SATURATED_PEER_RETRY_DELAY: Duration = Duration::from_secs(60);
 const USELESS_PEER_GRACE_PERIOD: Duration = Duration::from_secs(5);
-const SUBMITTED_DIAL_SUPPRESSION_INTERVAL: Duration = Duration::from_secs(60);
+const SUBMITTED_DIAL_SUPPRESSION_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
-const MAX_CONSECUTIVE_TIMEOUTS: u32 = 2;
-const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 256;
-const MAX_PENDING_DIALS_PER_REFILL: usize = 160;
+const MAX_CONSECUTIVE_TIMEOUTS: u32 = 8;
+const OUTBOUND_DIAL_RATIO: usize = 3;
+const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 96;
+const MAX_PENDING_DIALS_PER_REFILL: usize = 48;
 const REQUEST_PEER_REFILL_ATTEMPTS: usize = 20;
+pub(super) const REQUEST_LIMIT_MIN: usize = 1;
+pub(super) const REQUEST_LIMIT_MAX: usize = 128;
+pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 4;
+pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 8;
+const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
+const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
+const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(60),
     medium: Duration::from_secs(60 * 3),
@@ -83,6 +92,11 @@ pub type SourcedBlockBody = (
     PeerId,
     <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
 );
+pub type SourcedReceiptSet = (
+    PeerId,
+    Vec<alloy_consensus::ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
+);
+pub type SourcedBodyReceipts = (SourcedBlockBody, SourcedReceiptSet);
 
 /// Manages peer sessions and request routing on top of Reth's real network stack.
 pub struct PeerManager {
@@ -97,6 +111,7 @@ pub struct PeerManager {
     pending: HashMap<PeerId, NodeRecord>,
     pending_dials: HashMap<PeerId, Instant>,
     saturated_peers: HashMap<PeerId, Instant>,
+    receipt_quarantined_peers: HashMap<PeerId, Instant>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
     known_peers_path: PathBuf,
@@ -106,6 +121,18 @@ pub struct PeerManager {
     local_head: Head,
     network_activated: bool,
     max_peers: usize,
+    session_metrics: ExecutionPeerSessionMetrics,
+}
+
+#[derive(Default)]
+struct ExecutionPeerSessionMetrics {
+    accepted_sessions: u64,
+    rejected_zero_tip_sessions: u64,
+    disconnected_sessions: u64,
+    saturated_disconnects: u64,
+    nonserving_disconnects: u64,
+    missing_fork_id_candidates: u64,
+    fork_id_rejected_candidates: u64,
 }
 
 #[derive(Clone)]
@@ -117,38 +144,68 @@ struct ActivePeer {
     version: EthVersion,
     is_serving: bool,
     consecutive_timeouts: u32,
+    header_blocks_per_sec: f64,
+    body_blocks_per_sec: f64,
+    receipt_blocks_per_sec: f64,
+    body_request_limit: usize,
+    receipt_request_limit: usize,
+    body_paused_until: Option<Instant>,
+    receipt_paused_until: Option<Instant>,
+    receipt_quarantined_until: Option<Instant>,
     connected_at: Instant,
+}
+
+pub struct PeerManagerConfig {
+    pub secret_key: SecretKey,
+    pub listener_port: u16,
+    pub discovery_port: u16,
+    pub max_peers: usize,
+    pub nat_resolver: NatResolver,
+    pub our_head: Head,
+    pub known_peers: Vec<NodeRecord>,
+    pub known_peers_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PeerRequestKind {
+    Headers,
+    Bodies,
+    Receipts,
 }
 
 impl PeerManager {
     /// Create a new peer manager backed by Reth's network/session stack.
-    pub async fn new(
-        secret_key: SecretKey,
-        listener_port: u16,
-        discovery_port: u16,
-        max_peers: usize,
-        our_head: Head,
-        known_peers: Vec<NodeRecord>,
-        known_peers_path: PathBuf,
-    ) -> Result<Self> {
+    pub async fn new(config: PeerManagerConfig) -> Result<Self> {
+        let PeerManagerConfig {
+            secret_key,
+            listener_port,
+            discovery_port,
+            max_peers,
+            nat_resolver,
+            our_head,
+            known_peers,
+            known_peers_path,
+        } = config;
         let dns_discovery = mainnet_dns_discovery_config();
+        let advertised_nat_resolver = resolve_startup_nat(nat_resolver.clone()).await;
         let productive = seed_productive_peers(&known_peers);
-        let basic_nodes: HashSet<NodeRecord> = known_peers.iter().copied().collect();
         let serve_cache = Arc::new(ServeCacheProvider::new());
+        let (max_outbound, max_inbound) = peer_connection_limits(max_peers);
         let peer_config = PeersConfig::default()
-            .with_basic_nodes(basic_nodes)
-            .with_max_outbound(max_peers)
-            .with_max_inbound(max_peers.max(16))
+            .with_max_outbound(max_outbound)
+            .with_max_inbound(max_inbound)
             .with_max_concurrent_dials(
-                max_peers
+                max_outbound
                     .saturating_mul(4)
                     .clamp(32, MAX_CONCURRENT_OUTBOUND_DIALS),
             )
             .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
             .with_backoff_durations(DIAL_BACKOFF_DURATIONS)
             .with_enforce_enr_fork_id(false);
-        let sessions_config =
+        let mut sessions_config =
             SessionsConfig::default().with_upscaled_event_buffer(peer_config.max_peers());
+        sessions_config.limits.max_pending_outbound = Some(MAX_CONCURRENT_OUTBOUND_DIALS as u32);
+        sessions_config.limits.max_pending_inbound = Some(max_inbound as u32);
 
         let mut discovery = Discv4Config::builder();
         discovery
@@ -165,18 +222,21 @@ impl PeerManager {
             .set_head(network_head)
             .listener_addr(listener_addr)
             .discovery_addr(discovery_addr)
-            .external_ip_resolver(NatResolver::Any)
             .sessions_config(sessions_config)
             .peer_config(peer_config)
             .mainnet_boot_nodes()
             .disable_tx_gossip(true)
-            .discovery(discovery);
+            .discovery(discovery)
+            .external_ip_resolver(advertised_nat_resolver.clone());
         if let Some((_, dns_discovery_config)) = dns_discovery {
             builder = builder.dns_discovery(dns_discovery_config);
         }
         let peer_id = builder.get_peer_id();
         let hello = HelloMessage::builder(peer_id)
             .client_version(LOGEX_CLIENT_VERSION)
+            .protocol(EthVersion::Eth70)
+            .protocol(EthVersion::Eth69)
+            .port(listener_port)
             .build();
 
         let mut config = builder.hello_message(hello).build(Arc::clone(&serve_cache));
@@ -217,6 +277,7 @@ impl PeerManager {
             pending: HashMap::new(),
             pending_dials: HashMap::new(),
             saturated_peers: HashMap::new(),
+            receipt_quarantined_peers: HashMap::new(),
             productive,
             known_peers,
             known_peers_path,
@@ -226,6 +287,7 @@ impl PeerManager {
             local_head: network_head,
             network_activated,
             max_peers,
+            session_metrics: ExecutionPeerSessionMetrics::default(),
         };
 
         manager.seed_known_peers();
@@ -237,8 +299,15 @@ impl PeerManager {
             enr = %local_enr,
             listener = %local_record.tcp_addr(),
             discovery = %discovery_addr,
+            nat = %advertised_nat_resolver,
             "p2p networking started"
         );
+        if local_record.tcp_addr().ip().is_unspecified() {
+            tracing::warn!(
+                nat = %advertised_nat_resolver,
+                "EL p2p is advertising an unspecified external address; inbound peer retention will be weaker unless the node is run with --nat extip:<public-ip>, --nat extaddr:<domain>, or a working public IP resolver"
+            );
+        }
 
         Ok(manager)
     }
@@ -273,6 +342,13 @@ impl PeerManager {
     ) {
         self.serve_cache.insert_block(header, body, receipts);
         self.sync_advertised_history_range();
+    }
+
+    pub fn cache_canonical_headers(
+        &self,
+        headers: impl IntoIterator<Item = <LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    ) {
+        self.serve_cache.insert_headers(headers);
     }
 
     pub fn remove_cached_blocks(&self, reverted_hashes: &[B256]) {
@@ -335,4 +411,48 @@ fn mainnet_dns_discovery_config() -> Option<(String, DnsDiscoveryConfig)> {
             ..DnsDiscoveryConfig::default()
         },
     ))
+}
+
+async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
+    if matches!(
+        nat_resolver,
+        NatResolver::ExternalIp(_) | NatResolver::ExternalAddr(_) | NatResolver::None
+    ) {
+        return nat_resolver;
+    }
+
+    match nat_resolver.clone().external_addr().await {
+        Some(ip) => {
+            info!(
+                nat = %nat_resolver,
+                external_ip = %ip,
+                "resolved EL external IP before starting discovery"
+            );
+            NatResolver::ExternalIp(ip)
+        }
+        None => nat_resolver,
+    }
+}
+
+fn peer_connection_limits(max_peers: usize) -> (usize, usize) {
+    if max_peers == 0 {
+        return (0, 0);
+    }
+
+    let max_outbound = (max_peers / OUTBOUND_DIAL_RATIO).clamp(1, max_peers);
+    let max_inbound = max_peers.saturating_sub(max_outbound);
+    (max_outbound, max_inbound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_connection_limits_treat_config_as_total_capacity() {
+        assert_eq!(peer_connection_limits(0), (0, 0));
+        assert_eq!(peer_connection_limits(1), (1, 0));
+        assert_eq!(peer_connection_limits(3), (1, 2));
+        assert_eq!(peer_connection_limits(100), (33, 67));
+    }
 }

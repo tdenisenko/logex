@@ -17,6 +17,7 @@ impl SyncEngine {
 
         if !recent_headers.is_empty() {
             self.head_tracker.restore(recent_headers.clone());
+            self.peers.cache_canonical_headers(recent_headers.clone());
             self.last_validated_header = recent_headers.last().cloned();
             tracing::info!(
                 restored_headers = recent_headers.len(),

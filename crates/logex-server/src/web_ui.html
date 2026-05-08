@@ -580,6 +580,12 @@
     justify-content: space-between;
   }
 
+  .pager {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
   button {
     min-height: 42px;
     border: 0;
@@ -851,9 +857,9 @@
             <span class="pill" id="elBadge"><span class="dot"></span><strong id="elBadgeText">--</strong></span>
           </div>
           <div class="metric-grid">
-            <div class="metric el"><span class="k">Connected</span><span class="v" id="elConnected">--</span><span class="note">devp2p peers</span></div>
-            <div class="metric el"><span class="k">Serving</span><span class="v" id="elServing">--</span><span class="note">validated data peers</span></div>
-            <div class="metric el"><span class="k">Candidates</span><span class="v" id="elCandidates">--</span><span class="note">waiting to dial</span></div>
+            <div class="metric el"><span class="k">Connected</span><span class="v" id="elConnected">--</span><span class="note" id="elConnectedNote">devp2p peers</span></div>
+            <div class="metric el"><span class="k">Serving</span><span class="v" id="elServing">--</span><span class="note" id="elServingNote">validated data peers</span></div>
+            <div class="metric el"><span class="k">Candidates</span><span class="v" id="elCandidates">--</span><span class="note" id="elCandidatesNote">waiting to dial</span></div>
             <div class="metric el"><span class="k">Network Tip</span><span class="v" id="elTip">--</span><span class="note">peer-advertised block</span></div>
             <div class="metric el"><span class="k">Live Head</span><span class="v" id="elCursor">--</span><span class="note">highest verified block</span></div>
             <div class="metric el"><span class="k">To Genesis</span><span class="v" id="elLag">--</span><span class="note">blocks left</span></div>
@@ -935,6 +941,8 @@
           <div class="metric"><span class="k">Segments</span><span class="v" id="segments">--</span><span class="note">sealed partitions</span></div>
           <div class="metric"><span class="k">Storage Used</span><span class="v" id="storageUsed">--</span><span class="note">data directory</span></div>
           <div class="metric"><span class="k">Disk Free</span><span class="v" id="diskFree">--</span><span class="note">filesystem</span></div>
+          <div class="metric"><span class="k">Compression Queue</span><span class="v" id="rawCompactionBacklog">--</span><span class="note">raw segments pending</span></div>
+          <div class="metric"><span class="k">Rewrite Queue</span><span class="v" id="profileRewriteBacklog">--</span><span class="note">deferred until idle</span></div>
           <div class="metric finalized"><span class="k">Finality Gap</span><span class="v" id="finalityGap">--</span><span class="note">top to finalized</span></div>
         </div>
       </section>
@@ -952,6 +960,10 @@
         <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
         <div class="query-actions">
           <span class="query-meta" id="resultCount">--</span>
+          <div class="pager">
+            <button id="prevPageBtn" onclick="runQueryPage(-1)" disabled>Previous</button>
+            <button id="nextPageBtn" onclick="runQueryPage(1)" disabled>Next</button>
+          </div>
           <span class="query-meta" id="queryScanScope">--</span>
         </div>
         <div class="error-msg" id="errorMsg"></div>
@@ -975,8 +987,12 @@
 var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
 var MAINNET_GENESIS_TIME_SECONDS = 1606824023;
 var SECONDS_PER_SLOT = 12;
+var QUERY_PAGE_SIZE = 50;
 var latestStatus = null;
 var lastStatusTimestamp = null;
+var queryOffset = 0;
+var lastQuerySql = '';
+var nextQueryOffset = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -1173,6 +1189,7 @@ function updateStatus(data) {
   var nodeState = data.node_state || 'starting';
   var nodeLabel = data.node_state_label || nodeState;
   var clNetwork = data.consensus_network || {};
+  var elNetwork = data.execution_network || {};
   var clLight = data.consensus_light_client || {};
   var query = data.query_coverage || {};
   var current = numberOrNull(data.current_block) || 0;
@@ -1324,7 +1341,18 @@ function updateStatus(data) {
 
   setText('elConnected', fmt(data.connected_peers));
   setText('elServing', fmt(data.serving_peers));
-  setText('elCandidates', fmt(data.pending_peers));
+  setText('elCandidates', fmt(numberOrNull(elNetwork.queued_candidates) == null ? data.pending_peers : elNetwork.queued_candidates));
+  var connectedMix = 'G ' + fmt(elNetwork.connected_geth_peers) + ' / N ' + fmt(elNetwork.connected_nethermind_peers) + ' / R ' + fmt(elNetwork.connected_reth_peers) + ' / O ' + fmt(elNetwork.connected_other_peers);
+  var servingMix = 'G ' + fmt(elNetwork.serving_geth_peers) + ' / N ' + fmt(elNetwork.serving_nethermind_peers) + ' / R ' + fmt(elNetwork.serving_reth_peers) + ' / O ' + fmt(elNetwork.serving_other_peers);
+  setText('elConnectedNote', numberOrNull(elNetwork.max_peers) == null ? 'devp2p peers' : 'of ' + fmt(elNetwork.max_peers) + '; ' + connectedMix);
+  var productivePeers = numberOrNull(elNetwork.productive_peers);
+  setText('elServingNote', productivePeers == null ? 'validated data peers' : servingMix + '; ' + fmt(productivePeers) + ' productive');
+  var pendingDials = numberOrNull(elNetwork.pending_dials);
+  var saturated = numberOrNull(elNetwork.saturated_peers) || 0;
+  var zeroTipRejected = numberOrNull(elNetwork.rejected_zero_tip_sessions) || 0;
+  var nonservingClosed = numberOrNull(elNetwork.nonserving_disconnects) || 0;
+  var forkRejected = numberOrNull(elNetwork.fork_id_rejected_candidates) || 0;
+  setText('elCandidatesNote', pendingDials == null ? 'waiting to dial' : fmt(pendingDials) + ' dialing; ' + fmt(saturated) + ' saturated; ' + fmt(zeroTipRejected) + ' no-tip; ' + fmt(nonservingClosed) + ' non-serving; ' + fmt(forkRejected) + ' fork-filtered');
   setText('elTip', target > 0 ? fmt(target) : '--');
   setText('elCursor', fmt(current));
   setText('elLag', elLag == null ? '--' : fmt(elLag));
@@ -1369,6 +1397,8 @@ function updateStatus(data) {
   setText('segments', fmt(data.sealed_partitions));
   setText('storageUsed', fmtBytes(data.storage_used_bytes));
   setText('diskFree', fmtBytes(data.disk_free_bytes));
+  setText('rawCompactionBacklog', data.raw_log_segment_backlog == null ? '--' : fmt(data.raw_log_segment_backlog));
+  setText('profileRewriteBacklog', data.storage_profile_rewrite_backlog == null ? 'Deferred' : fmt(data.storage_profile_rewrite_backlog));
   setText('finalityGap', fmt(data.finality_lag_blocks));
 
   setText('queryScope', queryFrom == null ? 'No stored log rows yet.' : 'Queries scan local stored logs across blocks ' + queryRange + '.');
@@ -1444,9 +1474,29 @@ function renderTable(rows) {
   table.style.display = '';
 }
 
-function runQuery() {
+function updatePager() {
+  byId('prevPageBtn').disabled = queryOffset === 0;
+  byId('nextPageBtn').disabled = nextQueryOffset == null;
+}
+
+function runQueryPage(direction) {
+  if (direction < 0) {
+    queryOffset = Math.max(0, queryOffset - QUERY_PAGE_SIZE);
+  } else if (nextQueryOffset != null) {
+    queryOffset = nextQueryOffset;
+  }
+  runQuery(true);
+}
+
+function runQuery(keepOffset) {
   var sql = byId('sql').value.trim();
   if (!sql) return;
+  if (!keepOffset || sql !== lastQuerySql) {
+    queryOffset = 0;
+  }
+  lastQuerySql = sql;
+  nextQueryOffset = null;
+  updatePager();
 
   var btn = byId('runBtn');
   var errEl = byId('errorMsg');
@@ -1460,7 +1510,7 @@ function runQuery() {
   fetch('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql: sql })
+    body: JSON.stringify({ sql: sql, limit: QUERY_PAGE_SIZE, offset: queryOffset })
   })
     .then(function(response) {
       return response.json().then(function(body) {
@@ -1472,16 +1522,20 @@ function runQuery() {
         errEl.textContent = result.data.error || result.data.message || 'Unknown query error';
         errEl.style.display = 'block';
         renderTable([]);
+        updatePager();
         return;
       }
       var rows = result.data.rows || [];
-      countEl.textContent = fmt(rows.length) + ' rows returned; ' + fmt(result.data.total_scanned) + ' rows scanned';
+      nextQueryOffset = result.data.next_offset == null ? null : Number(result.data.next_offset);
+      countEl.textContent = fmt(rows.length) + ' rows returned; page starts at row ' + fmt(queryOffset + 1) + '; ' + fmt(result.data.total_scanned) + ' rows scanned';
+      updatePager();
       renderTable(rows);
     })
     .catch(function(error) {
       errEl.textContent = 'Request failed: ' + error.message;
       errEl.style.display = 'block';
       renderTable([]);
+      updatePager();
     })
     .finally(function() {
       btn.disabled = false;

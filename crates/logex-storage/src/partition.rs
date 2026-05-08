@@ -29,7 +29,7 @@ impl Default for PartitionManagerConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            partition_target_rows: 50_000_000,
+            partition_target_rows: 1_000_000,
             compaction_safety_margin_blocks: 2_048,
         }
     }
@@ -82,6 +82,13 @@ impl PartitionManager {
         Ok(())
     }
 
+    /// Ingest immutable historical rows directly as sealed compacted segments.
+    pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
+        self.inner.write_historical_batch(rows)?;
+        self.refresh_views();
+        Ok(())
+    }
+
     /// Refresh manifest metadata after indexes are rebuilt externally.
     pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.inner.refresh_segment_indexes(segment_id)
@@ -90,6 +97,34 @@ impl PartitionManager {
     /// Compact sealed segments that are safely behind the current head.
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
         self.inner.compact_eligible_segments()
+    }
+
+    /// Compact up to `limit` sealed segments that are safely behind the current head.
+    pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        let compacted = self.inner.compact_eligible_segments_limit(limit)?;
+        if compacted > 0 {
+            self.refresh_views();
+        }
+        Ok(compacted)
+    }
+
+    /// Compact raw sealed segments without migrating stale compacted profiles.
+    pub fn compact_raw_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        let compacted = self.inner.compact_raw_segments_limit(limit)?;
+        if compacted > 0 {
+            self.refresh_views();
+        }
+        Ok(compacted)
+    }
+
+    /// Count sealed segments that are eligible for compaction.
+    pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.compaction_backlog_count()
+    }
+
+    /// Count raw sealed segments that need first-time compaction.
+    pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.raw_compaction_backlog_count()
     }
 
     /// Persist the latest fully-validated block, even when it produced no logs.
@@ -276,8 +311,8 @@ mod tests {
 
         assert_eq!(mgr.total_rows(), 150);
         assert_eq!(mgr.sealed_count(), 1);
-        assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 150);
-        assert_eq!(mgr.hot_partition().meta.row_count, 0);
+        assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 100);
+        assert_eq!(mgr.hot_partition().meta.row_count, 50);
     }
 
     #[test]

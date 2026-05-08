@@ -25,6 +25,7 @@ pub struct NativeLogFilter {
     pub canonical_only: bool,
     pub order: LogOrder,
     pub limit: Option<usize>,
+    pub offset: usize,
 }
 
 impl NativeLogFilter {

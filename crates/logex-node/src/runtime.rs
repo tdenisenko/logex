@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::U256;
 use logex_cl::{
@@ -13,7 +13,7 @@ use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
 use logex_sync::p2p::{
-    peer_manager::PeerManager,
+    peer_manager::{PeerManager, PeerManagerConfig},
     persistence::{
         discovery_secret_path, known_peers_path, load_known_peers, load_or_create_secret_key,
         persist_known_peers,
@@ -21,6 +21,7 @@ use logex_sync::p2p::{
 };
 use logex_types::SyncStatus;
 use reth_chainspec::{EthChainSpec, MAINNET};
+use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
 
 use crate::background::{log_task_exit, run_background_indexer};
@@ -35,6 +36,7 @@ pub struct RunSyncOptions {
     pub discovery_port: u16,
     pub p2p_port: u16,
     pub max_peers: usize,
+    pub nat: String,
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
@@ -50,10 +52,18 @@ pub async fn run_sync(options: RunSyncOptions) {
         discovery_port,
         p2p_port,
         max_peers,
+        nat,
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
     } = options;
+    let nat = match nat.parse::<NatResolver>() {
+        Ok(nat) => nat,
+        Err(error) => {
+            tracing::error!(%error, "invalid EL NAT resolver");
+            std::process::exit(1);
+        }
+    };
 
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
@@ -237,15 +247,16 @@ pub async fn run_sync(options: RunSyncOptions) {
     );
 
     let our_head = startup_network_head(sync_head, consensus.as_deref());
-    let peers = match PeerManager::new(
+    let peers = match PeerManager::new(PeerManagerConfig {
         secret_key,
-        p2p_port,
+        listener_port: p2p_port,
         discovery_port,
         max_peers,
+        nat_resolver: nat,
         our_head,
         known_peers,
-        known_peers_file.clone(),
-    )
+        known_peers_path: known_peers_file.clone(),
+    })
     .await
     {
         Ok(peers) => peers,
@@ -277,7 +288,15 @@ pub async fn run_sync(options: RunSyncOptions) {
             signal = wait_for_shutdown_signal() => {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
                 let _ = shutdown_tx.send(true);
-                engine_run.await
+                match tokio::time::timeout(Duration::from_secs(15), &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            "sync engine did not stop within shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
             }
         }
     };

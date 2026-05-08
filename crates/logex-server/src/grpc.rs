@@ -6,7 +6,7 @@ use alloy_primitives::{Address, B256};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use logex_query::{self, SqlQueryError};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT, SqlQueryError, SqlQueryPage};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
@@ -48,7 +48,27 @@ impl LogExService for LogExGrpcService {
 
         let storage = self.state.storage.read().await;
         let head_block = storage.head_block();
-        let result = match logex_query::execute_sql(sql, &storage, head_block).await {
+        let query_request = request.get_ref();
+        let limit = query_request
+            .limit
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| Status::invalid_argument("limit is too large"))?
+            .unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
+        let offset = query_request
+            .offset
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| Status::invalid_argument("offset is too large"))?
+            .unwrap_or(0);
+        let result = match logex_query::execute_sql_page(
+            sql,
+            &storage,
+            head_block,
+            SqlQueryPage::new(Some(limit), offset),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(SqlQueryError::DataFusion(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));
@@ -62,6 +82,10 @@ impl LogExService for LogExGrpcService {
         };
 
         let row_count = result.rows.len() as u64;
+        let next_offset = (limit > 0
+            && row_count as usize == limit
+            && offset.saturating_add(row_count as usize) < MAX_QUERY_LIMIT)
+            .then_some((offset + row_count as usize) as u64);
         let rows = result
             .rows
             .into_iter()
@@ -75,6 +99,10 @@ impl LogExService for LogExGrpcService {
             rows,
             total_scanned: result.total_scanned,
             row_count,
+            limit: limit.min(MAX_QUERY_LIMIT.saturating_sub(offset)) as u64,
+            offset: offset as u64,
+            next_offset,
+            max_limit: MAX_QUERY_LIMIT as u64,
         }))
     }
 
@@ -183,6 +211,31 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
                 .map_err(|_| Box::new(Status::invalid_argument("limit is too large")))
         })
         .transpose()?;
+    if let Some(limit) = filter.limit {
+        if limit > MAX_QUERY_LIMIT {
+            return Err(Box::new(Status::invalid_argument(format!(
+                "limit must be at most {MAX_QUERY_LIMIT}"
+            ))));
+        }
+    } else {
+        filter.limit = Some(DEFAULT_QUERY_PAGE_SIZE);
+    }
+    filter.offset = request
+        .offset
+        .map(|offset| {
+            usize::try_from(offset)
+                .map_err(|_| Box::new(Status::invalid_argument("offset is too large")))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if filter.offset >= MAX_QUERY_LIMIT {
+        return Err(Box::new(Status::invalid_argument(format!(
+            "offset must be less than {MAX_QUERY_LIMIT}"
+        ))));
+    }
+    filter.limit = filter
+        .limit
+        .map(|limit| limit.min(MAX_QUERY_LIMIT - filter.offset));
 
     for (index, topic) in request.topics.iter().enumerate() {
         filter.topics[index] = parse_topic_constraint(topic, index)?;
@@ -347,6 +400,7 @@ mod tests {
 
         let request = Request::new(QueryRequest {
             sql: "SELECT * FROM logs".into(),
+            ..Default::default()
         });
 
         let response = service.query(request).await.unwrap();
@@ -368,6 +422,7 @@ mod tests {
         let addr = hex::encode(Address::repeat_byte(0xAA));
         let request = Request::new(QueryRequest {
             sql: format!("SELECT * FROM logs WHERE address = '0x{addr}'"),
+            ..Default::default()
         });
 
         let response = service.query(request).await.unwrap();
@@ -389,6 +444,7 @@ mod tests {
 
         let request = Request::new(QueryRequest {
             sql: "SELECT COUNT(*) AS total FROM logs WHERE block_number <= latest".into(),
+            ..Default::default()
         });
 
         let response = service.query(request).await.unwrap().into_inner();
@@ -405,6 +461,7 @@ mod tests {
 
         let request = Request::new(QueryRequest {
             sql: "SELECT block_number AS bn FROM logs ORDER BY block_number DESC LIMIT 1".into(),
+            ..Default::default()
         });
 
         let response = service.query(request).await.unwrap().into_inner();
@@ -434,6 +491,7 @@ mod tests {
 
         let request = Request::new(QueryRequest {
             sql: "NOT SQL".into(),
+            ..Default::default()
         });
 
         let result = service.query(request).await;
@@ -459,6 +517,7 @@ mod tests {
             canonical_only: None,
             descending: None,
             limit: None,
+            offset: None,
         });
 
         let response = service.get_logs(request).await.unwrap().into_inner();
@@ -490,6 +549,7 @@ mod tests {
             canonical_only: Some(true),
             descending: Some(true),
             limit: Some(2),
+            offset: None,
         });
 
         let mut stream = service.stream_logs(request).await.unwrap().into_inner();
@@ -515,6 +575,7 @@ mod tests {
             canonical_only: None,
             descending: None,
             limit: None,
+            offset: None,
         });
 
         let error = service

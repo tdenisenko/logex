@@ -30,6 +30,28 @@ pub fn run_build_indexes(config: PartitionManagerConfig) {
     tracing::info!("indexes built successfully");
 }
 
+pub fn run_compact(config: PartitionManagerConfig, limit: Option<usize>) {
+    let mut storage = match PartitionManager::open(config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open storage");
+            std::process::exit(1);
+        }
+    };
+
+    let compacted = match limit {
+        Some(limit) => storage.compact_eligible_segments_limit(limit),
+        None => storage.compact_eligible_segments(),
+    };
+    match compacted {
+        Ok(count) => println!("Compacted {count} sealed segments"),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to compact sealed segments");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn run_info(config: PartitionManagerConfig) {
     let consensus_state_path = consensus_state_path(&config.data_dir);
     let consensus = if consensus_state_path.exists() {

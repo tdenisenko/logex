@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,10 +13,13 @@ use crate::state::SyncHead;
 use crate::wal::WriteAheadLog;
 
 use super::catalog::{
-    NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, StorageCatalogPaths,
+    NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
+    StorageCatalogPaths,
 };
 use super::segment::{
     append_rows, apply_rows_to_descriptor, compact_segment, persist_segment_manifest,
+    persist_segment_manifest_with_columns, segment_uses_current_compaction_profile,
+    write_compacted_rows,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -30,6 +34,12 @@ struct StorageState {
     historical_floor_header: Option<Header>,
     #[serde(default)]
     historical_anchor_header: Option<Header>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompactionMode {
+    RawOnly,
+    CurrentProfile,
 }
 
 pub struct NativeStorage {
@@ -54,6 +64,7 @@ impl NativeStorage {
             state,
         };
 
+        storage.repair_catalog_from_manifests()?;
         storage.ensure_active_hot_segment()?;
         storage.replay_wal()?;
         storage.verify_integrity()?;
@@ -214,27 +225,81 @@ impl NativeStorage {
         }
 
         self.wal.append(rows)?;
-
-        let hot_id = self.ensure_active_hot_segment()?;
-        let hot_dir = self.paths.segment_dir(hot_id);
-        let descriptor = self
-            .catalog
-            .segments
-            .iter_mut()
-            .find(|segment| segment.id == hot_id)
-            .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
-
-        append_rows(&hot_dir, descriptor.row_count, rows)?;
-        apply_rows_to_descriptor(descriptor, rows);
-        let should_seal = descriptor.row_count >= self.config.hot_target_rows;
-        persist_segment_manifest(&self.paths, descriptor)?;
-        let _ = descriptor;
-        self.persist_catalog()?;
-
+        self.commit_rows_to_segments(rows)?;
         self.wal.truncate()?;
 
-        if should_seal {
-            self.seal_hot_segment()?;
+        Ok(())
+    }
+
+    pub fn write_historical_batch(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let target_rows = self.config.hot_target_rows.max(1) as usize;
+        for chunk in rows.chunks(target_rows) {
+            let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
+            let segment_dir = self.paths.segment_dir(descriptor.id);
+            let columns = write_compacted_rows(&segment_dir, chunk)?;
+            apply_rows_to_descriptor(&mut descriptor, chunk);
+            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
+            self.catalog.segments.push(descriptor);
+            self.persist_catalog()?;
+        }
+
+        Ok(())
+    }
+
+    fn commit_rows_to_segments(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let target_rows = self.config.hot_target_rows.max(1);
+        let mut offset = 0usize;
+        while offset < rows.len() {
+            let hot_id = self.ensure_active_hot_segment()?;
+
+            let remaining_capacity = {
+                let descriptor = self
+                    .catalog
+                    .segments
+                    .iter()
+                    .find(|segment| segment.id == hot_id)
+                    .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
+                target_rows.saturating_sub(descriptor.row_count)
+            };
+
+            if remaining_capacity == 0 {
+                self.seal_hot_segment()?;
+                continue;
+            }
+
+            let take = remaining_capacity.min((rows.len() - offset) as u64) as usize;
+            let chunk = &rows[offset..offset + take];
+            let hot_dir = self.paths.segment_dir(hot_id);
+
+            let should_seal = {
+                let descriptor = self
+                    .catalog
+                    .segments
+                    .iter_mut()
+                    .find(|segment| segment.id == hot_id)
+                    .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
+
+                append_rows(&hot_dir, descriptor.row_count, chunk)?;
+                apply_rows_to_descriptor(descriptor, chunk);
+                let should_seal = descriptor.row_count >= target_rows;
+                persist_segment_manifest(&self.paths, descriptor)?;
+                should_seal
+            };
+
+            self.persist_catalog()?;
+            offset += take;
+
+            if should_seal {
+                self.seal_hot_segment()?;
+            }
         }
 
         Ok(())
@@ -256,19 +321,65 @@ impl NativeStorage {
     }
 
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
-        let eligible: Vec<_> = self
-            .catalog
-            .segments
-            .iter()
-            .filter(|segment| self.should_compact_segment(segment))
-            .cloned()
-            .collect();
+        self.compact_eligible_segments_limit(usize::MAX)
+    }
+
+    pub fn compact_raw_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        self.compact_segments_limit(limit, CompactionMode::RawOnly)
+    }
+
+    pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        self.compact_segments_limit(limit, CompactionMode::CurrentProfile)
+    }
+
+    fn compact_segments_limit(
+        &mut self,
+        limit: usize,
+        mode: CompactionMode,
+    ) -> std::io::Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+
+        let mut eligible = Vec::new();
+        for segment in &self.catalog.segments {
+            if eligible.len() >= limit {
+                break;
+            }
+            let needs_compaction = match mode {
+                CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment)?,
+                CompactionMode::CurrentProfile => self.segment_needs_compaction(segment)?,
+            };
+            if needs_compaction {
+                eligible.push(segment.clone());
+            }
+        }
 
         for descriptor in &eligible {
             compact_segment(&self.paths, descriptor)?;
         }
 
         Ok(eligible.len())
+    }
+
+    pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
+        let mut count = 0usize;
+        for segment in &self.catalog.segments {
+            if self.segment_needs_raw_compaction(segment)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
+        let mut count = 0usize;
+        for segment in &self.catalog.segments {
+            if self.segment_needs_compaction(segment)? {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     pub fn mark_non_canonical(&self, block_hash: B256) -> std::io::Result<u64> {
@@ -377,6 +488,75 @@ impl NativeStorage {
         Ok(descriptor.id)
     }
 
+    fn repair_catalog_from_manifests(&mut self) -> std::io::Result<()> {
+        let mut descriptors = load_manifest_descriptors(&self.paths)?;
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+
+        let mut repaired_segments =
+            Vec::with_capacity(self.catalog.segments.len().max(descriptors.len()));
+        let mut changed = false;
+
+        for segment in &self.catalog.segments {
+            if let Some(descriptor) = descriptors.remove(&segment.id) {
+                if &descriptor != segment {
+                    tracing::warn!(
+                        segment_id = segment.id,
+                        catalog_rows = segment.row_count,
+                        manifest_rows = descriptor.row_count,
+                        "repairing storage catalog segment metadata from manifest"
+                    );
+                    changed = true;
+                }
+                repaired_segments.push(descriptor);
+            } else {
+                repaired_segments.push(segment.clone());
+            }
+        }
+
+        for descriptor in descriptors.into_values() {
+            tracing::warn!(
+                segment_id = descriptor.id,
+                row_count = descriptor.row_count,
+                "recovering storage segment missing from catalog"
+            );
+            repaired_segments.push(descriptor);
+            changed = true;
+        }
+
+        repaired_segments.sort_by_key(|segment| segment.id);
+
+        let active_hot_segment = repaired_segments
+            .iter()
+            .filter(|segment| segment.kind == SegmentKind::Hot)
+            .map(|segment| segment.id)
+            .max();
+        if self.catalog.active_hot_segment != active_hot_segment {
+            self.catalog.active_hot_segment = active_hot_segment;
+            changed = true;
+        }
+
+        if let Some(max_id) = repaired_segments.iter().map(|segment| segment.id).max() {
+            let next_segment_id = max_id.saturating_add(1);
+            if self.catalog.next_segment_id < next_segment_id {
+                self.catalog.next_segment_id = next_segment_id;
+                changed = true;
+            }
+        }
+
+        if self.catalog.segments != repaired_segments {
+            self.catalog.segments = repaired_segments;
+            changed = true;
+        }
+
+        if changed {
+            self.persist_catalog()?;
+        }
+
+        Ok(())
+    }
+
     fn seal_hot_segment(&mut self) -> std::io::Result<()> {
         let hot_id = self
             .catalog
@@ -414,19 +594,7 @@ impl NativeStorage {
 
         tracing::info!(rows = rows.len(), "replaying WAL entries");
 
-        let hot_id = self.ensure_active_hot_segment()?;
-        let hot_dir = self.paths.segment_dir(hot_id);
-        let descriptor = self
-            .catalog
-            .segments
-            .iter_mut()
-            .find(|segment| segment.id == hot_id)
-            .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
-
-        append_rows(&hot_dir, descriptor.row_count, &rows)?;
-        apply_rows_to_descriptor(descriptor, &rows);
-        persist_segment_manifest(&self.paths, descriptor)?;
-        self.persist_catalog()?;
+        self.commit_rows_to_segments(&rows)?;
         self.wal.truncate()?;
         Ok(())
     }
@@ -475,6 +643,31 @@ impl NativeStorage {
             return false;
         };
         max_block.saturating_add(self.config.compaction_safety_margin_blocks) <= head_block
+    }
+
+    fn segment_needs_compaction(&self, descriptor: &SegmentDescriptor) -> std::io::Result<bool> {
+        if !self.should_compact_segment(descriptor) {
+            return Ok(false);
+        }
+
+        Ok(!segment_uses_current_compaction_profile(
+            &self.paths,
+            descriptor.id,
+        )?)
+    }
+
+    fn segment_needs_raw_compaction(
+        &self,
+        descriptor: &SegmentDescriptor,
+    ) -> std::io::Result<bool> {
+        if !self.should_compact_segment(descriptor) {
+            return Ok(false);
+        }
+
+        Ok(!super::segment::segment_is_compacted(
+            &self.paths,
+            descriptor.id,
+        )?)
     }
 
     fn verify_integrity(&self) -> io::Result<()> {
@@ -603,6 +796,66 @@ impl NativeStorage {
     }
 }
 
+fn load_manifest_descriptors(
+    paths: &StorageCatalogPaths,
+) -> std::io::Result<BTreeMap<u64, SegmentDescriptor>> {
+    let mut descriptors = BTreeMap::new();
+    let segments_dir = paths.segments_dir();
+    if !segments_dir.exists() {
+        return Ok(descriptors);
+    }
+
+    for entry in fs::read_dir(segments_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let Some(segment_id) = parse_segment_dir_name(&entry.file_name()) else {
+            continue;
+        };
+        let manifest_path = entry.path().join("segment.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+
+        let json = fs::read_to_string(&manifest_path)?;
+        let manifest: SegmentManifest = serde_json::from_str(&json).map_err(io::Error::other)?;
+        if manifest.segment_id != segment_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment directory id {segment_id} does not match manifest id {}",
+                    manifest.segment_id
+                ),
+            ));
+        }
+
+        let relative_path = PathBuf::from("segments").join(format!("s_{segment_id:016}"));
+        descriptors.insert(
+            segment_id,
+            SegmentDescriptor {
+                id: segment_id,
+                generation: manifest.generation,
+                kind: manifest.kind,
+                relative_path: relative_path.clone(),
+                manifest_relative_path: relative_path.join("segment.json"),
+                min_block: manifest.min_block,
+                max_block: manifest.max_block,
+                row_count: manifest.row_count,
+            },
+        );
+    }
+
+    Ok(descriptors)
+}
+
+fn parse_segment_dir_name(name: &std::ffi::OsStr) -> Option<u64> {
+    let name = name.to_str()?;
+    let id = name.strip_prefix("s_")?;
+    id.parse().ok()
+}
+
 fn load_state(paths: &StorageCatalogPaths) -> std::io::Result<StorageState> {
     let path = paths.root().join(STORAGE_STATE_FILE);
     if !path.exists() {
@@ -723,7 +976,102 @@ mod tests {
         storage.write_batch(&make_rows(12, 100)).unwrap();
         assert_eq!(storage.sealed_count(), 1);
         assert_eq!(storage.total_rows(), 12);
-        assert!(storage.hot_partition_meta().row_count == 0);
+        assert_eq!(storage.sealed_partition_metas()[0].row_count, 10);
+        assert_eq!(storage.hot_partition_meta().row_count, 2);
+    }
+
+    #[test]
+    fn native_storage_splits_oversized_batches_at_hot_target() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage.write_batch(&make_rows(25, 100)).unwrap();
+
+        let sealed = storage.sealed_partition_metas();
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[0].row_count, 10);
+        assert_eq!(sealed[1].row_count, 10);
+        assert_eq!(storage.hot_partition_meta().row_count, 5);
+        assert_eq!(storage.total_rows(), 25);
+    }
+
+    #[test]
+    fn native_storage_writes_historical_batches_as_compacted_segments() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows(25, 100);
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage.write_historical_batch(&rows).unwrap();
+
+        let sealed = storage.sealed_partition_metas();
+        assert_eq!(sealed.len(), 3);
+        assert_eq!(
+            sealed.iter().map(|meta| meta.row_count).collect::<Vec<_>>(),
+            vec![10, 10, 5]
+        );
+        assert_eq!(storage.hot_partition_meta().row_count, 0);
+        assert_eq!(storage.total_rows(), 25);
+
+        let first_segment = storage.segment_path(sealed[0].id);
+        assert!(!first_segment.join("address.col").exists());
+        assert!(first_segment.join("columns/address.pages").exists());
+
+        let reader = SegmentReader::open(&first_segment).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows[..10].to_vec());
+
+        let reloaded = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        assert_eq!(reloaded.total_rows(), 25);
+        assert_eq!(reloaded.sealed_count(), 3);
+        assert_eq!(reloaded.hot_partition_meta().row_count, 0);
+    }
+
+    #[test]
+    fn native_storage_recovers_catalog_from_segment_manifests() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        };
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&make_rows(25, 100)).unwrap();
+        }
+
+        {
+            let (mut catalog, paths) = NativeStorageCatalog::open_or_create(&config).unwrap();
+            catalog.segments.truncate(1);
+            catalog.segments[0].kind = SegmentKind::Hot;
+            catalog.segments[0].row_count = 4;
+            catalog.next_segment_id = 1;
+            catalog.active_hot_segment = Some(catalog.segments[0].id);
+            catalog.persist(&paths).unwrap();
+        }
+
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 25);
+        assert_eq!(recovered.sealed_count(), 2);
+        assert_eq!(recovered.hot_partition_meta().row_count, 5);
+        assert_eq!(
+            recovered.segments().last().map(|segment| segment.id),
+            Some(2)
+        );
     }
 
     #[test]
@@ -960,6 +1308,7 @@ mod tests {
         storage.refresh_segment_indexes(sealed.id).unwrap();
         assert!(sealed_path.join("address.col").exists());
         assert!(!sealed_path.join("columns/address.pages").exists());
+        assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
 
         storage
             .record_sync_head(
@@ -968,8 +1317,11 @@ mod tests {
                 999,
             )
             .unwrap();
+        assert_eq!(storage.compaction_backlog_count().unwrap(), 1);
         assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
         assert!(!sealed_path.join("address.col").exists());
         assert!(sealed_path.join("columns/address.pages").exists());
+        assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
+        assert_eq!(storage.compact_eligible_segments().unwrap(), 0);
     }
 }

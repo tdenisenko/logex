@@ -21,6 +21,11 @@ pub struct EthFilter {
     pub topics: Vec<Option<TopicFilter>>,
     /// Block hash — mutually exclusive with fromBlock/toBlock.
     pub block_hash: Option<B256>,
+    /// Non-standard LogEx pagination limit. Defaults to the server page size.
+    pub limit: Option<usize>,
+    /// Non-standard LogEx pagination offset.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 impl EthFilter {
@@ -421,6 +426,8 @@ mod tests {
                 ])),
             ],
             block_hash: None,
+            limit: None,
+            offset: 0,
         };
 
         let native = filter.to_native_filter(500);

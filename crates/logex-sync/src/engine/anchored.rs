@@ -1,17 +1,132 @@
 use super::*;
 use crate::EXECUTION_HISTORY_TARGET_BLOCK;
+use crate::p2p::peer_manager::SourcedBodyReceipts;
+use crate::primitives::LogexNetworkPrimitives;
 use crate::validation::validate_header_matches_anchor;
+use alloy_consensus::ReceiptWithBloom;
 use alloy_eips::BlockHashOrNumber;
 use logex_types::{ExecutionAnchor, NodeState};
+use reth_eth_wire::NetworkPrimitives;
+use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
+const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
+const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 
 #[derive(Debug)]
 struct ConsensusReorg {
     retained_headers: Vec<Header>,
     indexed_head: Option<ExecutionAnchor>,
     reverted_hashes: Vec<B256>,
+}
+
+struct ValidatedHistoricalBlock {
+    index: usize,
+    body_peer: PeerId,
+    receipt_peer: PeerId,
+    ingest: HistoricalBlockIngest,
+}
+
+struct HistoricalValidationFailure {
+    peer: PeerId,
+    response_kind: &'static str,
+    block_number: u64,
+    block_hash: B256,
+    message: String,
+}
+
+async fn validate_historical_blocks_parallel(
+    headers: &[Header],
+    hashes: &[B256],
+    blocks: Vec<SourcedBodyReceipts>,
+) -> Result<std::result::Result<Vec<ValidatedHistoricalBlock>, Box<HistoricalValidationFailure>>> {
+    let mut tasks = JoinSet::new();
+    for (index, ((body_peer, body), (receipt_peer, receipts))) in blocks.into_iter().enumerate() {
+        let Some(header) = headers.get(index).cloned() else {
+            break;
+        };
+        let block_hash = hashes.get(index).copied().unwrap_or_default();
+        tasks.spawn_blocking(move || {
+            validate_historical_block(
+                index,
+                header,
+                block_hash,
+                body_peer,
+                body,
+                receipt_peer,
+                receipts,
+            )
+        });
+    }
+
+    let mut validated = Vec::with_capacity(tasks.len());
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(block)) => validated.push(block),
+            Ok(Err(failure)) => return Ok(Err(failure)),
+            Err(error) => return Err(eyre::eyre!("historical validation worker failed: {error}")),
+        }
+    }
+    validated.sort_by_key(|block| block.index);
+    Ok(Ok(validated))
+}
+
+fn validate_historical_block(
+    index: usize,
+    header: Header,
+    block_hash: B256,
+    body_peer: PeerId,
+    body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
+    receipt_peer: PeerId,
+    receipts: Vec<ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
+) -> std::result::Result<ValidatedHistoricalBlock, Box<HistoricalValidationFailure>> {
+    let block_number = header.number();
+    if let Err(error) = validate_block_pre_execution(&header, &body) {
+        return Err(Box::new(HistoricalValidationFailure {
+            peer: body_peer,
+            response_kind: "block bodies",
+            block_number,
+            block_hash,
+            message: error.to_string(),
+        }));
+    }
+
+    if !receipts_match_transaction_count(&body, &receipts) {
+        return Err(Box::new(HistoricalValidationFailure {
+            peer: receipt_peer,
+            response_kind: "receipts",
+            block_number,
+            block_hash,
+            message: format!(
+                "transaction/receipt count mismatch: transactions={}, receipts={}",
+                body.transaction_count(),
+                receipts.len()
+            ),
+        }));
+    }
+
+    if let Err(error) = validate_receipts_for_header(&header, &receipts) {
+        return Err(Box::new(HistoricalValidationFailure {
+            peer: receipt_peer,
+            response_kind: "receipts",
+            block_number,
+            block_hash,
+            message: error.to_string(),
+        }));
+    }
+
+    let txs = assemble_txs(&body, &receipts);
+    Ok(ValidatedHistoricalBlock {
+        index,
+        body_peer,
+        receipt_peer,
+        ingest: HistoricalBlockIngest {
+            header,
+            block_hash,
+            txs,
+        },
+    })
 }
 
 impl SyncEngine {
@@ -503,6 +618,279 @@ impl SyncEngine {
             return Ok(false);
         }
 
+        let (batch, prefetched) = if let Some(batch) = self.take_historical_prefetch(&child_header)
+        {
+            (batch, true)
+        } else {
+            match self
+                .fetch_historical_combined_batch(child_header.clone())
+                .await?
+            {
+                Some(batch) => (batch, false),
+                None => {
+                    return self
+                        .ingest_historical_backfill_batch_sequential(child_header)
+                        .await;
+                }
+            }
+        };
+
+        self.ingest_historical_fetched_batch(batch, prefetched).await
+    }
+
+    fn take_historical_prefetch(
+        &mut self,
+        child_header: &Header,
+    ) -> Option<HistoricalFetchedBatch> {
+        let batch = self.historical_prefetch.take()?;
+        if batch.child_header.number() == child_header.number()
+            && batch.child_header.hash_slow() == child_header.hash_slow()
+        {
+            return Some(batch);
+        }
+
+        tracing::debug!(
+            expected_child = child_header.number(),
+            prefetched_child = batch.child_header.number(),
+            "discarding stale historical prefetch"
+        );
+        None
+    }
+
+    async fn fetch_historical_combined_batch(
+        &mut self,
+        child_header: Header,
+    ) -> Result<Option<HistoricalFetchedBatch>> {
+        if child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+            return Ok(None);
+        }
+
+        let request_count = self
+            .config
+            .header_batch_size
+            .min(HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT)
+            .min(child_header.number() - EXECUTION_HISTORY_TARGET_BLOCK);
+        let header_started = std::time::Instant::now();
+        let (header_peer, headers) = match cancelable(
+            &mut self.shutdown,
+            self.peers.get_headers_reverse(
+                BlockHashOrNumber::Hash(child_header.parent_hash()),
+                request_count,
+            ),
+        )
+        .await
+        {
+            Some(Ok(response)) => response,
+            Some(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    child_block = child_header.number(),
+                    "historical reverse header request failed"
+                );
+                self.refresh_connectivity_state();
+                return Ok(None);
+            }
+            None => {
+                self.finish_shutdown()?;
+                return Ok(None);
+            }
+        };
+        let header_elapsed = header_started.elapsed();
+
+        if headers.is_empty() {
+            self.refresh_connectivity_state();
+            return Ok(None);
+        }
+
+        if let Err(error) = validate_reverse_downloaded_headers(&child_header, &headers) {
+            tracing::warn!(
+                child_block = child_header.number(),
+                header_peer = %header_peer,
+                %error,
+                "historical reverse header validation failed"
+            );
+            self.peers.report_invalid_block_data(header_peer, "headers");
+            self.refresh_connectivity_state();
+            return Ok(None);
+        }
+
+        let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
+        let required_block = headers
+            .first()
+            .map(|header| header.number())
+            .unwrap_or(child_header.number().saturating_sub(1));
+        if !HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE {
+            return Ok(None);
+        }
+
+        let pipeline_started = std::time::Instant::now();
+        match cancelable(
+            &mut self.shutdown,
+            self.peers.get_bodies_and_receipts_prefer_peers(
+                hashes.clone(),
+                required_block,
+                &[header_peer],
+            ),
+        )
+        .await
+        {
+            Some(Ok(Some(blocks))) if !blocks.is_empty() && blocks.len() <= headers.len() => {
+                Ok(Some(HistoricalFetchedBatch {
+                    child_header,
+                    header_peer,
+                    headers,
+                    hashes,
+                    blocks,
+                    required_block,
+                    header_elapsed,
+                    body_receipt_elapsed: pipeline_started.elapsed(),
+                }))
+            }
+            Some(Ok(Some(blocks))) => {
+                tracing::debug!(
+                    headers = headers.len(),
+                    blocks = blocks.len(),
+                    "historical body/receipt pipeline returned unusable response, falling back to sequential chunks"
+                );
+                Ok(None)
+            }
+            Some(Ok(None)) => Ok(None),
+            Some(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    "historical body/receipt pipeline failed, falling back to sequential chunks"
+                );
+                self.refresh_connectivity_state();
+                Ok(None)
+            }
+            None => {
+                self.finish_shutdown()?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn ingest_historical_fetched_batch(
+        &mut self,
+        batch: HistoricalFetchedBatch,
+        prefetched: bool,
+    ) -> Result<bool> {
+        let batch_started = std::time::Instant::now();
+        let HistoricalFetchedBatch {
+            header_peer,
+            headers,
+            hashes,
+            blocks,
+            required_block,
+            header_elapsed,
+            body_receipt_elapsed,
+            ..
+        } = batch;
+        let next_child_header = blocks
+            .len()
+            .checked_sub(1)
+            .and_then(|index| headers.get(index))
+            .cloned();
+        let validation_started = std::time::Instant::now();
+        let validated =
+            match validate_historical_blocks_parallel(&headers, &hashes, blocks).await? {
+                Ok(validated) => validated,
+                Err(failure) => {
+                    tracing::warn!(
+                        block_number = failure.block_number,
+                        block_hash = %failure.block_hash,
+                        peer = %failure.peer,
+                        error = %failure.message,
+                        "historical block validation failed"
+                    );
+                    self.peers
+                        .report_invalid_block_data(failure.peer, failure.response_kind);
+                    return Ok(false);
+                }
+            };
+        let validation_elapsed = validation_started.elapsed();
+
+        let mut newly_serving_peers = HashSet::new();
+        let mut ingest_batch = Vec::with_capacity(validated.len());
+        for block in validated {
+            self.note_serving_peer(header_peer, &mut newly_serving_peers);
+            self.note_serving_peer(block.body_peer, &mut newly_serving_peers);
+            self.note_serving_peer(block.receipt_peer, &mut newly_serving_peers);
+            ingest_batch.push(block.ingest);
+        }
+
+        let lowest_block = ingest_batch
+            .iter()
+            .map(|block| block.header.number())
+            .min()
+            .unwrap_or(required_block);
+        let highest_block = ingest_batch
+            .iter()
+            .map(|block| block.header.number())
+            .max()
+            .unwrap_or(required_block);
+        let block_count = ingest_batch.len();
+        let ingest_started = std::time::Instant::now();
+        let write_future = self.historical_write_future(ingest_batch);
+        let mut prefetched_next = false;
+
+        let outcome = if let Some(next_child_header) = next_child_header
+            && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
+            && self.peers.peer_count() > 0
+        {
+            let (write_result, prefetch_result) = tokio::join!(
+                write_future,
+                self.fetch_historical_combined_batch(next_child_header)
+            );
+            match prefetch_result {
+                Ok(Some(next_batch)) => {
+                    self.historical_prefetch = Some(next_batch);
+                    prefetched_next = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(error = %error, "historical prefetch failed");
+                }
+            }
+            write_result?
+        } else {
+            write_future.await?
+        };
+        let overlap_elapsed = ingest_started.elapsed();
+        let storage_elapsed = outcome.extraction_elapsed + outcome.write_elapsed;
+        let log_count = self.record_historical_ingest_outcome(outcome);
+        self.refresh_historical_status().await;
+
+        tracing::debug!(
+            requested_headers = headers.len(),
+            lowest_block,
+            highest_block,
+            blocks = block_count,
+            logs = log_count,
+            prefetched,
+            prefetched_next,
+            header_ms = header_elapsed.as_millis(),
+            body_receipt_ms = body_receipt_elapsed.as_millis(),
+            validation_ms = validation_elapsed.as_millis(),
+            storage_ms = storage_elapsed.as_millis(),
+            overlap_ms = overlap_elapsed.as_millis(),
+            total_ms = batch_started.elapsed().as_millis(),
+            "historical body/receipt pipeline batch completed"
+        );
+        tracing::trace!(
+            lowest_block,
+            highest_block,
+            blocks = block_count,
+            logs = log_count,
+            "historical block batch verified and ingested"
+        );
+        Ok(true)
+    }
+
+    async fn ingest_historical_backfill_batch_sequential(
+        &mut self,
+        child_header: Header,
+    ) -> Result<bool> {
         let request_count = self
             .config
             .header_batch_size
@@ -551,12 +939,16 @@ impl SyncEngine {
         }
 
         let mut newly_serving_peers = HashSet::new();
-
         let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
+
         let mut progressed = false;
+        let sequential_fetch_batch_size = self
+            .config
+            .fetch_batch_size
+            .min(HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT);
         for (chunk_headers, chunk_hashes) in headers
-            .chunks(self.config.fetch_batch_size)
-            .zip(hashes.chunks(self.config.fetch_batch_size))
+            .chunks(sequential_fetch_batch_size)
+            .zip(hashes.chunks(sequential_fetch_batch_size))
         {
             let chunk_headers = chunk_headers.to_vec();
             let chunk_hashes = chunk_hashes.to_vec();
@@ -593,24 +985,6 @@ impl SyncEngine {
                     return Ok(progressed);
                 }
             };
-
-            for (i, header) in chunk_headers.iter().enumerate() {
-                let block_hash = chunk_hashes[i];
-                let block_number = header.number();
-                let (body_peer, body) = &bodies[i];
-                if let Err(error) = validate_block_pre_execution(header, body) {
-                    tracing::warn!(
-                        block_number,
-                        %block_hash,
-                        body_peer = %body_peer,
-                        %error,
-                        "historical block pre-execution validation failed"
-                    );
-                    self.peers
-                        .report_invalid_block_data(*body_peer, "block bodies");
-                    return Ok(progressed);
-                }
-            }
 
             let expected_receipt_counts: Vec<usize> = bodies
                 .iter()
@@ -650,55 +1024,59 @@ impl SyncEngine {
                 }
             };
 
-            for (i, header) in chunk_headers.iter().enumerate() {
-                let block_hash = chunk_hashes[i];
-                let block_number = header.number();
-                let (body_peer, body) = &bodies[i];
+            let blocks: Vec<SourcedBodyReceipts> = bodies
+                .into_iter()
+                .zip(receipts)
+                .map(|((body_peer, body), receipts)| ((body_peer, body), (receipt_peer, receipts)))
+                .collect();
+            let validated =
+                match validate_historical_blocks_parallel(&chunk_headers, &chunk_hashes, blocks)
+                    .await?
+                {
+                    Ok(validated) => validated,
+                    Err(failure) => {
+                        tracing::warn!(
+                            block_number = failure.block_number,
+                            block_hash = %failure.block_hash,
+                            peer = %failure.peer,
+                            error = %failure.message,
+                            "historical block validation failed"
+                        );
+                        self.peers
+                            .report_invalid_block_data(failure.peer, failure.response_kind);
+                        return Ok(progressed);
+                    }
+                };
 
-                if !receipts_match_transaction_count(body, &receipts[i]) {
-                    tracing::warn!(
-                        block_number,
-                        %block_hash,
-                        receipt_peer = %receipt_peer,
-                        transactions = body.transaction_count(),
-                        receipts = receipts[i].len(),
-                        "historical block body / receipt count mismatch"
-                    );
-                    self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
-                    return Ok(progressed);
-                }
-
-                if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
-                    tracing::warn!(
-                        block_number,
-                        %block_hash,
-                        receipt_peer = %receipt_peer,
-                        %error,
-                        "historical receipt validation failed"
-                    );
-                    self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
-                    return Ok(progressed);
-                }
-
-                let txs = assemble_txs(body, &receipts[i]);
-                self.peers
-                    .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
-                let log_count = self
-                    .ingest_historical_block(header, block_hash, &txs)
-                    .await?;
+            let mut ingest_batch = Vec::with_capacity(validated.len());
+            for block in validated {
                 self.note_serving_peer(header_peer, &mut newly_serving_peers);
-                self.note_serving_peer(*body_peer, &mut newly_serving_peers);
-                self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
-                progressed = true;
-
-                tracing::trace!(
-                    block_number,
-                    logs = log_count,
-                    "historical block verified and ingested"
-                );
+                self.note_serving_peer(block.body_peer, &mut newly_serving_peers);
+                self.note_serving_peer(block.receipt_peer, &mut newly_serving_peers);
+                ingest_batch.push(block.ingest);
             }
+
+            let lowest_block = ingest_batch
+                .iter()
+                .map(|block| block.header.number())
+                .min()
+                .unwrap_or(required_block);
+            let highest_block = ingest_batch
+                .iter()
+                .map(|block| block.header.number())
+                .max()
+                .unwrap_or(required_block);
+            let block_count = ingest_batch.len();
+            let log_count = self.ingest_historical_blocks(ingest_batch).await?;
+            progressed = true;
+
+            tracing::trace!(
+                lowest_block,
+                highest_block,
+                blocks = block_count,
+                logs = log_count,
+                "historical block batch verified and ingested"
+            );
         }
 
         self.refresh_historical_status().await;

@@ -30,6 +30,8 @@ pub enum CheckpointSyncError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("checkpoint-sync endpoint root response from {url} is malformed: missing root")]
+    MissingRoot { url: String },
     #[error("checkpoint-sync endpoint returned non-numeric slot {slot:?} for {url}")]
     InvalidSlot { url: String, slot: String },
     #[error(
@@ -76,6 +78,31 @@ struct SignedBeaconHeader {
 #[derive(Debug, Clone, Deserialize)]
 struct BeaconHeaderMessage {
     slot: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconBlockResponse {
+    data: BeaconBlockData,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconBlockData {
+    message: BeaconBlockMessage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconBlockMessage {
+    slot: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconRootResponse {
+    data: BeaconRootData,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconRootData {
+    root: String,
 }
 
 pub async fn resolve_checkpoint(
@@ -200,16 +227,11 @@ impl CheckpointSyncEndpoint {
         block_id: &str,
     ) -> Result<BeaconHeader, CheckpointSyncError> {
         let url = format!("{}/eth/v1/beacon/headers/{}", self.base_url, block_id);
-        let response =
-            client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|source| CheckpointSyncError::Request {
-                    url: url.clone(),
-                    source,
-                })?;
+        let response = get_checkpoint_response(client, &url).await?;
         if !response.status().is_success() {
+            if block_id == "finalized" && response.status() == reqwest::StatusCode::NOT_FOUND {
+                return self.fetch_finalized_block(client).await;
+            }
             return Err(CheckpointSyncError::HttpStatus {
                 url,
                 status: response.status(),
@@ -233,6 +255,74 @@ impl CheckpointSyncEndpoint {
             root: header.data.root,
         })
     }
+
+    async fn fetch_finalized_block(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<BeaconHeader, CheckpointSyncError> {
+        let block_url = format!("{}/eth/v2/beacon/blocks/finalized", self.base_url);
+        let response = get_checkpoint_response(client, &block_url).await?;
+        if !response.status().is_success() {
+            return Err(CheckpointSyncError::HttpStatus {
+                url: block_url,
+                status: response.status(),
+            });
+        }
+        let block = response
+            .json::<BeaconBlockResponse>()
+            .await
+            .map_err(|source| CheckpointSyncError::Decode {
+                url: block_url.clone(),
+                source,
+            })?;
+        let slot =
+            block
+                .data
+                .message
+                .slot
+                .parse()
+                .map_err(|_| CheckpointSyncError::InvalidSlot {
+                    url: block_url.clone(),
+                    slot: block.data.message.slot,
+                })?;
+
+        let root_url = format!("{}/eth/v1/beacon/blocks/{slot}/root", self.base_url);
+        let response = get_checkpoint_response(client, &root_url).await?;
+        if !response.status().is_success() {
+            return Err(CheckpointSyncError::HttpStatus {
+                url: root_url,
+                status: response.status(),
+            });
+        }
+        let root = response
+            .json::<BeaconRootResponse>()
+            .await
+            .map_err(|source| CheckpointSyncError::Decode {
+                url: root_url.clone(),
+                source,
+            })?
+            .data
+            .root;
+        if root.is_empty() {
+            return Err(CheckpointSyncError::MissingRoot { url: root_url });
+        }
+
+        Ok(BeaconHeader { slot, root })
+    }
+}
+
+async fn get_checkpoint_response(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response, CheckpointSyncError> {
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|source| CheckpointSyncError::Request {
+            url: url.to_owned(),
+            source,
+        })
 }
 
 fn parse_inline_checkpoint(input: &str) -> Result<Option<InlineCheckpoint>, CheckpointSyncError> {
@@ -384,5 +474,21 @@ mod tests {
         };
 
         assert_eq!(header.inline_checkpoint(), "42@0xabcdef");
+    }
+
+    #[test]
+    fn parses_checkpoint_block_and_root_responses() {
+        let block: BeaconBlockResponse =
+            serde_json::from_str(r#"{"data":{"message":{"slot":"14279808","body":{}}}}"#).unwrap();
+        let root: BeaconRootResponse = serde_json::from_str(
+            r#"{"data":{"root":"0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(block.data.message.slot, "14279808");
+        assert_eq!(
+            root.data.root,
+            "0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c"
+        );
     }
 }

@@ -19,7 +19,7 @@ pub struct Cli {
     pub log_level: String,
 
     /// Target rows per partition before sealing.
-    #[arg(long, default_value = "50000000", global = true)]
+    #[arg(long, default_value = "1000000", global = true)]
     pub partition_target_rows: u64,
 
     /// Path to optional TOML config file.
@@ -59,8 +59,12 @@ pub enum Command {
         p2p_port: u16,
 
         /// Maximum peer connections.
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "100")]
         max_peers: usize,
+
+        /// EL NAT/external address resolver advertised to peers: any, none, publicip, netif, extip:<ip>, or extaddr:<domain>.
+        #[arg(long, default_value = "any")]
+        nat: String,
 
         /// Consensus-layer discv5 discovery port (UDP).
         #[arg(long, default_value = "9000")]
@@ -77,6 +81,13 @@ pub enum Command {
 
     /// Build or rebuild indexes on the hot partition.
     BuildIndexes,
+
+    /// Compact sealed storage segments.
+    Compact {
+        /// Maximum number of eligible sealed segments to compact.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 
     /// Show storage statistics.
     Info,
@@ -95,6 +106,8 @@ pub struct Config {
     pub checkpoint: Option<String>,
     #[serde(default)]
     pub checkpoint_sync_url: Option<String>,
+    #[serde(default)]
+    pub nat: Option<String>,
 }
 
 impl Config {

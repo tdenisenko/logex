@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json, Response};
 
-use logex_query::{self, SqlQueryError};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT, SqlQueryError, SqlQueryPage};
 use logex_storage::PartitionManager;
 use serde::Serialize;
 
@@ -16,6 +16,12 @@ use crate::storage_metrics;
 pub struct QueryRequest {
     /// SQL query string.
     pub sql: String,
+    /// Maximum rows to return in this page. Defaults to 50 and is capped at 10,000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Zero-based row offset for pagination.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 /// Response for a successful query.
@@ -24,6 +30,10 @@ pub struct QueryResponse {
     pub rows: Vec<serde_json::Value>,
     pub total_scanned: u64,
     pub row_count: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub max_limit: usize,
 }
 
 /// Error response.
@@ -45,7 +55,9 @@ pub async fn handle_query(
 ) -> Response {
     let storage = state.storage.read().await;
     let head_block = storage.head_block();
-    let result = match logex_query::execute_sql(&req.sql, &storage, head_block).await {
+    let requested_limit = req.limit.unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
+    let page = SqlQueryPage::new(Some(requested_limit), req.offset);
+    let result = match logex_query::execute_sql_page(&req.sql, &storage, head_block, page).await {
         Ok(r) => r,
         Err(SqlQueryError::DataFusion(e)) => {
             return ErrorResponse {
@@ -71,11 +83,19 @@ pub async fn handle_query(
     };
 
     let row_count = result.rows.len();
+    let next_offset = (requested_limit > 0
+        && row_count == requested_limit
+        && req.offset.saturating_add(row_count) < MAX_QUERY_LIMIT)
+        .then_some(req.offset + row_count);
 
     Json(QueryResponse {
         rows: result.rows,
         total_scanned: result.total_scanned,
         row_count,
+        limit: requested_limit.min(MAX_QUERY_LIMIT.saturating_sub(req.offset)),
+        offset: req.offset,
+        next_offset,
+        max_limit: MAX_QUERY_LIMIT,
     })
     .into_response()
 }
@@ -187,6 +207,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "historical_target_block": sync.historical_target_block,
         "historical_blocks_per_sec": sync.historical_blocks_per_sec,
         "historical_eta_seconds": sync.historical_eta_seconds,
+        "raw_log_segment_backlog": sync.raw_log_segment_backlog,
+        "storage_profile_rewrite_backlog": sync.storage_profile_rewrite_backlog,
         "progress_pct": progress_pct,
         "canonical_top_block": canonical_top_block,
         "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
@@ -198,6 +220,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "materialized_execution_anchor_gap_count": sync.materialized_execution_anchor_gap_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
+        "execution_network": sync.execution_network,
         "consensus_network": sync.consensus_network,
         "consensus_light_client": sync.consensus_light_client,
         "index_lag_blocks": index_lag_blocks,
@@ -234,8 +257,9 @@ mod tests {
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
         ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
-        LightClientBootstrapStatus, LightClientExecutionData, LightClientHeaderSummary, LogRow,
-        NodeState, Source, SyncStatus, WeakSubjectivityCheckpoint,
+        ExecutionNetworkStatus, LightClientBootstrapStatus, LightClientExecutionData,
+        LightClientHeaderSummary, LogRow, NodeState, Source, SyncStatus,
+        WeakSubjectivityCheckpoint,
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -548,6 +572,8 @@ mod tests {
                 historical_target_block: logex_types::EXECUTION_HISTORY_TARGET_BLOCK,
                 historical_blocks_per_sec: 0.0,
                 historical_eta_seconds: None,
+                raw_log_segment_backlog: Some(2),
+                storage_profile_rewrite_backlog: Some(5),
                 checkpoint: Some(WeakSubjectivityCheckpoint {
                     beacon_root: B256::repeat_byte(0x77),
                     beacon_slot: Some(123_456),
@@ -588,6 +614,30 @@ mod tests {
                     block_number: 480,
                     block_hash: B256::repeat_byte(0x08),
                     receipts_root: B256::repeat_byte(0x09),
+                }),
+                execution_network: Some(ExecutionNetworkStatus {
+                    max_peers: 100,
+                    accepted_sessions: 17,
+                    rejected_zero_tip_sessions: 2,
+                    disconnected_sessions: 5,
+                    saturated_disconnects: 1,
+                    nonserving_disconnects: 3,
+                    missing_fork_id_candidates: 4,
+                    fork_id_rejected_candidates: 6,
+                    queued_candidates: 9,
+                    pending_dials: 3,
+                    productive_peers: 7,
+                    known_peers: 11,
+                    saturated_peers: 2,
+                    receipt_quarantined_peers: 1,
+                    connected_geth_peers: 2,
+                    connected_nethermind_peers: 3,
+                    connected_reth_peers: 1,
+                    connected_other_peers: 0,
+                    serving_geth_peers: 1,
+                    serving_nethermind_peers: 2,
+                    serving_reth_peers: 1,
+                    serving_other_peers: 0,
                 }),
                 consensus_network: Some(ConsensusNetworkStatus {
                     local_enr: Some("enr:test".to_string()),
@@ -719,6 +769,25 @@ mod tests {
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
+        assert_eq!(status["execution_network"]["queued_candidates"], 9);
+        assert_eq!(status["execution_network"]["pending_dials"], 3);
+        assert_eq!(status["execution_network"]["productive_peers"], 7);
+        assert_eq!(status["execution_network"]["accepted_sessions"], 17);
+        assert_eq!(status["execution_network"]["rejected_zero_tip_sessions"], 2);
+        assert_eq!(status["execution_network"]["disconnected_sessions"], 5);
+        assert_eq!(status["execution_network"]["saturated_disconnects"], 1);
+        assert_eq!(status["execution_network"]["nonserving_disconnects"], 3);
+        assert_eq!(status["execution_network"]["missing_fork_id_candidates"], 4);
+        assert_eq!(
+            status["execution_network"]["fork_id_rejected_candidates"],
+            6
+        );
+        assert_eq!(status["execution_network"]["connected_geth_peers"], 2);
+        assert_eq!(status["execution_network"]["connected_nethermind_peers"], 3);
+        assert_eq!(status["execution_network"]["connected_reth_peers"], 1);
+        assert_eq!(status["execution_network"]["serving_nethermind_peers"], 2);
+        assert_eq!(status["raw_log_segment_backlog"], 2);
+        assert_eq!(status["storage_profile_rewrite_backlog"], 5);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
         assert_eq!(status["consensus_network"]["dialable_peers"], 13);
         assert_eq!(

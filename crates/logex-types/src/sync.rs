@@ -167,6 +167,54 @@ pub struct ConsensusNetworkStatus {
     pub last_response_send_failure: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ExecutionNetworkStatus {
+    /// Maximum execution peers configured for the current run.
+    pub max_peers: usize,
+    /// Execution peer sessions accepted since startup.
+    pub accepted_sessions: u64,
+    /// Execution peer sessions rejected because the peer did not advertise a usable tip.
+    pub rejected_zero_tip_sessions: u64,
+    /// Execution peer sessions closed since startup after being accepted.
+    pub disconnected_sessions: u64,
+    /// Accepted sessions closed with an explicit too-many-peers reason.
+    pub saturated_disconnects: u64,
+    /// Accepted sessions closed before serving any sync data.
+    pub nonserving_disconnects: u64,
+    /// Discovered candidates ignored because they did not include an ENR fork ID.
+    pub missing_fork_id_candidates: u64,
+    /// Discovered candidates ignored because their ENR fork ID was incompatible.
+    pub fork_id_rejected_candidates: u64,
+    /// Pending execution peer candidates that have not been submitted to the dialer yet.
+    pub queued_candidates: usize,
+    /// Execution peers currently submitted to the dialer but not yet connected or failed.
+    pub pending_dials: usize,
+    /// Persisted peers that previously served valid execution data.
+    pub productive_peers: usize,
+    /// Total persisted execution peers retained across restarts.
+    pub known_peers: usize,
+    /// Peers temporarily backed off after remote saturation or too-many-peers responses.
+    pub saturated_peers: usize,
+    /// Peers temporarily excluded from receipt requests after receipt-specific failures.
+    pub receipt_quarantined_peers: usize,
+    /// Connected geth peers.
+    pub connected_geth_peers: usize,
+    /// Connected Nethermind peers.
+    pub connected_nethermind_peers: usize,
+    /// Connected Reth peers.
+    pub connected_reth_peers: usize,
+    /// Connected peers from other client families.
+    pub connected_other_peers: usize,
+    /// Serving geth peers.
+    pub serving_geth_peers: usize,
+    /// Serving Nethermind peers.
+    pub serving_nethermind_peers: usize,
+    /// Serving Reth peers.
+    pub serving_reth_peers: usize,
+    /// Serving peers from other client families.
+    pub serving_other_peers: usize,
+}
+
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SyncStatus {
@@ -205,6 +253,12 @@ pub struct SyncStatus {
     pub historical_blocks_per_sec: f64,
     /// Estimated seconds remaining for the historical reverse verifier.
     pub historical_eta_seconds: Option<f64>,
+    /// Raw sealed log segments waiting for first-time column compression.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_log_segment_backlog: Option<usize>,
+    /// Already compacted segments waiting for an idle-time rewrite into the current storage profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_profile_rewrite_backlog: Option<usize>,
     /// Weak-subjectivity checkpoint the node bootstrapped from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<WeakSubjectivityCheckpoint>,
@@ -230,6 +284,9 @@ pub struct SyncStatus {
     /// Native consensus-network discovery state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consensus_network: Option<ConsensusNetworkStatus>,
+    /// Native execution-network peer state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_network: Option<ExecutionNetworkStatus>,
     /// Decoded native CL light-client payload summaries learned from peers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consensus_light_client: Option<ConsensusLightClientStatus>,

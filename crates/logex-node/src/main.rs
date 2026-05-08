@@ -40,6 +40,7 @@ fn main() {
         .unwrap_or(cli.partition_target_rows);
     let checkpoint = file_config.checkpoint.or(cli.checkpoint);
     let checkpoint_sync_url = file_config.checkpoint_sync_url.or(cli.checkpoint_sync_url);
+    let config_nat = file_config.nat;
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -55,10 +56,16 @@ fn main() {
             discovery_port,
             p2p_port,
             max_peers,
+            nat,
             cl_discovery_port,
             cl_p2p_port,
             cl_max_peers,
         } => {
+            let nat = if nat == "any" {
+                config_nat.unwrap_or(nat)
+            } else {
+                nat
+            };
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
@@ -69,12 +76,14 @@ fn main() {
                 discovery_port,
                 p2p_port,
                 max_peers,
+                nat,
                 cl_discovery_port,
                 cl_p2p_port,
                 cl_max_peers,
             }));
         }
         Command::BuildIndexes => commands::run_build_indexes(pm_config),
+        Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
     }
 }

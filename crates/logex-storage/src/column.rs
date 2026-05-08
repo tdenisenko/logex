@@ -1,5 +1,5 @@
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use logex_types::LogRow;
@@ -9,6 +9,7 @@ const COLUMN_MAGIC: &[u8; 4] = b"LXCL";
 
 /// Current column file format version.
 const COLUMN_VERSION: u32 = 1;
+const ZERO_B256: [u8; 32] = [0; 32];
 
 /// Header written at the start of every `.col` file.
 #[derive(Debug, Clone, Copy)]
@@ -131,44 +132,46 @@ impl ColumnFile {
         let row_count = rows.len() as u64;
 
         // Write all columns in parallel (sequentially here, could be parallelized later)
-        Self::write_fixed_col(dir, "address.col", row_count, rows, |r| {
-            r.address.as_slice().to_vec()
+        Self::write_fixed_col(dir, "address.col", row_count, rows, |w, r| {
+            w.write_all(r.address.as_slice())
         })?;
-        Self::write_fixed_col(dir, "block_number.col", row_count, rows, |r| {
-            r.block_number.to_le_bytes().to_vec()
+        Self::write_fixed_col(dir, "block_number.col", row_count, rows, |w, r| {
+            w.write_all(&r.block_number.to_le_bytes())
         })?;
-        Self::write_fixed_col(dir, "block_hash.col", row_count, rows, |r| {
-            r.block_hash.as_slice().to_vec()
+        Self::write_fixed_col(dir, "block_hash.col", row_count, rows, |w, r| {
+            w.write_all(r.block_hash.as_slice())
         })?;
-        Self::write_fixed_col(dir, "tx_hash.col", row_count, rows, |r| {
-            r.tx_hash.as_slice().to_vec()
+        Self::write_fixed_col(dir, "tx_hash.col", row_count, rows, |w, r| {
+            w.write_all(r.tx_hash.as_slice())
         })?;
-        Self::write_fixed_col(dir, "tx_index.col", row_count, rows, |r| {
-            r.tx_index.to_le_bytes().to_vec()
+        Self::write_fixed_col(dir, "tx_index.col", row_count, rows, |w, r| {
+            w.write_all(&r.tx_index.to_le_bytes())
         })?;
-        Self::write_fixed_col(dir, "log_index.col", row_count, rows, |r| {
-            r.log_index.to_le_bytes().to_vec()
+        Self::write_fixed_col(dir, "log_index.col", row_count, rows, |w, r| {
+            w.write_all(&r.log_index.to_le_bytes())
         })?;
-        Self::write_fixed_col(dir, "timestamp.col", row_count, rows, |r| {
-            r.timestamp.to_le_bytes().to_vec()
+        Self::write_fixed_col(dir, "timestamp.col", row_count, rows, |w, r| {
+            w.write_all(&r.timestamp.to_le_bytes())
         })?;
-        Self::write_fixed_col(dir, "data_len.col", row_count, rows, |r| {
-            r.data_len.to_le_bytes().to_vec()
+        Self::write_fixed_col(dir, "data_len.col", row_count, rows, |w, r| {
+            w.write_all(&r.data_len.to_le_bytes())
         })?;
-        Self::write_fixed_col(dir, "source.col", row_count, rows, |r| vec![r.source as u8])?;
+        Self::write_fixed_col(dir, "source.col", row_count, rows, |w, r| {
+            w.write_all(&[r.source as u8])
+        })?;
 
         // Nullable topic columns: write column file + null bitmap
-        Self::write_nullable_col(dir, "topic0", row_count, rows, |r| {
-            r.topic0.map(|t| t.as_slice().to_vec())
+        Self::write_nullable_col(dir, "topic0", row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic0.as_ref())
         })?;
-        Self::write_nullable_col(dir, "topic1", row_count, rows, |r| {
-            r.topic1.map(|t| t.as_slice().to_vec())
+        Self::write_nullable_col(dir, "topic1", row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic1.as_ref())
         })?;
-        Self::write_nullable_col(dir, "topic2", row_count, rows, |r| {
-            r.topic2.map(|t| t.as_slice().to_vec())
+        Self::write_nullable_col(dir, "topic2", row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic2.as_ref())
         })?;
-        Self::write_nullable_col(dir, "topic3", row_count, rows, |r| {
-            r.topic3.map(|t| t.as_slice().to_vec())
+        Self::write_nullable_col(dir, "topic3", row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic3.as_ref())
         })?;
 
         // Variable-length data column: offset array + data blob
@@ -188,49 +191,94 @@ impl ColumnFile {
 
         let new_row_count = existing_rows + rows.len() as u64;
 
-        Self::append_fixed_col(dir, "address.col", new_row_count, rows, |r| {
-            r.address.as_slice().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "block_number.col", new_row_count, rows, |r| {
-            r.block_number.to_le_bytes().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "block_hash.col", new_row_count, rows, |r| {
-            r.block_hash.as_slice().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "tx_hash.col", new_row_count, rows, |r| {
-            r.tx_hash.as_slice().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "tx_index.col", new_row_count, rows, |r| {
-            r.tx_index.to_le_bytes().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "log_index.col", new_row_count, rows, |r| {
-            r.log_index.to_le_bytes().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "timestamp.col", new_row_count, rows, |r| {
-            r.timestamp.to_le_bytes().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "data_len.col", new_row_count, rows, |r| {
-            r.data_len.to_le_bytes().to_vec()
-        })?;
-        Self::append_fixed_col(dir, "source.col", new_row_count, rows, |r| {
-            vec![r.source as u8]
-        })?;
+        Self::append_fixed_col(
+            dir,
+            "address.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(r.address.as_slice()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "block_number.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&r.block_number.to_le_bytes()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "block_hash.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(r.block_hash.as_slice()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "tx_hash.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(r.tx_hash.as_slice()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "tx_index.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&r.tx_index.to_le_bytes()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "log_index.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&r.log_index.to_le_bytes()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "timestamp.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&r.timestamp.to_le_bytes()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "data_len.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&r.data_len.to_le_bytes()),
+        )?;
+        Self::append_fixed_col(
+            dir,
+            "source.col",
+            existing_rows,
+            new_row_count,
+            rows,
+            |w, r| w.write_all(&[r.source as u8]),
+        )?;
 
-        Self::append_nullable_col(dir, "topic0", new_row_count, rows, |r| {
-            r.topic0.map(|t| t.as_slice().to_vec())
+        Self::append_nullable_col(dir, "topic0", existing_rows, new_row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic0.as_ref())
         })?;
-        Self::append_nullable_col(dir, "topic1", new_row_count, rows, |r| {
-            r.topic1.map(|t| t.as_slice().to_vec())
+        Self::append_nullable_col(dir, "topic1", existing_rows, new_row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic1.as_ref())
         })?;
-        Self::append_nullable_col(dir, "topic2", new_row_count, rows, |r| {
-            r.topic2.map(|t| t.as_slice().to_vec())
+        Self::append_nullable_col(dir, "topic2", existing_rows, new_row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic2.as_ref())
         })?;
-        Self::append_nullable_col(dir, "topic3", new_row_count, rows, |r| {
-            r.topic3.map(|t| t.as_slice().to_vec())
+        Self::append_nullable_col(dir, "topic3", existing_rows, new_row_count, rows, |w, r| {
+            write_optional_b256(w, r.topic3.as_ref())
         })?;
 
         Self::append_var_col(dir, "data.col", new_row_count, rows, existing_rows)?;
-        Self::append_canonical_bitmap(dir, new_row_count, rows.len() as u64)?;
+        Self::append_canonical_bitmap(dir, existing_rows, rows.len() as u64)?;
 
         Ok(())
     }
@@ -240,7 +288,7 @@ impl ColumnFile {
         name: &str,
         row_count: u64,
         rows: &[LogRow],
-        extract: impl Fn(&LogRow) -> Vec<u8>,
+        mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
         let path = dir.join(name);
         let file = File::create(&path)?;
@@ -254,7 +302,7 @@ impl ColumnFile {
         header.write_to(&mut w)?;
 
         for row in rows {
-            w.write_all(&extract(row))?;
+            write_value(&mut w, row)?;
         }
         w.flush()?;
         Ok(())
@@ -263,21 +311,16 @@ impl ColumnFile {
     fn append_fixed_col(
         dir: &Path,
         name: &str,
+        existing_rows: u64,
         new_row_count: u64,
         rows: &[LogRow],
-        extract: impl Fn(&LogRow) -> Vec<u8>,
+        mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
         let path = dir.join(name);
-        let mut data = fs::read(&path)?;
-
-        // Update row count in header
-        data[8..16].copy_from_slice(&new_row_count.to_le_bytes());
-
-        // Append new data
-        let mut file = File::create(&path)?;
-        file.write_all(&data)?;
+        let file = Self::open_col_for_append(&path, existing_rows, new_row_count)?;
+        let mut file = BufWriter::new(file);
         for row in rows {
-            file.write_all(&extract(row))?;
+            write_value(&mut file, row)?;
         }
         file.flush()?;
         Ok(())
@@ -288,7 +331,7 @@ impl ColumnFile {
         base_name: &str,
         row_count: u64,
         rows: &[LogRow],
-        extract: impl Fn(&LogRow) -> Option<Vec<u8>>,
+        mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
     ) -> io::Result<()> {
         let col_path = dir.join(format!("{base_name}.col"));
         let null_path = dir.join(format!("{base_name}.null"));
@@ -304,16 +347,8 @@ impl ColumnFile {
         };
         header.write_to(&mut w)?;
 
-        // For nullable columns, write 32 zero bytes when null, actual value when present.
-        let zero = vec![0u8; 32];
         for row in rows {
-            if let Some(val) = extract(row) {
-                w.write_all(&val)?;
-                nulls.push(true);
-            } else {
-                w.write_all(&zero)?;
-                nulls.push(false);
-            }
+            nulls.push(write_value(&mut w, row)?);
         }
         w.flush()?;
 
@@ -329,41 +364,37 @@ impl ColumnFile {
     fn append_nullable_col(
         dir: &Path,
         base_name: &str,
+        existing_rows: u64,
         new_row_count: u64,
         rows: &[LogRow],
-        extract: impl Fn(&LogRow) -> Option<Vec<u8>>,
+        mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
     ) -> io::Result<()> {
         let col_path = dir.join(format!("{base_name}.col"));
         let null_path = dir.join(format!("{base_name}.null"));
 
-        // Read existing column data and update header
-        let mut col_data = fs::read(&col_path)?;
-        col_data[8..16].copy_from_slice(&new_row_count.to_le_bytes());
-
-        let mut col_file = File::create(&col_path)?;
-        col_file.write_all(&col_data)?;
+        let col_file = Self::open_col_for_append(&col_path, existing_rows, new_row_count)?;
+        let mut col_file = BufWriter::new(col_file);
 
         // Read existing null bitmap and append
         let null_data = fs::read(&null_path)?;
         let mut nulls = NullBitmap::read_from(&null_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt null bitmap"))?;
+        if nulls.len() != existing_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "null bitmap row count mismatch for {base_name}: expected {existing_rows}, got {}",
+                    nulls.len()
+                ),
+            ));
+        }
 
-        let zero = vec![0u8; 32];
         for row in rows {
-            if let Some(val) = extract(row) {
-                col_file.write_all(&val)?;
-                nulls.push(true);
-            } else {
-                col_file.write_all(&zero)?;
-                nulls.push(false);
-            }
+            nulls.push(write_value(&mut col_file, row)?);
         }
         col_file.flush()?;
 
-        let null_file = File::create(&null_path)?;
-        let mut nw = BufWriter::new(null_file);
-        nulls.write_to(&mut nw)?;
-        nw.flush()?;
+        Self::replace_file(&null_path, |nw| nulls.write_to(nw))?;
 
         Ok(())
     }
@@ -416,6 +447,15 @@ impl ColumnFile {
         let header = ColumnFileHeader::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt data column"))?;
         let old_count = header.row_count as usize;
+        if header.row_count != _existing_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "data column row count mismatch: expected {_existing_rows}, got {}",
+                    header.row_count
+                ),
+            ));
+        }
 
         // Read existing offsets
         let offset_start = ColumnFileHeader::SIZE;
@@ -448,36 +488,34 @@ impl ColumnFile {
         }
         new_offsets.push(off);
 
-        // Write everything fresh
-        let file = File::create(&path)?;
-        let mut w = BufWriter::new(file);
+        Self::replace_file(&path, |w| {
+            let new_header = ColumnFileHeader {
+                version: COLUMN_VERSION,
+                row_count: new_row_count,
+                compression: 0,
+            };
+            new_header.write_to(w)?;
 
-        let new_header = ColumnFileHeader {
-            version: COLUMN_VERSION,
-            row_count: new_row_count,
-            compression: 0,
-        };
-        new_header.write_to(&mut w)?;
+            // All offsets: old (without sentinel) + new (with sentinel)
+            for o in &old_offsets[..old_count] {
+                w.write_all(&o.to_le_bytes())?;
+            }
+            for o in &new_offsets {
+                w.write_all(&o.to_le_bytes())?;
+            }
 
-        // All offsets: old (without sentinel) + new (with sentinel)
-        for o in &old_offsets[..old_count] {
-            w.write_all(&o.to_le_bytes())?;
-        }
-        for o in &new_offsets {
-            w.write_all(&o.to_le_bytes())?;
-        }
-
-        // All data
-        w.write_all(existing_data)?;
-        for row in rows {
-            w.write_all(&row.data)?;
-        }
-        w.flush()?;
+            // All data
+            w.write_all(existing_data)?;
+            for row in rows {
+                w.write_all(&row.data)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
     /// Write a canonical bitmap where all rows are marked canonical (all 1s).
-    fn write_canonical_bitmap(dir: &Path, row_count: u64) -> io::Result<()> {
+    pub(crate) fn write_canonical_bitmap(dir: &Path, row_count: u64) -> io::Result<()> {
         let path = dir.join("canonical.bitmap");
         let file = File::create(&path)?;
         let mut w = BufWriter::new(file);
@@ -491,22 +529,94 @@ impl ColumnFile {
         Ok(())
     }
 
-    fn append_canonical_bitmap(dir: &Path, _new_row_count: u64, new_rows: u64) -> io::Result<()> {
+    fn append_canonical_bitmap(dir: &Path, existing_rows: u64, new_rows: u64) -> io::Result<()> {
         let path = dir.join("canonical.bitmap");
         let data = fs::read(&path)?;
         let mut bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
         })?;
+        if bitmap.len() != existing_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "canonical bitmap row count mismatch: expected {existing_rows}, got {}",
+                    bitmap.len()
+                ),
+            ));
+        }
 
         for _ in 0..new_rows {
             bitmap.push(true);
         }
 
-        let file = File::create(&path)?;
-        let mut w = BufWriter::new(file);
-        bitmap.write_to(&mut w)?;
-        w.flush()?;
+        Self::replace_file(&path, |w| bitmap.write_to(w))?;
         Ok(())
+    }
+
+    fn open_col_for_append(
+        path: &Path,
+        existing_rows: u64,
+        new_row_count: u64,
+    ) -> io::Result<File> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let mut header_buf = [0u8; ColumnFileHeader::SIZE];
+        file.read_exact(&mut header_buf)?;
+        let header = ColumnFileHeader::read_from(&header_buf).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt column header in {}", path.display()),
+            )
+        })?;
+        if header.row_count != existing_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "column row count mismatch for {}: expected {existing_rows}, got {}",
+                    path.display(),
+                    header.row_count
+                ),
+            ));
+        }
+
+        file.seek(SeekFrom::Start(8))?;
+        file.write_all(&new_row_count.to_le_bytes())?;
+        file.seek(SeekFrom::End(0))?;
+        Ok(file)
+    }
+
+    fn replace_file(
+        path: &Path,
+        write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid file name: {}", path.display()),
+                )
+            })?;
+        let tmp_path = path.with_file_name(format!(".{file_name}.tmp"));
+        let file = File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+        write(&mut writer)?;
+        writer.flush()?;
+        fs::rename(tmp_path, path)?;
+        Ok(())
+    }
+}
+
+fn write_optional_b256(
+    writer: &mut BufWriter<File>,
+    value: Option<&alloy_primitives::B256>,
+) -> io::Result<bool> {
+    if let Some(value) = value {
+        writer.write_all(value.as_slice())?;
+        Ok(true)
+    } else {
+        writer.write_all(&ZERO_B256)?;
+        Ok(false)
     }
 }
 

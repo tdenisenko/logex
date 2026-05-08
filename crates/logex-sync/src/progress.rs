@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use logex_types::{
-    ChainAnchors, ExecutionBlockMarker, NodeState, SyncStatus, WeakSubjectivityCheckpoint,
+    ChainAnchors, ExecutionBlockMarker, ExecutionNetworkStatus, NodeState, SyncStatus,
+    WeakSubjectivityCheckpoint,
 };
 
 /// Tracks sync progress and updates the shared SyncStatus.
@@ -88,8 +89,20 @@ impl ProgressTracker {
     ) {
         let mut status = self.status.lock().unwrap();
         let previous_state = status.node_state;
+        let historical_incomplete = status
+            .historical_execution_floor
+            .is_some_and(|floor| floor.block_number > status.historical_target_block);
+        let node_state = if historical_incomplete
+            && matches!(
+                node_state,
+                NodeState::Synced | NodeState::WaitingForConsensus
+            ) {
+            NodeState::Syncing
+        } else {
+            node_state
+        };
         status.node_state = node_state;
-        status.syncing = node_state == NodeState::Syncing;
+        status.syncing = node_state == NodeState::Syncing || historical_incomplete;
         status.connected_peers = connected_peers;
         status.serving_peers = serving_peers;
         status.pending_peers = pending_peers;
@@ -106,6 +119,11 @@ impl ProgressTracker {
                 "node state changed"
             );
         }
+    }
+
+    pub fn update_execution_network_state(&self, execution_network: ExecutionNetworkStatus) {
+        let mut status = self.status.lock().unwrap();
+        status.execution_network = Some(execution_network);
     }
 
     /// Record that a block has been ingested.
@@ -174,14 +192,19 @@ impl ProgressTracker {
         );
     }
 
-    pub fn record_historical_block(
+    pub fn record_historical_blocks(
         &mut self,
         floor: ExecutionBlockMarker,
         anchor: Option<ExecutionBlockMarker>,
         target_block: u64,
+        block_count: u64,
         log_count: u64,
     ) {
-        self.historical_blocks_processed += 1;
+        if block_count == 0 {
+            return;
+        }
+
+        self.historical_blocks_processed += block_count;
         self.historical_logs_ingested += log_count;
         self.logs_ingested += log_count;
 
@@ -290,6 +313,26 @@ mod tests {
         let status = status.lock().unwrap().clone();
         assert!(!status.syncing);
         assert_eq!(status.node_state, NodeState::Connecting);
+    }
+
+    #[test]
+    fn historical_backfill_keeps_runtime_syncing_state_visible() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            historical_execution_floor: Some(ExecutionBlockMarker {
+                block_number: 10,
+                block_hash: B256::repeat_byte(0x10),
+                timestamp: 100,
+            }),
+            historical_target_block: 0,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Synced, 8, 8, 64);
+
+        let status = status.lock().unwrap().clone();
+        assert!(status.syncing);
+        assert_eq!(status.node_state, NodeState::Syncing);
     }
 
     #[test]

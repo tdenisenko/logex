@@ -295,6 +295,10 @@ pub fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd::encode_all(data, 3)
 }
 
+pub fn zstd_compress_level(data: &[u8], level: i32) -> io::Result<Vec<u8>> {
+    zstd::encode_all(data, level)
+}
+
 pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd::decode_all(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }

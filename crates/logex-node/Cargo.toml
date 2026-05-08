@@ -17,10 +17,12 @@ logex-index = { workspace = true }
 logex-server = { workspace = true }
 logex-sync = { workspace = true }
 reth-chainspec = { workspace = true }
+reth-discv4 = { workspace = true }
 reth-ethereum-forks = { workspace = true }
 secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 clap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }

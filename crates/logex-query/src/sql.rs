@@ -32,6 +32,8 @@ use crate::lexer::{Token, tokenize};
 use crate::native::{StorageSnapshot, candidate_row_ids, partition_matches_filter};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
+pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
+pub const MAX_QUERY_LIMIT: usize = 10_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlQueryError {
@@ -47,6 +49,44 @@ pub enum SqlQueryError {
 pub struct SqlQueryResult {
     pub rows: Vec<Value>,
     pub total_scanned: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SqlQueryPage {
+    pub limit: Option<usize>,
+    pub offset: usize,
+}
+
+impl Default for SqlQueryPage {
+    fn default() -> Self {
+        Self {
+            limit: Some(DEFAULT_QUERY_PAGE_SIZE),
+            offset: 0,
+        }
+    }
+}
+
+impl SqlQueryPage {
+    pub fn new(limit: Option<usize>, offset: usize) -> Self {
+        Self { limit, offset }
+    }
+
+    fn validated(self) -> Result<(usize, usize), SqlQueryError> {
+        if self.offset >= MAX_QUERY_LIMIT {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "query offset must be less than {MAX_QUERY_LIMIT}"
+            ))));
+        }
+
+        let limit = self.limit.unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
+        if limit > MAX_QUERY_LIMIT {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "query limit must be at most {MAX_QUERY_LIMIT}"
+            ))));
+        }
+
+        Ok((self.offset, limit.min(MAX_QUERY_LIMIT - self.offset)))
+    }
 }
 
 #[derive(Debug)]
@@ -215,6 +255,16 @@ pub async fn execute_sql(
     storage: &PartitionManager,
     head_block: Option<u64>,
 ) -> Result<SqlQueryResult, SqlQueryError> {
+    execute_sql_page(sql, storage, head_block, SqlQueryPage::default()).await
+}
+
+pub async fn execute_sql_page(
+    sql: &str,
+    storage: &PartitionManager,
+    head_block: Option<u64>,
+    page: SqlQueryPage,
+) -> Result<SqlQueryResult, SqlQueryError> {
+    let (offset, limit) = page.validated()?;
     let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
     if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
@@ -231,6 +281,7 @@ pub async fn execute_sql(
     ctx.register_table("logs", Arc::new(table))?;
 
     let dataframe = ctx.sql(&sql).await?;
+    let dataframe = dataframe.limit(offset, Some(limit))?;
     let batches = dataframe.collect().await?;
     let rows = record_batches_to_json(&batches);
 
@@ -1227,6 +1278,21 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["bn"], 200);
+    }
+
+    #[tokio::test]
+    async fn rejects_query_pages_above_hard_cap() {
+        let (_tmp, storage) = setup_storage();
+        let error = execute_sql_page(
+            "SELECT * FROM logs",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(MAX_QUERY_LIMIT + 1), 0),
+        )
+        .await
+        .expect_err("oversized query limit must be rejected");
+
+        assert!(matches!(error, SqlQueryError::DataFusion(_)));
     }
 
     #[tokio::test]

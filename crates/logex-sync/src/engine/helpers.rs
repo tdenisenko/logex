@@ -11,6 +11,8 @@ impl SyncEngine {
             let status = self.sync_status.lock().unwrap();
             status.node_state
         };
+        self.progress
+            .update_execution_network_state(self.peers.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -20,6 +22,8 @@ impl SyncEngine {
     }
 
     pub(super) fn set_runtime_state(&self, state: NodeState) {
+        self.progress
+            .update_execution_network_state(self.peers.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -152,10 +156,10 @@ pub(super) fn should_switch_to_live_without_target(
 
 pub(super) fn should_run_historical_backfill(
     current_block: u64,
-    target_block: u64,
-    max_live_lag: u64,
+    _target_block: u64,
+    _max_live_lag: u64,
 ) -> bool {
-    target_block == 0 || target_block.saturating_sub(current_block) <= max_live_lag
+    current_block > 0
 }
 
 pub(super) fn runtime_state_for_connectivity(
@@ -221,13 +225,17 @@ where
 }
 
 pub(super) fn refill_peer_floor(max_peers: usize) -> usize {
-    max_peers.clamp(1, MIN_ACTIVE_SYNC_PEERS)
+    max_peers.clamp(1, TARGET_ACTIVE_SYNC_PEERS.max(MIN_ACTIVE_SYNC_PEERS))
 }
 
-pub(super) fn desired_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
-    (connected_peers + 1)
-        .max(refill_peer_floor(max_peers))
-        .min(max_peers)
+pub(super) fn nonblocking_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
+    connected_peers
+        .saturating_add(PEER_REFILL_STEP)
+        .clamp(1, max_peers)
+}
+
+pub(super) fn active_refill_min_peers(max_peers: usize) -> usize {
+    refill_peer_floor(max_peers).min(max_peers)
 }
 
 pub(super) fn peer_refill_goal(
@@ -239,12 +247,13 @@ pub(super) fn peer_refill_goal(
         return None;
     }
 
-    if serving_peers < MIN_ACTIVE_SYNC_PEERS && connected_peers < max_peers {
-        return Some(max_peers);
+    let active_target = active_refill_min_peers(max_peers);
+    if serving_peers < active_target && connected_peers < max_peers {
+        return Some(active_refill_min_peers(max_peers));
     }
 
     if connected_peers < max_peers / 2 {
-        return Some(desired_refill_min_peers(connected_peers, max_peers));
+        return Some(nonblocking_refill_min_peers(connected_peers, max_peers));
     }
 
     None
@@ -343,11 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn historical_backfill_waits_when_live_lag_is_high() {
+    fn historical_backfill_runs_independently_of_live_lag() {
+        assert!(!should_run_historical_backfill(0, 0, 32));
         assert!(should_run_historical_backfill(100, 0, 32));
         assert!(should_run_historical_backfill(100, 132, 32));
         assert!(should_run_historical_backfill(140, 132, 32));
-        assert!(!should_run_historical_backfill(100, 133, 32));
+        assert!(should_run_historical_backfill(100, 133, 32));
     }
 
     #[test]
@@ -379,21 +389,30 @@ mod tests {
     }
 
     #[test]
-    fn desired_refill_min_peers_maintains_a_small_live_floor() {
-        assert_eq!(desired_refill_min_peers(0, 50), 4);
-        assert_eq!(desired_refill_min_peers(1, 50), 4);
-        assert_eq!(desired_refill_min_peers(3, 50), 4);
-        assert_eq!(desired_refill_min_peers(4, 50), 5);
-        assert_eq!(desired_refill_min_peers(0, 2), 2);
+    fn nonblocking_refill_min_peers_grows_pool_incrementally() {
+        assert_eq!(nonblocking_refill_min_peers(0, 50), 16);
+        assert_eq!(nonblocking_refill_min_peers(1, 50), 17);
+        assert_eq!(nonblocking_refill_min_peers(7, 50), 23);
+        assert_eq!(nonblocking_refill_min_peers(50, 50), 50);
+        assert_eq!(nonblocking_refill_min_peers(0, 2), 2);
     }
 
     #[test]
-    fn peer_refill_goal_prioritizes_serving_peer_floor() {
-        assert_eq!(peer_refill_goal(2, 1, 50), Some(50));
-        assert_eq!(peer_refill_goal(49, 1, 50), Some(50));
+    fn active_refill_min_peers_uses_sync_target() {
+        assert_eq!(active_refill_min_peers(100), 48);
+        assert_eq!(active_refill_min_peers(50), 48);
+        assert_eq!(active_refill_min_peers(8), 8);
+        assert_eq!(active_refill_min_peers(2), 2);
+    }
+
+    #[test]
+    fn peer_refill_goal_refills_toward_active_pool() {
+        assert_eq!(peer_refill_goal(0, 0, 50), Some(48));
+        assert_eq!(peer_refill_goal(2, 1, 50), Some(48));
+        assert_eq!(peer_refill_goal(49, 1, 50), Some(48));
         assert_eq!(peer_refill_goal(50, 1, 50), None);
-        assert_eq!(peer_refill_goal(10, 4, 50), Some(11));
-        assert_eq!(peer_refill_goal(30, 4, 50), None);
+        assert_eq!(peer_refill_goal(10, 48, 50), Some(26));
+        assert_eq!(peer_refill_goal(30, 48, 50), None);
     }
 
     #[test]

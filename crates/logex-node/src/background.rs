@@ -5,8 +5,21 @@ use std::time::Duration;
 
 use logex_index::IndexBuilder;
 use logex_server::AppState;
+use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 4;
+const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 8;
+const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 64;
+const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
+const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+struct CompactionReport {
+    compacted: usize,
+    raw_backlog: Option<usize>,
+    profile_rewrite_backlog: Option<usize>,
+}
 
 /// Background task that periodically rebuilds indexes on the hot partition.
 pub async fn run_background_indexer(
@@ -14,7 +27,7 @@ pub async fn run_background_indexer(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut last_indexed: Option<HotIndexState> = None;
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut ticker = tokio::time::interval(BACKGROUND_COMPACTION_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -24,6 +37,75 @@ pub async fn run_background_indexer(
                 break;
             }
             _ = ticker.tick() => {}
+        }
+
+        {
+            let active_sync = sync_is_active(&state) || historical_sync_is_incomplete(&state).await;
+            let compaction_limit = if active_sync {
+                ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT
+            } else {
+                BACKGROUND_COMPACTION_SEGMENT_LIMIT
+            };
+            let storage = Arc::clone(&state.storage);
+            match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
+                let mut storage = storage.blocking_write();
+                if active_sync {
+                    let backlog = storage.raw_compaction_backlog_count()?;
+                    let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
+                        ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
+                    } else {
+                        compaction_limit
+                    };
+                    let compacted = storage.compact_raw_segments_limit(compaction_limit)?;
+                    let raw_backlog = storage.raw_compaction_backlog_count()?;
+                    return Ok(CompactionReport {
+                        compacted,
+                        raw_backlog: Some(raw_backlog),
+                        profile_rewrite_backlog: None,
+                    });
+                }
+
+                let compaction_limit = {
+                    let backlog = storage.compaction_backlog_count()?;
+                    if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
+                        ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
+                    } else {
+                        compaction_limit
+                    }
+                };
+                let compacted = storage.compact_eligible_segments_limit(compaction_limit)?;
+                let raw_backlog = storage.raw_compaction_backlog_count()?;
+                let total_backlog = storage.compaction_backlog_count()?;
+                Ok(CompactionReport {
+                    compacted,
+                    raw_backlog: Some(raw_backlog),
+                    profile_rewrite_backlog: Some(total_backlog.saturating_sub(raw_backlog)),
+                })
+            })
+            .await
+            {
+                Ok(Ok(report)) => {
+                    update_compaction_status(&state, report);
+                    if report.compacted > 0 {
+                        tracing::info!(
+                            segments = report.compacted,
+                            raw_backlog = report.raw_backlog,
+                            profile_rewrite_backlog = report.profile_rewrite_backlog,
+                            "compacted sealed segments behind the safety margin"
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to compact eligible sealed segments");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "background compaction task failed");
+                }
+            }
+        }
+
+        if sync_is_active(&state) || historical_sync_is_incomplete(&state).await {
+            continue;
         }
 
         let current = {
@@ -83,23 +165,37 @@ pub async fn run_background_indexer(
                 }
             }
         }
-
-        {
-            let mut storage = state.storage.write().await;
-            match storage.compact_eligible_segments() {
-                Ok(0) => {}
-                Ok(compacted) => {
-                    tracing::info!(
-                        segments = compacted,
-                        "compacted sealed segments behind the safety margin"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to compact eligible sealed segments");
-                }
-            }
-        }
     }
+}
+
+fn sync_is_active(state: &AppState) -> bool {
+    let status = state
+        .sync_status
+        .lock()
+        .expect("sync status mutex poisoned");
+    should_defer_background_indexing(&status)
+}
+
+fn update_compaction_status(state: &AppState, report: CompactionReport) {
+    let mut status = state
+        .sync_status
+        .lock()
+        .expect("sync status mutex poisoned");
+    status.raw_log_segment_backlog = report.raw_backlog;
+    status.storage_profile_rewrite_backlog = report.profile_rewrite_backlog;
+}
+
+fn should_defer_background_indexing(status: &SyncStatus) -> bool {
+    status.syncing || status.historical_eta_seconds.is_some()
+}
+
+async fn historical_sync_is_incomplete(state: &AppState) -> bool {
+    let storage = state.storage.read().await;
+    should_defer_for_historical_floor(storage.historical_floor().map(|marker| marker.block_number))
+}
+
+fn should_defer_for_historical_floor(floor_block: Option<u64>) -> bool {
+    floor_block.is_some_and(|block| block > EXECUTION_HISTORY_TARGET_BLOCK)
 }
 
 pub async fn log_task_exit(name: &str, handle: tokio::task::JoinHandle<()>) {
@@ -213,5 +309,33 @@ mod tests {
         assert!(index_build_error_is_transient(&invalid, &before, &after));
         assert!(!index_build_error_is_transient(&invalid, &before, &before));
         assert!(!index_build_error_is_transient(&other, &before, &after));
+    }
+
+    #[test]
+    fn defer_background_indexing_while_sync_is_active() {
+        let syncing = SyncStatus {
+            syncing: true,
+            ..Default::default()
+        };
+        let historical = SyncStatus {
+            historical_eta_seconds: Some(120.0),
+            ..Default::default()
+        };
+        let idle = SyncStatus::default();
+
+        assert!(should_defer_background_indexing(&syncing));
+        assert!(should_defer_background_indexing(&historical));
+        assert!(!should_defer_background_indexing(&idle));
+    }
+
+    #[test]
+    fn defer_background_indexing_until_historical_floor_reaches_target() {
+        assert!(should_defer_for_historical_floor(Some(
+            EXECUTION_HISTORY_TARGET_BLOCK + 1
+        )));
+        assert!(!should_defer_for_historical_floor(Some(
+            EXECUTION_HISTORY_TARGET_BLOCK
+        )));
+        assert!(!should_defer_for_historical_floor(None));
     }
 }
