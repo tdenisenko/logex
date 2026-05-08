@@ -2,6 +2,8 @@ use super::*;
 use crate::extract;
 use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
 
+const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 512;
+
 impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
     pub(super) async fn ingest_block(
@@ -42,24 +44,6 @@ impl SyncEngine {
         }
 
         Ok(count)
-    }
-
-    /// Write a validated historical block batch without moving the live canonical head.
-    pub(super) async fn ingest_historical_blocks(
-        &mut self,
-        blocks: Vec<HistoricalBlockIngest>,
-    ) -> Result<u64> {
-        let outcome = self.historical_write_future(blocks).await?;
-        Ok(self.record_historical_ingest_outcome(outcome))
-    }
-
-    pub(super) fn historical_write_future(
-        &self,
-        blocks: Vec<HistoricalBlockIngest>,
-    ) -> impl std::future::Future<Output = Result<HistoricalIngestOutcome>> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
-        let subscriptions = self.subscriptions.clone();
-        async move { write_historical_blocks(storage, subscriptions, blocks).await }
     }
 
     pub(super) fn record_historical_ingest_outcome(
@@ -109,10 +93,10 @@ impl SyncEngine {
     }
 }
 
-pub(super) async fn write_historical_blocks(
+pub(super) async fn write_validated_historical_blocks(
     storage: Arc<RwLock<PartitionManager>>,
     subscriptions: Option<SubscriptionManager>,
-    blocks: Vec<HistoricalBlockIngest>,
+    mut blocks: Vec<HistoricalValidatedBlock>,
 ) -> Result<HistoricalIngestOutcome> {
     if blocks.is_empty() {
         return Ok(HistoricalIngestOutcome {
@@ -135,32 +119,53 @@ pub(super) async fn write_historical_blocks(
         .map(|block| block.header.clone())
         .expect("non-empty historical block batch has a lowest header");
     let block_count = blocks.len() as u64;
-    let extraction_started = std::time::Instant::now();
-    let rows = collect_historical_rows(blocks);
-    let extraction_elapsed = extraction_started.elapsed();
-    let row_count = rows.len() as u64;
-    let lowest_header_for_write = lowest_header.clone();
-    let write_started = std::time::Instant::now();
-    let (floor, anchor) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut storage = storage.blocking_write();
-        if !rows.is_empty() {
-            storage
-                .write_historical_batch(&rows)
-                .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
+    let mut row_count = 0u64;
+    let mut extraction_elapsed = Duration::ZERO;
+    let mut write_elapsed = Duration::ZERO;
+    let mut floor = None;
+    let mut anchor = None;
 
-            if let Some(ref subs) = subscriptions {
-                subs.notify(&rows);
+    while !blocks.is_empty() {
+        let take = blocks.len().min(HISTORICAL_WRITE_CHUNK_BLOCKS);
+        let chunk: Vec<_> = blocks.drain(..take).collect();
+        let chunk_lowest_header = chunk
+            .iter()
+            .min_by_key(|block| block.header.number())
+            .map(|block| block.header.clone())
+            .expect("non-empty historical block chunk has a lowest header");
+
+        let extraction_started = std::time::Instant::now();
+        let rows = collect_validated_historical_rows(&chunk);
+        extraction_elapsed += extraction_started.elapsed();
+        row_count = row_count.saturating_add(rows.len() as u64);
+        drop(chunk);
+
+        let chunk_subscriptions = subscriptions.clone();
+        let chunk_storage = Arc::clone(&storage);
+        let write_started = std::time::Instant::now();
+        let (chunk_floor, chunk_anchor) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let mut storage = chunk_storage.blocking_write();
+            if !rows.is_empty() {
+                storage
+                    .write_historical_batch(&rows)
+                    .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
+
+                if let Some(ref subs) = chunk_subscriptions {
+                    subs.notify(&rows);
+                }
             }
-        }
 
-        storage
-            .record_historical_floor(&lowest_header_for_write)
-            .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
-        Ok((storage.historical_floor(), storage.historical_anchor()))
-    })
-    .await
-    .map_err(|error| eyre::eyre!("historical storage worker failed: {error}"))??;
-    let write_elapsed = write_started.elapsed();
+            storage
+                .record_historical_floor(&chunk_lowest_header)
+                .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
+            Ok((storage.historical_floor(), storage.historical_anchor()))
+        })
+        .await
+        .map_err(|error| eyre::eyre!("historical storage worker failed: {error}"))??;
+        write_elapsed += write_started.elapsed();
+        floor = chunk_floor;
+        anchor = chunk_anchor;
+    }
 
     Ok(HistoricalIngestOutcome {
         block_count,
@@ -172,11 +177,26 @@ pub(super) async fn write_historical_blocks(
     })
 }
 
-fn collect_historical_rows(blocks: Vec<HistoricalBlockIngest>) -> Vec<LogRow> {
-    let total_rows = blocks.iter().map(|block| block.rows.len()).sum();
+fn collect_validated_historical_rows(blocks: &[HistoricalValidatedBlock]) -> Vec<LogRow> {
+    let total_rows = blocks
+        .iter()
+        .map(|block| {
+            block
+                .receipts
+                .iter()
+                .map(|receipt| receipt.logs().len())
+                .sum::<usize>()
+        })
+        .sum();
     let mut rows = Vec::with_capacity(total_rows);
     for block in blocks {
-        rows.extend(block.rows);
+        rows.extend(extract::extract_from_body_receipts(
+            block.header.number(),
+            block.block_hash,
+            block.header.timestamp(),
+            &block.body,
+            &block.receipts,
+        ));
     }
     rows
 }

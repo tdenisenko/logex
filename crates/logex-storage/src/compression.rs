@@ -292,7 +292,7 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
 // ---------------------------------------------------------------------------
 
 pub fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
-    zstd::encode_all(data, 3)
+    zstd::encode_all(data, 1)
 }
 
 pub fn zstd_compress_level(data: &[u8], level: i32) -> io::Result<Vec<u8>> {

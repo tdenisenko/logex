@@ -4,30 +4,32 @@
 
 LogEx bootstraps from a recent weak-subjectivity checkpoint, follows CL head/finality over native CL P2P, and uses CL-authenticated execution anchors as the pivot for EL validation. EL P2P can follow head, fetch historical headers/bodies/receipts backward from the pivot, verify receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-Latest fixed-port remote smoke on May 8, 2026 used `/root/logex-data-remote` and HTTP port `18683`. After restarting with the current branch, `/status` reported historical target `0`, historical floor `24,045,692`, `54` connected EL peers, `51` serving EL peers, and restart-wide historical sync at `64.11 blocks/sec`. Warmed batch logs showed 768-1024 verified blocks per batch, usually around 5-12 seconds once peers were serving, with the historical prefetch queue occasionally reaching depth 2. Peer count is usable; the main bottleneck is still body/receipt window scheduling plus receipt validation/storage.
+The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote run on May 8, 2026 uses `/root/logex-data-remote` and fixed HTTP port `18683`. After correcting an over-aggressive stale-dial cleanup that had reduced persisted known peers, the remote restarted with `30` known peers, rebuilt to `17` connected / `14` serving peers within about 90 seconds, and continued syncing. This early sample is not enough to judge final peer retention because the prior bad run had already damaged the persisted known-peer set.
 
 ## Completed Since Last Run
 
-- Added a bounded historical prefetch queue so batch `N+1` and sometimes `N+2` can be fetched while batch `N` is validated and written.
-- Lowered the combined body/receipt early-return floor from 1024 to 768 contiguous blocks to avoid waiting on slow tail chunks when the lower part of the reverse window is already usable.
-- Rechecked the hot downloader path against Geth's downloader model: the relevant pattern is capacity-scored task assignment with timeout reassignment; LogEx now has peer scoring and request backoff, but still needs deeper multi-window scheduling.
+- Split historical reverse sync into fetch, validation, and chunked write stages so network fetch can overlap local validation/storage work.
+- Added bounded multi-window historical fetch lookahead and ordered floor advancement, with full-window completion required before a batch is accepted.
+- Reduced historical write memory pressure by extracting and writing validated logs in 512-block chunks.
+- Lowered storage zstd level for faster continuous log compaction while keeping the existing topic dictionary encoding and query limits.
+- Improved EL peer ramp behavior with a larger sync peer target, more outbound dial capacity, and temporary demotion/backoff for unresponsive dial candidates instead of deleting persisted productive peers.
 
 ## Remaining TODOs
 
-1. Improve EL reverse-sync throughput.
-   - Reason: Current warmed batches can exceed the restart-wide average, but total throughput remains far below the roughly `1,160 blocks/sec` needed for a sub-6-hour genesis backfill.
-   - Completion criteria: Mainnet-like reverse sync sustains sub-6-hour full-history ETA, or an explicit architecture decision replaces full P2P receipt backfill with a faster trustless strategy.
+1. Reduce EL reverse-sync ETA below the production target.
+   - Reason: The current downloader still does not sustain the roughly `1,000+ blocks/sec` needed for sub-6-hour full-history backfill.
+   - Completion criteria: Mainnet-like reverse sync sustains sub-6-hour ETA on adequate hardware, or a documented architecture decision replaces full P2P receipt backfill with another trustless strategy.
 
 2. Implement deeper EL historical scheduling.
-   - Reason: The downloader still fetches only one historical body/receipt window at a time; bounded prefetch can only overlap network work with local validation/storage, not keep many independent body/receipt windows in flight.
-   - Completion criteria: Header lookahead, body/receipt task assignment, validation, and ordered historical writes are separated enough to keep multiple verified windows active without advancing the historical floor past gaps.
+   - Reason: The current lookahead overlaps whole windows, but slow body/receipt chunks can still dominate batch time.
+   - Completion criteria: Header lookahead, body/receipt chunk scheduling, validation, and ordered historical writes are separated enough to keep many independent chunks in flight without advancing past gaps.
 
 3. Complete pre-Merge PoW canonicality validation.
    - Reason: A CL pivot authenticates the recent execution anchor, but pre-Merge headers still need execution-layer canonicality checks down to genesis.
    - Completion criteria: Parent links, difficulty rules, and terminal total difficulty are validated before pre-Merge logs are treated as fully canonical.
 
-4. Harden restart, reorg, and peer behavior.
-   - Reason: Long-running correctness depends on stable resume, honest serving-range advertisement, and safe handling of normal mainnet churn.
+4. Harden restart, reorg, and long-run peer behavior.
+   - Reason: Production sync depends on stable resume, honest serving-range advertisement, and safe handling of normal mainnet churn.
    - Completion criteria: Long smokes show stable resume, persisted productive peers, no misleading advertised range, and explicit fail-fast behavior for unsupported deep reorgs.
 
 5. Replace the temporary checkpoint source.
@@ -42,29 +44,27 @@ Latest fixed-port remote smoke on May 8, 2026 used `/root/logex-data-remote` and
 
 - EL historical validation targets genesis because the CL checkpoint only proves a recent execution pivot.
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
-- Productive peers are prioritized in LogEx's own queue instead of being promoted to trusted/static peers; this matches how Geth and Nethermind treat operator-configured trusted peers.
-- Historical prefetch is retained only after the current batch validates and writes, preserving ordered floor advancement.
-- Combined body/receipt early return favors contiguous lower-window progress over waiting for every slow tail chunk.
+- Full historical windows are required before ordered floor advancement; partial-window early return was removed to avoid silently skipping difficult chunks.
+- Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure during dense log ranges.
+- Unresponsive dial candidates receive temporary in-memory backoff and productive-queue demotion, not deletion from the persisted known-peer set.
+- Query limits remain capped at `10,000` rows with `50` row default pages; storage keeps dictionary/topic compression and periodic compaction.
 
 ## Challenges and Resolutions
 
-- Challenge: Earlier peer-retention work improved connected and serving peers, but ETA stayed multi-day.
-  - Resolution: Remote samples showed body/receipt fetch latency, validation, and storage are the real limit after peers warm up.
-  - Remaining: Deeper multi-window scheduling is still needed.
+- Challenge: A 4096-block reverse window improved request amortization but caused remote memory pressure.
+  - Resolution: Capped windows at 2048 blocks and moved log extraction/writes into 512-block chunks.
 
-- Challenge: Current-batch local work previously blocked the next network fetch.
-  - Resolution: Added bounded prefetch overlap and stale-prefetch invalidation.
-  - Remaining: The peer manager still serializes historical body/receipt windows at the engine level.
+- Challenge: The earlier stale-dial cleanup hurt peer ramp by deleting peers from the persisted productive set.
+  - Resolution: Replaced deletion with temporary backoff plus queue demotion and added a regression test.
 
-- Challenge: Large reverse windows can stall on a few slow chunks.
-  - Resolution: Allow usable contiguous progress once at least 768 lower-window blocks are available.
-  - Remaining: The threshold needs longer-run validation across different block-density regions.
+- Challenge: Peer count can be high while ETA remains multi-day.
+  - Resolution: Storage and validation are now overlapped with fetches; the remaining throughput problem is body/receipt chunk scheduling and slow-tail reassignment.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the historical prefetch path, combined body/receipt downloader, peer request scoring, and roadmap notes.
-- Replaced the obsolete single-prefetch `Option` state with a bounded queue.
-- No new debug-only code or temporary peer-retention experiments were left in the branch.
+- Inspected the historical downloader, peer lifecycle/state, storage compression, and roadmap notes for obsolete experimental code.
+- Removed the obsolete single-prefetch path in favor of the bounded fetch/prepare pipeline.
+- Confirmed no debug prints, early-return roadmap behavior, or known-peer deletion experiment remains in the Rust code.
 
 ## Git Workflow
 
@@ -72,11 +72,11 @@ Latest fixed-port remote smoke on May 8, 2026 used `/root/logex-data-remote` and
 - New branch created this run: no
 - Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not ready; throughput target and pre-Merge validation are still incomplete.
-- Git/GitHub blockers: local `gh` auth is unavailable, but the GitHub connector can update the existing draft PR.
+- Git/GitHub blockers: none for committing and pushing; PR remains draft because the task is still incomplete.
 
 ## Known Issues or Risks
 
 - Reverse sync remains too slow for the target ETA.
 - Full-history receipt/log acquisition over public EL P2P may not realistically match snap-sync full-node timings unless the downloader is redesigned around deeper task queues or another trustless data source.
+- The current remote run needs time to rebuild a healthy persisted known-peer set after the previous bad build reduced it.
 - Pre-Merge PoW validation is still incomplete.
-- Local shell access to `127.0.0.1:18683` can require elevated local-network permission in this environment; the client itself should keep using the fixed HTTP port.

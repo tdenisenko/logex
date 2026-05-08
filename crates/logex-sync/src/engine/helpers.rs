@@ -399,20 +399,21 @@ mod tests {
 
     #[test]
     fn active_refill_min_peers_uses_sync_target() {
-        assert_eq!(active_refill_min_peers(100), 48);
-        assert_eq!(active_refill_min_peers(50), 48);
+        assert_eq!(active_refill_min_peers(100), 80);
+        assert_eq!(active_refill_min_peers(50), 50);
         assert_eq!(active_refill_min_peers(8), 8);
         assert_eq!(active_refill_min_peers(2), 2);
     }
 
     #[test]
     fn peer_refill_goal_refills_toward_active_pool() {
-        assert_eq!(peer_refill_goal(0, 0, 50), Some(48));
-        assert_eq!(peer_refill_goal(2, 1, 50), Some(48));
-        assert_eq!(peer_refill_goal(49, 1, 50), Some(48));
+        assert_eq!(peer_refill_goal(0, 0, 50), Some(50));
+        assert_eq!(peer_refill_goal(2, 1, 50), Some(50));
+        assert_eq!(peer_refill_goal(49, 1, 50), Some(50));
         assert_eq!(peer_refill_goal(50, 1, 50), None);
-        assert_eq!(peer_refill_goal(10, 48, 50), Some(26));
-        assert_eq!(peer_refill_goal(30, 48, 50), None);
+        assert_eq!(peer_refill_goal(10, 50, 50), Some(26));
+        assert_eq!(peer_refill_goal(30, 50, 50), None);
+        assert_eq!(peer_refill_goal(48, 48, 100), Some(80));
     }
 
     #[test]

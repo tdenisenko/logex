@@ -104,6 +104,7 @@ impl PeerManager {
         if !self.network_activated {
             return;
         }
+        self.queue_known_peers();
         self.dial_pending_peers(target);
         if self.peers.len() >= min || self.peers.len() >= target {
             return;
@@ -113,6 +114,7 @@ impl PeerManager {
 
         loop {
             self.drain_events_now();
+            self.queue_known_peers();
             self.dial_pending_peers(target);
 
             if self.peers.len() >= min || self.peers.len() >= target {
@@ -540,6 +542,10 @@ impl PeerManager {
         productive_before != self.productive.len() || known_before != self.known_peers.len()
     }
 
+    pub(super) fn demote_productive_peer(&mut self, peer_id: PeerId) -> bool {
+        demote_productive_peer_queue(&mut self.productive, peer_id)
+    }
+
     pub(super) fn persist_productive_peers(&mut self) {
         let peers = self.known_peers();
         match persist_known_peers_if_changed(
@@ -733,6 +739,17 @@ pub(super) fn seed_productive_peers(known_peers: &[NodeRecord]) -> VecDeque<Node
         .filter(|peer| !is_bootstrap_node(peer.id) && peer.tcp_port > 0)
         .take(MAX_PERSISTED_PEERS)
         .collect()
+}
+
+fn demote_productive_peer_queue(productive: &mut VecDeque<NodeRecord>, peer_id: PeerId) -> bool {
+    let Some(index) = productive.iter().position(|peer| peer.id == peer_id) else {
+        return false;
+    };
+    let Some(peer) = productive.remove(index) else {
+        return false;
+    };
+    productive.push_back(peer);
+    index + 1 != productive.len()
 }
 
 pub(super) fn rotate_request_candidates(peers: &mut [PeerId], request_cursor: usize) {
@@ -1015,6 +1032,36 @@ mod tests {
         let productive: Vec<_> = productive.into_iter().collect();
 
         assert_eq!(productive, vec![first, second]);
+    }
+
+    #[test]
+    fn demote_productive_peer_moves_peer_to_back() {
+        let first = NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x11),
+        );
+        let second = NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30304,
+            Some(30304),
+            PeerId::repeat_byte(0x22),
+        );
+        let third = NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30305,
+            Some(30305),
+            PeerId::repeat_byte(0x33),
+        );
+        let mut productive = VecDeque::from([first, second, third]);
+
+        assert!(demote_productive_peer_queue(&mut productive, second.id));
+        assert_eq!(
+            productive.iter().map(|peer| peer.id).collect::<Vec<_>>(),
+            vec![first.id, third.id, second.id]
+        );
+        assert!(!demote_productive_peer_queue(&mut productive, second.id));
     }
 
     #[test]

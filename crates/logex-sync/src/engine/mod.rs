@@ -1,22 +1,27 @@
-use alloy_consensus::{BlockHeader, Header, TxReceipt, transaction::TxHashRef};
+use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{B256, Log};
 use eyre::Result;
 use logex_cl::ConsensusStore;
+use reth_eth_wire::NetworkPrimitives;
 use reth_ethereum_forks::Head;
 use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{RwLock, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use logex_server::SubscriptionManager;
 use logex_storage::PartitionManager;
-use logex_types::{LogRow, NodeState, SyncStatus};
+use logex_types::{NodeState, SyncStatus};
 
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
-use crate::p2p::peer_manager::{PeerManager, SourcedBodyReceipts};
+use crate::p2p::peer_manager::{
+    BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager, SourcedBodyReceipts,
+};
+use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
 use crate::validation::{
     receipts_match_transaction_count, validate_block_pre_execution, validate_downloaded_headers,
@@ -39,15 +44,20 @@ const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
 const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
 const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 8;
-const TARGET_ACTIVE_SYNC_PEERS: usize = 48;
+const TARGET_ACTIVE_SYNC_PEERS: usize = 80;
 const PEER_REFILL_STEP: usize = 16;
 const RECENT_HEADER_WINDOW: usize = 8_192;
 const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
 const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
 
-pub(super) struct HistoricalBlockIngest {
+pub(super) struct HistoricalValidatedBlock {
+    index: usize,
     header: Header,
-    rows: Vec<LogRow>,
+    block_hash: B256,
+    body_peer: PeerId,
+    body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
+    receipt_peer: PeerId,
+    receipts: Vec<ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
 }
 
 pub(super) struct HistoricalFetchedBatch {
@@ -61,6 +71,28 @@ pub(super) struct HistoricalFetchedBatch {
     body_receipt_elapsed: Duration,
 }
 
+pub(super) struct HistoricalHeaderBatch {
+    child_header: Header,
+    header_peer: PeerId,
+    headers: Vec<Header>,
+    hashes: Vec<B256>,
+    required_block: u64,
+    header_elapsed: Duration,
+}
+
+pub(super) struct HistoricalFetchPlan {
+    header_batch: HistoricalHeaderBatch,
+    body_receipt_plan: BodyReceiptRequestPlan,
+}
+
+pub(super) struct HistoricalFetchOutcome {
+    generation: u64,
+    sequence: u64,
+    header_batch: HistoricalHeaderBatch,
+    body_receipt_elapsed: Duration,
+    outcome: BodyReceiptRequestOutcome,
+}
+
 pub(super) struct HistoricalIngestOutcome {
     block_count: u64,
     row_count: u64,
@@ -68,6 +100,47 @@ pub(super) struct HistoricalIngestOutcome {
     anchor: Option<logex_types::ExecutionBlockMarker>,
     extraction_elapsed: Duration,
     write_elapsed: Duration,
+}
+
+pub(super) struct PreparedHistoricalBatch {
+    requested_headers: usize,
+    header_elapsed: Duration,
+    body_receipt_elapsed: Duration,
+    peer_notes: Vec<PeerId>,
+    validated_blocks: Vec<HistoricalValidatedBlock>,
+    lowest_block: u64,
+    highest_block: u64,
+    block_count: usize,
+    validation_elapsed: Duration,
+}
+
+pub(super) struct WrittenHistoricalBatch {
+    requested_headers: usize,
+    header_elapsed: Duration,
+    body_receipt_elapsed: Duration,
+    outcome: HistoricalIngestOutcome,
+    peer_notes: Vec<PeerId>,
+    lowest_block: u64,
+    highest_block: u64,
+    block_count: usize,
+    validation_elapsed: Duration,
+    storage_elapsed: Duration,
+}
+
+pub(super) struct HistoricalValidationFailure {
+    peer: PeerId,
+    response_kind: &'static str,
+    block_number: u64,
+    block_hash: B256,
+    message: String,
+}
+
+pub(super) struct HistoricalPrepareTask {
+    child_header: Header,
+    next_child_header: Option<Header>,
+    handle: JoinHandle<
+        Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
+    >,
 }
 
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
@@ -80,7 +153,16 @@ pub struct SyncEngine {
     consensus: Option<Arc<ConsensusStore>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
-    historical_prefetch: VecDeque<HistoricalFetchedBatch>,
+    historical_prefetch: VecDeque<HistoricalPrepareTask>,
+    historical_fetch_tx: mpsc::UnboundedSender<HistoricalFetchOutcome>,
+    historical_fetch_rx: mpsc::UnboundedReceiver<HistoricalFetchOutcome>,
+    historical_fetch_generation: u64,
+    historical_fetch_next_sequence: u64,
+    historical_fetch_expected_sequence: u64,
+    historical_fetch_expected_child: Option<Header>,
+    historical_fetch_planned_child: Option<Header>,
+    historical_fetch_handles: HashMap<u64, JoinHandle<()>>,
+    historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
     connected_once: bool,
     last_validated_header: Option<Header>,
     shutdown: watch::Receiver<bool>,
@@ -97,6 +179,7 @@ impl SyncEngine {
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));
+        let (historical_fetch_tx, historical_fetch_rx) = mpsc::unbounded_channel();
         Self {
             config,
             peers,
@@ -107,6 +190,15 @@ impl SyncEngine {
             head_tracker: HeadTracker::new(RECENT_HEADER_WINDOW),
             progress,
             historical_prefetch: VecDeque::new(),
+            historical_fetch_tx,
+            historical_fetch_rx,
+            historical_fetch_generation: 0,
+            historical_fetch_next_sequence: 0,
+            historical_fetch_expected_sequence: 0,
+            historical_fetch_expected_child: None,
+            historical_fetch_planned_child: None,
+            historical_fetch_handles: HashMap::new(),
+            historical_fetch_completed: BTreeMap::new(),
             connected_once: false,
             last_validated_header: None,
             shutdown,
@@ -118,6 +210,7 @@ impl SyncEngine {
     }
 
     pub async fn shutdown(&mut self) {
+        self.reset_historical_fetch_pipeline();
         self.peers.shutdown().await;
     }
 }
