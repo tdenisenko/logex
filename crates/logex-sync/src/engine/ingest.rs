@@ -155,7 +155,7 @@ pub(super) async fn write_validated_historical_blocks(
                 let mut storage = chunk_storage.blocking_write();
                 if !rows.is_empty() {
                     storage
-                        .write_batch(&rows)
+                        .write_historical_batch(&rows)
                         .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
 
                     if let Some(ref subs) = chunk_subscriptions {
