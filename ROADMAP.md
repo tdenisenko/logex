@@ -12,6 +12,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Added bounded multi-window historical fetch lookahead and ordered floor advancement.
 - Changed body/receipt batches to ingest a verified contiguous prefix once it reaches 1024 blocks, then resume from the new floor instead of waiting for slow tail chunks.
 - Bounded body/receipt chunk fanout around the contiguous prefix so partial-window ingest does not waste most of the peer pool on cancelable tail requests.
+- Aligned historical fetch windows to the 1024-block accepted prefix so lookahead work does not target ranges that become stale after ordered floor advancement.
 - Reduced historical write memory pressure by extracting and writing validated logs in 512-block chunks.
 - Lowered storage zstd level for faster continuous log compaction while keeping the existing topic dictionary encoding and query limits.
 - Improved EL peer ramp behavior with a larger sync peer target, more outbound dial capacity, and temporary demotion/backoff for unresponsive dial candidates instead of deleting persisted productive peers.
@@ -49,6 +50,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
 - Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches 1024 blocks; the scheduler keeps extra chunk headroom for gaps but does not eagerly launch the full tail.
 - Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure during dense log ranges.
+- Reverse-sync windows currently use 1024 blocks to match the accepted contiguous prefix. Larger windows need true streaming chunk queues before they are worth re-enabling.
 - Unresponsive dial candidates receive temporary in-memory backoff and productive-queue demotion, not deletion from the persisted known-peer set.
 - Outbound dial capacity is intentionally higher than a general-purpose full node because LogEx is a sync-focused reader and needs to rebuild a large serving peer pool quickly after restart.
 - Query limits remain capped at `10,000` rows with `50` row default pages; storage keeps dictionary/topic compression and periodic compaction.
