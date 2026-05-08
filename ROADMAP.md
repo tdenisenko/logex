@@ -9,15 +9,15 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Remote data directory: `/root/logex-data-remote`
 - HTTP port: `18683`
 - `/status` reports `historical_target_block: 0`
-- Last sampled status: historical floor `24,647,344`, 32 connected EL peers, 32 serving EL peers, and historical reverse sync at `65.99 blocks/sec` since the latest restart
-- Recent warmed batches complete in roughly 6.5-13 seconds per 1024 blocks after capping combined body/receipt chunks, but full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
+- Last sampled status: historical floor `24,539,824`, 64 connected EL peers, 62 serving EL peers, and historical reverse sync at `75.75 blocks/sec` since the latest restart
+- Recent warmed batches complete in roughly 6-13 seconds per 1024 blocks after capping combined body/receipt chunks and overlapping current-batch ingest with next-batch fetch; full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
 
 ## Completed Since Last Run
 
 - Improved historical storage writes with append-oriented column commits, compact WAL payloads, larger hot segments, and deferred background indexing while historical sync is incomplete.
 - Added batched historical ingestion and a pipelined body/receipt downloader for reverse sync.
 - Tuned EL peer selection with request-rate scoring, productive-peer persistence, Geth-style inbound/outbound capacity, bounded dialing, and `eth/68-69` capability alignment.
-- Added a reverse-sync prefetch path so the next historical body/receipt batch can be fetched while the current validated batch is written.
+- Added a reverse-sync prefetch path so the next historical body/receipt batch can be fetched while the current batch is validated, extracted, and written.
 - Capped combined body/receipt chunks to keep each 1024-block window spread across more peers instead of letting adaptive request limits collapse the window into a handful of large requests.
 - Kept the effective 1024-block historical window after live testing showed larger header requests are capped by peers.
 - Reverted peer-retention and batch-size experiments that did not improve live samples.
@@ -27,7 +27,7 @@ Fresh fixed-port remote smoke on May 8, 2026:
 ## Remaining TODOs
 
 1. Improve EL reverse-sync throughput
-   - Reason: Peer retention is now high enough that the bottleneck has moved to body/receipt fetch latency and single-window pipeline utilization.
+   - Reason: Peer retention is now high enough that the bottleneck has moved to single-window pipeline utilization and local validation/extraction/write time for log-heavy batches.
    - Completion criteria: Reverse validation sustains roughly `1,160 blocks/sec` or better on mainnet-like data for a sub-6-hour full-history ETA, or a documented architecture decision replaces full P2P receipt backfill with a faster trustless strategy.
 
 2. Complete pre-Merge PoW canonicality validation
@@ -83,6 +83,11 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Alternatives considered: Request 4096 headers per window. That did not increase returned batch size.
   - Tradeoff: Further throughput needs multiple overlapped windows or a different trustless data acquisition strategy.
 
+- Retain speculative historical prefetches only after the current batch is accepted.
+  - Why: A next-window fetch is valid only if the current contiguous batch validates and writes successfully.
+  - Alternatives considered: Store the prefetched batch immediately after the network request returns. That could leave stale speculative data queued after a validation or storage failure.
+  - Tradeoff: Failed current batches discard any concurrent prefetch work, preserving correctness over marginal reuse.
+
 ## Challenges and Resolutions
 
 - Challenge: Serving peers disconnected during receipt fetches with RLP decode errors.
@@ -108,13 +113,17 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Resolution: Capped combined body/receipt chunks at 32 blocks so one 1024-block historical window fans out across more peers.
   - Remaining: This improved the latest sample to `65.99 blocks/sec`, but still leaves the ETA far above the target.
 
+- Challenge: Current-batch validation and storage were serialized ahead of the next network fetch.
+  - Resolution: Overlapped validation/extraction/write for batch N with header/body/receipt fetch for batch N+1 and guarded against retaining speculative prefetches after failed current batches.
+  - Remaining: The latest restart-wide sample improved to `75.75 blocks/sec`, with warmed tail batches roughly `120-150 blocks/sec`, but the sub-6-hour target still requires deeper scheduling or lower local ingest cost.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected EL peer management, historical ingestion, storage append/WAL paths, and background indexing.
 - Removed or reverted ineffective peer-retention experiments that did not improve live samples.
 - Removed the ineffective 4096-header historical window experiment after peers continued returning 1024 headers.
 - Replaced an oversized P2P constructor argument list with a config struct while fixing clippy.
-- Kept combined body/receipt chunk capping because the remote sample improved; no new ineffective code remains from this pass.
+- Kept combined body/receipt chunk capping and ingest/fetch overlap because remote samples improved; no new ineffective code remains from this pass.
 - Confirmed obsolete single-block historical ingestion is no longer referenced; batched historical ingestion is the active path.
 - No additional obsolete pipeline code was removed because the remaining request paths are still used as fallback or validation paths.
 
@@ -122,7 +131,7 @@ Fresh fixed-port remote smoke on May 8, 2026:
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: no
-- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`)
+- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`), `603c03f` (`docs: update execution sync roadmap`), `73f78e8` (`perf: increase historical receipt fanout`), `acd7586` (`perf: overlap historical ingest and prefetch`)
 - Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not applicable yet
 - Git/GitHub blockers: local `gh` auth token is invalid, but the GitHub connector created the draft PR successfully; the PR should remain draft because the sub-6-hour sync target is not met yet
