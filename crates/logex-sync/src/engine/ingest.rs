@@ -4,6 +4,14 @@ use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
 
 const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 512;
 
+struct HistoricalChunkWriteOutcome {
+    row_count: u64,
+    floor: Option<ExecutionBlockMarker>,
+    anchor: Option<ExecutionBlockMarker>,
+    extraction_elapsed: Duration,
+    write_elapsed: Duration,
+}
+
 impl SyncEngine {
     /// Write a block's logs to storage and notify subscribers.
     pub(super) async fn ingest_block(
@@ -128,43 +136,51 @@ pub(super) async fn write_validated_historical_blocks(
     while !blocks.is_empty() {
         let take = blocks.len().min(HISTORICAL_WRITE_CHUNK_BLOCKS);
         let chunk: Vec<_> = blocks.drain(..take).collect();
-        let chunk_lowest_header = chunk
-            .iter()
-            .min_by_key(|block| block.header.number())
-            .map(|block| block.header.clone())
-            .expect("non-empty historical block chunk has a lowest header");
-
-        let extraction_started = std::time::Instant::now();
-        let rows = collect_validated_historical_rows(&chunk);
-        extraction_elapsed += extraction_started.elapsed();
-        row_count = row_count.saturating_add(rows.len() as u64);
-        drop(chunk);
-
         let chunk_subscriptions = subscriptions.clone();
         let chunk_storage = Arc::clone(&storage);
-        let write_started = std::time::Instant::now();
-        let (chunk_floor, chunk_anchor) = tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut storage = chunk_storage.blocking_write();
-            if !rows.is_empty() {
-                storage
-                    .write_historical_batch(&rows)
-                    .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
+        let chunk_outcome =
+            tokio::task::spawn_blocking(move || -> Result<HistoricalChunkWriteOutcome> {
+                let chunk_lowest_header = chunk
+                    .iter()
+                    .min_by_key(|block| block.header.number())
+                    .map(|block| block.header.clone())
+                    .expect("non-empty historical block chunk has a lowest header");
 
-                if let Some(ref subs) = chunk_subscriptions {
-                    subs.notify(&rows);
+                let extraction_started = std::time::Instant::now();
+                let rows = collect_validated_historical_rows(&chunk);
+                let extraction_elapsed = extraction_started.elapsed();
+                let row_count = rows.len() as u64;
+
+                let write_started = std::time::Instant::now();
+                let mut storage = chunk_storage.blocking_write();
+                if !rows.is_empty() {
+                    storage
+                        .write_historical_batch(&rows)
+                        .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
+
+                    if let Some(ref subs) = chunk_subscriptions {
+                        subs.notify(&rows);
+                    }
                 }
-            }
 
-            storage
-                .record_historical_floor(&chunk_lowest_header)
-                .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
-            Ok((storage.historical_floor(), storage.historical_anchor()))
-        })
-        .await
-        .map_err(|error| eyre::eyre!("historical storage worker failed: {error}"))??;
-        write_elapsed += write_started.elapsed();
-        floor = chunk_floor;
-        anchor = chunk_anchor;
+                storage
+                    .record_historical_floor(&chunk_lowest_header)
+                    .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
+                Ok(HistoricalChunkWriteOutcome {
+                    row_count,
+                    floor: storage.historical_floor(),
+                    anchor: storage.historical_anchor(),
+                    extraction_elapsed,
+                    write_elapsed: write_started.elapsed(),
+                })
+            })
+            .await
+            .map_err(|error| eyre::eyre!("historical storage worker failed: {error}"))??;
+        extraction_elapsed += chunk_outcome.extraction_elapsed;
+        write_elapsed += chunk_outcome.write_elapsed;
+        row_count = row_count.saturating_add(chunk_outcome.row_count);
+        floor = chunk_outcome.floor;
+        anchor = chunk_outcome.anchor;
     }
 
     Ok(HistoricalIngestOutcome {

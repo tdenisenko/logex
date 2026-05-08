@@ -14,7 +14,7 @@ const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 64;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 64;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 1_920_000_000;
-const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 2048;
+const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_WIDE_FANOUT_MIN_PEERS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 2;
@@ -3039,8 +3039,8 @@ mod tests {
     fn body_receipt_min_return_blocks_processes_contiguous_prefixes() {
         assert_eq!(body_receipt_min_return_blocks(0), 0);
         assert_eq!(body_receipt_min_return_blocks(128), 128);
-        assert_eq!(body_receipt_min_return_blocks(2048), 2048);
-        assert_eq!(body_receipt_min_return_blocks(4096), 2048);
+        assert_eq!(body_receipt_min_return_blocks(2048), 1024);
+        assert_eq!(body_receipt_min_return_blocks(4096), 1024);
     }
 
     #[test]
