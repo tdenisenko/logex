@@ -9,8 +9,8 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Remote data directory: `/root/logex-data-remote`
 - HTTP port: `18683`
 - `/status` reports `historical_target_block: 0`
-- Last sampled status: historical floor `24,539,824`, 64 connected EL peers, 62 serving EL peers, and historical reverse sync at `75.75 blocks/sec` since the latest restart
-- Recent warmed batches complete in roughly 6-13 seconds per 1024 blocks after capping combined body/receipt chunks and overlapping current-batch ingest with next-batch fetch; full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
+- Last sampled status: historical floor `24,384,176`, 37 connected EL peers, 36 serving EL peers, and historical reverse sync at `62.95 blocks/sec` since the latest restart
+- Recent warmed batches complete in roughly 5.3-13.5 seconds per 1024 blocks after capping combined body/receipt chunks, overlapping current-batch ingest with next-batch fetch, and reducing historical ingest CPU work; full reverse validation to genesis is still multiple days, so EL throughput remains the primary blocker
 
 ## Completed Since Last Run
 
@@ -19,6 +19,8 @@ Fresh fixed-port remote smoke on May 8, 2026:
 - Tuned EL peer selection with request-rate scoring, productive-peer persistence, Geth-style inbound/outbound capacity, bounded dialing, and `eth/68-69` capability alignment.
 - Added a reverse-sync prefetch path so the next historical body/receipt batch can be fetched while the current batch is validated, extracted, and written.
 - Capped combined body/receipt chunks to keep each 1024-block window spread across more peers instead of letting adaptive request limits collapse the window into a handful of large requests.
+- Reduced historical ingest CPU by extracting log rows directly during validation instead of cloning receipt logs into an intermediate transaction list.
+- Added a dictionary fast path for repeated fixed-width storage pages so compression can skip unnecessary Zstd candidates when dictionary encoding already wins clearly.
 - Kept the effective 1024-block historical window after live testing showed larger header requests are capped by peers.
 - Reverted peer-retention and batch-size experiments that did not improve live samples.
 - Added storage compression, query limits, pagination support, and UI status corrections for EL historical coverage.
@@ -27,7 +29,7 @@ Fresh fixed-port remote smoke on May 8, 2026:
 ## Remaining TODOs
 
 1. Improve EL reverse-sync throughput
-   - Reason: Peer retention is now high enough that the bottleneck has moved to single-window pipeline utilization and local validation/extraction/write time for log-heavy batches.
+   - Reason: Peer retention can reach useful levels, but latest profiling shows the hot path is now single-window utilization, Keccak-heavy receipt-root validation, and remaining local ingest cost.
    - Completion criteria: Reverse validation sustains roughly `1,160 blocks/sec` or better on mainnet-like data for a sub-6-hour full-history ETA, or a documented architecture decision replaces full P2P receipt backfill with a faster trustless strategy.
 
 2. Complete pre-Merge PoW canonicality validation
@@ -88,6 +90,11 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Alternatives considered: Store the prefetched batch immediately after the network request returns. That could leave stale speculative data queued after a validation or storage failure.
   - Tradeoff: Failed current batches discard any concurrent prefetch work, preserving correctness over marginal reuse.
 
+- Prefer compression shortcuts that preserve queryable compact pages over raw uncompressed history.
+  - Why: Storage pressure is real, but profiling showed some compression work was wasted on pages where dictionary encoding already beat raw data.
+  - Alternatives considered: Disable compression during sync or lower all Zstd levels. That would reduce CPU but risk much faster disk growth.
+  - Tradeoff: Repeated values avoid extra Zstd CPU, while high-cardinality pages still use the stronger adaptive candidates.
+
 ## Challenges and Resolutions
 
 - Challenge: Serving peers disconnected during receipt fetches with RLP decode errors.
@@ -117,21 +124,25 @@ Fresh fixed-port remote smoke on May 8, 2026:
   - Resolution: Overlapped validation/extraction/write for batch N with header/body/receipt fetch for batch N+1 and guarded against retaining speculative prefetches after failed current batches.
   - Remaining: The latest restart-wide sample improved to `75.75 blocks/sec`, with warmed tail batches roughly `120-150 blocks/sec`, but the sub-6-hour target still requires deeper scheduling or lower local ingest cost.
 
+- Challenge: CPU profiling showed Keccak, Zstd compression, and allocation on the historical ingest hot path.
+  - Resolution: Removed the redundant historical extraction phase and added a dictionary compression fast path; Zstd dropped from roughly `9%` to `4.5%` in a follow-up profile.
+  - Remaining: Keccak receipt-root validation remains the largest CPU cost, and the current run still needs more serving peers or deeper scheduling to approach the target.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected EL peer management, historical ingestion, storage append/WAL paths, and background indexing.
 - Removed or reverted ineffective peer-retention experiments that did not improve live samples.
 - Removed the ineffective 4096-header historical window experiment after peers continued returning 1024 headers.
 - Replaced an oversized P2P constructor argument list with a config struct while fixing clippy.
-- Kept combined body/receipt chunk capping and ingest/fetch overlap because remote samples improved; no new ineffective code remains from this pass.
+- Kept combined body/receipt chunk capping, ingest/fetch overlap, direct historical row materialization, and dictionary compression fast path because profiling or remote samples showed improvement.
 - Confirmed obsolete single-block historical ingestion is no longer referenced; batched historical ingestion is the active path.
-- No additional obsolete pipeline code was removed because the remaining request paths are still used as fallback or validation paths.
+- Removed the redundant second historical extraction task phase from the reverse-sync write path; remaining request paths are still used as fallback or validation paths.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: no
-- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`), `603c03f` (`docs: update execution sync roadmap`), `73f78e8` (`perf: increase historical receipt fanout`), `acd7586` (`perf: overlap historical ingest and prefetch`)
+- Commits made during this run: `0984522` (`feat: improve execution sync pipeline`), `603c03f` (`docs: update execution sync roadmap`), `73f78e8` (`perf: increase historical receipt fanout`), `acd7586` (`perf: overlap historical ingest and prefetch`), `54e35fa` (`docs: update execution sync roadmap`), `aca3288` (`perf: reduce historical ingest CPU cost`)
 - Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not applicable yet
 - Git/GitHub blockers: local `gh` auth token is invalid, but the GitHub connector created the draft PR successfully; the PR should remain draft because the sub-6-hour sync target is not met yet
