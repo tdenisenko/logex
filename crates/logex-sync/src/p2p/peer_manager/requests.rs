@@ -14,6 +14,7 @@ const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 16;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 480_000_000;
+const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 512;
 const PIPELINED_WIDE_FANOUT_MIN_PEERS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 2;
@@ -514,7 +515,7 @@ impl BodyReceiptRequestPlan {
                 ));
             }
 
-            let min_return_blocks = self.hashes.len();
+            let min_return_blocks = body_receipt_min_return_blocks(self.hashes.len());
             while let Some(chunk) = attempts.next().await {
                 let chunk_start = chunk.start;
                 let chunk_failed = chunk.blocks.is_empty();
@@ -2854,6 +2855,10 @@ fn body_receipt_chunk_limit(body_limit: usize, receipt_limit: usize, chunk_cap: 
     body_limit.min(receipt_limit).min(chunk_cap)
 }
 
+fn body_receipt_min_return_blocks(total_blocks: usize) -> usize {
+    total_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{ReceiptWithBloom, TxType};
@@ -2932,6 +2937,13 @@ mod tests {
         assert_eq!(body_receipt_chunk_limit(128, 128, 16), 16);
         assert_eq!(body_receipt_chunk_limit(16, 128, 32), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 32), 8);
+    }
+
+    #[test]
+    fn body_receipt_min_return_blocks_processes_contiguous_prefixes() {
+        assert_eq!(body_receipt_min_return_blocks(0), 0);
+        assert_eq!(body_receipt_min_return_blocks(128), 128);
+        assert_eq!(body_receipt_min_return_blocks(2048), 512);
     }
 
     #[test]

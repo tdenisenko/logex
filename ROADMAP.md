@@ -9,7 +9,8 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 ## Completed Since Last Run
 
 - Split historical reverse sync into fetch, validation, and chunked write stages so network fetch can overlap local validation/storage work.
-- Added bounded multi-window historical fetch lookahead and ordered floor advancement, with full-window completion required before a batch is accepted.
+- Added bounded multi-window historical fetch lookahead and ordered floor advancement.
+- Changed body/receipt batches to ingest a verified contiguous prefix once it reaches 512 blocks, then resume from the new floor instead of waiting for slow tail chunks.
 - Reduced historical write memory pressure by extracting and writing validated logs in 512-block chunks.
 - Lowered storage zstd level for faster continuous log compaction while keeping the existing topic dictionary encoding and query limits.
 - Improved EL peer ramp behavior with a larger sync peer target, more outbound dial capacity, and temporary demotion/backoff for unresponsive dial candidates instead of deleting persisted productive peers.
@@ -44,7 +45,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 
 - EL historical validation targets genesis because the CL checkpoint only proves a recent execution pivot.
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
-- Full historical windows are required before ordered floor advancement; partial-window early return was removed to avoid silently skipping difficult chunks.
+- Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches 512 blocks; the next request resumes at the new floor so difficult tail chunks are retried instead of skipped.
 - Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure during dense log ranges.
 - Unresponsive dial candidates receive temporary in-memory backoff and productive-queue demotion, not deletion from the persisted known-peer set.
 - Query limits remain capped at `10,000` rows with `50` row default pages; storage keeps dictionary/topic compression and periodic compaction.
@@ -58,7 +59,8 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
   - Resolution: Replaced deletion with temporary backoff plus queue demotion and added a regression test.
 
 - Challenge: Peer count can be high while ETA remains multi-day.
-  - Resolution: Storage and validation are now overlapped with fetches; the remaining throughput problem is body/receipt chunk scheduling and slow-tail reassignment.
+  - Resolution: Storage and validation are now overlapped with fetches, and contiguous-prefix ingest reduces slow-tail stalls.
+  - Remaining: The downloader still needs longer-run validation and deeper task queues to reach the target ETA.
 
 ## Dead Code and Obsolescence Cleanup
 
