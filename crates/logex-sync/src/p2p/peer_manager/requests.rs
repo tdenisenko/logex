@@ -70,7 +70,6 @@ pub(crate) struct BodyReceiptRequestPlan {
     range_indices_by_start: HashMap<usize, usize>,
     body_peer_ids: Vec<PeerId>,
     receipt_peer_ids: Vec<PeerId>,
-    preferred_peers: Vec<PeerId>,
     max_in_flight: usize,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
 }
@@ -444,7 +443,6 @@ impl PeerManager {
             range_indices_by_start,
             body_peer_ids,
             receipt_peer_ids,
-            preferred_peers: preferred_peers.to_vec(),
             max_in_flight,
             peers,
         }))
@@ -516,7 +514,6 @@ impl BodyReceiptRequestPlan {
                     &self.hashes,
                     &chunk_body_peer_ids,
                     &chunk_receipt_peer_ids,
-                    &self.preferred_peers,
                 ));
             }
 
@@ -576,7 +573,6 @@ impl BodyReceiptRequestPlan {
                         &self.hashes,
                         &chunk_body_peer_ids,
                         &chunk_receipt_peer_ids,
-                        &self.preferred_peers,
                     ));
                 }
 
@@ -599,7 +595,6 @@ impl BodyReceiptRequestPlan {
                         &self.hashes,
                         &chunk_body_peer_ids,
                         &chunk_receipt_peer_ids,
-                        &self.preferred_peers,
                     ));
                 }
             }
@@ -619,7 +614,6 @@ impl BodyReceiptRequestPlan {
         hashes: Vec<B256>,
         body_peer_ids: Vec<PeerId>,
         receipt_peer_ids: Vec<PeerId>,
-        preferred_peers: Vec<PeerId>,
     ) -> BodyReceiptChunk {
         let mut failures = Vec::new();
         let mut stats = Vec::new();
@@ -632,7 +626,6 @@ impl BodyReceiptRequestPlan {
         for body_peer in body_candidates {
             let receipt_candidates = receipt_candidates_for_body_peer(
                 receipt_peer_ids.clone(),
-                &preferred_peers,
                 body_peer,
                 PIPELINED_CHUNK_REQUEST_PEERS,
             );
@@ -2525,14 +2518,12 @@ fn body_receipt_chunk_request<'a>(
     hashes: &[B256],
     body_peer_ids: &[PeerId],
     receipt_peer_ids: &[PeerId],
-    preferred_peers: &[PeerId],
 ) -> futures_util::future::BoxFuture<'a, BodyReceiptChunk> {
     let chunk_hashes = hashes[range.clone()].to_vec();
     let mut chunk_body_peers = body_peer_ids.to_vec();
     rotate_request_candidates(&mut chunk_body_peers, chunk_index);
     let mut chunk_receipt_peers = receipt_peer_ids.to_vec();
     rotate_request_candidates(&mut chunk_receipt_peers, chunk_index);
-    let preferences = preferred_peers.to_vec();
 
     async move {
         plan.request_body_receipt_chunk(
@@ -2540,7 +2531,6 @@ fn body_receipt_chunk_request<'a>(
             chunk_hashes,
             chunk_body_peers,
             chunk_receipt_peers,
-            preferences,
         )
         .await
     }
@@ -2549,16 +2539,10 @@ fn body_receipt_chunk_request<'a>(
 
 fn receipt_candidates_for_body_peer(
     receipt_peer_ids: Vec<PeerId>,
-    preferred_peers: &[PeerId],
     body_peer: PeerId,
     limit: usize,
 ) -> Vec<PeerId> {
-    let receipt_preferences = preferred_peers
-        .iter()
-        .copied()
-        .filter(|peer_id| *peer_id != body_peer)
-        .collect::<Vec<_>>();
-    let mut candidates = prioritize_preferred_peer_ids(receipt_peer_ids, &receipt_preferences);
+    let mut candidates = receipt_peer_ids;
     if candidates.first() == Some(&body_peer)
         && let Some(index) = candidates.iter().position(|peer_id| *peer_id != body_peer)
     {
@@ -2997,7 +2981,7 @@ mod tests {
         let third = PeerId::repeat_byte(0x33);
 
         let ordered =
-            receipt_candidates_for_body_peer(vec![body_peer, second, third], &[], body_peer, 3);
+            receipt_candidates_for_body_peer(vec![body_peer, second, third], body_peer, 3);
 
         assert_eq!(ordered, vec![second, body_peer, third]);
     }
@@ -3006,7 +2990,7 @@ mod tests {
     fn body_receipt_chunks_fall_back_to_body_peer_when_needed() {
         let body_peer = PeerId::repeat_byte(0x11);
 
-        let ordered = receipt_candidates_for_body_peer(vec![body_peer], &[], body_peer, 3);
+        let ordered = receipt_candidates_for_body_peer(vec![body_peer], body_peer, 3);
 
         assert_eq!(ordered, vec![body_peer]);
     }

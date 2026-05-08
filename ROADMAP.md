@@ -4,7 +4,7 @@
 
 LogEx bootstraps from a recent weak-subjectivity checkpoint, follows CL head/finality over native CL P2P, and uses CL-authenticated execution anchors as the pivot for EL validation. EL P2P can follow head, fetch historical headers/bodies/receipts backward from the pivot, verify receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote run on May 8, 2026 uses `/root/logex-data-remote` and fixed HTTP port `18683`. A bounded sample after the 1024-window alignment showed `25` connected / `23` serving EL peers and about `57` historical blocks/sec, so the active bottleneck remains body/receipt scheduling rather than raw peer discovery.
+The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote runs on May 8, 2026 use `/root/logex-data-remote` and fixed HTTP port `18683`. The best bounded sample so far reached about `144` historical blocks/sec after distributing receipt requests across rotated peers instead of concentrating them on the header peer. This is better than the earlier `57-122` blocks/sec runs, but still far from the sub-6-hour target. A corrupt remote data dir from an overlapping restart was cleared and the current remote run is fresh.
 
 ## Completed Since Last Run
 
@@ -19,6 +19,10 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Increased the remote test dial ceiling again after the 1024-prefix run showed network headroom but only 17 serving peers.
 - Reused successful receipt responses across body-peer retries inside a body/receipt chunk so a failed body peer does not force duplicate receipt downloads for the same hashes.
 - Added a historical tail result cache so completed out-of-order body/receipt chunks below the accepted prefix can be queued for validation instead of being refetched after floor advancement.
+- Increased body/receipt request units to 64 blocks and moved historical row extraction into the blocking storage worker so network prefetch can start without being blocked by synchronous log extraction.
+- Measured and rejected 4096-block reverse windows and deferred historical compaction because they increased memory or reduced throughput in remote runs.
+- Removed per-chunk receipt preference for the header peer so combined body/receipt chunks distribute first receipt requests across the rotated serving-peer set.
+- Hardened historical sealed-segment writes against abandoned segment directories left behind by interrupted writes.
 
 ## Remaining TODOs
 
@@ -51,7 +55,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - EL historical validation targets genesis because the CL checkpoint only proves a recent execution pivot.
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
 - Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches 1024 blocks; already completed tail chunks are queued for ordered validation instead of discarded.
-- Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure during dense log ranges.
+- Reverse-sync windows are capped at 2048 blocks for now because 4096-block windows caused excessive memory pressure for only a small throughput gain during dense log ranges.
 - Unresponsive dial candidates receive temporary in-memory backoff and productive-queue demotion, not deletion from the persisted known-peer set.
 - Outbound dial capacity is intentionally higher than a general-purpose full node because LogEx is a sync-focused reader and needs to rebuild a large serving peer pool quickly after restart.
 - Query limits remain capped at `10,000` rows with `50` row default pages; storage keeps dictionary/topic compression and periodic compaction.
@@ -77,10 +81,23 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Challenge: Re-enabling larger reverse windows previously wasted tail work after the first accepted prefix.
   - Resolution: Added tail-batch reuse before restoring 2048-block windows.
 
+- Challenge: Historical log extraction ran synchronously inside the async write future before network prefetch could make progress.
+  - Resolution: Moved extraction into the blocking storage worker; the best remote sample improved to about `122` historical blocks/sec.
+
+- Challenge: Deferring historical compaction to the background hot-segment path looked useful for sync-path CPU, but it regressed throughput by competing with sync work.
+  - Resolution: Reverted that experiment and kept inline compacted historical writes for now.
+
+- Challenge: Receipt requests were still concentrated on the header peer after per-chunk rotation, limiting the value of a larger peer pool.
+  - Resolution: Removed the header-peer preference from combined chunk receipt selection; the best bounded sample improved to about `144` historical blocks/sec.
+
+- Challenge: An overlapping remote restart exposed a storage durability issue where an abandoned segment directory could be reused with stale column files.
+  - Resolution: Historical sealed-segment writes now remove any abandoned directory before writing a newly allocated segment. The corrupt remote data dir was deleted after preserving peer/discovery files.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the historical downloader, peer lifecycle/state, storage compression, and roadmap notes for obsolete experimental code.
+- Inspected the historical downloader, peer lifecycle/state, storage compression, sealed-segment writes, and roadmap notes for obsolete experimental code.
 - Removed the obsolete single-prefetch path in favor of the bounded fetch/prepare pipeline.
+- Reverted the 1024-block historical write chunk experiment after it caused excessive memory pressure on the remote runner.
 - Confirmed no debug prints, early-return roadmap behavior, or known-peer deletion experiment remains in the Rust code.
 
 ## Git Workflow

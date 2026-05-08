@@ -240,6 +240,9 @@ impl NativeStorage {
         for chunk in rows.chunks(target_rows) {
             let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
             let segment_dir = self.paths.segment_dir(descriptor.id);
+            if segment_dir.exists() {
+                fs::remove_dir_all(&segment_dir)?;
+            }
             let columns = write_compacted_rows(&segment_dir, chunk)?;
             apply_rows_to_descriptor(&mut descriptor, chunk);
             persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
@@ -1038,6 +1041,32 @@ mod tests {
         assert_eq!(reloaded.total_rows(), 25);
         assert_eq!(reloaded.sealed_count(), 3);
         assert_eq!(reloaded.hot_partition_meta().row_count, 0);
+    }
+
+    #[test]
+    fn historical_batch_replaces_abandoned_segment_directory() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        let stale_segment_dir = storage.paths.segment_dir(storage.catalog.next_segment_id);
+        fs::create_dir_all(stale_segment_dir.join("columns")).unwrap();
+        fs::write(stale_segment_dir.join("stale"), b"stale").unwrap();
+
+        storage.write_historical_batch(&make_rows(12, 100)).unwrap();
+
+        assert!(!stale_segment_dir.join("stale").exists());
+        let reloaded = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        assert_eq!(reloaded.total_rows(), 12);
+        assert_eq!(reloaded.sealed_count(), 2);
     }
 
     #[test]
