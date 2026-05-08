@@ -1389,22 +1389,24 @@ impl SyncEngine {
         prefetched: bool,
     ) -> Result<bool> {
         let batch_started = std::time::Instant::now();
-        let mut next_child_header = task.next_child_header.clone();
+        let immediate_next_child_header = task.next_child_header.clone();
+        let mut queued_next_child_header = immediate_next_child_header.clone();
         let queued_tail_batches = self.enqueue_historical_tail_batches(
             std::mem::take(&mut task.tail_batches),
-            &mut next_child_header,
+            &mut queued_next_child_header,
         );
         let storage = Arc::clone(&self.storage);
         let subscriptions = self.subscriptions.clone();
         let prepare_and_write = write_prepared_historical_batch(storage, subscriptions, task);
         let mut prefetched_next_batches = 0usize;
         let overlap_started = std::time::Instant::now();
-        let written = if let Some(next_child_header) = next_child_header
-            && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
+        let written = if let Some(immediate_next_child_header) = immediate_next_child_header
+            && immediate_next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
             && self.peers.peer_count() > 0
         {
-            self.align_historical_prefetch_queue(&next_child_header);
-            let mut next_prefetch_child = self.next_historical_prefetch_child(next_child_header);
+            self.align_historical_prefetch_queue(&immediate_next_child_header);
+            let mut next_prefetch_child =
+                self.next_historical_prefetch_child(immediate_next_child_header);
             let mut written = None;
             let mut write = Box::pin(prepare_and_write);
 
