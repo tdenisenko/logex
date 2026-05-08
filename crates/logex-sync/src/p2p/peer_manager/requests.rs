@@ -496,7 +496,11 @@ impl BodyReceiptRequestPlan {
             let mut in_flight = HashSet::<usize>::new();
             let mut body_bad_peers = HashSet::<PeerId>::new();
             let mut receipt_bad_peers = HashSet::<PeerId>::new();
-            for _ in 0..self.max_in_flight {
+            let min_return_blocks = body_receipt_min_return_blocks(self.hashes.len());
+            let max_scheduled_chunks =
+                body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
+                    .min(self.max_in_flight);
+            for _ in 0..max_scheduled_chunks {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
                     break;
                 };
@@ -515,7 +519,6 @@ impl BodyReceiptRequestPlan {
                 ));
             }
 
-            let min_return_blocks = body_receipt_min_return_blocks(self.hashes.len());
             while let Some(chunk) = attempts.next().await {
                 let chunk_start = chunk.start;
                 let chunk_failed = chunk.blocks.is_empty();
@@ -576,7 +579,7 @@ impl BodyReceiptRequestPlan {
                     ));
                 }
 
-                while attempts.len() < self.max_in_flight {
+                while attempts.len() < max_scheduled_chunks {
                     if contiguous_chunk_blocks(&chunks) >= min_return_blocks {
                         break;
                     }
@@ -2859,6 +2862,24 @@ fn body_receipt_min_return_blocks(total_blocks: usize) -> usize {
     total_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
 }
 
+fn body_receipt_scheduled_chunk_limit(
+    ranges: &[std::ops::Range<usize>],
+    min_return_blocks: usize,
+) -> usize {
+    if ranges.is_empty() || min_return_blocks == 0 {
+        return 0;
+    }
+
+    let prefix_chunks = ranges
+        .iter()
+        .take_while(|range| range.start < min_return_blocks)
+        .count()
+        .max(1);
+    prefix_chunks
+        .saturating_mul(2)
+        .clamp(1, ranges.len())
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{ReceiptWithBloom, TxType};
@@ -2944,6 +2965,16 @@ mod tests {
         assert_eq!(body_receipt_min_return_blocks(0), 0);
         assert_eq!(body_receipt_min_return_blocks(128), 128);
         assert_eq!(body_receipt_min_return_blocks(2048), 512);
+    }
+
+    #[test]
+    fn body_receipt_scheduled_chunk_limit_keeps_prefix_headroom() {
+        let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
+
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 0), 0);
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 2);
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 6);
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 4096), 6);
     }
 
     #[test]
