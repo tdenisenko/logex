@@ -41,9 +41,7 @@ mod requests;
 mod state;
 
 use self::requests::RequestAttempt;
-pub(crate) use self::requests::{
-    BodyReceiptRequestCompletion, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
-};
+pub(crate) use self::requests::{BodyReceiptRequestOutcome, BodyReceiptRequestPlan};
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
     is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
@@ -63,13 +61,12 @@ const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
 const REQUEST_HANDLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const SATURATED_PEER_RETRY_DELAY: Duration = Duration::from_secs(60);
-const UNRESPONSIVE_DIAL_RETRY_DELAY: Duration = Duration::from_secs(60);
 const USELESS_PEER_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SUBMITTED_DIAL_SUPPRESSION_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 8;
-const INBOUND_PEER_RESERVE_RATIO: usize = 4;
+const OUTBOUND_DIAL_RATIO: usize = 3;
 const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 192;
 const MAX_PENDING_DIALS_PER_REFILL: usize = 96;
 const REQUEST_PEER_REFILL_ATTEMPTS: usize = 20;
@@ -115,7 +112,6 @@ pub struct PeerManager {
     request_cursor: usize,
     pending: HashMap<PeerId, NodeRecord>,
     pending_dials: HashMap<PeerId, Instant>,
-    unresponsive_dial_peers: HashMap<PeerId, Instant>,
     saturated_peers: HashMap<PeerId, Instant>,
     receipt_quarantined_peers: HashMap<PeerId, Instant>,
     productive: VecDeque<NodeRecord>,
@@ -281,7 +277,6 @@ impl PeerManager {
             request_cursor: 0,
             pending: HashMap::new(),
             pending_dials: HashMap::new(),
-            unresponsive_dial_peers: HashMap::new(),
             saturated_peers: HashMap::new(),
             receipt_quarantined_peers: HashMap::new(),
             productive,
@@ -387,35 +382,9 @@ impl PeerManager {
     }
 
     fn prune_submitted_dials(&mut self, now: Instant) {
-        let expired: Vec<_> = self
-            .pending_dials
-            .iter()
-            .filter_map(|(peer_id, last_submitted)| {
-                (now.duration_since(*last_submitted) >= SUBMITTED_DIAL_SUPPRESSION_INTERVAL)
-                    .then_some(*peer_id)
-            })
-            .collect();
-
-        let mut changed_productive_peers = false;
-        for peer_id in expired {
-            self.pending_dials.remove(&peer_id);
-            self.unresponsive_dial_peers
-                .insert(peer_id, now + UNRESPONSIVE_DIAL_RETRY_DELAY);
-            changed_productive_peers |= self.demote_productive_peer(peer_id);
-        }
-        if changed_productive_peers {
-            self.persist_productive_peers();
-        }
-    }
-
-    fn recently_unresponsive_dial(&self, peer_id: PeerId, now: Instant) -> bool {
-        self.unresponsive_dial_peers
-            .get(&peer_id)
-            .is_some_and(|until| *until > now)
-    }
-
-    fn prune_unresponsive_dial_peers(&mut self, now: Instant) {
-        self.unresponsive_dial_peers.retain(|_, until| *until > now);
+        self.pending_dials.retain(|_, last_submitted| {
+            now.duration_since(*last_submitted) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
+        });
     }
 }
 
@@ -470,15 +439,9 @@ fn peer_connection_limits(max_peers: usize) -> (usize, usize) {
     if max_peers == 0 {
         return (0, 0);
     }
-    if max_peers == 1 {
-        return (1, 0);
-    }
 
-    // LogEx is a sync-focused light client: inbound capacity is useful for
-    // discovery and reciprocal network health, but reverse-log backfill cannot
-    // wait for inbound sessions to fill most of the pool on a fresh run.
-    let max_inbound = (max_peers / INBOUND_PEER_RESERVE_RATIO).clamp(1, max_peers - 1);
-    let max_outbound = max_peers.saturating_sub(max_inbound);
+    let max_outbound = (max_peers / OUTBOUND_DIAL_RATIO).clamp(1, max_peers);
+    let max_inbound = max_peers.saturating_sub(max_outbound);
     (max_outbound, max_inbound)
 }
 
@@ -490,7 +453,7 @@ mod tests {
     fn peer_connection_limits_treat_config_as_total_capacity() {
         assert_eq!(peer_connection_limits(0), (0, 0));
         assert_eq!(peer_connection_limits(1), (1, 0));
-        assert_eq!(peer_connection_limits(3), (2, 1));
-        assert_eq!(peer_connection_limits(100), (75, 25));
+        assert_eq!(peer_connection_limits(3), (1, 2));
+        assert_eq!(peer_connection_limits(100), (33, 67));
     }
 }

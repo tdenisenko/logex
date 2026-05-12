@@ -46,16 +46,17 @@ pub fn extract_from_block(
     extract_logs(&ctx, txs)
 }
 
-/// Extract `LogRow`s directly from a block body and its receipts without
-/// cloning receipt logs into an intermediate transaction list.
-pub fn extract_from_body_receipts<B, R>(
+/// Append `LogRow`s directly from a block body and receipts into an existing
+/// buffer. This is used by historical batch ingestion to avoid per-block
+/// temporary vectors while preserving transaction and log ordering.
+pub fn append_from_body_receipts<B, R>(
+    rows: &mut Vec<LogRow>,
     block_number: u64,
     block_hash: B256,
     timestamp: u64,
     body: &B,
     receipts: &[R],
-) -> Vec<LogRow>
-where
+) where
     B: BlockBody,
     B::Transaction: TxHashRef,
     R: alloy_consensus::TxReceipt<Log = Log>,
@@ -65,8 +66,6 @@ where
         block_hash,
         timestamp,
     };
-    let total_logs = receipts.iter().map(|receipt| receipt.logs().len()).sum();
-    let mut rows = Vec::with_capacity(total_logs);
     let mut global_log_index = 0u32;
 
     for (tx_index, (tx, receipt)) in body.transactions().iter().zip(receipts.iter()).enumerate() {
@@ -82,8 +81,6 @@ where
             global_log_index += 1;
         }
     }
-
-    rows
 }
 
 #[cfg(test)]

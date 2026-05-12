@@ -62,7 +62,6 @@ impl PeerManager {
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
-        self.prune_unresponsive_dial_peers(now);
         let mut queued = 0usize;
         for peer in self.known_peers.clone() {
             if is_bootstrap_node(peer.id)
@@ -70,7 +69,6 @@ impl PeerManager {
                 || self.peers.contains_key(&peer.id)
                 || self.pending.contains_key(&peer.id)
                 || self.recently_saturated(peer.id, now)
-                || self.recently_unresponsive_dial(peer.id, now)
                 || self.recently_submitted(peer.id, now)
             {
                 continue;
@@ -93,7 +91,6 @@ impl PeerManager {
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
-        self.prune_unresponsive_dial_peers(now);
         self.prune_stale_nonserving_peers();
         self.fill_open_peer_slots();
     }
@@ -124,7 +121,6 @@ impl PeerManager {
                     && node.tcp_port > 0
                     && !self.peers.contains_key(&node.id)
                     && !self.recently_saturated(node.id, now)
-                    && !self.recently_unresponsive_dial(node.id, now)
                     && !self.recently_submitted(node.id, now)
             })
             .collect();
@@ -305,7 +301,6 @@ impl PeerManager {
             );
             self.pending.remove(&info.peer_id);
             self.pending_dials.remove(&info.peer_id);
-            self.unresponsive_dial_peers.remove(&info.peer_id);
             self.session_metrics.rejected_zero_tip_sessions = self
                 .session_metrics
                 .rejected_zero_tip_sessions
@@ -322,7 +317,6 @@ impl PeerManager {
             .remove(&info.peer_id)
             .unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
         self.pending_dials.remove(&info.peer_id);
-        self.unresponsive_dial_peers.remove(&info.peer_id);
         record = record.with_tcp_port(info.remote_addr.port());
 
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
@@ -377,14 +371,10 @@ impl PeerManager {
     pub(super) fn remember_pending(&mut self, node: NodeRecord) {
         let now = Instant::now();
         self.prune_saturated_peers(now);
-        self.prune_unresponsive_dial_peers(now);
         if is_bootstrap_node(node.id) || node.tcp_port == 0 || self.peers.contains_key(&node.id) {
             return;
         }
         if self.recently_saturated(node.id, now) {
-            return;
-        }
-        if self.recently_unresponsive_dial(node.id, now) {
             return;
         }
         if self.pending.len() >= MAX_TRACKED_PENDING && !self.pending.contains_key(&node.id) {
@@ -409,7 +399,6 @@ impl PeerManager {
         self.peers.remove(&peer_id);
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
-        self.unresponsive_dial_peers.remove(&peer_id);
         self.saturated_peers.remove(&peer_id);
         self.receipt_quarantined_peers.remove(&peer_id);
         self.peer_order.retain(|id| *id != peer_id);
@@ -424,7 +413,6 @@ impl PeerManager {
     pub(super) fn remove_peer(&mut self, peer_id: PeerId) -> Option<ActivePeer> {
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
-        self.unresponsive_dial_peers.remove(&peer_id);
         let peer = self.peers.remove(&peer_id);
         if let Some(peer) = peer.as_ref()
             && peer.is_serving
@@ -582,7 +570,6 @@ impl PeerManager {
         self.saturated_peers.insert(peer_id, until);
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
-        self.unresponsive_dial_peers.remove(&peer_id);
         self.network.remove_peer(peer_id, PeerKind::Basic);
     }
 

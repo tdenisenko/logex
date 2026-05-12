@@ -1,5 +1,6 @@
 use super::*;
 use crate::EXECUTION_HISTORY_TARGET_BLOCK;
+use crate::extract;
 use crate::p2p::peer_manager::SourcedBodyReceipts;
 use crate::primitives::LogexNetworkPrimitives;
 use crate::validation::validate_header_matches_anchor;
@@ -14,16 +15,19 @@ const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 3;
+const HISTORICAL_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
-const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 2_048;
-const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 2_048;
+const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
+const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
-const HISTORICAL_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 32;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 64;
+const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
+const HISTORICAL_HEADER_GAS_WINDOW_TARGET: u128 =
+    30_000_000u128 * HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u128;
 
 #[derive(Debug)]
 struct ConsensusReorg {
@@ -40,6 +44,14 @@ struct HistoricalValidationJob {
     body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
     receipt_peer: PeerId,
     receipts: Vec<ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
+}
+
+struct HistoricalValidationExtractedChunk {
+    start_index: usize,
+    peer_notes: Vec<PeerId>,
+    extracted: super::ingest::HistoricalExtractedChunk,
+    lowest_block: u64,
+    highest_block: u64,
 }
 
 async fn validate_historical_blocks_parallel(
@@ -91,6 +103,105 @@ async fn validate_historical_blocks_parallel(
     Ok(Ok(validated))
 }
 
+async fn validate_and_extract_historical_blocks_parallel(
+    headers: &[Header],
+    hashes: &[B256],
+    blocks: Vec<SourcedBodyReceipts>,
+) -> Result<
+    std::result::Result<
+        (
+            super::ingest::HistoricalExtractedBatch,
+            Vec<PeerId>,
+            u64,
+            u64,
+        ),
+        Box<HistoricalValidationFailure>,
+    >,
+> {
+    let block_count = blocks.len();
+    let task_count = historical_validation_task_count(block_count);
+    let chunk_size = block_count.div_ceil(task_count);
+    let mut tasks = JoinSet::new();
+    let mut chunk = Vec::with_capacity(chunk_size);
+
+    for (index, ((body_peer, body), (receipt_peer, receipts))) in blocks.into_iter().enumerate() {
+        let Some(header) = headers.get(index).cloned() else {
+            break;
+        };
+        let block_hash = hashes.get(index).copied().unwrap_or_default();
+
+        chunk.push(HistoricalValidationJob {
+            index,
+            header,
+            block_hash,
+            body_peer,
+            body,
+            receipt_peer,
+            receipts,
+        });
+
+        if chunk.len() >= chunk_size {
+            let task_chunk = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
+            tasks.spawn_blocking(move || validate_and_extract_historical_block_chunk(task_chunk));
+        }
+    }
+
+    if !chunk.is_empty() {
+        tasks.spawn_blocking(move || validate_and_extract_historical_block_chunk(chunk));
+    }
+
+    let mut chunks = Vec::with_capacity(task_count);
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(chunk)) => chunks.push(chunk),
+            Ok(Err(failure)) => return Ok(Err(failure)),
+            Err(error) => {
+                return Err(eyre::eyre!(
+                    "historical validation/extraction worker failed: {error}"
+                ));
+            }
+        }
+    }
+    chunks.sort_by_key(|chunk| chunk.start_index);
+
+    let mut peer_notes = Vec::new();
+    let mut extracted_chunks = Vec::with_capacity(chunks.len());
+    let mut row_count = 0u64;
+    let mut extraction_elapsed = Duration::ZERO;
+    let mut lowest_header = None;
+    let mut lowest_block = u64::MAX;
+    let mut highest_block = 0u64;
+
+    for chunk in chunks {
+        peer_notes.extend(chunk.peer_notes);
+        row_count = row_count.saturating_add(chunk.extracted.row_count);
+        extraction_elapsed += chunk.extracted.extraction_elapsed;
+        lowest_block = lowest_block.min(chunk.lowest_block);
+        highest_block = highest_block.max(chunk.highest_block);
+        if lowest_header
+            .as_ref()
+            .is_none_or(|header: &Header| chunk.extracted.lowest_header.number() < header.number())
+        {
+            lowest_header = Some(chunk.extracted.lowest_header.clone());
+        }
+        extracted_chunks.push(chunk.extracted);
+    }
+
+    let lowest_header = lowest_header.unwrap_or_else(|| Header {
+        number: 0,
+        ..Default::default()
+    });
+    let extracted = super::ingest::HistoricalExtractedBatch {
+        block_count: block_count as u64,
+        row_count,
+        lowest_header,
+        chunks: extracted_chunks,
+        extraction_elapsed,
+    };
+
+    Ok(Ok((extracted, peer_notes, lowest_block, highest_block)))
+}
+
 fn historical_validation_task_count(block_count: usize) -> usize {
     if block_count == 0 {
         return 1;
@@ -103,6 +214,108 @@ fn historical_validation_task_count(block_count: usize) -> usize {
         .saturating_mul(HISTORICAL_VALIDATION_TASKS_PER_CPU)
         .clamp(1, HISTORICAL_VALIDATION_TASK_LIMIT)
         .min(block_count)
+}
+
+fn historical_header_window_reached_gas_target(header_count: usize, cumulative_gas: u128) -> bool {
+    header_count >= HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS
+        && cumulative_gas >= HISTORICAL_HEADER_GAS_WINDOW_TARGET
+}
+
+fn validate_and_extract_historical_block_chunk(
+    jobs: Vec<HistoricalValidationJob>,
+) -> std::result::Result<HistoricalValidationExtractedChunk, Box<HistoricalValidationFailure>> {
+    let start_index = jobs.first().map_or(0, |job| job.index);
+    let block_count = jobs.len();
+    let mut rows = Vec::new();
+    let mut peer_notes = Vec::with_capacity(block_count.saturating_mul(2));
+    let mut lowest_header = None;
+    let mut lowest_block = u64::MAX;
+    let mut highest_block = 0u64;
+    let mut extraction_elapsed = Duration::ZERO;
+
+    for job in jobs {
+        let block_number = job.header.number();
+        if let Err(error) = validate_block_pre_execution(&job.header, &job.body) {
+            return Err(Box::new(HistoricalValidationFailure {
+                peer: job.body_peer,
+                response_kind: "block bodies",
+                block_number,
+                block_hash: job.block_hash,
+                message: error.to_string(),
+            }));
+        }
+
+        if !receipts_match_transaction_count(&job.body, &job.receipts) {
+            return Err(Box::new(HistoricalValidationFailure {
+                peer: job.receipt_peer,
+                response_kind: "receipts",
+                block_number,
+                block_hash: job.block_hash,
+                message: format!(
+                    "transaction/receipt count mismatch: transactions={}, receipts={}",
+                    job.body.transaction_count(),
+                    job.receipts.len()
+                ),
+            }));
+        }
+
+        if let Err(error) = validate_receipts_for_header(&job.header, &job.receipts) {
+            return Err(Box::new(HistoricalValidationFailure {
+                peer: job.receipt_peer,
+                response_kind: "receipts",
+                block_number,
+                block_hash: job.block_hash,
+                message: error.to_string(),
+            }));
+        }
+
+        let log_count = job
+            .receipts
+            .iter()
+            .map(|receipt| receipt.logs().len())
+            .sum::<usize>();
+        rows.reserve(log_count);
+        let extraction_started = std::time::Instant::now();
+        extract::append_from_body_receipts(
+            &mut rows,
+            block_number,
+            job.block_hash,
+            job.header.timestamp(),
+            &job.body,
+            &job.receipts,
+        );
+        extraction_elapsed += extraction_started.elapsed();
+
+        peer_notes.push(job.body_peer);
+        peer_notes.push(job.receipt_peer);
+        lowest_block = lowest_block.min(block_number);
+        highest_block = highest_block.max(block_number);
+        if lowest_header
+            .as_ref()
+            .is_none_or(|header: &Header| block_number < header.number())
+        {
+            lowest_header = Some(job.header);
+        }
+    }
+
+    let lowest_header = lowest_header.unwrap_or_else(|| Header {
+        number: 0,
+        ..Default::default()
+    });
+    let row_count = rows.len() as u64;
+    Ok(HistoricalValidationExtractedChunk {
+        start_index,
+        peer_notes,
+        extracted: super::ingest::HistoricalExtractedChunk {
+            rows,
+            row_count,
+            block_count,
+            lowest_header,
+            extraction_elapsed,
+        },
+        lowest_block,
+        highest_block,
+    })
 }
 
 fn validate_historical_block_chunk(
@@ -178,16 +391,14 @@ fn validate_historical_block(
     })
 }
 
-fn spawn_historical_prepare_task(mut batch: HistoricalFetchedBatch) -> HistoricalPrepareTask {
+fn spawn_historical_prepare_task(batch: HistoricalFetchedBatch) -> HistoricalPrepareTask {
     let child_header = batch.child_header.clone();
     let next_child_header = historical_batch_next_child_header(&batch);
-    let tail_batches = std::mem::take(&mut batch.tail_batches);
     let handle = tokio::spawn(async move { prepare_historical_batch(batch).await });
 
     HistoricalPrepareTask {
         child_header,
         next_child_header,
-        tail_batches,
         handle,
     }
 }
@@ -207,40 +418,36 @@ async fn prepare_historical_batch(
     } = batch;
     let requested_headers = headers.len();
 
-    let validation_started = std::time::Instant::now();
-    let validated = match validate_historical_blocks_parallel(&headers, &hashes, blocks).await? {
-        Ok(validated) => validated,
-        Err(failure) => return Ok(Err(failure)),
-    };
-    let validation_elapsed = validation_started.elapsed();
+    let preparation_started = std::time::Instant::now();
+    let (extracted, mut block_peer_notes, lowest_block, highest_block) =
+        match validate_and_extract_historical_blocks_parallel(&headers, &hashes, blocks).await? {
+            Ok(prepared) => prepared,
+            Err(failure) => return Ok(Err(failure)),
+        };
+    let validation_elapsed = preparation_started.elapsed();
 
-    let mut peer_notes = Vec::with_capacity(validated.len().saturating_mul(2) + 1);
+    let mut peer_notes = Vec::with_capacity(block_peer_notes.len() + 1);
     peer_notes.push(header_peer);
-    let mut validated_blocks = Vec::with_capacity(validated.len());
-    for block in validated {
-        peer_notes.push(block.body_peer);
-        peer_notes.push(block.receipt_peer);
-        validated_blocks.push(block);
-    }
+    peer_notes.append(&mut block_peer_notes);
+    let block_count = extracted.block_count as usize;
 
-    let lowest_block = validated_blocks
-        .iter()
-        .map(|block| block.header.number())
-        .min()
-        .unwrap_or(required_block);
-    let highest_block = validated_blocks
-        .iter()
-        .map(|block| block.header.number())
-        .max()
-        .unwrap_or(required_block);
-    let block_count = validated_blocks.len();
+    let lowest_block = if block_count == 0 {
+        required_block
+    } else {
+        lowest_block
+    };
+    let highest_block = if block_count == 0 {
+        required_block
+    } else {
+        highest_block
+    };
 
     Ok(Ok(PreparedHistoricalBatch {
         requested_headers,
         header_elapsed,
         body_receipt_elapsed,
         peer_notes,
-        validated_blocks,
+        extracted,
         lowest_block,
         highest_block,
         block_count,
@@ -253,6 +460,7 @@ async fn write_prepared_historical_batch(
     subscriptions: Option<SubscriptionManager>,
     task: HistoricalPrepareTask,
 ) -> Result<std::result::Result<WrittenHistoricalBatch, Box<HistoricalValidationFailure>>> {
+    let prepare_wait_started = std::time::Instant::now();
     let prepared = match task
         .handle
         .await
@@ -261,14 +469,12 @@ async fn write_prepared_historical_batch(
         Ok(prepared) => prepared,
         Err(failure) => return Ok(Err(failure)),
     };
+    let prepare_wait_elapsed = prepare_wait_started.elapsed();
 
     let storage_started = std::time::Instant::now();
-    let outcome = super::ingest::write_validated_historical_blocks(
-        storage,
-        subscriptions,
-        prepared.validated_blocks,
-    )
-    .await?;
+    let outcome =
+        super::ingest::write_extracted_historical_batch(storage, subscriptions, prepared.extracted)
+            .await?;
     let storage_elapsed = storage_started.elapsed();
 
     Ok(Ok(WrittenHistoricalBatch {
@@ -281,6 +487,7 @@ async fn write_prepared_historical_batch(
         highest_block: prepared.highest_block,
         block_count: prepared.block_count,
         validation_elapsed: prepared.validation_elapsed,
+        prepare_wait_elapsed,
         storage_elapsed,
     }))
 }
@@ -312,72 +519,6 @@ fn historical_header_batch_matches_child(
 ) -> bool {
     batch.child_header.number() == child_header.number()
         && batch.child_header.hash_slow() == child_header.hash_slow()
-}
-
-fn historical_header_batch_next_child_header(batch: &HistoricalHeaderBatch) -> Option<Header> {
-    batch.headers.last().cloned()
-}
-
-fn historical_tail_batches_from_completion(
-    header_peer: PeerId,
-    headers: &[Header],
-    hashes: &[B256],
-    consumed_blocks: usize,
-    completion: BodyReceiptRequestCompletion,
-) -> (Vec<SourcedBodyReceipts>, Vec<HistoricalFetchedBatch>) {
-    let mut tail_batches = Vec::new();
-    let mut tail_chunks = completion.tail_chunks;
-    let mut tail_start = consumed_blocks;
-
-    while tail_start < headers.len() {
-        let Some(mut tail_blocks) = tail_chunks.remove(&tail_start) else {
-            break;
-        };
-        let batch_start = tail_start;
-        tail_start = tail_start.saturating_add(tail_blocks.len());
-
-        while let Some(mut next_blocks) = tail_chunks.remove(&tail_start) {
-            tail_start = tail_start.saturating_add(next_blocks.len());
-            tail_blocks.append(&mut next_blocks);
-        }
-
-        let Some(child_header) = batch_start
-            .checked_sub(1)
-            .and_then(|index| headers.get(index))
-            .cloned()
-        else {
-            break;
-        };
-        let batch_end = batch_start.saturating_add(tail_blocks.len());
-        let batch_headers = headers
-            .get(batch_start..batch_end)
-            .unwrap_or_default()
-            .to_vec();
-        let batch_hashes = hashes
-            .get(batch_start..batch_end)
-            .unwrap_or_default()
-            .to_vec();
-        let required_block = batch_headers
-            .last()
-            .map(|header| header.number())
-            .unwrap_or_else(|| child_header.number().saturating_sub(1));
-
-        if !batch_headers.is_empty() && batch_headers.len() == tail_blocks.len() {
-            tail_batches.push(HistoricalFetchedBatch {
-                child_header,
-                header_peer,
-                headers: batch_headers,
-                hashes: batch_hashes,
-                blocks: tail_blocks,
-                tail_batches: Vec::new(),
-                required_block,
-                header_elapsed: Duration::ZERO,
-                body_receipt_elapsed: Duration::ZERO,
-            });
-        }
-    }
-
-    (completion.blocks, tail_batches)
 }
 
 impl SyncEngine {
@@ -869,6 +1010,17 @@ impl SyncEngine {
             return Ok(false);
         }
 
+        let connected_peer_floor = historical_backfill_peer_floor(self.config.max_peers);
+        if self.peers.peer_count() < connected_peer_floor {
+            self.refresh_connectivity_state();
+            tracing::debug!(
+                connected_peers = self.peers.peer_count(),
+                connected_peer_floor,
+                "waiting for execution peer pool before historical backfill"
+            );
+            return Ok(false);
+        }
+
         let (task, prefetched) = if let Some(task) = self.take_historical_prefetch(&child_header) {
             (task, true)
         } else {
@@ -957,28 +1109,30 @@ impl SyncEngine {
         }
     }
 
+    async fn arm_next_historical_fetch(&mut self, next_child_header: Option<Header>) -> Result<()> {
+        let Some(next_child_header) = next_child_header else {
+            return Ok(());
+        };
+        if next_child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK
+            || self.historical_prefetch.len() >= HISTORICAL_PREFETCH_QUEUE_DEPTH
+            || self.peers.peer_count() == 0
+        {
+            return Ok(());
+        }
+
+        self.ensure_historical_fetch_pipeline(next_child_header)
+            .await
+    }
+
     fn enqueue_historical_fetched_batch(
         &mut self,
         batch: HistoricalFetchedBatch,
         next_child_header: &mut Option<Header>,
     ) -> usize {
-        let mut task = spawn_historical_prepare_task(batch);
+        let task = spawn_historical_prepare_task(batch);
         *next_child_header = historical_prepare_task_next_child_header(&task);
-        let tail_batches = std::mem::take(&mut task.tail_batches);
         self.historical_prefetch.push_back(task);
-        1 + self.enqueue_historical_tail_batches(tail_batches, next_child_header)
-    }
-
-    fn enqueue_historical_tail_batches(
-        &mut self,
-        tail_batches: Vec<HistoricalFetchedBatch>,
-        next_child_header: &mut Option<Header>,
-    ) -> usize {
-        let mut queued = 0usize;
-        for batch in tail_batches {
-            queued += self.enqueue_historical_fetched_batch(batch, next_child_header);
-        }
-        queued
+        1
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
@@ -1029,17 +1183,6 @@ impl SyncEngine {
         self.historical_fetch_handles.len() + self.historical_fetch_completed.len()
     }
 
-    fn historical_inflight_fetch_depth(&self) -> usize {
-        let serving_peers = self.peers.serving_peer_count();
-        if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS {
-            3
-        } else if serving_peers >= HISTORICAL_LOOKAHEAD_MIN_SERVING_PEERS {
-            2
-        } else {
-            1
-        }
-    }
-
     fn historical_fetch_window_blocks(&self) -> u64 {
         let serving_peers = self.peers.serving_peer_count();
         if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS {
@@ -1083,7 +1226,7 @@ impl SyncEngine {
             self.historical_fetch_planned_child = Some(child_header);
         }
 
-        while self.pending_historical_fetch_count() < self.historical_inflight_fetch_depth() {
+        while self.pending_historical_fetch_count() < HISTORICAL_FETCH_PIPELINE_DEPTH {
             let Some(planned_child) = self.historical_fetch_planned_child.take() else {
                 break;
             };
@@ -1099,8 +1242,7 @@ impl SyncEngine {
                 break;
             };
 
-            self.historical_fetch_planned_child =
-                historical_header_batch_next_child_header(&plan.header_batch);
+            self.historical_fetch_planned_child = plan.planned_next_child_header.clone();
             self.spawn_historical_fetch_plan(plan);
         }
 
@@ -1170,32 +1312,29 @@ impl SyncEngine {
                 if !completion.blocks.is_empty() && completion.blocks.len() <= headers.len() =>
             {
                 let consumed_blocks = completion.blocks.len();
-                let (blocks, tail_batches) = historical_tail_batches_from_completion(
-                    header_peer,
-                    &headers,
-                    &hashes,
-                    consumed_blocks,
-                    completion,
-                );
-                let prefix_next_child_header = blocks
-                    .len()
+                let planned_return_blocks = completion.planned_return_blocks;
+                let next_child_header = consumed_blocks
                     .checked_sub(1)
                     .and_then(|index| headers.get(index))
                     .cloned();
-                let next_child_header = tail_batches
-                    .last()
-                    .and_then(historical_batch_next_child_header)
-                    .or(prefix_next_child_header);
-                self.historical_fetch_expected_sequence =
-                    self.historical_fetch_expected_sequence.saturating_add(1);
-                self.historical_fetch_expected_child = next_child_header;
+                if consumed_blocks < planned_return_blocks {
+                    tracing::debug!(
+                        consumed_blocks,
+                        planned_return_blocks,
+                        "historical body/receipt pipeline completed partial prefix, resetting lookahead"
+                    );
+                    self.reset_historical_fetch_pipeline();
+                } else {
+                    self.historical_fetch_expected_sequence =
+                        self.historical_fetch_expected_sequence.saturating_add(1);
+                    self.historical_fetch_expected_child = next_child_header.clone();
+                }
                 Ok(Some(HistoricalFetchedBatch {
                     child_header,
                     header_peer,
                     headers,
                     hashes,
-                    blocks,
-                    tail_batches,
+                    blocks: completion.blocks,
                     required_block,
                     header_elapsed,
                     body_receipt_elapsed,
@@ -1247,12 +1386,19 @@ impl SyncEngine {
             )
             .await?;
 
-        Ok(
-            body_receipt_plan.map(|body_receipt_plan| HistoricalFetchPlan {
+        Ok(body_receipt_plan.map(|body_receipt_plan| {
+            let planned_next_child_header = body_receipt_plan
+                .return_blocks()
+                .min(header_batch.headers.len())
+                .checked_sub(1)
+                .and_then(|index| header_batch.headers.get(index))
+                .cloned();
+            HistoricalFetchPlan {
                 header_batch,
+                planned_next_child_header,
                 body_receipt_plan,
-            }),
-        )
+            }
+        }))
     }
 
     async fn fetch_historical_header_batch(
@@ -1275,6 +1421,7 @@ impl SyncEngine {
         let mut page_child_header = child_header.clone();
         let mut header_peer = PeerId::ZERO;
         let mut headers = Vec::with_capacity(target_count as usize);
+        let mut cumulative_header_gas = 0u128;
 
         while remaining > 0 {
             let request_count = remaining.min(page_limit);
@@ -1333,6 +1480,14 @@ impl SyncEngine {
             if header_peer == PeerId::ZERO {
                 header_peer = page_peer;
             }
+            let previous_header_count = headers.len();
+            for (offset, header) in page_headers.iter().enumerate() {
+                if previous_header_count + offset >= target_count as usize {
+                    break;
+                }
+                cumulative_header_gas =
+                    cumulative_header_gas.saturating_add(u128::from(header.gas_used));
+            }
             remaining = remaining.saturating_sub(page_headers.len() as u64);
             if let Some(next_child) = page_headers.last().cloned() {
                 page_child_header = next_child;
@@ -1342,6 +1497,7 @@ impl SyncEngine {
             if headers
                 .last()
                 .is_some_and(|header| header.number() == EXECUTION_HISTORY_TARGET_BLOCK)
+                || historical_header_window_reached_gas_target(headers.len(), cumulative_header_gas)
             {
                 break;
             }
@@ -1385,16 +1541,11 @@ impl SyncEngine {
 
     async fn ingest_historical_prepared_task(
         &mut self,
-        mut task: HistoricalPrepareTask,
+        task: HistoricalPrepareTask,
         prefetched: bool,
     ) -> Result<bool> {
         let batch_started = std::time::Instant::now();
         let immediate_next_child_header = task.next_child_header.clone();
-        let mut queued_next_child_header = immediate_next_child_header.clone();
-        let queued_tail_batches = self.enqueue_historical_tail_batches(
-            std::mem::take(&mut task.tail_batches),
-            &mut queued_next_child_header,
-        );
         let storage = Arc::clone(&self.storage);
         let subscriptions = self.subscriptions.clone();
         let prepare_and_write = write_prepared_historical_batch(storage, subscriptions, task);
@@ -1430,6 +1581,7 @@ impl SyncEngine {
                                 &mut next_prefetch_child,
                             ) {
                                 prefetched_next_batches += 1;
+                                self.arm_next_historical_fetch(next_prefetch_child.clone()).await?;
                             }
                         }
                         written = Some(write_result);
@@ -1482,9 +1634,12 @@ impl SyncEngine {
         let body_receipt_elapsed = written.body_receipt_elapsed;
         let storage_elapsed = written.storage_elapsed;
         let validation_elapsed = written.validation_elapsed;
+        let prepare_wait_elapsed = written.prepare_wait_elapsed;
         let lowest_block = written.lowest_block;
         let highest_block = written.highest_block;
         let block_count = written.block_count;
+        let extraction_elapsed = written.outcome.extraction_elapsed;
+        let write_elapsed = written.outcome.write_elapsed;
         let log_count = self.record_historical_ingest_outcome(written.outcome);
         self.refresh_historical_status().await;
 
@@ -1497,11 +1652,13 @@ impl SyncEngine {
             prefetched,
             prefetched_next = prefetched_next_batches > 0,
             prefetched_next_batches,
-            queued_tail_batches,
             prefetch_queue_depth = self.historical_prefetch.len(),
             header_ms = header_elapsed.as_millis(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),
             validation_ms = validation_elapsed.as_millis(),
+            prepare_wait_ms = prepare_wait_elapsed.as_millis(),
+            extraction_ms = extraction_elapsed.as_millis(),
+            write_ms = write_elapsed.as_millis(),
             storage_ms = storage_elapsed.as_millis(),
             overlap_ms = overlap_elapsed.as_millis(),
             total_ms = batch_started.elapsed().as_millis(),
@@ -1917,6 +2074,22 @@ mod tests {
         let anchors = vec![anchor_for(&first, 1)];
 
         assert!(contiguous_anchor_batch(98, false, &anchors, 16).is_empty());
+    }
+
+    #[test]
+    fn historical_header_gas_window_requires_minimum_dense_prefix() {
+        assert!(!historical_header_window_reached_gas_target(
+            1023,
+            HISTORICAL_HEADER_GAS_WINDOW_TARGET,
+        ));
+        assert!(!historical_header_window_reached_gas_target(
+            1024,
+            HISTORICAL_HEADER_GAS_WINDOW_TARGET - 1,
+        ));
+        assert!(historical_header_window_reached_gas_target(
+            1024,
+            HISTORICAL_HEADER_GAS_WINDOW_TARGET,
+        ));
     }
 
     #[test]

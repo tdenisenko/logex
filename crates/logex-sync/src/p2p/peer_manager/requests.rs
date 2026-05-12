@@ -11,13 +11,19 @@ use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
-const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 64;
-const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 64;
-const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 1_920_000_000;
+const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(5);
+const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
+const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
+const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
+const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 32;
+const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 5000;
+const PIPELINED_BODY_RECEIPT_RETURN_GAS_TARGET: u128 =
+    30_000_000u128 * PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS as u128;
 const PIPELINED_WIDE_FANOUT_MIN_PEERS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
-const PARALLEL_REQUESTS_PER_PEER: usize = 2;
+const PARALLEL_REQUESTS_PER_PEER: usize = 4;
 const MAX_PARALLEL_BODY_RECEIPT_REQUESTS: usize = 128;
 const MAX_PARALLEL_BODY_REQUESTS: usize = 64;
 const MIN_PARALLEL_BODY_REQUEST_BLOCKS: usize = 64;
@@ -64,10 +70,19 @@ struct BodyReceiptChunk {
     stats: TypedRequestStats,
 }
 
+struct InFlightBodyReceiptChunk {
+    range: std::ops::Range<usize>,
+    chunk_index: usize,
+    attempts: usize,
+    last_hedged_at: Instant,
+    hedges: usize,
+}
+
 pub(crate) struct BodyReceiptRequestPlan {
     hashes: Vec<B256>,
     ranges: Vec<std::ops::Range<usize>>,
     range_indices_by_start: HashMap<usize, usize>,
+    return_blocks: usize,
     body_peer_ids: Vec<PeerId>,
     receipt_peer_ids: Vec<PeerId>,
     max_in_flight: usize,
@@ -76,6 +91,7 @@ pub(crate) struct BodyReceiptRequestPlan {
 
 pub(crate) struct BodyReceiptRequestOutcome {
     total_hashes: usize,
+    return_blocks: usize,
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
     failures: ParallelChunkFailures,
     stats: TypedRequestStats,
@@ -83,7 +99,7 @@ pub(crate) struct BodyReceiptRequestOutcome {
 
 pub(crate) struct BodyReceiptRequestCompletion {
     pub(crate) blocks: Vec<SourcedBodyReceipts>,
-    pub(crate) tail_chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+    pub(crate) planned_return_blocks: usize,
 }
 
 #[derive(Clone)]
@@ -408,6 +424,7 @@ impl PeerManager {
         if ranges.len() < 2 {
             return Ok(None);
         }
+        let return_blocks = body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref());
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -441,6 +458,7 @@ impl PeerManager {
             hashes,
             ranges,
             range_indices_by_start,
+            return_blocks,
             body_peer_ids,
             receipt_peer_ids,
             max_in_flight,
@@ -454,6 +472,7 @@ impl PeerManager {
     ) -> Result<Option<BodyReceiptRequestCompletion>> {
         let BodyReceiptRequestOutcome {
             total_hashes,
+            return_blocks,
             chunks,
             failures,
             stats,
@@ -465,13 +484,13 @@ impl PeerManager {
         self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
         self.remove_dead_peers(&dead_peers);
 
-        let (blocks, tail_chunks) = split_contiguous_body_receipt_chunks(total_hashes, chunks);
+        let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
 
         if !blocks.is_empty() {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
                 blocks,
-                tail_chunks,
+                planned_return_blocks: return_blocks,
             }))
         } else {
             bail!(
@@ -484,18 +503,31 @@ impl PeerManager {
 }
 
 impl BodyReceiptRequestPlan {
+    pub(crate) fn return_blocks(&self) -> usize {
+        self.return_blocks
+    }
+
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
         let mut chunks = BTreeMap::new();
         let mut failures = Vec::new();
         let mut stats = Vec::new();
         {
             let mut attempts = futures_util::stream::FuturesUnordered::new();
-            let mut pending_ranges = self.ranges.iter().cloned().enumerate();
+            let mut pending_ranges =
+                self.ranges
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .filter_map(|(chunk_index, range)| {
+                        body_receipt_prefix_range(range, self.return_blocks)
+                            .map(|range| (chunk_index, range))
+                    });
             let mut retry_counts = HashMap::<usize, usize>::new();
-            let mut in_flight = HashSet::<usize>::new();
+            let mut in_flight = HashMap::<usize, InFlightBodyReceiptChunk>::new();
             let mut body_bad_peers = HashSet::<PeerId>::new();
             let mut receipt_bad_peers = HashSet::<PeerId>::new();
-            let min_return_blocks = body_receipt_min_return_blocks(self.hashes.len());
+            let mut hedge_count = 0usize;
+            let min_return_blocks = self.return_blocks;
             let max_scheduled_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
@@ -503,39 +535,75 @@ impl BodyReceiptRequestPlan {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
                     break;
                 };
-                in_flight.insert(range.start);
                 let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
                 let chunk_receipt_peer_ids =
                     peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
-                attempts.push(body_receipt_chunk_request(
+                schedule_body_receipt_chunk_attempt(
                     &self,
+                    &mut attempts,
+                    &mut in_flight,
                     range,
                     chunk_index,
-                    &self.hashes,
-                    &chunk_body_peer_ids,
-                    &chunk_receipt_peer_ids,
-                ));
+                    chunk_body_peer_ids,
+                    chunk_receipt_peer_ids,
+                );
             }
 
-            while let Some(chunk) = attempts.next().await {
+            while !attempts.is_empty() {
+                let chunk = match timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await
+                {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) => {
+                        if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
+                            && let Some((range, chunk_index)) = body_receipt_hedge_candidate(
+                                &mut in_flight,
+                                &chunks,
+                                min_return_blocks,
+                                Instant::now(),
+                            )
+                        {
+                            let chunk_body_peer_ids =
+                                peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                            let chunk_receipt_peer_ids =
+                                peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                            schedule_body_receipt_chunk_attempt(
+                                &self,
+                                &mut attempts,
+                                &mut in_flight,
+                                range,
+                                chunk_index
+                                    + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count)
+                                        * self.ranges.len()),
+                                chunk_body_peer_ids,
+                                chunk_receipt_peer_ids,
+                            );
+                            hedge_count += 1;
+                        }
+                        continue;
+                    }
+                };
                 let chunk_start = chunk.start;
+                complete_body_receipt_chunk_attempt(&mut in_flight, chunk_start);
+                let chunk_already_completed = chunks.contains_key(&chunk_start);
                 let chunk_failed = chunk.blocks.is_empty();
-                in_flight.remove(&chunk_start);
-                for failure in &chunk.failures {
-                    if chunk_failure_disables_role_peer(failure) {
-                        match failure.role {
-                            ChunkRequestRole::Bodies => {
-                                body_bad_peers.insert(failure.peer_id);
-                            }
-                            ChunkRequestRole::Receipts => {
-                                receipt_bad_peers.insert(failure.peer_id);
+                if !chunk_already_completed {
+                    for failure in &chunk.failures {
+                        if chunk_failure_disables_role_peer(failure) {
+                            match failure.role {
+                                ChunkRequestRole::Bodies => {
+                                    body_bad_peers.insert(failure.peer_id);
+                                }
+                                ChunkRequestRole::Receipts => {
+                                    receipt_bad_peers.insert(failure.peer_id);
+                                }
                             }
                         }
                     }
+                    failures.extend(chunk.failures);
                 }
-                failures.extend(chunk.failures);
                 stats.extend(chunk.stats);
-                if !chunk_failed {
+                if !chunk_failed && !chunk_already_completed {
                     chunks.insert(chunk_start, chunk.blocks);
                 }
 
@@ -547,7 +615,7 @@ impl BodyReceiptRequestPlan {
 
                 if chunk_failed
                     && chunk_start <= contiguous_blocks
-                    && !in_flight.contains(&chunk_start)
+                    && !in_flight.contains_key(&chunk_start)
                     && retry_counts.get(&chunk_start).copied().unwrap_or_default()
                         < PIPELINED_GAP_RETRY_ROUNDS
                     && let Some(base_chunk_index) =
@@ -557,23 +625,24 @@ impl BodyReceiptRequestPlan {
                         .iter()
                         .find(|range| range.start == chunk_start)
                         .cloned()
+                        .and_then(|range| body_receipt_prefix_range(range, min_return_blocks))
                 {
                     let retry_count = retry_counts.entry(chunk_start).or_default();
                     *retry_count += 1;
                     let chunk_index = base_chunk_index + (*retry_count * self.ranges.len());
-                    in_flight.insert(range.start);
                     let chunk_body_peer_ids =
                         peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
                     let chunk_receipt_peer_ids =
                         peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
-                    attempts.push(body_receipt_chunk_request(
+                    schedule_body_receipt_chunk_attempt(
                         &self,
+                        &mut attempts,
+                        &mut in_flight,
                         range,
                         chunk_index,
-                        &self.hashes,
-                        &chunk_body_peer_ids,
-                        &chunk_receipt_peer_ids,
-                    ));
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
+                    );
                 }
 
                 while attempts.len() < max_scheduled_chunks {
@@ -583,25 +652,52 @@ impl BodyReceiptRequestPlan {
                     let Some((chunk_index, range)) = pending_ranges.next() else {
                         break;
                     };
-                    in_flight.insert(range.start);
                     let chunk_body_peer_ids =
                         peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
                     let chunk_receipt_peer_ids =
                         peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
-                    attempts.push(body_receipt_chunk_request(
+                    schedule_body_receipt_chunk_attempt(
                         &self,
+                        &mut attempts,
+                        &mut in_flight,
                         range,
                         chunk_index,
-                        &self.hashes,
-                        &chunk_body_peer_ids,
-                        &chunk_receipt_peer_ids,
-                    ));
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
+                    );
+                }
+
+                while hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES {
+                    let Some((range, chunk_index)) = body_receipt_hedge_candidate(
+                        &mut in_flight,
+                        &chunks,
+                        min_return_blocks,
+                        Instant::now(),
+                    ) else {
+                        break;
+                    };
+                    let chunk_body_peer_ids =
+                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                    let chunk_receipt_peer_ids =
+                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                    schedule_body_receipt_chunk_attempt(
+                        &self,
+                        &mut attempts,
+                        &mut in_flight,
+                        range,
+                        chunk_index
+                            + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count) * self.ranges.len()),
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
+                    );
+                    hedge_count += 1;
                 }
             }
         }
 
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
+            return_blocks: self.return_blocks,
             chunks,
             failures,
             stats,
@@ -2511,6 +2607,83 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
     }
 }
 
+fn schedule_body_receipt_chunk_attempt<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptChunk>,
+    >,
+    in_flight: &mut HashMap<usize, InFlightBodyReceiptChunk>,
+    range: std::ops::Range<usize>,
+    chunk_index: usize,
+    body_peer_ids: Vec<PeerId>,
+    receipt_peer_ids: Vec<PeerId>,
+) {
+    let start = range.start;
+    match in_flight.entry(start) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().attempts += 1;
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(InFlightBodyReceiptChunk {
+                range: range.clone(),
+                chunk_index,
+                attempts: 1,
+                last_hedged_at: Instant::now(),
+                hedges: 0,
+            });
+        }
+    }
+
+    attempts.push(body_receipt_chunk_request(
+        plan,
+        range,
+        chunk_index,
+        &plan.hashes,
+        &body_peer_ids,
+        &receipt_peer_ids,
+    ));
+}
+
+fn complete_body_receipt_chunk_attempt(
+    in_flight: &mut HashMap<usize, InFlightBodyReceiptChunk>,
+    start: usize,
+) {
+    let std::collections::hash_map::Entry::Occupied(mut entry) = in_flight.entry(start) else {
+        return;
+    };
+    if entry.get().attempts > 1 {
+        entry.get_mut().attempts -= 1;
+    } else {
+        entry.remove();
+    }
+}
+
+fn body_receipt_hedge_candidate(
+    in_flight: &mut HashMap<usize, InFlightBodyReceiptChunk>,
+    chunks: &BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+    min_return_blocks: usize,
+    now: Instant,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let contiguous_blocks = contiguous_chunk_blocks(chunks);
+    let start = in_flight
+        .keys()
+        .copied()
+        .filter(|start| {
+            *start <= contiguous_blocks && *start < min_return_blocks && !chunks.contains_key(start)
+        })
+        .min()?;
+    let entry = in_flight.get_mut(&start)?;
+    if entry.hedges >= PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK
+        || now.duration_since(entry.last_hedged_at) < PIPELINED_BODY_RECEIPT_HEDGE_DELAY
+    {
+        return None;
+    }
+
+    entry.hedges += 1;
+    entry.last_hedged_at = now;
+    Some((entry.range.clone(), entry.chunk_index))
+}
+
 fn body_receipt_chunk_request<'a>(
     plan: &'a BodyReceiptRequestPlan,
     range: std::ops::Range<usize>,
@@ -2579,7 +2752,7 @@ fn body_receipt_blocks_if_counts_match(
         .collect())
 }
 
-fn contiguous_chunk_blocks(chunks: &BTreeMap<usize, Vec<SourcedBodyReceipts>>) -> usize {
+fn contiguous_chunk_blocks<T>(chunks: &BTreeMap<usize, Vec<T>>) -> usize {
     let mut expected_start = 0usize;
     for (start, chunk_blocks) in chunks {
         if *start != expected_start {
@@ -2590,27 +2763,35 @@ fn contiguous_chunk_blocks(chunks: &BTreeMap<usize, Vec<SourcedBodyReceipts>>) -
     expected_start
 }
 
-fn split_contiguous_body_receipt_chunks(
-    total_hashes: usize,
+fn take_contiguous_body_receipt_prefix(
+    return_blocks: usize,
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-) -> (
-    Vec<SourcedBodyReceipts>,
-    BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-) {
-    let mut blocks = Vec::with_capacity(total_hashes);
-    let mut tail_chunks = BTreeMap::new();
+) -> Vec<SourcedBodyReceipts> {
+    take_contiguous_prefix(return_blocks, chunks)
+}
+
+fn take_contiguous_prefix<T>(return_blocks: usize, chunks: BTreeMap<usize, Vec<T>>) -> Vec<T> {
+    let contiguous_blocks = contiguous_chunk_blocks(&chunks);
+    let target_blocks = contiguous_blocks.min(return_blocks);
+    let mut blocks = Vec::with_capacity(target_blocks);
     let mut expected_start = 0usize;
 
-    for (start, chunk_blocks) in chunks {
-        if start == expected_start {
+    for (start, mut chunk_blocks) in chunks {
+        if start == expected_start && blocks.len() < target_blocks {
+            let remaining_prefix = target_blocks - blocks.len();
+            if chunk_blocks.len() <= remaining_prefix {
+                expected_start += chunk_blocks.len();
+                blocks.extend(chunk_blocks);
+                continue;
+            }
+
+            chunk_blocks.truncate(remaining_prefix);
             expected_start += chunk_blocks.len();
             blocks.extend(chunk_blocks);
-        } else {
-            tail_chunks.insert(start, chunk_blocks);
         }
     }
 
-    (blocks, tail_chunks)
+    blocks
 }
 
 #[derive(Debug, Clone)]
@@ -2919,8 +3100,42 @@ fn body_receipt_chunk_limit(body_limit: usize, receipt_limit: usize, chunk_cap: 
     body_limit.min(receipt_limit).min(chunk_cap)
 }
 
-fn body_receipt_min_return_blocks(total_blocks: usize) -> usize {
-    total_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
+fn body_receipt_prefix_range(
+    mut range: std::ops::Range<usize>,
+    return_blocks: usize,
+) -> Option<std::ops::Range<usize>> {
+    if range.start >= return_blocks {
+        return None;
+    }
+    range.end = range.end.min(return_blocks);
+    if range.start < range.end {
+        Some(range)
+    } else {
+        None
+    }
+}
+
+fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> usize {
+    if total_blocks <= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS {
+        return total_blocks;
+    }
+
+    let Some(gas_used) = gas_used else {
+        return PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS;
+    };
+
+    let mut cumulative_gas = 0u128;
+    for (index, gas) in gas_used.iter().take(total_blocks).enumerate() {
+        cumulative_gas = cumulative_gas.saturating_add(u128::from(*gas));
+        let returned_blocks = index + 1;
+        if returned_blocks >= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
+            && cumulative_gas >= PIPELINED_BODY_RECEIPT_RETURN_GAS_TARGET
+        {
+            return returned_blocks;
+        }
+    }
+
+    total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS)
 }
 
 fn body_receipt_scheduled_chunk_limit(
@@ -2936,7 +3151,7 @@ fn body_receipt_scheduled_chunk_limit(
         .take_while(|range| range.start < min_return_blocks)
         .count()
         .max(1);
-    prefix_chunks.saturating_mul(2).clamp(1, ranges.len())
+    prefix_chunks.clamp(1, ranges.len())
 }
 
 #[cfg(test)]
@@ -3005,49 +3220,98 @@ mod tests {
     #[test]
     fn request_window_limit_scales_in_flight_requests_by_peer_count() {
         assert_eq!(request_window_limit(0, 16), 0);
-        assert_eq!(request_window_limit(1, 16), 2);
-        assert_eq!(request_window_limit(2, 16), 4);
+        assert_eq!(request_window_limit(1, 16), 4);
+        assert_eq!(request_window_limit(2, 16), 8);
         assert_eq!(request_window_limit(8, 16), 16);
     }
 
     #[test]
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
-        assert_eq!(body_receipt_chunk_cap(31), 64);
-        assert_eq!(body_receipt_chunk_cap(32), 64);
-        assert_eq!(body_receipt_chunk_limit(128, 128, 64), 64);
-        assert_eq!(body_receipt_chunk_limit(16, 128, 64), 16);
-        assert_eq!(body_receipt_chunk_limit(128, 8, 64), 8);
+        assert_eq!(body_receipt_chunk_cap(31), 32);
+        assert_eq!(body_receipt_chunk_cap(32), 32);
+        assert_eq!(body_receipt_chunk_limit(128, 128, 32), 32);
+        assert_eq!(body_receipt_chunk_limit(16, 128, 32), 16);
+        assert_eq!(body_receipt_chunk_limit(128, 8, 32), 8);
     }
 
     #[test]
-    fn body_receipt_min_return_blocks_processes_contiguous_prefixes() {
-        assert_eq!(body_receipt_min_return_blocks(0), 0);
-        assert_eq!(body_receipt_min_return_blocks(128), 128);
-        assert_eq!(body_receipt_min_return_blocks(2048), 1024);
-        assert_eq!(body_receipt_min_return_blocks(4096), 1024);
+    fn body_receipt_return_blocks_caps_dense_prefix_but_allows_sparse_windows() {
+        let dense = vec![30_000_000; 4096];
+        let sparse = vec![0; 6000];
+
+        assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
+        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 1024);
+        assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 5000);
+        assert_eq!(body_receipt_return_blocks(4096, None), 1024);
     }
 
     #[test]
-    fn body_receipt_scheduled_chunk_limit_keeps_prefix_headroom() {
+    fn body_receipt_scheduled_chunk_limit_caps_to_prefix_chunks() {
         let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
 
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 0), 0);
-        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 2);
-        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 6);
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 1);
+        assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 3);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 4096), 6);
     }
 
     #[test]
-    fn split_contiguous_body_receipt_chunks_preserves_tail_chunks() {
+    fn body_receipt_prefix_range_truncates_to_return_boundary() {
+        assert_eq!(body_receipt_prefix_range(0..64, 128), Some(0..64));
+        assert_eq!(body_receipt_prefix_range(64..160, 128), Some(64..128));
+        assert_eq!(body_receipt_prefix_range(128..192, 128), None);
+    }
+
+    #[test]
+    fn body_receipt_hedge_candidate_allows_bounded_rehedges_for_blocking_gap() {
+        let start = Instant::now();
+        let mut in_flight = HashMap::from([(
+            0,
+            InFlightBodyReceiptChunk {
+                range: 0..32,
+                chunk_index: 0,
+                attempts: 1,
+                last_hedged_at: start - PIPELINED_BODY_RECEIPT_HEDGE_DELAY,
+                hedges: 0,
+            },
+        )]);
+        let chunks = BTreeMap::<usize, Vec<SourcedBodyReceipts>>::new();
+
+        assert_eq!(
+            body_receipt_hedge_candidate(&mut in_flight, &chunks, 1024, start),
+            Some((0..32, 0))
+        );
+        assert!(body_receipt_hedge_candidate(&mut in_flight, &chunks, 1024, start).is_none());
+        assert_eq!(
+            body_receipt_hedge_candidate(
+                &mut in_flight,
+                &chunks,
+                1024,
+                start + PIPELINED_BODY_RECEIPT_HEDGE_DELAY
+            ),
+            Some((0..32, 0))
+        );
+        assert!(
+            body_receipt_hedge_candidate(
+                &mut in_flight,
+                &chunks,
+                1024,
+                start + (PIPELINED_BODY_RECEIPT_HEDGE_DELAY * 2)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn take_contiguous_body_receipt_prefix_returns_deterministic_prefix() {
         let mut chunks = BTreeMap::new();
-        chunks.insert(0, Vec::new());
-        chunks.insert(4, Vec::new());
-        chunks.insert(8, Vec::new());
+        chunks.insert(0, vec![0, 1, 2, 3]);
+        chunks.insert(4, vec![4, 5, 6, 7]);
+        chunks.insert(8, vec![8, 9, 10, 11]);
 
-        let (blocks, tail_chunks) = split_contiguous_body_receipt_chunks(12, chunks);
+        let blocks = take_contiguous_prefix(6, chunks);
 
-        assert!(blocks.is_empty());
-        assert_eq!(tail_chunks.keys().copied().collect::<Vec<_>>(), vec![4, 8]);
+        assert_eq!(blocks, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -3065,7 +3329,7 @@ mod tests {
         let large_gas_window = vec![30_000_000; 70];
         assert_eq!(
             chunk_ranges_with_optional_gas(70, |_| 80, Some(&large_gas_window)),
-            vec![0..64, 64..70]
+            vec![0..32, 32..64, 64..70]
         );
     }
 

@@ -6,6 +6,8 @@ use logex_types::{
     WeakSubjectivityCheckpoint,
 };
 
+const HISTORICAL_RATE_EWMA_WEIGHT: f64 = 0.35;
+
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
     status: Arc<Mutex<SyncStatus>>,
@@ -16,9 +18,10 @@ pub struct ProgressTracker {
     last_log_block: u64,
     /// Timestamp of the last terminal progress line.
     last_log_at: Instant,
-    historical_start: Instant,
     historical_blocks_processed: u64,
     historical_logs_ingested: u64,
+    historical_rate_at: Instant,
+    historical_recent_blocks_per_sec: f64,
     last_historical_log_block: u64,
     last_historical_log_at: Instant,
 }
@@ -32,9 +35,10 @@ impl ProgressTracker {
             logs_ingested: 0,
             last_log_block: 0,
             last_log_at: Instant::now(),
-            historical_start: Instant::now(),
             historical_blocks_processed: 0,
             historical_logs_ingested: 0,
+            historical_rate_at: Instant::now(),
+            historical_recent_blocks_per_sec: 0.0,
             last_historical_log_block: u64::MAX,
             last_historical_log_at: Instant::now(),
         }
@@ -208,12 +212,17 @@ impl ProgressTracker {
         self.historical_logs_ingested += log_count;
         self.logs_ingested += log_count;
 
-        let elapsed = self.historical_start.elapsed().as_secs_f64();
-        let bps = if elapsed > 0.0 {
-            self.historical_blocks_processed as f64 / elapsed
+        let now = Instant::now();
+        let interval = now.duration_since(self.historical_rate_at).as_secs_f64();
+        self.historical_rate_at = now;
+        let recent_bps = if interval > 0.0 {
+            block_count as f64 / interval
         } else {
             0.0
         };
+        let bps =
+            smoothed_historical_blocks_per_sec(self.historical_recent_blocks_per_sec, recent_bps);
+        self.historical_recent_blocks_per_sec = bps;
 
         let mut status = self.status.lock().unwrap();
         status.node_state = NodeState::Syncing;
@@ -284,6 +293,17 @@ fn historical_eta(
     Some((floor.block_number - target_block) as f64 / blocks_per_sec)
 }
 
+fn smoothed_historical_blocks_per_sec(previous: f64, recent: f64) -> f64 {
+    if recent <= 0.0 {
+        return previous.max(0.0);
+    }
+    if previous <= 0.0 {
+        return recent;
+    }
+
+    (previous * (1.0 - HISTORICAL_RATE_EWMA_WEIGHT)) + (recent * HISTORICAL_RATE_EWMA_WEIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +353,15 @@ mod tests {
         let status = status.lock().unwrap().clone();
         assert!(status.syncing);
         assert_eq!(status.node_state, NodeState::Syncing);
+    }
+
+    #[test]
+    fn historical_rate_smoothing_uses_recent_progress() {
+        assert_eq!(smoothed_historical_blocks_per_sec(0.0, 128.0), 128.0);
+        assert_eq!(smoothed_historical_blocks_per_sec(100.0, 0.0), 100.0);
+        let smoothed = smoothed_historical_blocks_per_sec(100.0, 200.0);
+        assert!(smoothed > 100.0);
+        assert!(smoothed < 200.0);
     }
 
     #[test]

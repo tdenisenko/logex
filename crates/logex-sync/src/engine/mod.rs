@@ -19,8 +19,7 @@ use logex_types::{NodeState, SyncStatus};
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::{
-    BodyReceiptRequestCompletion, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
-    SourcedBodyReceipts,
+    BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager, SourcedBodyReceipts,
 };
 use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
@@ -36,9 +35,9 @@ mod ingest;
 mod live;
 
 use self::helpers::{
-    assemble_txs, cancelable, execution_head, peer_refill_goal, preferred_body_peers,
-    refill_peer_floor, should_mark_historical_complete, should_run_historical_backfill,
-    should_switch_to_live_without_target,
+    assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
+    preferred_body_peers, refill_peer_floor, should_mark_historical_complete,
+    should_run_historical_backfill, should_switch_to_live_without_target,
 };
 
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
@@ -47,6 +46,7 @@ const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 8;
 const TARGET_ACTIVE_SYNC_PEERS: usize = 80;
 const PEER_REFILL_STEP: usize = 16;
+const HISTORICAL_BACKFILL_MIN_CONNECTED_PEERS: usize = 8;
 const RECENT_HEADER_WINDOW: usize = 8_192;
 const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
 const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
@@ -67,7 +67,6 @@ pub(super) struct HistoricalFetchedBatch {
     headers: Vec<Header>,
     hashes: Vec<B256>,
     blocks: Vec<SourcedBodyReceipts>,
-    tail_batches: Vec<HistoricalFetchedBatch>,
     required_block: u64,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
@@ -84,6 +83,7 @@ pub(super) struct HistoricalHeaderBatch {
 
 pub(super) struct HistoricalFetchPlan {
     header_batch: HistoricalHeaderBatch,
+    planned_next_child_header: Option<Header>,
     body_receipt_plan: BodyReceiptRequestPlan,
 }
 
@@ -109,7 +109,7 @@ pub(super) struct PreparedHistoricalBatch {
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
     peer_notes: Vec<PeerId>,
-    validated_blocks: Vec<HistoricalValidatedBlock>,
+    extracted: ingest::HistoricalExtractedBatch,
     lowest_block: u64,
     highest_block: u64,
     block_count: usize,
@@ -126,6 +126,7 @@ pub(super) struct WrittenHistoricalBatch {
     highest_block: u64,
     block_count: usize,
     validation_elapsed: Duration,
+    prepare_wait_elapsed: Duration,
     storage_elapsed: Duration,
 }
 
@@ -140,7 +141,6 @@ pub(super) struct HistoricalValidationFailure {
 pub(super) struct HistoricalPrepareTask {
     child_header: Header,
     next_child_header: Option<Header>,
-    tail_batches: Vec<HistoricalFetchedBatch>,
     handle: JoinHandle<
         Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
     >,

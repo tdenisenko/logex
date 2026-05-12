@@ -162,6 +162,16 @@ pub(super) fn should_run_historical_backfill(
     current_block > 0
 }
 
+pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
+    if max_peers == 0 {
+        return 0;
+    }
+
+    (max_peers / 3)
+        .clamp(1, HISTORICAL_BACKFILL_MIN_CONNECTED_PEERS)
+        .min(max_peers)
+}
+
 pub(super) fn runtime_state_for_connectivity(
     connected_once: bool,
     connected_peers: usize,
@@ -358,6 +368,14 @@ mod tests {
         assert!(should_run_historical_backfill(100, 132, 32));
         assert!(should_run_historical_backfill(140, 132, 32));
         assert!(should_run_historical_backfill(100, 133, 32));
+    }
+
+    #[test]
+    fn historical_backfill_peer_floor_scales_with_configured_pool() {
+        assert_eq!(historical_backfill_peer_floor(0), 0);
+        assert_eq!(historical_backfill_peer_floor(1), 1);
+        assert_eq!(historical_backfill_peer_floor(8), 2);
+        assert_eq!(historical_backfill_peer_floor(100), 8);
     }
 
     #[test]
