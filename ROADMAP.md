@@ -9,9 +9,10 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 ## Completed Since Last Run
 
 - Reworked the dashboard around the primary user-facing signals: Execution Layer sync progress, Consensus Layer status, verified log block range, storage usage, and the query tool.
-- Added a page-wide sync performance chart for peers and historical blocks/sec, with 1-hour, 6-hour, and 12-hour windows.
+- Added split Chart.js performance charts for historical blocks/sec, serving peers, and process CPU utilization, with 1-hour, 6-hour, and 12-hour windows.
 - Moved secondary operational details into a collapsed advanced section.
 - Added HTTP dashboard controls: dashboard enabled by default, `--disable-dashboard`, config-level `dashboard_enabled`, and `--dashboard-password` / `dashboard_password` for HTTP Basic authentication.
+- Restored the softer pre-existing dashboard styling while keeping the simplified DOM and green animated Execution Layer progress bar.
 
 ## Remaining TODOs
 
@@ -40,6 +41,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 - Consensus Layer sync is forward-only from a recent checkpoint; Execution Layer historical sync is responsible for walking execution data back toward genesis.
 - Logs are valid only inside the verified contiguous stored range. Unsynced historical gaps remain outside query coverage.
 - The dashboard keeps the query tool on the main page because querying verified logs is a primary product workflow.
+- Performance charts use Chart.js rather than custom SVG path generation.
 - Dashboard authentication uses HTTP Basic auth as a lightweight local/server operator control. It should be paired with localhost binding, firewalling, SSH tunneling, or TLS termination when exposed outside a trusted machine.
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 
@@ -54,6 +56,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 ## Dead Code and Obsolescence Cleanup
 
 - Removed the old dense dashboard sections that duplicated sync range information or exposed low-level metrics by default.
+- Removed the custom SVG line-chart path generation after switching to Chart.js.
 - Kept the HTTP `/query`, JSON-RPC, WebSocket, gRPC, and storage query code paths because they remain active APIs.
 - No experimental Execution Layer peer-retention or sync-performance code was changed in this UI branch.
 
@@ -61,7 +64,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 
 - Current branch: `ui/minimal-sync-dashboard`
 - New branch created this run: yes
-- Commits made during this run: `feat: simplify dashboard and protect query routes`
+- Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`
 - Pull request status: draft PR #77 (`https://github.com/tdenisenko/logex/pull/77`)
 - Merge status: not merged; UI approval is still required before merging this dashboard branch.
 - Git/GitHub blockers: none known.
