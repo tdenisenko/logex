@@ -135,13 +135,14 @@
 
   .overview {
     display: grid;
-    grid-template-columns: minmax(0, 1.75fr) minmax(240px, .85fr) minmax(240px, .85fr) minmax(240px, .85fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
     align-items: stretch;
     margin-bottom: 16px;
   }
 
   .execution-card {
+    grid-column: 1 / -1;
     min-height: 190px;
     display: grid;
     gap: 14px;
@@ -171,31 +172,6 @@
   }
 
   .subline {
-    color: var(--muted);
-    line-height: 1.45;
-    font-size: var(--font-body);
-  }
-
-  .metric-card {
-    min-height: 190px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 14px;
-  }
-
-  .metric-value {
-    display: block;
-    margin-top: 5px;
-    color: var(--text);
-    font-size: var(--font-body);
-    line-height: 1.1;
-    font-weight: 760;
-    letter-spacing: 0;
-    word-break: break-word;
-  }
-
-  .metric-note {
     color: var(--muted);
     line-height: 1.45;
     font-size: var(--font-body);
@@ -241,6 +217,18 @@
     animation: greenSweep 1.7s linear infinite;
   }
 
+  .segmented-bar.offline {
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 1px, transparent 1px 12px),
+      #171b21;
+  }
+
+  .segmented-bar.offline > span {
+    animation: none;
+    background: #66717d;
+    background-size: auto;
+  }
+
   @keyframes greenSweep {
     from { background-position: -120px 0, 0 0; }
     to { background-position: 120px 0, 0 0; }
@@ -278,6 +266,13 @@
     font-size: var(--font-body);
     line-height: 1.2;
     font-weight: 720;
+  }
+
+  .mini .note {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.35;
   }
 
   .chart-panel {
@@ -578,12 +573,23 @@
   }
 
   .error {
+    display: none;
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 107, 107, .36);
+    border-radius: 8px;
+    background: rgba(255, 107, 107, .08);
     color: #ffd3d3;
     font-size: var(--font-body);
+    line-height: 1.4;
+  }
+
+  .error.visible {
+    display: block;
   }
 
   @media (max-width: 1180px) {
-    .overview, .charts-grid {
+    .charts-grid {
       grid-template-columns: 1fr 1fr;
     }
 
@@ -593,10 +599,6 @@
 
     .status-strip, .node-strip {
       justify-content: flex-start;
-    }
-
-    .execution-card {
-      grid-column: 1 / -1;
     }
 
     .debug-grid, .mini-grid {
@@ -644,8 +646,8 @@
       </div>
       <div class="bar-wrap">
         <div class="bar-limits">
-          <span id="executionStart">Genesis block 0</span>
-          <span id="executionEnd">Pivot --</span>
+          <span id="executionStart">Pivot --</span>
+          <span id="executionEnd">Genesis block 0</span>
         </div>
         <div class="segmented-bar active" id="executionBarShell"><span id="executionBar"></span></div>
       </div>
@@ -654,31 +656,11 @@
         <div class="mini"><span class="k">Rate</span><span class="v" id="executionRate">--</span></div>
         <div class="mini"><span class="k">Estimate</span><span class="v" id="executionEta">--</span></div>
         <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
+        <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
+        <div class="mini"><span class="k">Log block range</span><span class="v" id="logRange">--</span><span class="note" id="logRangeDetail">Verified local logs available for queries.</span></div>
+        <div class="mini"><span class="k">Storage used</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail">--</span></div>
+        <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary">--</span></div>
       </div>
-    </div>
-
-    <div class="panel metric-card">
-      <div>
-        <p class="card-label">Consensus Layer</p>
-        <span class="metric-value" id="consensusStatus">--</span>
-      </div>
-      <div class="metric-note" id="consensusDetail">Checkpoint to latest block.</div>
-    </div>
-
-    <div class="panel metric-card">
-      <div>
-        <p class="card-label">Log block range</p>
-        <span class="metric-value" id="logRange">--</span>
-      </div>
-      <div class="metric-note" id="logRangeDetail">Verified local logs available for queries.</div>
-    </div>
-
-    <div class="panel metric-card">
-      <div>
-        <p class="card-label">Storage</p>
-        <span class="metric-value" id="storageUsed">--</span>
-      </div>
-      <div class="metric-note" id="storageDetail">--</div>
     </div>
   </section>
 
@@ -728,6 +710,12 @@
           <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
+          <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
+          <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
+          <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
+          <div class="debug-item"><span class="k">Storage used</span><span class="v" id="debugStorageUsed">--</span></div>
+          <div class="debug-item"><span class="k">Disk free</span><span class="v" id="debugDiskFree">--</span></div>
+          <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
           <div class="debug-item"><span class="k">Raw log segments pending compression</span><span class="v" id="debugRawBacklog">--</span></div>
           <div class="debug-item"><span class="k">Lowest verified block</span><span class="v" id="debugHistoricalFloor">--</span></div>
           <div class="debug-item"><span class="k">Historical pivot block</span><span class="v" id="debugHistoricalAnchor">--</span></div>
@@ -750,10 +738,11 @@
       </div>
       <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
     </div>
-    <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs ORDER BY block_number DESC LIMIT 50</textarea>
+    <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
     <div class="query-actions">
       <span id="resultCount">No query results yet.</span>
       <div class="button-row">
+        <button type="button" class="secondary" id="exportBtn" onclick="exportQueryResults()" disabled>Export CSV</button>
         <button type="button" class="secondary" id="prevPageBtn" onclick="runQueryPage(-1)" disabled>Previous</button>
         <button type="button" class="secondary" id="nextPageBtn" onclick="runQueryPage(1)" disabled>Next</button>
       </div>
@@ -774,11 +763,15 @@
 var QUERY_PAGE_SIZE = 50;
 var MAX_QUERY_LIMIT = 10000;
 var queryOffset = 0;
-var nextQueryOffset = null;
+var queryRows = [];
+var queryColumns = [];
+var queryWasCapped = false;
+var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
+var querySqlTouched = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -792,6 +785,20 @@ function setText(id, value) {
 function setWidth(id, pct) {
   var el = byId(id);
   if (el) el.style.width = clamp(pct, 0, 100).toFixed(2) + '%';
+}
+
+function setExecutionBarState(active, offline) {
+  var shell = byId('executionBarShell');
+  if (!shell) return;
+  shell.classList.toggle('offline', !!offline);
+  shell.classList.toggle('active', !!active && !offline);
+}
+
+function showQueryError(message) {
+  var error = byId('queryError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.classList.toggle('visible', !!message);
 }
 
 function clamp(value, min, max) {
@@ -886,6 +893,26 @@ function blockWithAge(block, timestamp) {
   return fmt(block) + (age ? ' (' + age + ')' : '');
 }
 
+function buildDefaultQuery(fromBlock, toBlock) {
+  if (fromBlock == null || toBlock == null) return null;
+  var to = Math.max(0, Math.round(toBlock));
+  var floor = Math.max(0, Math.round(fromBlock));
+  if (floor > to) return null;
+  return [
+    'SELECT block_number, tx_hash, address, topic0, data_len, log_index',
+    'FROM logs',
+    'WHERE block_number = ' + to,
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC'
+  ].join('\n');
+}
+
+function updateDefaultQuery(fromBlock, toBlock) {
+  if (querySqlTouched) return;
+  var sql = buildDefaultQuery(fromBlock, toBlock);
+  if (!sql) return;
+  byId('sql').value = sql;
+}
+
 function shortHash(value) {
   if (!value) return '--';
   value = String(value);
@@ -966,11 +993,11 @@ function updateStatus(data) {
   setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 1) + '%' : '--');
   setText('executionSummary', floorBlock == null
     ? 'Waiting for the first verified historical Execution Layer block.'
-    : fmtBlocks(remaining) + ' remaining to genesis; lowest verified ' + blockWithAge(floorBlock, floorTime) + '.');
-  setText('executionStart', 'Genesis block ' + fmt(targetBlock));
-  setText('executionEnd', anchorBlockNumber == null ? 'Pivot --' : 'Pivot ' + blockWithAge(anchorBlockNumber, anchorTimeValue));
+    : fmtBlocks(remaining) + ' remaining to genesis.');
+  setText('executionStart', anchorBlockNumber == null ? 'Pivot --' : 'Pivot ' + blockWithAge(anchorBlockNumber, anchorTimeValue));
+  setText('executionEnd', 'Genesis block ' + fmt(targetBlock));
   setWidth('executionBar', pct);
-  byId('executionBarShell').classList.toggle('active', active);
+  setExecutionBarState(active, false);
   setText('executionRemaining', remaining == null ? '--' : fmtBlocks(remaining));
   setText('executionRate', fmtRate(rate));
   setText('executionEta', fmtEta(data.historical_eta_seconds));
@@ -996,10 +1023,20 @@ function updateStatus(data) {
 
   setText('storageUsed', fmtBytes(data.storage_used_bytes));
   setText('storageDetail', fmtBytes(data.disk_free_bytes) + ' free; ' + fmt(data.raw_log_segment_backlog) + ' raw segments pending compression.');
+  setText('diskFree', fmtBytes(data.disk_free_bytes));
+  setText('rawBacklogSummary', fmt(data.raw_log_segment_backlog) + ' raw segments pending compression.');
 
   setText('debugConnectedPeers', fmt(connectedPeers));
   setText('debugServingPeers', fmt(servingPeers));
   setText('debugPeerCandidates', fmt(numberOrNull(executionNetwork.queued_candidates) == null ? pendingPeers : executionNetwork.queued_candidates));
+  setText('debugConsensusStatus', consensusStatus);
+  setText('debugConsensusDetail', materializedBlock == null
+    ? 'Checkpoint ' + shortHash(data.checkpoint_root)
+    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
+  setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
+  setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
+  setText('debugDiskFree', fmtBytes(data.disk_free_bytes));
+  setText('debugCpu', fmtPct(data.cpu_utilization_pct));
   setText('debugRawBacklog', fmt(data.raw_log_segment_backlog));
   setText('debugHistoricalFloor', blockWithAge(floorBlock, floorTime));
   setText('debugHistoricalAnchor', blockWithAge(anchorBlockNumber, anchorTimeValue));
@@ -1010,6 +1047,7 @@ function updateStatus(data) {
   setText('debugStoredRows', fmt(data.total_rows));
   setText('debugSegments', fmt(data.sealed_partitions));
   setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
+  updateDefaultQuery(queryFrom, queryTo);
 
   addPerfSample({
     ts: Date.now(),
@@ -1038,6 +1076,7 @@ function fetchStatus() {
     .catch(function() {
       setPill('nodeBadge', 'Status offline', 'state-disconnected');
       setText('nodeState', 'Status offline');
+      setExecutionBarState(false, true);
       refreshLastUpdated();
     });
 }
@@ -1084,7 +1123,8 @@ function setChartWindow(hours) {
 
 function renderChart() {
   var now = Date.now();
-  var start = now - chartHours * 3600 * 1000;
+  var windowMinutes = chartHours * 60;
+  var start = now - windowMinutes * 60 * 1000;
   var samples = downsampleSamples(perfSamples.filter(function(sample) { return sample.ts >= start; }), 720);
   setText('chartWindowLabel', 'Last ' + chartHours + (chartHours === 1 ? ' hour' : ' hours'));
 
@@ -1095,13 +1135,13 @@ function renderChart() {
 
   byId('chartUnavailable').style.display = 'none';
   ensureCharts();
-  updateChart('blocks', samples, 'rate', 'Blocks/sec', '#48d6b8', function(value) {
+  updateChart('blocks', samples, start, now, 'rate', 'Blocks/sec', '#48d6b8', function(value) {
     return fmtDecimal(value, value >= 100 ? 0 : 1);
   });
-  updateChart('peers', samples, 'peers', 'Serving peers', '#6aa7ff', function(value) {
+  updateChart('peers', samples, start, now, 'peers', 'Serving peers', '#6aa7ff', function(value) {
     return fmtDecimal(value, 0);
   });
-  updateChart('cpu', samples, 'cpu', 'CPU utilization (%)', '#f2b84b', function(value) {
+  updateChart('cpu', samples, start, now, 'cpu', 'CPU utilization (%)', '#f2b84b', function(value) {
     return fmtPct(value);
   });
 
@@ -1155,15 +1195,23 @@ function createLineChart(canvasId, yTitle, color) {
         tooltip: {
           callbacks: {
             title: function(items) {
-              return items.length ? items[0].label : '';
+              if (!items.length) return '';
+              return formatChartTime(items[0].parsed.x);
             }
           }
         }
       },
       scales: {
         x: {
+          type: 'linear',
+          min: 0,
+          max: Date.now(),
           title: { display: true, text: 'Time' },
-          ticks: { color: '#91a0ad', maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
+          ticks: {
+            color: '#91a0ad',
+            maxRotation: 0,
+            callback: function(value) { return formatChartTime(value); }
+          },
           grid: { color: 'rgba(53, 70, 90, .35)' }
         },
         y: {
@@ -1177,18 +1225,49 @@ function createLineChart(canvasId, yTitle, color) {
   });
 }
 
-function updateChart(chartId, samples, key, yTitle, color, formatter) {
-  var chart = performanceCharts[chartId];
-  var labels = samples.map(function(sample) { return chartTimeLabel(sample.ts); });
-  var values = samples.map(function(sample) {
-    var value = numberOrNull(sample[key]);
-    return value == null ? null : value;
+function chartTickIntervalMs() {
+  return (chartHours <= 1 ? 15 : 30) * 60 * 1000;
+}
+
+function roundedChartTicks(startMs, endMs) {
+  var interval = chartTickIntervalMs();
+  var first = Math.ceil(startMs / interval) * interval;
+  var ticks = [];
+  for (var timestamp = first; timestamp <= endMs; timestamp += interval) {
+    ticks.push(timestamp);
+  }
+  return ticks;
+}
+
+function formatChartTime(value) {
+  var date = new Date(Number(value));
+  if (!Number.isFinite(date.getTime())) return '';
+  return date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
   });
-  chart.data.labels = labels;
+}
+
+function updateChart(chartId, samples, startMs, endMs, key, yTitle, color, formatter) {
+  var chart = performanceCharts[chartId];
+  var points = samples.map(function(sample) {
+    var value = numberOrNull(sample[key]);
+    return {
+      x: sample.ts,
+      y: value == null ? null : value
+    };
+  });
+  chart.data.labels = [];
   chart.data.datasets[0].label = yTitle;
   chart.data.datasets[0].borderColor = color;
   chart.data.datasets[0].backgroundColor = color + '22';
-  chart.data.datasets[0].data = values;
+  chart.data.datasets[0].data = points;
+  chart.options.scales.x.min = startMs;
+  chart.options.scales.x.max = endMs;
+  chart.options.scales.x.afterBuildTicks = function(axis) {
+    axis.ticks = roundedChartTicks(startMs, endMs).map(function(value) { return { value: value }; });
+  };
   chart.options.scales.y.title.text = yTitle;
   chart.options.plugins.tooltip.callbacks.label = function(context) {
     var value = context.parsed.y;
@@ -1197,15 +1276,7 @@ function updateChart(chartId, samples, key, yTitle, color, formatter) {
   chart.update('none');
 }
 
-function chartTimeLabel(timestampMs) {
-  return new Date(timestampMs).toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: chartHours === 1 ? '2-digit' : undefined
-  });
-}
-
-function renderTable(rows) {
+function renderTable(rows, emptyMessage) {
   var table = byId('resultsTable');
   var empty = byId('emptyState');
   var thead = byId('thead');
@@ -1213,7 +1284,7 @@ function renderTable(rows) {
   if (!rows || rows.length === 0) {
     table.style.display = 'none';
     empty.style.display = 'flex';
-    empty.textContent = 'Query returned no rows.';
+    empty.textContent = emptyMessage || 'Query returned no rows.';
     thead.innerHTML = '';
     tbody.innerHTML = '';
     return;
@@ -1248,73 +1319,146 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
+function csvCell(value) {
+  var text = formatCell(value);
+  if (/[",\n\r]/.test(text)) {
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+  return text;
+}
+
+function queryPageRows() {
+  return queryRows.slice(queryOffset, queryOffset + QUERY_PAGE_SIZE);
+}
+
 function updateQueryButtons() {
   byId('prevPageBtn').disabled = queryOffset === 0;
-  byId('nextPageBtn').disabled = nextQueryOffset == null;
+  byId('nextPageBtn').disabled = queryOffset + QUERY_PAGE_SIZE >= queryRows.length;
+  byId('exportBtn').disabled = queryRows.length === 0;
+}
+
+function renderQueryPage() {
+  if (queryRows.length === 0) {
+    renderTable([], 'Query returned no rows.');
+    setText('resultCount', '0 rows returned; ' + fmt(queryScannedRows) + ' rows scanned.');
+    updateQueryButtons();
+    return;
+  }
+
+  queryOffset = clamp(queryOffset, 0, Math.max(0, queryRows.length - 1));
+  queryOffset = Math.floor(queryOffset / QUERY_PAGE_SIZE) * QUERY_PAGE_SIZE;
+  renderTable(queryPageRows());
+
+  var start = queryOffset + 1;
+  var end = Math.min(queryOffset + QUERY_PAGE_SIZE, queryRows.length);
+  var cap = queryWasCapped ? '; capped at ' + fmt(MAX_QUERY_LIMIT) + ' rows' : '';
+  setText('resultCount',
+    fmt(queryRows.length) + ' rows loaded' + cap + '; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
+  updateQueryButtons();
 }
 
 function runQueryPage(direction) {
   if (direction < 0) {
     queryOffset = Math.max(0, queryOffset - QUERY_PAGE_SIZE);
-  } else if (nextQueryOffset != null) {
-    queryOffset = nextQueryOffset;
+  } else {
+    queryOffset = Math.min(Math.max(0, queryRows.length - 1), queryOffset + QUERY_PAGE_SIZE);
   }
-  runQuery(true);
+  renderQueryPage();
 }
 
-function runQuery(keepOffset) {
+function runQuery() {
   var sql = byId('sql').value.trim();
-  var error = byId('queryError');
-  if (!keepOffset) queryOffset = 0;
-  nextQueryOffset = null;
+  queryOffset = 0;
+  queryRows = [];
+  queryColumns = [];
+  queryWasCapped = false;
+  queryScannedRows = null;
   updateQueryButtons();
-  error.textContent = '';
+  showQueryError('');
   if (!sql) {
-    error.textContent = 'Enter a SQL query.';
-    return;
-  }
-  if (queryOffset >= MAX_QUERY_LIMIT) {
-    error.textContent = 'Offset must stay below ' + fmt(MAX_QUERY_LIMIT) + '.';
+    showQueryError('Enter a SQL query.');
     return;
   }
 
   byId('runBtn').disabled = true;
   setText('resultCount', 'Running query...');
+  renderTable([], 'Running query...');
   fetch('/query', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql: sql, limit: QUERY_PAGE_SIZE, offset: queryOffset })
+    body: JSON.stringify({ sql: sql, limit: MAX_QUERY_LIMIT, offset: 0 })
   })
     .then(function(response) {
-      return response.json().then(function(data) {
-        return { ok: response.ok, data: data };
+      return response.text().then(function(text) {
+        var data = {};
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (_) {
+            data = { error: text };
+          }
+        }
+        return { ok: response.ok, status: response.status, data: data };
       });
     })
     .then(function(result) {
       if (!result.ok) {
-        throw new Error(result.data.error || result.data.message || 'Query failed.');
+        throw new Error(result.data.error || result.data.message || 'Query failed with HTTP ' + result.status + '.');
       }
-      var rows = result.data.rows || [];
-      renderTable(rows);
-      nextQueryOffset = result.data.next_offset == null ? null : Number(result.data.next_offset);
-      setText('resultCount', fmt(rows.length) + ' rows returned; page starts at row ' + fmt(queryOffset + 1) + '; ' + fmt(result.data.total_scanned) + ' rows scanned.');
-      updateQueryButtons();
+      queryRows = Array.isArray(result.data.rows) ? result.data.rows : [];
+      queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
+      queryWasCapped = result.data.next_offset != null || queryRows.length >= MAX_QUERY_LIMIT;
+      queryScannedRows = result.data.total_scanned;
+      renderQueryPage();
     })
     .catch(function(err) {
-      error.textContent = err.message || 'Query failed.';
+      showQueryError(err.message || 'Query failed.');
       setText('resultCount', 'Query failed.');
-      renderTable([]);
+      queryRows = [];
+      queryColumns = [];
+      queryWasCapped = false;
+      queryScannedRows = null;
+      updateQueryButtons();
+      renderTable([], 'Query failed.');
     })
     .finally(function() {
       byId('runBtn').disabled = false;
     });
 }
 
+function exportQueryResults() {
+  if (!queryRows.length) {
+    showQueryError('Run a query before exporting results.');
+    return;
+  }
+
+  var columns = queryColumns.length ? queryColumns : Object.keys(queryRows[0]);
+  var csv = [
+    columns.map(csvCell).join(',')
+  ].concat(queryRows.map(function(row) {
+    return columns.map(function(column) { return csvCell(row[column]); }).join(',');
+  })).join('\n');
+
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('a');
+  link.href = url;
+  link.download = 'logex-query-results-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 byId('sql').addEventListener('keydown', function(event) {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     runQuery();
   }
+});
+
+byId('sql').addEventListener('input', function() {
+  querySqlTouched = true;
 });
 
 fetchStatus();

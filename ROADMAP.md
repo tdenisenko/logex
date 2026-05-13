@@ -13,6 +13,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 - Moved secondary operational details into a collapsed advanced section.
 - Added HTTP dashboard controls: dashboard enabled by default, `--disable-dashboard`, config-level `dashboard_enabled`, and `--dashboard-password` / `dashboard_password` for HTTP Basic authentication.
 - Restored the softer pre-existing dashboard styling while keeping the simplified DOM and green animated Execution Layer progress bar.
+- Refined the dashboard review build: the Execution Layer panel now carries the primary status details, performance charts use rounded wall-clock ticks, and the query panel paginates loaded capped results with CSV export.
 
 ## Remaining TODOs
 
@@ -44,6 +45,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 - Performance charts use Chart.js rather than custom SVG path generation.
 - Dashboard authentication uses HTTP Basic auth as a lightweight local/server operator control. It should be paired with localhost binding, firewalling, SSH tunneling, or TLS termination when exposed outside a trusted machine.
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
+- Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 
 ## Challenges and Resolutions
 
@@ -65,8 +67,8 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 - Current branch: `ui/minimal-sync-dashboard`
 - New branch created this run: yes
 - Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`
-- Pull request status: draft PR #77 (`https://github.com/tdenisenko/logex/pull/77`)
-- Merge status: not merged; UI approval is still required before merging this dashboard branch.
+- Pull request status: PR #77 (`https://github.com/tdenisenko/logex/pull/77`) approved for merge into `feature/el-reverse-sync`.
+- Merge status: pending final PR merge.
 - Git/GitHub blockers: none known.
 
 ## Known Issues or Risks
