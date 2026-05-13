@@ -934,23 +934,34 @@ fn cached_light_client_update_payloads_by_range(
     responses
 }
 
-fn select_checkpoint_forward_child(
-    children: &[VerifiedBeaconBlock],
+fn select_checkpoint_forward_child<I>(
+    children: I,
     preferred_roots: &HashSet<B256>,
-) -> Option<VerifiedBeaconBlock> {
-    if children.is_empty() {
-        return None;
+) -> Option<VerifiedBeaconBlock>
+where
+    I: IntoIterator<Item = VerifiedBeaconBlock>,
+{
+    let mut only_child = None;
+    let mut child_count = 0usize;
+    let mut only_preferred_child = None;
+    let mut preferred_child_count = 0usize;
+
+    for child in children {
+        child_count = child_count.saturating_add(1);
+        only_child = Some(child);
+        if preferred_roots.contains(&child.beacon_root) {
+            preferred_child_count = preferred_child_count.saturating_add(1);
+            only_preferred_child = Some(child);
+        }
     }
 
-    let preferred_children = children
-        .iter()
-        .copied()
-        .filter(|block| preferred_roots.contains(&block.beacon_root))
-        .collect::<Vec<_>>();
-    if preferred_children.len() == 1 {
-        return preferred_children.into_iter().next();
+    if preferred_child_count == 1 {
+        only_preferred_child
+    } else if child_count == 1 {
+        only_child
+    } else {
+        None
     }
-    (children.len() == 1).then_some(children[0])
 }
 
 #[derive(Debug, Clone)]
@@ -3585,8 +3596,7 @@ impl ConsensusNetwork {
         &self,
         target: HistorySyncTarget,
     ) -> Option<CachedForwardPathProgress> {
-        let chain = self.checkpoint_forward_chain_blocks(target)?;
-        let highest_cached_slot = chain.last()?.slot;
+        let highest_cached_slot = self.checkpoint_forward_highest_cached_slot(target)?;
         Some(CachedForwardPathProgress {
             checkpoint_slot: target.checkpoint_slot,
             target_slot: target.optimistic_slot,
@@ -3770,17 +3780,13 @@ impl ConsensusNetwork {
         )
     }
 
-    fn checkpoint_forward_chain_blocks(
-        &self,
-        target: HistorySyncTarget,
-    ) -> Option<Vec<VerifiedBeaconBlock>> {
+    fn checkpoint_forward_highest_cached_slot(&self, target: HistorySyncTarget) -> Option<u64> {
         let checkpoint_block = *self.verified_beacon_blocks.get(&target.checkpoint_root)?;
         if checkpoint_block.slot != target.checkpoint_slot {
             return None;
         }
 
         let preferred_roots = self.cached_target_lineage_roots(target);
-        let mut chain = vec![checkpoint_block];
         let mut current = checkpoint_block;
         while let Some(child) = self.next_checkpoint_forward_child(
             current.beacon_root,
@@ -3788,11 +3794,10 @@ impl ConsensusNetwork {
             target.optimistic_slot,
             &preferred_roots,
         ) {
-            chain.push(child);
             current = child;
         }
 
-        Some(chain)
+        Some(current.slot)
     }
 
     fn serving_forward_chain_blocks(&self) -> Option<Vec<VerifiedBeaconBlock>> {
@@ -3843,14 +3848,14 @@ impl ConsensusNetwork {
         target_slot: u64,
         preferred_roots: &HashSet<B256>,
     ) -> Option<VerifiedBeaconBlock> {
-        let children = self
-            .verified_beacon_block_children
-            .get(&parent_root)?
-            .iter()
-            .copied()
-            .filter(|block| block.slot > parent_slot && block.slot <= target_slot)
-            .collect::<Vec<_>>();
-        select_checkpoint_forward_child(&children, preferred_roots)
+        select_checkpoint_forward_child(
+            self.verified_beacon_block_children
+                .get(&parent_root)?
+                .iter()
+                .copied()
+                .filter(|child| child.slot > parent_slot && child.slot <= target_slot),
+            preferred_roots,
+        )
     }
 
     fn maybe_force_light_client_store(&mut self) {
@@ -5647,15 +5652,15 @@ mod tests {
         let preferred_roots = HashSet::from([child_b.beacon_root]);
 
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a, child_b], &preferred_roots),
+            select_checkpoint_forward_child([child_a, child_b], &preferred_roots),
             Some(child_b)
         );
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a], &HashSet::new()),
+            select_checkpoint_forward_child([child_a], &HashSet::new()),
             Some(child_a)
         );
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a, child_b], &HashSet::new()),
+            select_checkpoint_forward_child([child_a, child_b], &HashSet::new()),
             None
         );
     }

@@ -16,6 +16,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Reduced storage compaction allocation overhead and restart-time segment validation cost on large data directories.
 - Added a parent-root child index for cached Consensus Layer beacon blocks to avoid repeated full-cache scans while materializing the forward checkpoint chain.
 - Enabled Alloy's assembly Keccak backend after remote perf samples showed receipt-trie hashing dominating local CPU time.
+- Removed avoidable Consensus Layer forward-lineage allocations from history range readiness checks.
 
 ## Remaining TODOs
 
@@ -53,6 +54,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
+- Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 
 ## Challenges and Resolutions
 
@@ -77,6 +79,9 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: After storage and lineage optimizations, remote perf samples showed receipt-root Keccak hashing as the dominant CPU cost.
   - Resolution: Enabled Alloy's `asm-keccak` feature and validated the sync crate plus full clippy before remote measurement.
 
+- Challenge: Perf samples still showed Consensus Layer range readiness spending CPU on temporary lineage vectors.
+  - Resolution: Reworked forward progress selection to walk cached children without allocating a chain.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
@@ -89,7 +94,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, and Consensus Layer child-index optimization commits on this branch; assembly Keccak optimization pending commit.
+- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, and assembly Keccak commits on this branch; forward-lineage allocation cleanup pending commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
