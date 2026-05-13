@@ -17,7 +17,8 @@ const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
-const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 512;
+const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 5000;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_TARGET: u128 =
     30_000_000u128 * PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS as u128;
@@ -486,7 +487,8 @@ impl PeerManager {
 
         let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
 
-        if !blocks.is_empty() {
+        let min_accepted_prefix = body_receipt_min_accepted_prefix(return_blocks);
+        if blocks.len() >= min_accepted_prefix {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
                 blocks,
@@ -494,9 +496,10 @@ impl PeerManager {
             }))
         } else {
             bail!(
-                "body/receipt chunk pipeline completed {}/{} blocks",
+                "body/receipt chunk pipeline completed {}/{} blocks below accepted prefix {}",
                 blocks.len(),
-                total_hashes
+                total_hashes,
+                min_accepted_prefix
             )
         }
     }
@@ -3138,6 +3141,10 @@ fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> 
     total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS)
 }
 
+fn body_receipt_min_accepted_prefix(return_blocks: usize) -> usize {
+    return_blocks.min(PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS)
+}
+
 fn body_receipt_scheduled_chunk_limit(
     ranges: &[std::ops::Range<usize>],
     min_return_blocks: usize,
@@ -3240,9 +3247,16 @@ mod tests {
         let sparse = vec![0; 6000];
 
         assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
-        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 1024);
+        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 512);
         assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 5000);
-        assert_eq!(body_receipt_return_blocks(4096, None), 1024);
+        assert_eq!(body_receipt_return_blocks(4096, None), 512);
+    }
+
+    #[test]
+    fn body_receipt_min_accepted_prefix_rejects_tiny_dense_progress() {
+        assert_eq!(body_receipt_min_accepted_prefix(128), 128);
+        assert_eq!(body_receipt_min_accepted_prefix(512), 384);
+        assert_eq!(body_receipt_min_accepted_prefix(5000), 384);
     }
 
     #[test]

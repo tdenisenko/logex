@@ -14,8 +14,8 @@ const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
-const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 3;
-const HISTORICAL_FETCH_PIPELINE_DEPTH: usize = 3;
+const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 2;
+const HISTORICAL_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
@@ -25,7 +25,7 @@ const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 32;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 64;
-const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
+const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 512;
 const HISTORICAL_HEADER_GAS_WINDOW_TARGET: u128 =
     30_000_000u128 * HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u128;
 
@@ -2079,15 +2079,15 @@ mod tests {
     #[test]
     fn historical_header_gas_window_requires_minimum_dense_prefix() {
         assert!(!historical_header_window_reached_gas_target(
-            1023,
+            HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS - 1,
             HISTORICAL_HEADER_GAS_WINDOW_TARGET,
         ));
         assert!(!historical_header_window_reached_gas_target(
-            1024,
+            HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS,
             HISTORICAL_HEADER_GAS_WINDOW_TARGET - 1,
         ));
         assert!(historical_header_window_reached_gas_target(
-            1024,
+            HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS,
             HISTORICAL_HEADER_GAS_WINDOW_TARGET,
         ));
     }
