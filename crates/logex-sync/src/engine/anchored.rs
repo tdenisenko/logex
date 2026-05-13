@@ -8,11 +8,12 @@ use alloy_consensus::ReceiptWithBloom;
 use alloy_eips::BlockHashOrNumber;
 use logex_types::{ExecutionAnchor, NodeState};
 use reth_eth_wire::NetworkPrimitives;
+use std::sync::OnceLock;
 use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
-const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 4;
+const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 8;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 3;
@@ -23,12 +24,15 @@ const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
-const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
-const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 32;
-const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 64;
+const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
+const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 18;
+const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 36;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
-const HISTORICAL_HEADER_GAS_WINDOW_TARGET: u128 =
-    30_000_000u128 * HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u128;
+const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
+const BYTES_PER_KIB: u64 = 1024;
+const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 24 * BYTES_PER_GIB;
+const HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 48 * BYTES_PER_GIB;
 
 #[derive(Debug)]
 struct ConsensusReorg {
@@ -207,9 +211,75 @@ fn historical_validation_task_count(block_count: usize) -> usize {
         .min(block_count)
 }
 
-fn historical_header_window_reached_gas_target(header_count: usize, cumulative_gas: u128) -> bool {
-    header_count >= HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS
-        && cumulative_gas >= HISTORICAL_HEADER_GAS_WINDOW_TARGET
+fn historical_header_window_reached_gas_target(
+    header_count: usize,
+    cumulative_gas: u128,
+    target_count: u64,
+) -> bool {
+    let gas_target = HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET.saturating_mul(target_count as u128);
+    header_count >= HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS && cumulative_gas >= gas_target
+}
+
+fn historical_fetch_pipeline_depth_for_serving_peers(
+    serving_peers: usize,
+    total_memory_bytes: Option<u64>,
+) -> usize {
+    if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_deep_windows(total_memory_bytes)
+    {
+        HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
+    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
+        HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+    } else {
+        HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+    }
+}
+
+fn historical_fetch_window_blocks_for_serving_peers(
+    serving_peers: usize,
+    total_memory_bytes: Option<u64>,
+) -> u64 {
+    if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_wide_windows(total_memory_bytes)
+    {
+        HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
+    } else if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_deep_windows(total_memory_bytes)
+    {
+        HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
+    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
+        HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
+    } else {
+        HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS
+    }
+}
+
+fn historical_allows_deep_windows(total_memory_bytes: Option<u64>) -> bool {
+    total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES)
+}
+
+fn historical_allows_wide_windows(total_memory_bytes: Option<u64>) -> bool {
+    total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES)
+}
+
+fn historical_total_memory_bytes() -> Option<u64> {
+    static TOTAL_MEMORY_BYTES: OnceLock<Option<u64>> = OnceLock::new();
+    *TOTAL_MEMORY_BYTES.get_or_init(read_linux_total_memory_bytes)
+}
+
+fn read_linux_total_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        let kib = rest
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())?;
+        return kib.checked_mul(BYTES_PER_KIB);
+    }
+    None
 }
 
 fn validate_and_extract_historical_block_chunk(
@@ -227,7 +297,7 @@ fn validate_and_extract_historical_block_chunk(
 
     for job in jobs {
         let block_number = job.header.number();
-        if let Err(error) = validate_block_pre_execution(&job.header, &job.body) {
+        if let Err(error) = validate_block_pre_execution(&job.header, job.block_hash, &job.body) {
             return Err(Box::new(HistoricalValidationFailure {
                 peer: job.body_peer,
                 response_kind: "block bodies",
@@ -339,7 +409,7 @@ fn validate_historical_block(
     receipts: Vec<ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
 ) -> std::result::Result<HistoricalValidatedBlock, Box<HistoricalValidationFailure>> {
     let block_number = header.number();
-    if let Err(error) = validate_block_pre_execution(&header, &body) {
+    if let Err(error) = validate_block_pre_execution(&header, block_hash, &body) {
         return Err(Box::new(HistoricalValidationFailure {
             peer: body_peer,
             response_kind: "block bodies",
@@ -764,7 +834,7 @@ impl SyncEngine {
                 let block_number = header.number();
                 let block_hash = chunk_hashes[i];
                 let (body_peer, body) = &bodies[i];
-                if let Err(error) = validate_block_pre_execution(header, body) {
+                if let Err(error) = validate_block_pre_execution(header, block_hash, body) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
@@ -969,7 +1039,9 @@ impl SyncEngine {
         }
 
         let connected_peer_floor = historical_backfill_peer_floor(self.config.max_peers);
-        if self.peers.peer_count() < connected_peer_floor {
+        if self.peers.peer_count() < connected_peer_floor
+            && !self.has_ready_historical_fetch_for(&child_header)
+        {
             self.refresh_connectivity_state();
             tracing::debug!(
                 connected_peers = self.peers.peer_count(),
@@ -1028,6 +1100,14 @@ impl SyncEngine {
         }
     }
 
+    fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> bool {
+        self.drain_historical_fetch_outcomes();
+        self.historical_fetch_pipeline_matches(child_header)
+            && self
+                .historical_fetch_completed
+                .contains_key(&self.historical_fetch_expected_sequence)
+    }
+
     fn historical_fetch_pipeline_matches(&self, child_header: &Header) -> bool {
         self.historical_fetch_expected_child
             .as_ref()
@@ -1042,27 +1122,17 @@ impl SyncEngine {
     }
 
     fn historical_fetch_pipeline_depth(&self) -> usize {
-        let serving_peers = self.peers.serving_peer_count();
-        if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS {
-            HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
-        } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
-            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
-        } else {
-            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
-        }
+        historical_fetch_pipeline_depth_for_serving_peers(
+            self.peers.serving_peer_count(),
+            historical_total_memory_bytes(),
+        )
     }
 
     fn historical_fetch_window_blocks(&self) -> u64 {
-        let serving_peers = self.peers.serving_peer_count();
-        if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS {
-            HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
-        } else if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS {
-            HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
-        } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
-            HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
-        } else {
-            HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS
-        }
+        historical_fetch_window_blocks_for_serving_peers(
+            self.peers.serving_peer_count(),
+            historical_total_memory_bytes(),
+        )
     }
 
     fn spawn_historical_fetch_plan(&mut self, plan: HistoricalFetchPlan) {
@@ -1290,6 +1360,7 @@ impl SyncEngine {
         let mut page_child_header = child_header.clone();
         let mut header_peer = PeerId::ZERO;
         let mut headers = Vec::with_capacity(target_count as usize);
+        let mut hashes = Vec::with_capacity(target_count as usize);
         let mut cumulative_header_gas = 0u128;
 
         while remaining > 0 {
@@ -1329,22 +1400,26 @@ impl SyncEngine {
                 break;
             }
 
-            if let Err(error) =
-                validate_reverse_downloaded_headers(&page_child_header, &page_headers)
-            {
-                tracing::warn!(
-                    child_block = page_child_header.number(),
-                    header_peer = %page_peer,
-                    %error,
-                    "historical reverse header validation failed"
-                );
-                self.peers.report_invalid_block_data(page_peer, "headers");
-                self.refresh_connectivity_state();
-                if headers.is_empty() {
-                    return Ok(None);
+            let page_hashes = match validate_reverse_downloaded_headers_with_hashes(
+                &page_child_header,
+                &page_headers,
+            ) {
+                Ok(hashes) => hashes,
+                Err(error) => {
+                    tracing::warn!(
+                        child_block = page_child_header.number(),
+                        header_peer = %page_peer,
+                        %error,
+                        "historical reverse header validation failed"
+                    );
+                    self.peers.report_invalid_block_data(page_peer, "headers");
+                    self.refresh_connectivity_state();
+                    if headers.is_empty() {
+                        return Ok(None);
+                    }
+                    break;
                 }
-                break;
-            }
+            };
 
             if header_peer == PeerId::ZERO {
                 header_peer = page_peer;
@@ -1361,12 +1436,17 @@ impl SyncEngine {
             if let Some(next_child) = page_headers.last().cloned() {
                 page_child_header = next_child;
             }
+            hashes.extend(page_hashes);
             headers.extend(page_headers);
 
             if headers
                 .last()
                 .is_some_and(|header| header.number() == EXECUTION_HISTORY_TARGET_BLOCK)
-                || historical_header_window_reached_gas_target(headers.len(), cumulative_header_gas)
+                || historical_header_window_reached_gas_target(
+                    headers.len(),
+                    cumulative_header_gas,
+                    target_count,
+                )
             {
                 break;
             }
@@ -1377,7 +1457,6 @@ impl SyncEngine {
             return Ok(None);
         }
 
-        let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
         let required_block = headers
             .last()
             .map(|header| header.number())
@@ -1543,20 +1622,23 @@ impl SyncEngine {
             return Ok(false);
         }
 
-        if let Err(error) = validate_reverse_downloaded_headers(&child_header, &headers) {
-            tracing::warn!(
-                child_block = child_header.number(),
-                header_peer = %header_peer,
-                %error,
-                "historical reverse header validation failed"
-            );
-            self.peers.report_invalid_block_data(header_peer, "headers");
-            self.refresh_connectivity_state();
-            return Ok(false);
-        }
+        let hashes = match validate_reverse_downloaded_headers_with_hashes(&child_header, &headers)
+        {
+            Ok(hashes) => hashes,
+            Err(error) => {
+                tracing::warn!(
+                    child_block = child_header.number(),
+                    header_peer = %header_peer,
+                    %error,
+                    "historical reverse header validation failed"
+                );
+                self.peers.report_invalid_block_data(header_peer, "headers");
+                self.refresh_connectivity_state();
+                return Ok(false);
+            }
+        };
 
         let mut newly_serving_peers = HashSet::new();
-        let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
 
         let mut progressed = false;
         let sequential_fetch_batch_size = self
@@ -1908,18 +1990,47 @@ mod tests {
 
     #[test]
     fn historical_header_gas_window_requires_minimum_dense_prefix() {
+        let target_count = HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u64;
+        let gas_target = HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET * target_count as u128;
         assert!(!historical_header_window_reached_gas_target(
             HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS - 1,
-            HISTORICAL_HEADER_GAS_WINDOW_TARGET,
+            gas_target,
+            target_count,
         ));
         assert!(!historical_header_window_reached_gas_target(
             HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS,
-            HISTORICAL_HEADER_GAS_WINDOW_TARGET - 1,
+            gas_target - 1,
+            target_count,
         ));
         assert!(historical_header_window_reached_gas_target(
             HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS,
-            HISTORICAL_HEADER_GAS_WINDOW_TARGET,
+            gas_target,
+            target_count,
         ));
+    }
+
+    #[test]
+    fn historical_fetch_window_respects_memory_tier() {
+        let small_memory = Some(8 * BYTES_PER_GIB);
+        let deep_memory = Some(HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES);
+        let wide_memory = Some(HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES);
+
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(40, small_memory),
+            HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(40, small_memory),
+            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(20, deep_memory),
+            HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
+        );
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(40, wide_memory),
+            HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
+        );
     }
 
     #[test]

@@ -168,7 +168,7 @@ pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
     }
 
     (max_peers / 3)
-        .clamp(1, HISTORICAL_BACKFILL_MIN_CONNECTED_PEERS)
+        .clamp(1, HISTORICAL_BACKFILL_CONNECTED_PEER_FLOOR_CAP)
         .min(max_peers)
 }
 
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(historical_backfill_peer_floor(0), 0);
         assert_eq!(historical_backfill_peer_floor(1), 1);
         assert_eq!(historical_backfill_peer_floor(8), 2);
-        assert_eq!(historical_backfill_peer_floor(100), 8);
+        assert_eq!(historical_backfill_peer_floor(100), 4);
     }
 
     #[test]

@@ -1037,7 +1037,7 @@ mod tests {
     fn inherited_request_limits_use_warmed_pool_average() {
         assert_eq!(
             inherited_peer_request_limit([24, 48, 96].into_iter(), PeerRequestKind::Bodies),
-            BODY_REQUEST_LIMIT_INITIAL
+            56
         );
         assert_eq!(
             inherited_peer_request_limit([1, 2].into_iter(), PeerRequestKind::Receipts),

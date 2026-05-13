@@ -4,7 +4,7 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 
-use crate::native::{NativeStorage, NativeStorageConfig};
+use crate::native::{NativeStorage, NativeStorageConfig, SegmentCompactionPlan};
 use crate::state::SyncHead;
 
 /// A read-only compatibility view over a storage segment.
@@ -82,7 +82,7 @@ impl PartitionManager {
         Ok(())
     }
 
-    /// Ingest immutable historical rows directly as sealed compacted segments.
+    /// Ingest immutable historical rows directly as sealed raw segments.
     pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
         self.inner.write_historical_batch(rows)?;
         self.refresh_views();
@@ -115,6 +115,19 @@ impl PartitionManager {
             self.refresh_views();
         }
         Ok(compacted)
+    }
+
+    /// Select sealed segments that can be compacted outside the storage lock.
+    pub fn segment_compaction_plan(&self, limit: usize) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.segment_compaction_plan(limit)
+    }
+
+    /// Select raw sealed segments that can be compacted outside the storage lock.
+    pub fn raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.raw_segment_compaction_plan(limit)
     }
 
     /// Count sealed segments that are eligible for compaction.

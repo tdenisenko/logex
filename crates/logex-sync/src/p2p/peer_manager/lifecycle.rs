@@ -106,7 +106,10 @@ impl PeerManager {
         if dial_capacity == 0 {
             return;
         }
-        let open_slots = target.saturating_sub(self.peers.len()).min(dial_capacity);
+        let active_or_submitted = self.peers.len().saturating_add(self.pending_dials.len());
+        let open_slots = target
+            .saturating_sub(active_or_submitted)
+            .min(dial_capacity);
         if open_slots == 0 {
             return;
         }
@@ -153,7 +156,8 @@ impl PeerManager {
     }
 
     pub(super) fn fill_open_peer_slots(&mut self) {
-        if self.network_activated && self.peers.len() < self.max_peers {
+        let active_or_submitted = self.peers.len().saturating_add(self.pending_dials.len());
+        if self.network_activated && active_or_submitted < self.max_peers {
             self.queue_known_peers();
         }
         self.dial_pending_peers(self.max_peers);

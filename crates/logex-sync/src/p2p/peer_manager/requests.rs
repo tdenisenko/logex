@@ -20,8 +20,7 @@ const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 5000;
-const PIPELINED_BODY_RECEIPT_RETURN_GAS_TARGET: u128 =
-    30_000_000u128 * PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS as u128;
+const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PIPELINED_WIDE_FANOUT_MIN_PEERS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 4;
@@ -3127,18 +3126,21 @@ fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> 
         return PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS;
     };
 
+    let return_limit = total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS);
+    let return_gas_target =
+        PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET.saturating_mul(return_limit as u128);
     let mut cumulative_gas = 0u128;
     for (index, gas) in gas_used.iter().take(total_blocks).enumerate() {
         cumulative_gas = cumulative_gas.saturating_add(u128::from(*gas));
         let returned_blocks = index + 1;
         if returned_blocks >= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
-            && cumulative_gas >= PIPELINED_BODY_RECEIPT_RETURN_GAS_TARGET
+            && cumulative_gas >= return_gas_target
         {
             return returned_blocks;
         }
     }
 
-    total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS)
+    return_limit
 }
 
 fn body_receipt_min_accepted_prefix(return_blocks: usize) -> usize {
@@ -3242,12 +3244,12 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_return_blocks_caps_dense_prefix_but_allows_sparse_windows() {
+    fn body_receipt_return_blocks_scales_dense_prefix_and_caps_sparse_windows() {
         let dense = vec![30_000_000; 4096];
         let sparse = vec![0; 6000];
 
         assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
-        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 1024);
+        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 4096);
         assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 5000);
         assert_eq!(body_receipt_return_blocks(4096, None), 1024);
     }

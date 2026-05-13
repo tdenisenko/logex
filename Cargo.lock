@@ -5191,6 +5191,7 @@ dependencies = [
  "rand 0.8.5",
  "reth-chainspec",
  "reth-consensus",
+ "reth-consensus-common",
  "reth-db-models",
  "reth-discv4",
  "reth-dns-discovery",

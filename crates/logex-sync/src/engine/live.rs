@@ -138,7 +138,7 @@ impl SyncEngine {
                 let timestamp = header.timestamp();
                 let (body_peer, body) = &bodies[i];
 
-                if let Err(error) = validate_block_pre_execution(header, body) {
+                if let Err(error) = validate_block_pre_execution(header, block_hash, body) {
                     tracing::warn!(
                         block_number,
                         %block_hash,

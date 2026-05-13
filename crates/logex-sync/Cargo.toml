@@ -31,6 +31,7 @@ reth-ethereum-primitives = { workspace = true }
 reth-storage-api = { workspace = true }
 reth-db-models = { workspace = true }
 reth-consensus = { workspace = true }
+reth-consensus-common = { workspace = true }
 reth-ethereum-consensus = { workspace = true }
 
 # Async

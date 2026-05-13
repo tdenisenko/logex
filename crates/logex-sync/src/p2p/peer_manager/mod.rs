@@ -49,7 +49,7 @@ use self::state::{
     should_retry_disconnected_peer,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 const FILL_BUDGET: Duration = Duration::from_secs(2);
 const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
@@ -67,13 +67,13 @@ const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 8;
 const OUTBOUND_DIAL_RATIO: usize = 3;
-const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 192;
-const MAX_PENDING_DIALS_PER_REFILL: usize = 96;
+const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 96;
+const MAX_PENDING_DIALS_PER_REFILL: usize = 48;
 const REQUEST_PEER_REFILL_ATTEMPTS: usize = 20;
 pub(super) const REQUEST_LIMIT_MIN: usize = 1;
 pub(super) const REQUEST_LIMIT_MAX: usize = 128;
-pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 64;
-pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 64;
+pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 16;
+pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 16;
 const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
 const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
 const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);

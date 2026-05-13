@@ -48,15 +48,25 @@ pub async fn run_background_indexer(
             };
             let storage = Arc::clone(&state.storage);
             match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
-                let mut storage = storage.blocking_write();
                 if active_sync {
-                    let backlog = storage.raw_compaction_backlog_count()?;
-                    let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
-                        ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
-                    } else {
-                        compaction_limit
+                    let (plan, compaction_limit) = {
+                        let storage = storage.blocking_read();
+                        let backlog = storage.raw_compaction_backlog_count()?;
+                        let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG
+                        {
+                            ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
+                        } else {
+                            compaction_limit
+                        };
+                        (
+                            storage.raw_segment_compaction_plan(compaction_limit)?,
+                            compaction_limit,
+                        )
                     };
-                    let compacted = storage.compact_raw_segments_limit(compaction_limit)?;
+
+                    debug_assert!(plan.len() <= compaction_limit);
+                    let compacted = plan.compact()?;
+                    let storage = storage.blocking_read();
                     let raw_backlog = storage.raw_compaction_backlog_count()?;
                     return Ok(CompactionReport {
                         compacted,
@@ -65,15 +75,23 @@ pub async fn run_background_indexer(
                     });
                 }
 
-                let compaction_limit = {
+                let (plan, compaction_limit) = {
+                    let storage = storage.blocking_read();
                     let backlog = storage.compaction_backlog_count()?;
-                    if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
+                    let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
                         ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
                     } else {
                         compaction_limit
-                    }
+                    };
+                    (
+                        storage.segment_compaction_plan(compaction_limit)?,
+                        compaction_limit,
+                    )
                 };
-                let compacted = storage.compact_eligible_segments_limit(compaction_limit)?;
+
+                debug_assert!(plan.len() <= compaction_limit);
+                let compacted = plan.compact()?;
+                let storage = storage.blocking_read();
                 let raw_backlog = storage.raw_compaction_backlog_count()?;
                 let total_backlog = storage.compaction_backlog_count()?;
                 Ok(CompactionReport {

@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::thread;
 
 use logex_types::LogRow;
 
@@ -125,62 +126,104 @@ impl NullBitmap {
 /// Handles writing column files for a partition directory.
 pub struct ColumnFile;
 
+fn join_write_worker(handle: thread::ScopedJoinHandle<'_, io::Result<()>>) -> io::Result<()> {
+    handle
+        .join()
+        .map_err(|_| io::Error::other("column write worker panicked"))?
+}
+
 impl ColumnFile {
     /// Write all fixed-size and variable-length column files for a batch of rows.
     pub fn write_batch(dir: &Path, rows: &[LogRow]) -> io::Result<()> {
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
 
-        // Write all columns in parallel (sequentially here, could be parallelized later)
-        Self::write_fixed_col(dir, "address.col", row_count, rows, |w, r| {
-            w.write_all(r.address.as_slice())
-        })?;
-        Self::write_fixed_col(dir, "block_number.col", row_count, rows, |w, r| {
-            w.write_all(&r.block_number.to_le_bytes())
-        })?;
-        Self::write_fixed_col(dir, "block_hash.col", row_count, rows, |w, r| {
-            w.write_all(r.block_hash.as_slice())
-        })?;
-        Self::write_fixed_col(dir, "tx_hash.col", row_count, rows, |w, r| {
-            w.write_all(r.tx_hash.as_slice())
-        })?;
-        Self::write_fixed_col(dir, "tx_index.col", row_count, rows, |w, r| {
-            w.write_all(&r.tx_index.to_le_bytes())
-        })?;
-        Self::write_fixed_col(dir, "log_index.col", row_count, rows, |w, r| {
-            w.write_all(&r.log_index.to_le_bytes())
-        })?;
-        Self::write_fixed_col(dir, "timestamp.col", row_count, rows, |w, r| {
-            w.write_all(&r.timestamp.to_le_bytes())
-        })?;
-        Self::write_fixed_col(dir, "data_len.col", row_count, rows, |w, r| {
-            w.write_all(&r.data_len.to_le_bytes())
-        })?;
-        Self::write_fixed_col(dir, "source.col", row_count, rows, |w, r| {
-            w.write_all(&[r.source as u8])
-        })?;
+        thread::scope(|scope| {
+            let address = scope.spawn(|| {
+                Self::write_fixed_col(dir, "address.col", row_count, rows, |w, r| {
+                    w.write_all(r.address.as_slice())
+                })
+            });
+            let block_number = scope.spawn(|| {
+                Self::write_fixed_col(dir, "block_number.col", row_count, rows, |w, r| {
+                    w.write_all(&r.block_number.to_le_bytes())
+                })
+            });
+            let block_hash = scope.spawn(|| {
+                Self::write_fixed_col(dir, "block_hash.col", row_count, rows, |w, r| {
+                    w.write_all(r.block_hash.as_slice())
+                })
+            });
+            let tx_hash = scope.spawn(|| {
+                Self::write_fixed_col(dir, "tx_hash.col", row_count, rows, |w, r| {
+                    w.write_all(r.tx_hash.as_slice())
+                })
+            });
+            let tx_index = scope.spawn(|| {
+                Self::write_fixed_col(dir, "tx_index.col", row_count, rows, |w, r| {
+                    w.write_all(&r.tx_index.to_le_bytes())
+                })
+            });
+            let log_index = scope.spawn(|| {
+                Self::write_fixed_col(dir, "log_index.col", row_count, rows, |w, r| {
+                    w.write_all(&r.log_index.to_le_bytes())
+                })
+            });
+            let timestamp = scope.spawn(|| {
+                Self::write_fixed_col(dir, "timestamp.col", row_count, rows, |w, r| {
+                    w.write_all(&r.timestamp.to_le_bytes())
+                })
+            });
+            let data_len = scope.spawn(|| {
+                Self::write_fixed_col(dir, "data_len.col", row_count, rows, |w, r| {
+                    w.write_all(&r.data_len.to_le_bytes())
+                })
+            });
+            let source = scope.spawn(|| {
+                Self::write_fixed_col(dir, "source.col", row_count, rows, |w, r| {
+                    w.write_all(&[r.source as u8])
+                })
+            });
+            let topic0 = scope.spawn(|| {
+                Self::write_nullable_col(dir, "topic0", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic0.as_ref())
+                })
+            });
+            let topic1 = scope.spawn(|| {
+                Self::write_nullable_col(dir, "topic1", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic1.as_ref())
+                })
+            });
+            let topic2 = scope.spawn(|| {
+                Self::write_nullable_col(dir, "topic2", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic2.as_ref())
+                })
+            });
+            let topic3 = scope.spawn(|| {
+                Self::write_nullable_col(dir, "topic3", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic3.as_ref())
+                })
+            });
+            let data = scope.spawn(|| Self::write_var_col(dir, "data.col", row_count, rows));
+            let canonical = scope.spawn(|| Self::write_canonical_bitmap(dir, row_count));
 
-        // Nullable topic columns: write column file + null bitmap
-        Self::write_nullable_col(dir, "topic0", row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic0.as_ref())
-        })?;
-        Self::write_nullable_col(dir, "topic1", row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic1.as_ref())
-        })?;
-        Self::write_nullable_col(dir, "topic2", row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic2.as_ref())
-        })?;
-        Self::write_nullable_col(dir, "topic3", row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic3.as_ref())
-        })?;
-
-        // Variable-length data column: offset array + data blob
-        Self::write_var_col(dir, "data.col", row_count, rows)?;
-
-        // Canonical bitmap: all rows start as canonical
-        Self::write_canonical_bitmap(dir, row_count)?;
-
-        Ok(())
+            join_write_worker(address)?;
+            join_write_worker(block_number)?;
+            join_write_worker(block_hash)?;
+            join_write_worker(tx_hash)?;
+            join_write_worker(tx_index)?;
+            join_write_worker(log_index)?;
+            join_write_worker(timestamp)?;
+            join_write_worker(data_len)?;
+            join_write_worker(source)?;
+            join_write_worker(topic0)?;
+            join_write_worker(topic1)?;
+            join_write_worker(topic2)?;
+            join_write_worker(topic3)?;
+            join_write_worker(data)?;
+            join_write_worker(canonical)?;
+            Ok(())
+        })
     }
 
     /// Append rows to existing column files (for the hot partition).

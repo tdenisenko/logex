@@ -25,7 +25,7 @@ use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
 use crate::validation::{
     receipts_match_transaction_count, validate_block_pre_execution, validate_downloaded_headers,
-    validate_receipts_for_header, validate_reverse_downloaded_headers,
+    validate_receipts_for_header, validate_reverse_downloaded_headers_with_hashes,
 };
 
 mod anchored;
@@ -46,7 +46,7 @@ const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 8;
 const TARGET_ACTIVE_SYNC_PEERS: usize = 80;
 const PEER_REFILL_STEP: usize = 16;
-const HISTORICAL_BACKFILL_MIN_CONNECTED_PEERS: usize = 8;
+const HISTORICAL_BACKFILL_CONNECTED_PEER_FLOOR_CAP: usize = 4;
 const RECENT_HEADER_WINDOW: usize = 8_192;
 const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
 const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;

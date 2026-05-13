@@ -18,8 +18,7 @@ use super::catalog::{
 };
 use super::segment::{
     append_rows, apply_rows_to_descriptor, compact_segment, persist_segment_manifest,
-    persist_segment_manifest_with_columns, segment_uses_current_compaction_profile,
-    write_compacted_rows,
+    segment_uses_current_compaction_profile,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -40,6 +39,55 @@ struct StorageState {
 enum CompactionMode {
     RawOnly,
     CurrentProfile,
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentCompactionTask {
+    paths: StorageCatalogPaths,
+    descriptor: SegmentDescriptor,
+}
+
+impl SegmentCompactionTask {
+    pub fn segment_id(&self) -> u64 {
+        self.descriptor.id
+    }
+
+    pub fn compact(&self) -> std::io::Result<()> {
+        compact_segment(&self.paths, &self.descriptor)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SegmentCompactionPlan {
+    tasks: Vec<SegmentCompactionTask>,
+}
+
+impl SegmentCompactionPlan {
+    fn new(paths: StorageCatalogPaths, descriptors: Vec<SegmentDescriptor>) -> Self {
+        let tasks = descriptors
+            .into_iter()
+            .map(|descriptor| SegmentCompactionTask {
+                paths: paths.clone(),
+                descriptor,
+            })
+            .collect();
+        Self { tasks }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn compact(&self) -> std::io::Result<usize> {
+        for task in &self.tasks {
+            task.compact()?;
+        }
+        Ok(self.tasks.len())
+    }
 }
 
 pub struct NativeStorage {
@@ -243,9 +291,9 @@ impl NativeStorage {
             if segment_dir.exists() {
                 fs::remove_dir_all(&segment_dir)?;
             }
-            let columns = write_compacted_rows(&segment_dir, chunk)?;
+            append_rows(&segment_dir, 0, chunk)?;
             apply_rows_to_descriptor(&mut descriptor, chunk);
-            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
+            persist_segment_manifest(&self.paths, &descriptor)?;
             self.catalog.segments.push(descriptor);
             self.persist_catalog()?;
         }
@@ -328,20 +376,33 @@ impl NativeStorage {
     }
 
     pub fn compact_raw_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
-        self.compact_segments_limit(limit, CompactionMode::RawOnly)
+        let plan = self.raw_segment_compaction_plan(limit)?;
+        plan.compact()
     }
 
     pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
-        self.compact_segments_limit(limit, CompactionMode::CurrentProfile)
+        let plan = self.segment_compaction_plan(limit)?;
+        plan.compact()
     }
 
-    fn compact_segments_limit(
-        &mut self,
+    pub fn raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.compaction_plan(limit, CompactionMode::RawOnly)
+    }
+
+    pub fn segment_compaction_plan(&self, limit: usize) -> std::io::Result<SegmentCompactionPlan> {
+        self.compaction_plan(limit, CompactionMode::CurrentProfile)
+    }
+
+    fn compaction_plan(
+        &self,
         limit: usize,
         mode: CompactionMode,
-    ) -> std::io::Result<usize> {
+    ) -> std::io::Result<SegmentCompactionPlan> {
         if limit == 0 {
-            return Ok(0);
+            return Ok(SegmentCompactionPlan::default());
         }
 
         let mut eligible = Vec::new();
@@ -358,11 +419,7 @@ impl NativeStorage {
             }
         }
 
-        for descriptor in &eligible {
-            compact_segment(&self.paths, descriptor)?;
-        }
-
-        Ok(eligible.len())
+        Ok(SegmentCompactionPlan::new(self.paths.clone(), eligible))
     }
 
     pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
@@ -1004,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn native_storage_writes_historical_batches_as_compacted_segments() {
+    fn native_storage_writes_historical_batches_as_raw_sealed_segments() {
         let tmp = TempDir::new().unwrap();
         let rows = make_rows(25, 100);
         let mut storage = NativeStorage::open(NativeStorageConfig {
@@ -1026,11 +1083,22 @@ mod tests {
         assert_eq!(storage.total_rows(), 25);
 
         let first_segment = storage.segment_path(sealed[0].id);
-        assert!(!first_segment.join("address.col").exists());
-        assert!(first_segment.join("columns/address.pages").exists());
+        assert!(first_segment.join("address.col").exists());
+        assert!(!first_segment.join("columns/address.pages").exists());
 
         let reader = SegmentReader::open(&first_segment).unwrap();
         assert_eq!(reader.read_log_rows(None).unwrap(), rows[..10].to_vec());
+
+        storage
+            .record_sync_head(10_000, B256::repeat_byte(0xAA), 999)
+            .unwrap();
+        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 3);
+        let raw_plan = storage.raw_segment_compaction_plan(2).unwrap();
+        assert_eq!(raw_plan.len(), 2);
+        assert_eq!(raw_plan.compact().unwrap(), 2);
+        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 1);
+        assert!(!first_segment.join("address.col").exists());
+        assert!(first_segment.join("columns/address.pages").exists());
 
         let reloaded = NativeStorage::open(NativeStorageConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -1347,10 +1415,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(storage.compaction_backlog_count().unwrap(), 1);
-        assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
+        let plan = storage.segment_compaction_plan(10).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.compact().unwrap(), 1);
         assert!(!sealed_path.join("address.col").exists());
         assert!(sealed_path.join("columns/address.pages").exists());
         assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
+        assert_eq!(storage.segment_compaction_plan(10).unwrap().len(), 0);
         assert_eq!(storage.compact_eligible_segments().unwrap(), 0);
     }
 }

@@ -6,10 +6,13 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
 use logex_types::ExecutionAnchor;
 use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
-use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
+use reth_consensus::{ConsensusError, HeaderValidator};
+use reth_consensus_common::validation::{
+    MAX_RLP_BLOCK_SIZE, validate_body_against_header as validate_reth_body_against_header,
+};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_primitives::{Block as EthereumBlock, BlockBody as EthereumBlockBody};
-use reth_primitives_traits::{BlockBody, GotExpected, SealedBlock, SealedHeader};
+use reth_primitives_traits::{Block, BlockBody, GotExpected, SealedHeader};
 
 static EXECUTION_CONSENSUS: LazyLock<EthBeaconConsensus<ChainSpec>> =
     LazyLock::new(|| EthBeaconConsensus::new(MAINNET.clone()));
@@ -168,8 +171,15 @@ pub fn validate_reverse_downloaded_headers(
     child_header: &Header,
     headers: &[Header],
 ) -> Result<(), HeaderValidationError> {
+    validate_reverse_downloaded_headers_with_hashes(child_header, headers).map(|_| ())
+}
+
+pub fn validate_reverse_downloaded_headers_with_hashes(
+    child_header: &Header,
+    headers: &[Header],
+) -> Result<Vec<B256>, HeaderValidationError> {
     let Some(first_header) = headers.first() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
     let expected_start_block = child_header.number().saturating_sub(1);
@@ -180,7 +190,8 @@ pub fn validate_reverse_downloaded_headers(
         });
     }
 
-    let mut child = SealedHeader::seal_slow(child_header.clone());
+    let mut child = SealedHeader::new_unhashed(child_header.clone());
+    let mut hashes = Vec::with_capacity(headers.len());
     for parent_header in headers {
         let parent_hash = parent_header.hash_slow();
         if child.parent_hash() != parent_hash {
@@ -190,29 +201,26 @@ pub fn validate_reverse_downloaded_headers(
             });
         }
 
-        let parent = SealedHeader::seal_slow(parent_header.clone());
+        let parent = SealedHeader::new(parent_header.clone(), parent_hash);
         EXECUTION_CONSENSUS
             .validate_header(&parent)
             .map_err(HeaderValidationError::Standalone)?;
         EXECUTION_CONSENSUS
             .validate_header_against_parent(&child, &parent)
             .map_err(HeaderValidationError::AgainstParent)?;
+        hashes.push(parent_hash);
         child = parent;
     }
 
-    Ok(())
+    Ok(hashes)
 }
 
 pub fn validate_block_pre_execution(
     header: &Header,
+    _block_hash: B256,
     body: &EthereumBlockBody,
 ) -> Result<(), ConsensusError> {
-    let sealed_header = SealedHeader::seal_slow(header.clone());
-    <EthBeaconConsensus<ChainSpec> as Consensus<EthereumBlock>>::validate_body_against_header(
-        &*EXECUTION_CONSENSUS,
-        body,
-        &sealed_header,
-    )?;
+    validate_reth_body_against_header(body, header)?;
 
     if let Some(header_blob_gas_used) = header.blob_gas_used() {
         let total_blob_gas = body.blob_gas_used();
@@ -228,11 +236,13 @@ pub fn validate_block_pre_execution(
         .chain_spec()
         .is_osaka_active_at_timestamp(header.timestamp())
     {
-        let sealed_block = SealedBlock::seal_slow(EthereumBlock {
-            header: header.clone(),
-            body: body.clone(),
-        });
-        EXECUTION_CONSENSUS.validate_block_pre_execution(&sealed_block)?;
+        let rlp_length = EthereumBlock::rlp_length(header, body);
+        if rlp_length > MAX_RLP_BLOCK_SIZE {
+            return Err(ConsensusError::BlockTooLarge {
+                rlp_length,
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            });
+        }
     }
 
     Ok(())
@@ -475,7 +485,7 @@ mod tests {
         };
 
         assert!(matches!(
-            validate_block_pre_execution(&header, &body),
+            validate_block_pre_execution(&header, header.hash_slow(), &body),
             Err(ConsensusError::BlobGasUsedDiff(_))
         ));
     }
