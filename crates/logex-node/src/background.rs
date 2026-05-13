@@ -11,6 +11,7 @@ const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 4;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 64;
+const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 16;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
 const BYTES_PER_KIB: u64 = 1024;
@@ -86,7 +87,7 @@ pub async fn run_background_indexer(
             let storage = Arc::clone(&state.storage);
             match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
                 if active_sync {
-                    let (plan, compaction_limit) = {
+                    let (raw_plan, profile_plan, compaction_limit) = {
                         let storage = storage.blocking_read();
                         let backlog = storage.raw_compaction_backlog_count()?;
                         let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG
@@ -97,18 +98,26 @@ pub async fn run_background_indexer(
                         };
                         (
                             storage.raw_segment_compaction_plan(compaction_limit)?,
+                            storage.profile_rewrite_compaction_plan(
+                                if backlog <= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
+                                    ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT
+                                } else {
+                                    0
+                                },
+                            )?,
                             compaction_limit,
                         )
                     };
 
-                    debug_assert!(plan.len() <= compaction_limit);
-                    let compacted = plan.compact()?;
+                    debug_assert!(raw_plan.len() <= compaction_limit);
+                    let compacted = raw_plan.compact()? + profile_plan.compact()?;
                     let storage = storage.blocking_read();
                     let raw_backlog = storage.raw_compaction_backlog_count()?;
+                    let profile_rewrite_backlog = storage.profile_rewrite_backlog_count()?;
                     return Ok(CompactionReport {
                         compacted,
                         raw_backlog: Some(raw_backlog),
-                        profile_rewrite_backlog: None,
+                        profile_rewrite_backlog: Some(profile_rewrite_backlog),
                     });
                 }
 

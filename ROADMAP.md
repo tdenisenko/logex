@@ -19,6 +19,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Reworked high-memory historical lookahead to use 4096-block batches at depth 3 once enough connected/serving peers are available, and removed the 16-block wide-peer chunk downshift so the paired request cap controls pressure.
 - Sorted validated historical blocks into ascending block order before storage extraction so the columnar encoders receive locality-friendly rows without changing EL validation.
 - Added a signed-delta `block_number` storage codec for reverse-sync segments, reducing newly compacted dense segment `block_number.pages` from about 2.3-2.6 MiB to about 60-68 KiB per roughly 300k rows.
+- Added a fast block-number-only profile rewrite path and let active compaction migrate old compacted segments in small batches, so the current run can reclaim space without rewriting every column.
 
 ## Remaining TODOs
 
@@ -58,7 +59,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
-- Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. This keeps raw compaction efficient and remains backward-compatible with existing compacted segments that still declare the older codec.
+- Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 
 ## Challenges and Resolutions
 
@@ -105,7 +106,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
   - Resolution: Switched the high-memory path to 4096-block batches at depth three and kept 32-block body/receipt chunks so a full 2048-block prefix can fit within the paired request cap. The warmed remote run reached about 718 historical blocks/sec with stable memory headroom.
 
 - Challenge: Dense historical segments were spending several MiB per compacted `block_number` column because reverse-order rows defeated the unsigned delta codec.
-  - Resolution: Historical rows are now extracted in ascending block order, and `block_number` compaction uses signed deltas so both old reverse-order raw segments and new sorted segments compress efficiently.
+  - Resolution: Historical rows are now extracted in ascending block order, `block_number` compaction uses signed deltas, and active compaction can migrate old compacted block-number columns without rewriting every log column.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -116,6 +117,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Reverted an outbound-heavy peer split trial because it under-filled the peer pool compared with the established split.
 - Removed the 16-block wide-peer body/receipt chunk cap after it forced extra request waves under the paired in-flight cap.
 - Replaced the old unsigned `block_number` compaction profile for new compactions with signed delta encoding; existing compacted segments remain readable through their manifest-declared codec.
+- Added a targeted legacy block-number profile rewrite path instead of using the existing full-row recompact path for this migration.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow

@@ -38,6 +38,7 @@ struct StorageState {
 #[derive(Debug, Clone, Copy)]
 enum CompactionMode {
     RawOnly,
+    ProfileRewrite,
     CurrentProfile,
 }
 
@@ -396,6 +397,13 @@ impl NativeStorage {
         self.compaction_plan(limit, CompactionMode::CurrentProfile)
     }
 
+    pub fn profile_rewrite_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.compaction_plan(limit, CompactionMode::ProfileRewrite)
+    }
+
     fn compaction_plan(
         &self,
         limit: usize,
@@ -412,6 +420,7 @@ impl NativeStorage {
             }
             let needs_compaction = match mode {
                 CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment)?,
+                CompactionMode::ProfileRewrite => self.segment_needs_profile_rewrite(segment)?,
                 CompactionMode::CurrentProfile => self.segment_needs_compaction(segment)?,
             };
             if needs_compaction {
@@ -436,6 +445,16 @@ impl NativeStorage {
         let mut count = 0usize;
         for segment in &self.catalog.segments {
             if self.segment_needs_compaction(segment)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    pub fn profile_rewrite_backlog_count(&self) -> std::io::Result<usize> {
+        let mut count = 0usize;
+        for segment in &self.catalog.segments {
+            if self.segment_needs_profile_rewrite(segment)? {
                 count += 1;
             }
         }
@@ -725,6 +744,23 @@ impl NativeStorage {
         }
 
         Ok(!super::segment::segment_is_compacted(
+            &self.paths,
+            descriptor.id,
+        )?)
+    }
+
+    fn segment_needs_profile_rewrite(
+        &self,
+        descriptor: &SegmentDescriptor,
+    ) -> std::io::Result<bool> {
+        if !self.should_compact_segment(descriptor) {
+            return Ok(false);
+        }
+        if !super::segment::segment_is_compacted(&self.paths, descriptor.id)? {
+            return Ok(false);
+        }
+
+        Ok(!segment_uses_current_compaction_profile(
             &self.paths,
             descriptor.id,
         )?)

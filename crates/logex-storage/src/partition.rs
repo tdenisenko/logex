@@ -130,6 +130,14 @@ impl PartitionManager {
         self.inner.raw_segment_compaction_plan(limit)
     }
 
+    /// Select compacted sealed segments that only need migration to the current profile.
+    pub fn profile_rewrite_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.profile_rewrite_compaction_plan(limit)
+    }
+
     /// Count sealed segments that are eligible for compaction.
     pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
         self.inner.compaction_backlog_count()
@@ -138,6 +146,11 @@ impl PartitionManager {
     /// Count raw sealed segments that need first-time compaction.
     pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
         self.inner.raw_compaction_backlog_count()
+    }
+
+    /// Count compacted sealed segments that need migration to the current profile.
+    pub fn profile_rewrite_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.profile_rewrite_backlog_count()
     }
 
     /// Persist the latest fully-validated block, even when it produced no logs.

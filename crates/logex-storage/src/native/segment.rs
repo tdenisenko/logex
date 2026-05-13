@@ -310,6 +310,10 @@ fn recompact_segment(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
+    if recompact_block_number_profile(paths, descriptor)? {
+        return Ok(());
+    }
+
     let segment_dir = paths.segment_dir(descriptor.id);
     let tmp_dir = segment_dir.join(".recompact_tmp");
     if tmp_dir.exists() {
@@ -339,6 +343,79 @@ fn recompact_segment(
     );
 
     Ok(())
+}
+
+fn recompact_block_number_profile(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<bool> {
+    let Some(mut columns) = existing_columns(paths, descriptor.id)? else {
+        return Ok(false);
+    };
+    let Some(block_column_index) = block_number_only_profile_mismatch(&columns) else {
+        return Ok(false);
+    };
+
+    let segment_dir = paths.segment_dir(descriptor.id);
+    let tmp_dir = segment_dir.join(".block_number_recompact_tmp");
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)?;
+    }
+    fs::create_dir_all(tmp_dir.join("columns"))?;
+
+    let values = SegmentReader::open(&segment_dir)?.read_u64("block_number", None)?;
+    let mut block_number_column = compact_u64_values(
+        &tmp_dir,
+        "block_number",
+        CompressionCodec::DeltaZigZag,
+        values,
+    )?;
+    let target_dir_name = "columns_block_number_v2";
+    let target_dir = segment_dir.join(target_dir_name);
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir)?;
+    }
+    fs::rename(tmp_dir.join("columns"), &target_dir)?;
+    rewrite_column_path_descriptor(&mut block_number_column, target_dir_name);
+
+    let old_column = std::mem::replace(&mut columns[block_column_index], block_number_column);
+    persist_segment_manifest_with_columns(paths, descriptor, columns)?;
+    remove_column_files(&segment_dir, &old_column)?;
+    if tmp_dir.exists() {
+        fs::remove_dir_all(tmp_dir)?;
+    }
+
+    tracing::info!(
+        segment_id = descriptor.id,
+        row_count = descriptor.row_count,
+        "recompressed block_number column with signed deltas"
+    );
+
+    Ok(true)
+}
+
+fn block_number_only_profile_mismatch(columns: &[ColumnDescriptor]) -> Option<usize> {
+    if columns.len() != current_column_profile().len() {
+        return None;
+    }
+
+    let mut block_column_index = None;
+    for (name, codec) in current_column_profile() {
+        let (index, column) = columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name == *name && column.page_index_path.is_some())?;
+        if *name == "block_number" {
+            if column.codec != CompressionCodec::Delta {
+                return None;
+            }
+            block_column_index = Some(index);
+        } else if column.codec != *codec {
+            return None;
+        }
+    }
+
+    block_column_index
 }
 
 pub(crate) fn segment_is_compacted(
@@ -638,16 +715,20 @@ fn compact_data_values(segment_dir: &Path, rows: &[LogRow]) -> std::io::Result<C
 
 fn rewrite_column_dir(columns: &mut [ColumnDescriptor], dir_name: &str) {
     for column in columns {
-        column.data_path = rewrite_column_path(&column.data_path, dir_name);
-        column.null_bitmap_path = column
-            .null_bitmap_path
-            .as_ref()
-            .map(|path| rewrite_column_path(path, dir_name));
-        column.page_index_path = column
-            .page_index_path
-            .as_ref()
-            .map(|path| rewrite_column_path(path, dir_name));
+        rewrite_column_path_descriptor(column, dir_name);
     }
+}
+
+fn rewrite_column_path_descriptor(column: &mut ColumnDescriptor, dir_name: &str) {
+    column.data_path = rewrite_column_path(&column.data_path, dir_name);
+    column.null_bitmap_path = column
+        .null_bitmap_path
+        .as_ref()
+        .map(|path| rewrite_column_path(path, dir_name));
+    column.page_index_path = column
+        .page_index_path
+        .as_ref()
+        .map(|path| rewrite_column_path(path, dir_name));
 }
 
 fn rewrite_column_path(path: &str, dir_name: &str) -> String {
@@ -788,6 +869,25 @@ fn remove_superseded_column_dirs(segment_dir: &Path, active_dir: &str) -> std::i
     Ok(())
 }
 
+fn remove_column_files(segment_dir: &Path, column: &ColumnDescriptor) -> std::io::Result<()> {
+    remove_file_if_exists(segment_dir.join(&column.data_path))?;
+    if let Some(path) = &column.null_bitmap_path {
+        remove_file_if_exists(segment_dir.join(path))?;
+    }
+    if let Some(path) = &column.page_index_path {
+        remove_file_if_exists(segment_dir.join(path))?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: PathBuf) -> std::io::Result<()> {
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> {
     let index_dir = segment_dir.join("indexes");
     if !index_dir.exists() {
@@ -819,4 +919,99 @@ fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> 
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::bytes;
+    use logex_types::Source;
+    use tempfile::TempDir;
+
+    fn descending_rows() -> Vec<LogRow> {
+        (0..8192)
+            .map(|index| {
+                let block_number = 2_000u64 - (index / 8) as u64;
+                LogRow {
+                    block_number,
+                    block_hash: B256::repeat_byte((block_number % 251) as u8),
+                    timestamp: 1_700_000_000 - (index / 8) as u64 * 12,
+                    tx_hash: B256::repeat_byte((index % 251) as u8),
+                    tx_index: (index % 4) as u32,
+                    log_index: index as u32,
+                    address: Address::repeat_byte((index % 17) as u8),
+                    topic0: Some(B256::repeat_byte(0xdd)),
+                    topic1: None,
+                    topic2: None,
+                    topic3: None,
+                    data: bytes!("cafe"),
+                    data_len: 2,
+                    source: Source::Receipt,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recompact_segment_rewrites_only_legacy_block_number_profile() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
+        paths.ensure_base_dirs().unwrap();
+        let descriptor = SegmentDescriptor {
+            id: 7,
+            generation: 0,
+            kind: SegmentKind::Sealed,
+            relative_path: PathBuf::from("segments").join("s_0000000000000007"),
+            manifest_relative_path: PathBuf::from("segments")
+                .join("s_0000000000000007")
+                .join("segment.json"),
+            min_block: Some(0),
+            max_block: Some(2_000),
+            row_count: 8192,
+        };
+        let segment_dir = paths.segment_dir(descriptor.id);
+        let rows = descending_rows();
+        let mut columns = write_compacted_rows(&segment_dir, &rows).unwrap();
+        let legacy_block_number = compact_u64_values(
+            &segment_dir,
+            "block_number",
+            CompressionCodec::Delta,
+            rows.iter().map(|row| row.block_number),
+        )
+        .unwrap();
+        let block_number_index = columns
+            .iter()
+            .position(|column| column.name == "block_number")
+            .unwrap();
+        columns[block_number_index] = legacy_block_number.clone();
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+
+        let old_size = fs::metadata(segment_dir.join(&legacy_block_number.data_path))
+            .unwrap()
+            .len();
+        compact_segment(&paths, &descriptor).unwrap();
+
+        let columns = existing_columns(&paths, descriptor.id).unwrap().unwrap();
+        let block_number = columns
+            .iter()
+            .find(|column| column.name == "block_number")
+            .unwrap();
+        assert_eq!(block_number.codec, CompressionCodec::DeltaZigZag);
+        let new_size = fs::metadata(segment_dir.join(&block_number.data_path))
+            .unwrap()
+            .len();
+        assert!(
+            new_size.saturating_mul(10) < old_size,
+            "old_size={old_size} new_size={new_size}"
+        );
+
+        let reread = SegmentReader::open(&segment_dir)
+            .unwrap()
+            .read_u64("block_number", None)
+            .unwrap();
+        assert_eq!(
+            reread,
+            rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
+        );
+    }
 }
