@@ -11,7 +11,7 @@ use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
-const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(5);
+const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
@@ -430,7 +430,7 @@ impl PeerManager {
             .enumerate()
             .map(|(index, range)| (range.start, index))
             .collect();
-        let max_in_flight = request_window_limit(
+        let max_in_flight = paired_body_receipt_chunk_window_limit(
             body_peer_ids.len().min(receipt_peer_ids.len()),
             MAX_PARALLEL_BODY_RECEIPT_REQUESTS,
         );
@@ -3047,6 +3047,15 @@ fn request_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
         .clamp(1, max_in_flight)
 }
 
+fn paired_body_receipt_chunk_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
+    let request_limit = request_window_limit(peer_count, max_in_flight);
+    if request_limit == 0 {
+        0
+    } else {
+        request_limit.div_ceil(2)
+    }
+}
+
 fn chunk_ranges_with_optional_gas(
     total_items: usize,
     mut limit_for_chunk: impl FnMut(usize) -> usize,
@@ -3232,6 +3241,15 @@ mod tests {
         assert_eq!(request_window_limit(1, 16), 4);
         assert_eq!(request_window_limit(2, 16), 8);
         assert_eq!(request_window_limit(8, 16), 16);
+    }
+
+    #[test]
+    fn paired_body_receipt_window_counts_both_request_types() {
+        assert_eq!(paired_body_receipt_chunk_window_limit(0, 16), 0);
+        assert_eq!(paired_body_receipt_chunk_window_limit(1, 16), 2);
+        assert_eq!(paired_body_receipt_chunk_window_limit(2, 16), 4);
+        assert_eq!(paired_body_receipt_chunk_window_limit(8, 16), 8);
+        assert_eq!(paired_body_receipt_chunk_window_limit(64, 128), 64);
     }
 
     #[test]

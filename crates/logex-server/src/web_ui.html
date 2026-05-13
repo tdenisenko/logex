@@ -990,7 +990,7 @@ function updateStatus(data) {
   setText('nodeState', stateLabel);
   refreshLastUpdated();
 
-  setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 1) + '%' : '--');
+  setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 2) + '%' : '--');
   setText('executionSummary', floorBlock == null
     ? 'Waiting for the first verified historical Execution Layer block.'
     : fmtBlocks(remaining) + ' remaining to genesis.');

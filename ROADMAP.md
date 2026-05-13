@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is keeping enough useful EL body/receipt service and local validation/extraction overlap to sustain the sub-6-hour target without exceeding memory on smaller machines.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. Recent warmed samples improved to roughly 500-550 historical blocks/sec, still above the sub-6-hour full-history target.
 
 ## Completed Since Last Run
 
@@ -14,6 +14,8 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Made active-sync storage compaction skip work under low available memory while still reporting the raw compaction backlog.
 - Extended graceful shutdown waits so in-flight verified historical writes can drain instead of being interrupted during normal SIGINT/SIGTERM.
 - Tested and removed an experimental dial cooldown because it did not clearly improve peer ramp compared with the established peer policy.
+- Capped paired body/receipt chunk fanout by counting both request types, shortened bounded hedging for slow chunks, and kept the high-memory lookahead at six queued fetches after an eight-deep trial consumed too much memory for little gain.
+- Changed the dashboard Execution Layer sync percentage to two decimal places.
 
 ## Remaining TODOs
 
@@ -47,7 +49,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
-- Medium-peer historical reverse sync keeps four body/receipt fetches queued; high-memory runs with enough serving peers may queue six. Available-memory guards reduce both depth and window size before the process risks OOM.
+- Medium-peer historical reverse sync keeps four body/receipt fetches queued; high-memory runs with enough serving peers may queue six. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
@@ -92,11 +94,15 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Challenge: A trial dial retry cooldown added complexity without a clear peer-retention gain.
   - Resolution: The cooldown was removed before committing; the branch keeps the previously proven peer connection policy.
 
+- Challenge: Body/receipt batches were over-counting safe parallelism because each scheduled range can issue both a body request and a receipt request.
+  - Resolution: The paired pipeline now halves the chunk window derived from request concurrency, reducing timeout pressure while retaining overlap.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, and background compaction loop.
+- Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, and dashboard sync display.
 - Removed the experimental peer dial cooldown after remote testing did not show a clear benefit.
-- Kept the memory-aware lookahead and compaction guards because they directly address the observed slowdown/OOM risk.
+- Reverted the eight-deep high-memory lookahead trial after remote RSS and throughput samples showed the extra memory was not justified.
+- Kept the memory-aware lookahead, compaction guards, paired request accounting, and bounded chunk hedging because they directly address observed slowdown/OOM or timeout risks.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow
