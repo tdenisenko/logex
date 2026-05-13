@@ -4,7 +4,7 @@
 
 LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer head/finality over native P2P, and uses authenticated execution anchors as the pivot for Execution Layer validation. Execution Layer P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 against `feature/el-reverse-sync` / draft PR #76. This branch focuses on the dashboard surface and HTTP access controls while the parent branch remains focused on Execution Layer reverse-sync throughput.
+The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch; the remaining focus is Execution Layer reverse-sync throughput and production readiness.
 
 ## Completed Since Last Run
 
@@ -14,6 +14,7 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 - Added HTTP dashboard controls: dashboard enabled by default, `--disable-dashboard`, config-level `dashboard_enabled`, and `--dashboard-password` / `dashboard_password` for HTTP Basic authentication.
 - Restored the softer pre-existing dashboard styling while keeping the simplified DOM and green animated Execution Layer progress bar.
 - Refined the dashboard review build: the Execution Layer panel now carries the primary status details, performance charts use rounded wall-clock ticks, and the query panel paginates loaded capped results with CSV export.
+- Merged dashboard PR #77 into `feature/el-reverse-sync`.
 
 ## Remaining TODOs
 
@@ -64,11 +65,11 @@ The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 ag
 
 ## Git Workflow
 
-- Current branch: `ui/minimal-sync-dashboard`
-- New branch created this run: yes
-- Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`
-- Pull request status: PR #77 (`https://github.com/tdenisenko/logex/pull/77`) approved for merge into `feature/el-reverse-sync`.
-- Merge status: pending final PR merge.
+- Current branch: `feature/el-reverse-sync`
+- New branch created this run: `ui/minimal-sync-dashboard` was created for the completed dashboard task and has been merged back.
+- Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`, `fix: refine dashboard review flow`
+- Pull request status: PR #77 (`https://github.com/tdenisenko/logex/pull/77`) merged into `feature/el-reverse-sync`.
+- Merge status: merged via squash commit `5e9bcd80ec9f4edce67171e717e8886be1b08b87`.
 - Git/GitHub blockers: none known.
 
 ## Known Issues or Risks
