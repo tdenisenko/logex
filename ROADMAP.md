@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote measurements show peer retention is no longer the main limiter. The 4-vCPU/8GB host is CPU- and memory-bound while verifying dense receipt/log ranges, with near-zero IO delay and continuous segment compaction.
+Current remote measurements show peer retention is no longer the main limiter. The 4-vCPU/8GB host is CPU- and memory-bound while verifying dense receipt/log ranges; the latest slowdown was dominated by 26-36 second storage/write waits per 2,048-block batch while the process held about 7.1 GiB RSS on an 8 GiB host.
 
 ## Completed Since Last Run
 
@@ -88,6 +88,9 @@ Current remote measurements show peer retention is no longer the main limiter. T
 - Challenge: Warm remote runs still remain above the sub-6-hour target after peer retention and pipeline overlap improvements.
   - Resolution: Profiling now points to receipt-trie hashing, log extraction/storage, and 8GB memory pressure as the remaining limit on the current host; IO delay is not material.
 
+- Challenge: A later remote run dropped from hundreds of blocks/sec to about 43 blocks/sec despite 50 connected peers and 39 serving peers.
+  - Resolution: Bounded status, log, and `pidstat` samples showed the stalled batches were dominated by storage/write waits and memory pressure, not peer retention. The remote client was stopped cleanly for a CPU/RAM upgrade.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
@@ -100,7 +103,7 @@ Current remote measurements show peer retention is no longer the main limiter. T
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, assembly Keccak, and forward-lineage allocation cleanup commits on this branch; remote bottleneck measurement pending commit.
+- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, assembly Keccak, forward-lineage allocation cleanup, and remote bottleneck documentation commits on this branch.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
