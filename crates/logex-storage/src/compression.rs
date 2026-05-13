@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 
 /// Compression codec identifier stored in column file headers.
@@ -39,24 +40,50 @@ impl Codec {
 // ---------------------------------------------------------------------------
 
 pub fn dict_encode(values: &[&[u8]], item_size: usize) -> Vec<u8> {
-    // Build dictionary
-    let mut dict: Vec<Vec<u8>> = Vec::new();
-    let mut index_map: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
+    let mut dict: Vec<&[u8]> = Vec::new();
+    let mut index_map: HashMap<&[u8], u32> = HashMap::with_capacity(values.len());
     let mut indices: Vec<u32> = Vec::with_capacity(values.len());
 
-    for val in values {
-        let key = val.to_vec();
-        let idx = if let Some(&existing) = index_map.get(&key) {
+    for &val in values {
+        let idx = if let Some(&existing) = index_map.get(val) {
             existing
         } else {
             let idx = dict.len() as u32;
-            index_map.insert(key.clone(), idx);
-            dict.push(key);
+            index_map.insert(val, idx);
+            dict.push(val);
             idx
         };
         indices.push(idx);
     }
 
+    encode_dictionary_parts(&dict, item_size, &indices)
+}
+
+pub fn dict_encode_raw(raw_values: &[u8], item_size: usize) -> Vec<u8> {
+    debug_assert!(item_size > 0);
+    debug_assert!(raw_values.len().is_multiple_of(item_size));
+
+    let row_count = raw_values.len() / item_size;
+    let mut dict: Vec<&[u8]> = Vec::new();
+    let mut index_map: HashMap<&[u8], u32> = HashMap::with_capacity(row_count);
+    let mut indices: Vec<u32> = Vec::with_capacity(row_count);
+
+    for val in raw_values.chunks_exact(item_size) {
+        let idx = if let Some(&existing) = index_map.get(val) {
+            existing
+        } else {
+            let idx = dict.len() as u32;
+            index_map.insert(val, idx);
+            dict.push(val);
+            idx
+        };
+        indices.push(idx);
+    }
+
+    encode_dictionary_parts(&dict, item_size, &indices)
+}
+
+fn encode_dictionary_parts(dict: &[&[u8]], item_size: usize, indices: &[u32]) -> Vec<u8> {
     let dict_size = dict.len() as u32;
     let bits_needed = if dict_size <= 1 {
         1
@@ -64,19 +91,18 @@ pub fn dict_encode(values: &[&[u8]], item_size: usize) -> Vec<u8> {
         32 - (dict_size - 1).leading_zeros() as u8
     };
 
-    let mut out = Vec::new();
-    // Dict size
+    let packed_len = indices
+        .len()
+        .saturating_mul(bits_needed as usize)
+        .div_ceil(8);
+    let mut out = Vec::with_capacity(8 + dict.len() * item_size + 1 + packed_len);
     out.extend_from_slice(&dict_size.to_le_bytes());
-    // Item size
     out.extend_from_slice(&(item_size as u32).to_le_bytes());
-    // Dict entries
-    for entry in &dict {
+    for entry in dict {
         out.extend_from_slice(entry);
     }
-    // Bits per index
     out.push(bits_needed);
-    // Bitpacked indices
-    bitpack_u32(&indices, bits_needed, &mut out);
+    bitpack_u32(indices, bits_needed, &mut out);
 
     out
 }

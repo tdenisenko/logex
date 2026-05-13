@@ -252,7 +252,7 @@ pub(crate) fn persist_segment_manifest_with_columns(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+    let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
     fs::write(&tmp, json)?;
     fs::rename(tmp, path)?;
     Ok(())

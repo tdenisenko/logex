@@ -121,14 +121,25 @@ impl SegmentReader {
     }
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
-        let path = self
-            .manifest
-            .as_ref()
-            .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
-            .unwrap_or_else(|| self.dir.join("canonical.bitmap"));
-        let data = fs::read(path)?;
+        let data = fs::read(self.canonical_path())?;
         NullBitmap::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+    }
+
+    pub fn read_canonical_len(&self) -> io::Result<u64> {
+        let mut file = File::open(self.canonical_path())?;
+        let mut len_bytes = [0u8; 8];
+        file.read_exact(&mut len_bytes)?;
+        let len = u64::from_le_bytes(len_bytes);
+        let expected_len = 8 + len.div_ceil(8);
+        let actual_len = file.metadata()?.len();
+        if actual_len < expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap is truncated",
+            ));
+        }
+        Ok(len)
     }
 
     pub fn read_row_count(&self) -> io::Result<u64> {
@@ -189,6 +200,13 @@ impl SegmentReader {
             .columns
             .iter()
             .find(|column| column.name == name && column.page_index_path.is_some())
+    }
+
+    fn canonical_path(&self) -> PathBuf {
+        self.manifest
+            .as_ref()
+            .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
+            .unwrap_or_else(|| self.dir.join("canonical.bitmap"))
     }
 
     fn read_fixed_width_values(
@@ -591,6 +609,7 @@ mod tests {
         compact_segment(&paths, &descriptor).unwrap();
 
         let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_canonical_len().unwrap(), rows.len() as u64);
         let reread = reader.read_log_rows(None).unwrap();
         assert_eq!(reread, rows);
 
@@ -645,6 +664,21 @@ mod tests {
         let err = reader
             .read_nullable_b256("topic0", Some(&[0]))
             .expect_err("page-index corruption should fail reads");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn canonical_len_rejects_truncated_bitmap() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("segment");
+        fs::create_dir_all(&dir).unwrap();
+        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        fs::write(dir.join("canonical.bitmap"), 20u64.to_le_bytes()).unwrap();
+
+        let reader = SegmentReader::open(&dir).unwrap();
+        let err = reader
+            .read_canonical_len()
+            .expect_err("truncated canonical bitmap should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

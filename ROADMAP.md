@@ -13,6 +13,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Fixed dashboard storage accounting so `storage_used_bytes` follows symlinked segment directories and avoids double-counting repeated links.
 - Reduced startup/query disk pressure for compacted segments by reading only selected page payloads instead of loading full column files for sparse row reads.
 - Increased medium-peer historical fetch lookahead after the remote batch logs showed better fetch/validation overlap without making memory the limiting resource.
+- Reduced storage compaction allocation overhead and restart-time segment validation cost on large data directories.
 
 ## Remaining TODOs
 
@@ -47,6 +48,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
 - Medium-peer historical reverse sync keeps four body/receipt fetches queued. The remote run showed this improves pipeline overlap while CPU-bound receipt validation and log extraction remain the main limiter.
+- Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 
 ## Challenges and Resolutions
 
@@ -62,9 +64,13 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: Historical sync still had visible wait time between body/receipt fetches and local processing.
   - Resolution: Raised medium-peer lookahead to four queued fetches after comparing remote batch logs; the run remains CPU-bound rather than peer- or IO-bound.
 
+- Challenge: Restarting with billions of stored rows spent too long rereading canonical bitmaps during integrity checks.
+  - Resolution: Integrity checks now verify canonical bitmap length without materializing the full bitmap, reducing remote HTTP-ready time from about 100 seconds to 58 seconds on the active data directory.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected storage startup, segment-reader, and server metric code paths affected by the remote volume split.
+- Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
+- Removed unnecessary per-value allocation in dictionary page encoding and unnecessary pretty formatting for hot storage metadata writes.
 - Kept the symlink-based segment relocation support because it is required by the active remote run.
 - No experimental Execution Layer peer-retention code was added or retained in this storage pass.
 
@@ -72,7 +78,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility commit on this branch; medium-peer historical lookahead change pending validation.
+- Commits made during this run: storage-volume compatibility commit and medium-peer historical lookahead commit on this branch; storage compaction/startup optimization pending commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -83,3 +89,4 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
 - The parent Execution Layer performance branch is still above the long-term sync ETA target.
 - Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
+- Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.

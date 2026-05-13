@@ -4,7 +4,8 @@ use alloy_primitives::Bytes;
 
 use crate::compression::{
     delta_decode, delta_encode, delta_of_delta_decode, delta_of_delta_encode, dict_decode,
-    dict_encode, lz4_compress, lz4_decompress, zstd_compress, zstd_compress_level, zstd_decompress,
+    dict_encode_raw, lz4_compress, lz4_decompress, zstd_compress, zstd_compress_level,
+    zstd_decompress,
 };
 use crate::native::CompressionCodec;
 
@@ -125,10 +126,7 @@ pub fn encode_fixed_width_page(
 
     match codec {
         CompressionCodec::None => Ok(raw_values.to_vec()),
-        CompressionCodec::Dictionary => {
-            let values: Vec<&[u8]> = raw_values.chunks_exact(item_size).collect();
-            Ok(dict_encode(&values, item_size))
-        }
+        CompressionCodec::Dictionary => Ok(dict_encode_raw(raw_values, item_size)),
         CompressionCodec::Zstd => zstd_compress(raw_values),
         CompressionCodec::Lz4 => Ok(lz4_compress(raw_values)),
         CompressionCodec::AdaptiveFixed => encode_adaptive_fixed_width_page(raw_values, item_size),
@@ -172,10 +170,7 @@ pub fn decode_fixed_width_page(
 }
 
 fn encode_adaptive_fixed_width_page(raw_values: &[u8], item_size: usize) -> io::Result<Vec<u8>> {
-    let dictionary = {
-        let values: Vec<&[u8]> = raw_values.chunks_exact(item_size).collect();
-        dict_encode(&values, item_size)
-    };
+    let dictionary = dict_encode_raw(raw_values, item_size);
     if dictionary
         .len()
         .saturating_mul(DICTIONARY_FAST_PATH_DENOMINATOR)
@@ -344,10 +339,7 @@ pub fn decode_u32_page(
 pub fn encode_u8_page(values: &[u8], codec: CompressionCodec) -> io::Result<Vec<u8>> {
     match codec {
         CompressionCodec::None => Ok(values.to_vec()),
-        CompressionCodec::Dictionary => {
-            let borrowed: Vec<&[u8]> = values.iter().map(std::slice::from_ref).collect();
-            Ok(dict_encode(&borrowed, 1))
-        }
+        CompressionCodec::Dictionary => Ok(dict_encode_raw(values, 1)),
         CompressionCodec::Zstd => zstd_compress(values),
         CompressionCodec::Lz4 => Ok(lz4_compress(values)),
         other => Err(io::Error::new(

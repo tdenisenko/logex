@@ -677,7 +677,7 @@ impl NativeStorage {
     fn persist_state(&self) -> std::io::Result<()> {
         let path = self.state_path();
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(&self.state).map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec(&self.state).map_err(std::io::Error::other)?;
         fs::write(&tmp, json)?;
         fs::rename(tmp, path)?;
         Ok(())
@@ -779,14 +779,13 @@ impl NativeStorage {
             return Ok(());
         }
 
-        let canonical = reader.read_canonical()?;
-        if canonical.len() != row_count {
+        let canonical_len = reader.read_canonical_len()?;
+        if canonical_len != row_count {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "segment {} canonical bitmap length mismatch: bitmap={} rows={row_count}",
-                    descriptor.id,
-                    canonical.len()
+                    "segment {} canonical bitmap length mismatch: bitmap={canonical_len} rows={row_count}",
+                    descriptor.id
                 ),
             ));
         }
