@@ -6,6 +6,8 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
+Current remote measurements show peer retention is no longer the main limiter. The 4-vCPU/8GB host is CPU- and memory-bound while verifying dense receipt/log ranges, with near-zero IO delay and continuous segment compaction.
+
 ## Completed Since Last Run
 
 - Mounted the remote 100GB volume at `/mnt/logex-extra` and moved older sealed segment directories there to keep the active run alive without keeping multiple data directories.
@@ -17,6 +19,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Added a parent-root child index for cached Consensus Layer beacon blocks to avoid repeated full-cache scans while materializing the forward checkpoint chain.
 - Enabled Alloy's assembly Keccak backend after remote perf samples showed receipt-trie hashing dominating local CPU time.
 - Removed avoidable Consensus Layer forward-lineage allocations from history range readiness checks.
+- Confirmed the latest remote bottleneck is local CPU/RSS pressure rather than peer count or disk latency.
 
 ## Remaining TODOs
 
@@ -82,6 +85,9 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: Perf samples still showed Consensus Layer range readiness spending CPU on temporary lineage vectors.
   - Resolution: Reworked forward progress selection to walk cached children without allocating a chain.
 
+- Challenge: Warm remote runs still remain above the sub-6-hour target after peer retention and pipeline overlap improvements.
+  - Resolution: Profiling now points to receipt-trie hashing, log extraction/storage, and 8GB memory pressure as the remaining limit on the current host; IO delay is not material.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
@@ -94,7 +100,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, and assembly Keccak commits on this branch; forward-lineage allocation cleanup pending commit.
+- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, assembly Keccak, and forward-lineage allocation cleanup commits on this branch; remote bottleneck measurement pending commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -104,5 +110,6 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - HTTP Basic auth does not encrypt traffic. Use it behind localhost, a firewall, an SSH tunnel, or a TLS-terminating reverse proxy.
 - gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
 - The parent Execution Layer performance branch is still above the long-term sync ETA target.
+- The current 4-vCPU/8GB remote host is not enough to demonstrate the sub-6-hour full-history target; higher CPU count and memory are required to validate scaling beyond the current 2,048-block windows.
 - Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
 - Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.
