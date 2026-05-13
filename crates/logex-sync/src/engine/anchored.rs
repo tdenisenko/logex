@@ -14,7 +14,6 @@ const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 2;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
-const HISTORICAL_PREFETCH_QUEUE_DEPTH: usize = 2;
 const HISTORICAL_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
@@ -25,7 +24,7 @@ const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 32;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 64;
-const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 512;
+const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_WINDOW_TARGET: u128 =
     30_000_000u128 * HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u128;
 
@@ -392,12 +391,10 @@ fn validate_historical_block(
 }
 
 fn spawn_historical_prepare_task(batch: HistoricalFetchedBatch) -> HistoricalPrepareTask {
-    let child_header = batch.child_header.clone();
     let next_child_header = historical_batch_next_child_header(&batch);
     let handle = tokio::spawn(async move { prepare_historical_batch(batch).await });
 
     HistoricalPrepareTask {
-        child_header,
         next_child_header,
         handle,
     }
@@ -414,7 +411,6 @@ async fn prepare_historical_batch(
         required_block,
         header_elapsed,
         body_receipt_elapsed,
-        ..
     } = batch;
     let requested_headers = headers.len();
 
@@ -499,18 +495,6 @@ fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<
         .checked_sub(1)
         .and_then(|index| batch.headers.get(index))
         .cloned()
-}
-
-fn historical_prepare_task_matches_child(
-    task: &HistoricalPrepareTask,
-    child_header: &Header,
-) -> bool {
-    task.child_header.number() == child_header.number()
-        && task.child_header.hash_slow() == child_header.hash_slow()
-}
-
-fn historical_prepare_task_next_child_header(task: &HistoricalPrepareTask) -> Option<Header> {
-    task.next_child_header.clone()
 }
 
 fn historical_header_batch_matches_child(
@@ -1021,126 +1005,22 @@ impl SyncEngine {
             return Ok(false);
         }
 
-        let (task, prefetched) = if let Some(task) = self.take_historical_prefetch(&child_header) {
-            (task, true)
-        } else {
-            match self
-                .fetch_historical_combined_batch(child_header.clone())
-                .await?
-            {
-                Some(batch) => (spawn_historical_prepare_task(batch), false),
-                None => {
-                    return self
-                        .ingest_historical_backfill_batch_sequential(child_header)
-                        .await;
-                }
-            }
+        let Some((batch, prefetched)) = self
+            .fetch_historical_combined_batch(child_header.clone())
+            .await?
+        else {
+            return self
+                .ingest_historical_backfill_batch_sequential(child_header)
+                .await;
         };
+        let task = spawn_historical_prepare_task(batch);
 
         self.ingest_historical_prepared_task(task, prefetched).await
-    }
-
-    fn take_historical_prefetch(&mut self, child_header: &Header) -> Option<HistoricalPrepareTask> {
-        let task = self.historical_prefetch.pop_front()?;
-        if historical_prepare_task_matches_child(&task, child_header) {
-            return Some(task);
-        }
-
-        let remaining_prefetches = self.historical_prefetch.len();
-        let prefetched_child = task.child_header.number();
-        task.handle.abort();
-        self.reset_historical_fetch_pipeline();
-        tracing::debug!(
-            expected_child = child_header.number(),
-            prefetched_child,
-            remaining_prefetches,
-            "discarding stale historical prefetch"
-        );
-        None
-    }
-
-    fn align_historical_prefetch_queue(&mut self, child_header: &Header) {
-        if self
-            .historical_prefetch
-            .front()
-            .is_none_or(|task| historical_prepare_task_matches_child(task, child_header))
-        {
-            return;
-        }
-
-        let prefetched_child = self
-            .historical_prefetch
-            .front()
-            .map(|task| task.child_header.number())
-            .unwrap_or_default();
-        let dropped_prefetches = self.historical_prefetch.len();
-        self.reset_historical_fetch_pipeline();
-        tracing::debug!(
-            expected_child = child_header.number(),
-            prefetched_child,
-            dropped_prefetches,
-            "discarding stale historical prefetch queue"
-        );
-    }
-
-    fn next_historical_prefetch_child(&self, first_child_header: Header) -> Option<Header> {
-        match self.historical_prefetch.back() {
-            Some(task) => historical_prepare_task_next_child_header(task),
-            None => Some(first_child_header),
-        }
-    }
-
-    fn store_historical_prefetch_result(
-        &mut self,
-        result: Result<Option<HistoricalFetchedBatch>>,
-        next_child_header: &mut Option<Header>,
-    ) -> bool {
-        match result {
-            Ok(Some(batch)) => self.enqueue_historical_fetched_batch(batch, next_child_header) > 0,
-            Ok(None) => {
-                *next_child_header = None;
-                false
-            }
-            Err(error) => {
-                tracing::debug!(error = %error, "historical prefetch failed");
-                *next_child_header = None;
-                false
-            }
-        }
-    }
-
-    async fn arm_next_historical_fetch(&mut self, next_child_header: Option<Header>) -> Result<()> {
-        let Some(next_child_header) = next_child_header else {
-            return Ok(());
-        };
-        if next_child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK
-            || self.historical_prefetch.len() >= HISTORICAL_PREFETCH_QUEUE_DEPTH
-            || self.peers.peer_count() == 0
-        {
-            return Ok(());
-        }
-
-        self.ensure_historical_fetch_pipeline(next_child_header)
-            .await
-    }
-
-    fn enqueue_historical_fetched_batch(
-        &mut self,
-        batch: HistoricalFetchedBatch,
-        next_child_header: &mut Option<Header>,
-    ) -> usize {
-        let task = spawn_historical_prepare_task(batch);
-        *next_child_header = historical_prepare_task_next_child_header(&task);
-        self.historical_prefetch.push_back(task);
-        1
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
         for (_, handle) in self.historical_fetch_handles.drain() {
             handle.abort();
-        }
-        for task in self.historical_prefetch.drain(..) {
-            task.handle.abort();
         }
         self.historical_fetch_generation = self.historical_fetch_generation.wrapping_add(1);
         self.historical_fetch_next_sequence = 0;
@@ -1299,12 +1179,12 @@ impl SyncEngine {
             ..
         } = fetch;
         let HistoricalHeaderBatch {
-            child_header,
             header_peer,
             headers,
             hashes,
             required_block,
             header_elapsed,
+            ..
         } = header_batch;
 
         match self.peers.complete_bodies_and_receipts_request(outcome) {
@@ -1330,7 +1210,6 @@ impl SyncEngine {
                     self.historical_fetch_expected_child = next_child_header.clone();
                 }
                 Ok(Some(HistoricalFetchedBatch {
-                    child_header,
                     header_peer,
                     headers,
                     hashes,
@@ -1527,16 +1406,22 @@ impl SyncEngine {
     async fn fetch_historical_combined_batch(
         &mut self,
         child_header: Header,
-    ) -> Result<Option<HistoricalFetchedBatch>> {
+    ) -> Result<Option<(HistoricalFetchedBatch, bool)>> {
         self.ensure_historical_fetch_pipeline(child_header.clone())
             .await?;
+        self.drain_historical_fetch_outcomes();
+        let prefetched = self
+            .historical_fetch_completed
+            .contains_key(&self.historical_fetch_expected_sequence);
         let Some(outcome) = self
             .wait_for_historical_fetch_outcome(&child_header)
             .await?
         else {
             return Ok(None);
         };
-        self.complete_historical_fetch_outcome(outcome)
+        Ok(self
+            .complete_historical_fetch_outcome(outcome)?
+            .map(|batch| (batch, prefetched)))
     }
 
     async fn ingest_historical_prepared_task(
@@ -1549,65 +1434,17 @@ impl SyncEngine {
         let storage = Arc::clone(&self.storage);
         let subscriptions = self.subscriptions.clone();
         let prepare_and_write = write_prepared_historical_batch(storage, subscriptions, task);
-        let mut prefetched_next_batches = 0usize;
+        let mut queued_next_fetches = 0usize;
         let overlap_started = std::time::Instant::now();
-        let written = if let Some(immediate_next_child_header) = immediate_next_child_header
+        if let Some(immediate_next_child_header) = immediate_next_child_header
             && immediate_next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
             && self.peers.peer_count() > 0
         {
-            self.align_historical_prefetch_queue(&immediate_next_child_header);
-            let mut next_prefetch_child =
-                self.next_historical_prefetch_child(immediate_next_child_header);
-            let mut written = None;
-            let mut write = Box::pin(prepare_and_write);
-
-            while self.historical_prefetch.len() < HISTORICAL_PREFETCH_QUEUE_DEPTH {
-                let Some(prefetch_child) = next_prefetch_child.take() else {
-                    break;
-                };
-                if prefetch_child.number() == EXECUTION_HISTORY_TARGET_BLOCK {
-                    break;
-                }
-
-                let must_complete_prefetch = self.historical_prefetch.is_empty();
-                let mut prefetch = Box::pin(self.fetch_historical_combined_batch(prefetch_child));
-                tokio::select! {
-                    write_result = &mut write => {
-                        let write_result = write_result?;
-                        if must_complete_prefetch {
-                            let prefetch_result = prefetch.await;
-                            if self.store_historical_prefetch_result(
-                                prefetch_result,
-                                &mut next_prefetch_child,
-                            ) {
-                                prefetched_next_batches += 1;
-                                self.arm_next_historical_fetch(next_prefetch_child.clone()).await?;
-                            }
-                        }
-                        written = Some(write_result);
-                        break;
-                    }
-                    prefetch_result = &mut prefetch => {
-                        drop(prefetch);
-                        if self.store_historical_prefetch_result(
-                            prefetch_result,
-                            &mut next_prefetch_child,
-                        ) {
-                            prefetched_next_batches += 1;
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            }
-
-            match written {
-                Some(written) => written,
-                None => write.await?,
-            }
-        } else {
-            prepare_and_write.await?
-        };
+            self.ensure_historical_fetch_pipeline(immediate_next_child_header)
+                .await?;
+            queued_next_fetches = self.pending_historical_fetch_count();
+        }
+        let written = prepare_and_write.await?;
         let written = match written {
             Ok(written) => written,
             Err(failure) => {
@@ -1650,9 +1487,9 @@ impl SyncEngine {
             blocks = block_count,
             logs = log_count,
             prefetched,
-            prefetched_next = prefetched_next_batches > 0,
-            prefetched_next_batches,
-            prefetch_queue_depth = self.historical_prefetch.len(),
+            prefetched_next = queued_next_fetches > 0,
+            queued_next_fetches,
+            fetch_pipeline_depth = self.pending_historical_fetch_count(),
             header_ms = header_elapsed.as_millis(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),
             validation_ms = validation_elapsed.as_millis(),

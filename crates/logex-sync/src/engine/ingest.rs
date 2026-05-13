@@ -1,6 +1,7 @@
 use super::*;
 use crate::extract;
 use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
+use std::collections::VecDeque;
 
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
 const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 512;

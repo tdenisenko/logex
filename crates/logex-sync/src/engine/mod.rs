@@ -6,7 +6,7 @@ use reth_eth_wire::NetworkPrimitives;
 use reth_ethereum_forks::Head;
 use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, watch};
@@ -62,7 +62,6 @@ pub(super) struct HistoricalValidatedBlock {
 }
 
 pub(super) struct HistoricalFetchedBatch {
-    child_header: Header,
     header_peer: PeerId,
     headers: Vec<Header>,
     hashes: Vec<B256>,
@@ -139,7 +138,6 @@ pub(super) struct HistoricalValidationFailure {
 }
 
 pub(super) struct HistoricalPrepareTask {
-    child_header: Header,
     next_child_header: Option<Header>,
     handle: JoinHandle<
         Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
@@ -156,7 +154,6 @@ pub struct SyncEngine {
     consensus: Option<Arc<ConsensusStore>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
-    historical_prefetch: VecDeque<HistoricalPrepareTask>,
     historical_fetch_tx: mpsc::UnboundedSender<HistoricalFetchOutcome>,
     historical_fetch_rx: mpsc::UnboundedReceiver<HistoricalFetchOutcome>,
     historical_fetch_generation: u64,
@@ -192,7 +189,6 @@ impl SyncEngine {
             consensus,
             head_tracker: HeadTracker::new(RECENT_HEADER_WINDOW),
             progress,
-            historical_prefetch: VecDeque::new(),
             historical_fetch_tx,
             historical_fetch_rx,
             historical_fetch_generation: 0,
