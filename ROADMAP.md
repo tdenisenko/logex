@@ -15,6 +15,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Increased medium-peer historical fetch lookahead after the remote batch logs showed better fetch/validation overlap without making memory the limiting resource.
 - Reduced storage compaction allocation overhead and restart-time segment validation cost on large data directories.
 - Added a parent-root child index for cached Consensus Layer beacon blocks to avoid repeated full-cache scans while materializing the forward checkpoint chain.
+- Enabled Alloy's assembly Keccak backend after remote perf samples showed receipt-trie hashing dominating local CPU time.
 
 ## Remaining TODOs
 
@@ -51,6 +52,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Medium-peer historical reverse sync keeps four body/receipt fetches queued. The remote run showed this improves pipeline overlap while CPU-bound receipt validation and log extraction remain the main limiter.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
+- Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
 
 ## Challenges and Resolutions
 
@@ -72,6 +74,9 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: Perf samples still showed Consensus Layer lineage selection scanning the full cached block set.
   - Resolution: Added a child index keyed by parent root so forward-chain walking only inspects direct children.
 
+- Challenge: After storage and lineage optimizations, remote perf samples showed receipt-root Keccak hashing as the dominant CPU cost.
+  - Resolution: Enabled Alloy's `asm-keccak` feature and validated the sync crate plus full clippy before remote measurement.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
@@ -84,7 +89,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility commit, medium-peer historical lookahead commit, and storage compaction/startup optimization commit on this branch; Consensus Layer child-index optimization pending commit.
+- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, and Consensus Layer child-index optimization commits on this branch; assembly Keccak optimization pending commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
