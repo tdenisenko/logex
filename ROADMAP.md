@@ -4,7 +4,7 @@
 
 LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer head/finality over native P2P, and uses authenticated execution anchors as the pivot for Execution Layer validation. Execution Layer P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The active task branch is `ui/minimal-sync-dashboard`, branched from `feature/el-reverse-sync` / draft PR #76. This branch focuses on the dashboard surface and HTTP access controls while the parent branch remains focused on Execution Layer reverse-sync throughput.
+The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 against `feature/el-reverse-sync` / draft PR #76. This branch focuses on the dashboard surface and HTTP access controls while the parent branch remains focused on Execution Layer reverse-sync throughput.
 
 ## Completed Since Last Run
 
@@ -62,7 +62,7 @@ The active task branch is `ui/minimal-sync-dashboard`, branched from `feature/el
 - Current branch: `ui/minimal-sync-dashboard`
 - New branch created this run: yes
 - Commits made during this run: `feat: simplify dashboard and protect query routes`
-- Pull request status: to be opened as a draft against `feature/el-reverse-sync` after commit/push.
+- Pull request status: draft PR #77 (`https://github.com/tdenisenko/logex/pull/77`)
 - Merge status: not merged; UI approval is still required before merging this dashboard branch.
 - Git/GitHub blockers: none known.
 
