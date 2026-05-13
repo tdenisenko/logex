@@ -11,6 +11,7 @@ const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 4;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 64;
+const ACTIVE_SYNC_PROFILE_REWRITE_CATCH_UP_LIMIT: usize = 4;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 16;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
@@ -102,7 +103,7 @@ pub async fn run_background_indexer(
                                 if backlog <= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
                                     ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT
                                 } else {
-                                    0
+                                    ACTIVE_SYNC_PROFILE_REWRITE_CATCH_UP_LIMIT
                                 },
                             )?,
                             compaction_limit,
