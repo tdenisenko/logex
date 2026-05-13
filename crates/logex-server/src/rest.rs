@@ -205,6 +205,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "historical_execution_floor": historical_floor,
         "historical_execution_anchor": historical_anchor,
         "historical_target_block": sync.historical_target_block,
+        "execution_merge_block": logex_types::EXECUTION_MERGE_BLOCK,
+        "execution_terminal_pow_block": logex_types::EXECUTION_TERMINAL_POW_BLOCK,
         "historical_blocks_per_sec": sync.historical_blocks_per_sec,
         "historical_eta_seconds": sync.historical_eta_seconds,
         "raw_log_segment_backlog": sync.raw_log_segment_backlog,
@@ -753,6 +755,14 @@ mod tests {
         assert_eq!(status["query_coverage"]["latest_timestamp"], 1_650_000_000);
         assert_eq!(status["query_coverage"]["indexed_head_block"], 200);
         assert_eq!(status["query_coverage"]["stored_rows"], 2);
+        assert_eq!(
+            status["execution_merge_block"],
+            logex_types::EXECUTION_MERGE_BLOCK
+        );
+        assert_eq!(
+            status["execution_terminal_pow_block"],
+            logex_types::EXECUTION_TERMINAL_POW_BLOCK
+        );
         assert_eq!(status["blocks_per_minute"], 120.0);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");

@@ -446,6 +446,19 @@ mod tests {
     }
 
     #[test]
+    fn merge_boundary_constants_match_mainnet_chainspec() {
+        let (merge_block, _) = MAINNET
+            .paris_block_and_final_difficulty
+            .expect("mainnet Paris block must be known");
+
+        assert_eq!(merge_block, logex_types::EXECUTION_MERGE_BLOCK);
+        assert_eq!(
+            logex_types::EXECUTION_TERMINAL_POW_BLOCK + 1,
+            logex_types::EXECUTION_MERGE_BLOCK
+        );
+    }
+
+    #[test]
     fn serving_peer_notifications_ignore_zero_and_duplicates() {
         let first = PeerId::repeat_byte(0x11);
         let mut seen = HashSet::new();

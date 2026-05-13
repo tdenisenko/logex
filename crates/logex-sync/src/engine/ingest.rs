@@ -4,7 +4,7 @@ use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
 use std::collections::VecDeque;
 
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
-const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 512;
+const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 1024;
 const HISTORICAL_EXTRACTION_PIPELINE_DEPTH: usize = 4;
 
 pub(super) struct HistoricalExtractedBatch {
@@ -480,11 +480,9 @@ mod tests {
 
         let write_chunks = coalesce_historical_write_chunks(chunks);
 
-        assert_eq!(write_chunks.len(), 2);
+        assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, HISTORICAL_WRITE_CHUNK_BLOCKS);
-        assert_eq!(write_chunks[0].lowest_header.number(), 512);
-        assert_eq!(write_chunks[1].block_count, HISTORICAL_WRITE_CHUNK_BLOCKS);
-        assert_eq!(write_chunks[1].lowest_header.number(), 0);
+        assert_eq!(write_chunks[0].lowest_header.number(), 0);
     }
 
     #[test]
