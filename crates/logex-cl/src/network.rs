@@ -461,6 +461,7 @@ struct ConsensusNetwork {
     last_rpc_failure: Option<String>,
     last_response_send_failure: Option<String>,
     verified_beacon_blocks: HashMap<B256, VerifiedBeaconBlock>,
+    verified_beacon_block_children: HashMap<B256, Vec<VerifiedBeaconBlock>>,
     verified_beacon_block_payloads: HashMap<B256, RawRpcResponse>,
     active_history_target: Option<HistorySyncTarget>,
 }
@@ -585,6 +586,19 @@ fn verified_beacon_blocks_from_light_client_store(
             })
         })
         .collect()
+}
+
+fn verified_beacon_block_children_from_blocks(
+    blocks: &HashMap<B256, VerifiedBeaconBlock>,
+) -> HashMap<B256, Vec<VerifiedBeaconBlock>> {
+    let mut children: HashMap<B256, Vec<VerifiedBeaconBlock>> = HashMap::new();
+    for block in blocks.values().copied() {
+        children.entry(block.parent_root).or_default().push(block);
+    }
+    for blocks in children.values_mut() {
+        blocks.sort_by_key(|block| (block.slot, block.beacon_root));
+    }
+    children
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1546,6 +1560,8 @@ impl ConsensusNetwork {
                 verified_beacon_blocks.insert(block.beacon_root, block);
             }
         }
+        let verified_beacon_block_children =
+            verified_beacon_block_children_from_blocks(&verified_beacon_blocks);
 
         Ok(Self {
             config,
@@ -1592,6 +1608,7 @@ impl ConsensusNetwork {
             last_rpc_failure: None,
             last_response_send_failure: None,
             verified_beacon_blocks,
+            verified_beacon_block_children,
             verified_beacon_block_payloads: HashMap::new(),
             active_history_target: None,
         })
@@ -3586,7 +3603,38 @@ impl ConsensusNetwork {
             self.verified_beacon_block_payloads
                 .insert(block.beacon_root, payload);
         }
-        self.verified_beacon_blocks.insert(block.beacon_root, block) != Some(block)
+        let previous = self.verified_beacon_blocks.insert(block.beacon_root, block);
+        if previous == Some(block) {
+            return false;
+        }
+
+        if let Some(previous) = previous {
+            let remove_parent = self
+                .verified_beacon_block_children
+                .get_mut(&previous.parent_root)
+                .is_some_and(|children| {
+                    children.retain(|child| child.beacon_root != previous.beacon_root);
+                    children.is_empty()
+                });
+            if remove_parent {
+                self.verified_beacon_block_children
+                    .remove(&previous.parent_root);
+            }
+        }
+
+        let children = self
+            .verified_beacon_block_children
+            .entry(block.parent_root)
+            .or_default();
+        if !children
+            .iter()
+            .any(|child| child.beacon_root == block.beacon_root)
+        {
+            children.push(block);
+            children.sort_by_key(|child| (child.slot, child.beacon_root));
+        }
+
+        true
     }
 
     fn seed_verified_light_client_headers(&mut self) -> bool {
@@ -3795,17 +3843,13 @@ impl ConsensusNetwork {
         target_slot: u64,
         preferred_roots: &HashSet<B256>,
     ) -> Option<VerifiedBeaconBlock> {
-        let mut children = self
-            .verified_beacon_blocks
-            .values()
+        let children = self
+            .verified_beacon_block_children
+            .get(&parent_root)?
+            .iter()
             .copied()
-            .filter(|block| {
-                block.parent_root == parent_root
-                    && block.slot > parent_slot
-                    && block.slot <= target_slot
-            })
+            .filter(|block| block.slot > parent_slot && block.slot <= target_slot)
             .collect::<Vec<_>>();
-        children.sort_by_key(|block| (block.slot, block.beacon_root));
         select_checkpoint_forward_child(&children, preferred_roots)
     }
 

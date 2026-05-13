@@ -14,6 +14,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Reduced startup/query disk pressure for compacted segments by reading only selected page payloads instead of loading full column files for sparse row reads.
 - Increased medium-peer historical fetch lookahead after the remote batch logs showed better fetch/validation overlap without making memory the limiting resource.
 - Reduced storage compaction allocation overhead and restart-time segment validation cost on large data directories.
+- Added a parent-root child index for cached Consensus Layer beacon blocks to avoid repeated full-cache scans while materializing the forward checkpoint chain.
 
 ## Remaining TODOs
 
@@ -49,6 +50,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
 - Medium-peer historical reverse sync keeps four body/receipt fetches queued. The remote run showed this improves pipeline overlap while CPU-bound receipt validation and log extraction remain the main limiter.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
+- Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 
 ## Challenges and Resolutions
 
@@ -67,10 +69,14 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: Restarting with billions of stored rows spent too long rereading canonical bitmaps during integrity checks.
   - Resolution: Integrity checks now verify canonical bitmap length without materializing the full bitmap, reducing remote HTTP-ready time from about 100 seconds to 58 seconds on the active data directory.
 
+- Challenge: Perf samples still showed Consensus Layer lineage selection scanning the full cached block set.
+  - Resolution: Added a child index keyed by parent root so forward-chain walking only inspects direct children.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
 - Removed unnecessary per-value allocation in dictionary page encoding and unnecessary pretty formatting for hot storage metadata writes.
+- Removed repeated Consensus Layer child scans by indexing cached beacon block children.
 - Kept the symlink-based segment relocation support because it is required by the active remote run.
 - No experimental Execution Layer peer-retention code was added or retained in this storage pass.
 
@@ -78,7 +84,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility commit and medium-peer historical lookahead commit on this branch; storage compaction/startup optimization pending commit.
+- Commits made during this run: storage-volume compatibility commit, medium-peer historical lookahead commit, and storage compaction/startup optimization commit on this branch; Consensus Layer child-index optimization pending commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
