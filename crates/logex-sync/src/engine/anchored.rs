@@ -17,7 +17,7 @@ const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 8;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
-const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 6;
+const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH: usize = 8;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
@@ -27,7 +27,7 @@ const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 18;
-const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 20;
+const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 18;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
@@ -227,24 +227,24 @@ fn historical_header_window_reached_gas_target(
     header_count >= HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS && cumulative_gas >= gas_target
 }
 
-fn historical_fetch_pipeline_depth_for_serving_peers(
-    serving_peers: usize,
+fn historical_fetch_pipeline_depth_for_peer_count(
+    peer_count: usize,
     total_memory_bytes: Option<u64>,
     available_memory_bytes: Option<u64>,
 ) -> usize {
-    let depth = if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS
+    let depth = if peer_count >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS
         && historical_allows_wide_windows(total_memory_bytes)
     {
         HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
-    } else if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
+    } else if peer_count >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
         && historical_allows_deep_windows(total_memory_bytes)
     {
         HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH
-    } else if serving_peers >= HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS
+    } else if peer_count >= HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS
         && historical_allows_high_memory_pipeline(total_memory_bytes)
     {
         HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
-    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS
+    } else if peer_count >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS
         && historical_allows_medium_memory_pipeline(total_memory_bytes)
     {
         HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
@@ -274,8 +274,10 @@ fn historical_fetch_window_blocks_for_serving_peers(
         && historical_allows_wide_windows(total_memory_bytes)
     {
         HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
-    } else if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
-        && historical_allows_deep_windows(total_memory_bytes)
+    } else if (serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_deep_windows(total_memory_bytes))
+        || (serving_peers >= HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS
+            && historical_allows_high_memory_pipeline(total_memory_bytes))
     {
         HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
     } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
@@ -1219,8 +1221,8 @@ impl SyncEngine {
         }
 
         let available_memory_bytes = historical_available_memory_bytes();
-        let pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
-            self.peers.serving_peer_count(),
+        let pipeline_depth = historical_fetch_pipeline_depth_for_peer_count(
+            self.peers.peer_count(),
             historical_total_memory_bytes(),
             available_memory_bytes,
         );
@@ -2093,23 +2095,23 @@ mod tests {
             HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, small_memory, None),
+            historical_fetch_pipeline_depth_for_peer_count(40, small_memory, None),
             HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, medium_memory, None),
+            historical_fetch_pipeline_depth_for_peer_count(40, medium_memory, None),
             HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(
+            historical_fetch_pipeline_depth_for_peer_count(
                 HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS - 1,
                 high_pipeline_memory,
                 None,
             ),
-            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(
+            historical_fetch_pipeline_depth_for_peer_count(
                 HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
                 high_pipeline_memory,
                 None,
@@ -2117,11 +2119,15 @@ mod tests {
             HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, high_pipeline_memory, None),
+            historical_fetch_pipeline_depth_for_peer_count(40, high_pipeline_memory, None),
             HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(
+            historical_fetch_window_blocks_for_serving_peers(40, high_pipeline_memory, None),
+            HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_peer_count(
                 HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS - 1,
                 high_pipeline_memory,
                 None,
@@ -2133,7 +2139,7 @@ mod tests {
             HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(48, deep_memory, None),
+            historical_fetch_pipeline_depth_for_peer_count(48, deep_memory, None),
             HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
@@ -2141,7 +2147,7 @@ mod tests {
             HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(80, wide_memory, None),
+            historical_fetch_pipeline_depth_for_peer_count(80, wide_memory, None),
             HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
         );
     }
@@ -2157,11 +2163,11 @@ mod tests {
             HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, low_available),
+            historical_fetch_pipeline_depth_for_peer_count(40, total_memory, low_available),
             HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, critical_available,),
+            historical_fetch_pipeline_depth_for_peer_count(40, total_memory, critical_available,),
             1
         );
     }

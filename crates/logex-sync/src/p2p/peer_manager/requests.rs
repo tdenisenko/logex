@@ -15,13 +15,11 @@ const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
-const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 16;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 5000;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
-const PIPELINED_WIDE_FANOUT_MIN_PEERS: usize = 32;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 4;
 const MAX_PARALLEL_BODY_RECEIPT_REQUESTS: usize = 128;
@@ -3099,12 +3097,8 @@ fn chunk_ranges_with_optional_gas(
     ranges
 }
 
-fn body_receipt_chunk_cap(peer_pair_count: usize) -> usize {
-    if peer_pair_count >= PIPELINED_WIDE_FANOUT_MIN_PEERS {
-        PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE
-    } else {
-        PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT
-    }
+fn body_receipt_chunk_cap(_peer_pair_count: usize) -> usize {
+    PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT
 }
 
 fn body_receipt_chunk_limit(body_limit: usize, receipt_limit: usize, chunk_cap: usize) -> usize {
@@ -3255,8 +3249,8 @@ mod tests {
     #[test]
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
         assert_eq!(body_receipt_chunk_cap(31), 32);
-        assert_eq!(body_receipt_chunk_cap(32), 16);
-        assert_eq!(body_receipt_chunk_limit(128, 128, 16), 16);
+        assert_eq!(body_receipt_chunk_cap(32), 32);
+        assert_eq!(body_receipt_chunk_limit(128, 128, 32), 32);
         assert_eq!(body_receipt_chunk_limit(16, 128, 32), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 32), 8);
     }

@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. Recent warmed samples improved to roughly 500-550 historical blocks/sec, still above the sub-6-hour full-history target.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest warmed 4096-block/depth-3 historical run reached roughly 718 historical blocks/sec with an ETA near 5.1 hours while leaving the remote client running for longer observation.
 
 ## Completed Since Last Run
 
@@ -16,12 +16,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Tested and removed an experimental dial cooldown because it did not clearly improve peer ramp compared with the established peer policy.
 - Capped paired body/receipt chunk fanout by counting both request types, shortened bounded hedging for slow chunks, and kept the high-memory lookahead at six queued fetches after an eight-deep trial consumed too much memory for little gain.
 - Changed the dashboard Execution Layer sync percentage to two decimal places.
+- Reworked high-memory historical lookahead to use 4096-block batches at depth 3 once enough connected/serving peers are available, and removed the 16-block wide-peer chunk downshift so the paired request cap controls pressure.
 
 ## Remaining TODOs
 
 1. Reduce Execution Layer reverse-sync ETA below the production target.
-   - Reason: Current remote runs are still above the sub-6-hour full-history target.
-   - Completion criteria: A fresh mainnet-like run sustains sub-6-hour ETA on adequate hardware, or a documented architecture decision replaces full P2P receipt backfill with another trustless strategy.
+   - Reason: The latest warmed remote sample reached the sub-6-hour target, but it still needs longer-run and fresh-run confirmation.
+   - Completion criteria: A fresh mainnet-like run sustains sub-6-hour ETA on adequate hardware without low-memory fallback, storage exhaustion, or peer-pool collapse, or a documented architecture decision replaces full P2P receipt backfill with another trustless strategy.
 
 2. Stabilize Execution Layer peer ramp and body/receipt throughput.
    - Reason: The downloader needs enough serving peers to hide request latency and keep wide fetch windows active.
@@ -49,7 +50,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
-- Medium-peer historical reverse sync keeps four body/receipt fetches queued; high-memory runs with enough serving peers may queue six. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
+- Medium-peer historical reverse sync keeps four 2048-block body/receipt fetches queued. High-memory runs with enough connected and serving peers use 4096-block batches at depth three, which keeps a similar in-flight block footprint while reducing scheduling overhead. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
@@ -97,19 +98,24 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Challenge: Body/receipt batches were over-counting safe parallelism because each scheduled range can issue both a body request and a receipt request.
   - Resolution: The paired pipeline now halves the chunk window derived from request concurrency, reducing timeout pressure while retaining overlap.
 
+- Challenge: The 2048-block/depth-6 high-memory path stabilized near 500-550 historical blocks/sec, still above the six-hour target.
+  - Resolution: Switched the high-memory path to 4096-block batches at depth three and kept 32-block body/receipt chunks so a full 2048-block prefix can fit within the paired request cap. The warmed remote run reached about 718 historical blocks/sec with stable memory headroom.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, and dashboard sync display.
 - Removed the experimental peer dial cooldown after remote testing did not show a clear benefit.
 - Reverted the eight-deep high-memory lookahead trial after remote RSS and throughput samples showed the extra memory was not justified.
 - Kept the memory-aware lookahead, compaction guards, paired request accounting, and bounded chunk hedging because they directly address observed slowdown/OOM or timeout risks.
+- Reverted an outbound-heavy peer split trial because it under-filled the peer pool compared with the established split.
+- Removed the 16-block wide-peer body/receipt chunk cap after it forced extra request waves under the paired in-flight cap.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: pending; current changes are validated locally and running on the remote for observation.
+- Commits made during this run: `perf: tune historical body receipt windows`
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
