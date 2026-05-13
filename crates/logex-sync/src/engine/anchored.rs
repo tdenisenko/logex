@@ -17,20 +17,27 @@ const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 8;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
 const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
-const HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH: usize = 4;
+const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 6;
+const HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH: usize = 6;
+const HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH: usize = 8;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
-const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
-const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 18;
-const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 36;
+const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 18;
+const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 24;
+const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
+const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES: u64 = 2 * BYTES_PER_GIB;
+const HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES: u64 = 4 * BYTES_PER_GIB;
+const HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 12 * BYTES_PER_GIB;
+const HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 14 * BYTES_PER_GIB;
 const HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 24 * BYTES_PER_GIB;
 const HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 48 * BYTES_PER_GIB;
 
@@ -223,22 +230,46 @@ fn historical_header_window_reached_gas_target(
 fn historical_fetch_pipeline_depth_for_serving_peers(
     serving_peers: usize,
     total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
 ) -> usize {
-    if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
-        && historical_allows_deep_windows(total_memory_bytes)
+    let depth = if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_wide_windows(total_memory_bytes)
     {
         HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
-    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS {
+    } else if serving_peers >= HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_deep_windows(total_memory_bytes)
+    {
+        HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH
+    } else if serving_peers >= HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS
+        && historical_allows_high_memory_pipeline(total_memory_bytes)
+    {
+        HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS
+        && historical_allows_medium_memory_pipeline(total_memory_bytes)
+    {
         HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
     } else {
         HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+    };
+
+    if historical_available_memory_is_critical(available_memory_bytes) {
+        1
+    } else if historical_available_memory_is_low(available_memory_bytes) {
+        depth.min(HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH)
+    } else {
+        depth
     }
 }
 
 fn historical_fetch_window_blocks_for_serving_peers(
     serving_peers: usize,
     total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
 ) -> u64 {
+    if historical_available_memory_is_low(available_memory_bytes) {
+        return HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS;
+    }
+
     if serving_peers >= HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS
         && historical_allows_wide_windows(total_memory_bytes)
     {
@@ -254,6 +285,15 @@ fn historical_fetch_window_blocks_for_serving_peers(
     }
 }
 
+fn historical_allows_high_memory_pipeline(total_memory_bytes: Option<u64>) -> bool {
+    total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES)
+}
+
+fn historical_allows_medium_memory_pipeline(total_memory_bytes: Option<u64>) -> bool {
+    total_memory_bytes
+        .is_none_or(|bytes| bytes >= HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES)
+}
+
 fn historical_allows_deep_windows(total_memory_bytes: Option<u64>) -> bool {
     total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES)
 }
@@ -262,15 +302,31 @@ fn historical_allows_wide_windows(total_memory_bytes: Option<u64>) -> bool {
     total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES)
 }
 
+fn historical_available_memory_is_low(available_memory_bytes: Option<u64>) -> bool {
+    available_memory_bytes.is_some_and(|bytes| bytes < HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
+}
+
+fn historical_available_memory_is_critical(available_memory_bytes: Option<u64>) -> bool {
+    available_memory_bytes.is_some_and(|bytes| bytes < HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES)
+}
+
 fn historical_total_memory_bytes() -> Option<u64> {
     static TOTAL_MEMORY_BYTES: OnceLock<Option<u64>> = OnceLock::new();
     *TOTAL_MEMORY_BYTES.get_or_init(read_linux_total_memory_bytes)
 }
 
+fn historical_available_memory_bytes() -> Option<u64> {
+    read_linux_meminfo_bytes("MemAvailable:")
+}
+
 fn read_linux_total_memory_bytes() -> Option<u64> {
+    read_linux_meminfo_bytes("MemTotal:")
+}
+
+fn read_linux_meminfo_bytes(prefix: &str) -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
-        let Some(rest) = line.strip_prefix("MemTotal:") else {
+        let Some(rest) = line.strip_prefix(prefix) else {
             continue;
         };
         let kib = rest
@@ -1124,17 +1180,11 @@ impl SyncEngine {
         self.historical_fetch_handles.len() + self.historical_fetch_completed.len()
     }
 
-    fn historical_fetch_pipeline_depth(&self) -> usize {
-        historical_fetch_pipeline_depth_for_serving_peers(
-            self.peers.serving_peer_count(),
-            historical_total_memory_bytes(),
-        )
-    }
-
     fn historical_fetch_window_blocks(&self) -> u64 {
         historical_fetch_window_blocks_for_serving_peers(
             self.peers.serving_peer_count(),
             historical_total_memory_bytes(),
+            historical_available_memory_bytes(),
         )
     }
 
@@ -1165,10 +1215,28 @@ impl SyncEngine {
         if !self.historical_fetch_pipeline_matches(&child_header) || pipeline_empty {
             self.reset_historical_fetch_pipeline();
             self.historical_fetch_expected_child = Some(child_header.clone());
-            self.historical_fetch_planned_child = Some(child_header);
+            self.historical_fetch_planned_child = Some(child_header.clone());
         }
 
-        let pipeline_depth = self.historical_fetch_pipeline_depth();
+        let available_memory_bytes = historical_available_memory_bytes();
+        let pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
+            self.peers.serving_peer_count(),
+            historical_total_memory_bytes(),
+            available_memory_bytes,
+        );
+        if historical_available_memory_is_critical(available_memory_bytes)
+            && self.pending_historical_fetch_count() > pipeline_depth
+        {
+            tracing::debug!(
+                available_memory_bytes,
+                pending_fetches = self.pending_historical_fetch_count(),
+                pipeline_depth,
+                "resetting historical fetch lookahead under memory pressure"
+            );
+            self.reset_historical_fetch_pipeline();
+            self.historical_fetch_expected_child = Some(child_header.clone());
+            self.historical_fetch_planned_child = Some(child_header.clone());
+        }
         while self.pending_historical_fetch_count() < pipeline_depth {
             let Some(planned_child) = self.historical_fetch_planned_child.take() else {
                 break;
@@ -2015,24 +2083,86 @@ mod tests {
     #[test]
     fn historical_fetch_window_respects_memory_tier() {
         let small_memory = Some(8 * BYTES_PER_GIB);
+        let medium_memory = Some(HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
+        let high_pipeline_memory = Some(HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
         let deep_memory = Some(HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES);
         let wide_memory = Some(HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES);
 
         assert_eq!(
-            historical_fetch_window_blocks_for_serving_peers(40, small_memory),
+            historical_fetch_window_blocks_for_serving_peers(40, small_memory, None),
             HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_pipeline_depth_for_serving_peers(40, small_memory),
+            historical_fetch_pipeline_depth_for_serving_peers(40, small_memory, None),
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(40, medium_memory, None),
             HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
-            historical_fetch_window_blocks_for_serving_peers(20, deep_memory),
+            historical_fetch_pipeline_depth_for_serving_peers(
+                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS - 1,
+                high_pipeline_memory,
+                None,
+            ),
+            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(
+                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
+                high_pipeline_memory,
+                None,
+            ),
+            HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(40, high_pipeline_memory, None),
+            HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(
+                HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS - 1,
+                high_pipeline_memory,
+                None,
+            ),
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(48, deep_memory, None),
             HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
-            historical_fetch_window_blocks_for_serving_peers(40, wide_memory),
+            historical_fetch_pipeline_depth_for_serving_peers(48, deep_memory, None),
+            HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(80, wide_memory, None),
             HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(80, wide_memory, None),
+            HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH
+        );
+    }
+
+    #[test]
+    fn historical_fetch_window_backs_off_under_memory_pressure() {
+        let total_memory = Some(16 * BYTES_PER_GIB);
+        let low_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1);
+        let critical_available = Some(HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES - 1);
+
+        assert_eq!(
+            historical_fetch_window_blocks_for_serving_peers(40, total_memory, low_available),
+            HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, low_available),
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, critical_available,),
+            1
         );
     }
 

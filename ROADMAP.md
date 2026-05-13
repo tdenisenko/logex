@@ -6,20 +6,14 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote measurements show peer retention is no longer the main limiter. The 4-vCPU/8GB host is CPU- and memory-bound while verifying dense receipt/log ranges; the latest slowdown was dominated by 26-36 second storage/write waits per 2,048-block batch while the process held about 7.1 GiB RSS on an 8 GiB host.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is keeping enough useful EL body/receipt service and local validation/extraction overlap to sustain the sub-6-hour target without exceeding memory on smaller machines.
 
 ## Completed Since Last Run
 
-- Mounted the remote 100GB volume at `/mnt/logex-extra` and moved older sealed segment directories there to keep the active run alive without keeping multiple data directories.
-- Fixed storage catalog repair so symlinked segment directories remain discoverable after restart.
-- Fixed dashboard storage accounting so `storage_used_bytes` follows symlinked segment directories and avoids double-counting repeated links.
-- Reduced startup/query disk pressure for compacted segments by reading only selected page payloads instead of loading full column files for sparse row reads.
-- Increased medium-peer historical fetch lookahead after the remote batch logs showed better fetch/validation overlap without making memory the limiting resource.
-- Reduced storage compaction allocation overhead and restart-time segment validation cost on large data directories.
-- Added a parent-root child index for cached Consensus Layer beacon blocks to avoid repeated full-cache scans while materializing the forward checkpoint chain.
-- Enabled Alloy's assembly Keccak backend after remote perf samples showed receipt-trie hashing dominating local CPU time.
-- Removed avoidable Consensus Layer forward-lineage allocations from history range readiness checks.
-- Confirmed the latest remote bottleneck is local CPU/RSS pressure rather than peer count or disk latency.
+- Added memory-aware EL historical lookahead so smaller machines fall back before OOM while larger machines can keep more body/receipt fetches queued.
+- Made active-sync storage compaction skip work under low available memory while still reporting the raw compaction backlog.
+- Extended graceful shutdown waits so in-flight verified historical writes can drain instead of being interrupted during normal SIGINT/SIGTERM.
+- Tested and removed an experimental dial cooldown because it did not clearly improve peer ramp compared with the established peer policy.
 
 ## Remaining TODOs
 
@@ -53,11 +47,12 @@ Current remote measurements show peer retention is no longer the main limiter. T
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
-- Medium-peer historical reverse sync keeps four body/receipt fetches queued. The remote run showed this improves pipeline overlap while CPU-bound receipt validation and log extraction remain the main limiter.
+- Medium-peer historical reverse sync keeps four body/receipt fetches queued; high-memory runs with enough serving peers may queue six. Available-memory guards reduce both depth and window size before the process risks OOM.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
+- Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 
 ## Challenges and Resolutions
 
@@ -91,19 +86,24 @@ Current remote measurements show peer retention is no longer the main limiter. T
 - Challenge: A later remote run dropped from hundreds of blocks/sec to about 43 blocks/sec despite 50 connected peers and 39 serving peers.
   - Resolution: Bounded status, log, and `pidstat` samples showed the stalled batches were dominated by storage/write waits and memory pressure, not peer retention. The remote client was stopped cleanly for a CPU/RAM upgrade.
 
+- Challenge: The upgraded host had enough CPU/RAM headroom but still showed ETA swings when lookahead expanded too early or peer service was thin.
+  - Resolution: Historical lookahead now depends on total memory, available memory, and serving-peer count. The branch keeps conservative windows for low-peer or low-memory runs and only enables deeper queues on the upgraded host class.
+
+- Challenge: A trial dial retry cooldown added complexity without a clear peer-retention gain.
+  - Resolution: The cooldown was removed before committing; the branch keeps the previously proven peer connection policy.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected storage startup, segment-reader, compression, and server metric code paths affected by the remote volume split and large compacted segment set.
-- Removed unnecessary per-value allocation in dictionary page encoding and unnecessary pretty formatting for hot storage metadata writes.
-- Removed repeated Consensus Layer child scans by indexing cached beacon block children.
-- Kept the symlink-based segment relocation support because it is required by the active remote run.
-- No experimental Execution Layer peer-retention code was added or retained in this storage pass.
+- Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, and background compaction loop.
+- Removed the experimental peer dial cooldown after remote testing did not show a clear benefit.
+- Kept the memory-aware lookahead and compaction guards because they directly address the observed slowdown/OOM risk.
+- Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility, medium-peer historical lookahead, storage compaction/startup optimization, Consensus Layer child-index optimization, assembly Keccak, forward-lineage allocation cleanup, and remote bottleneck documentation commits on this branch.
+- Commits made during this run: pending; current changes are validated locally and running on the remote for observation.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -112,7 +112,7 @@ Current remote measurements show peer retention is no longer the main limiter. T
 
 - HTTP Basic auth does not encrypt traffic. Use it behind localhost, a firewall, an SSH tunnel, or a TLS-terminating reverse proxy.
 - gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
-- The parent Execution Layer performance branch is still above the long-term sync ETA target.
-- The current 4-vCPU/8GB remote host is not enough to demonstrate the sub-6-hour full-history target; higher CPU count and memory are required to validate scaling beyond the current 2,048-block windows.
+- The parent Execution Layer performance branch is still above the long-term sync ETA target on the current observed runs.
+- The 8-vCPU/16GB remote host has headroom, but throughput is still sensitive to useful body/receipt peer supply and dense-log local processing.
 - Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
 - Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.

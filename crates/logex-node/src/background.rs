@@ -7,12 +7,15 @@ use logex_index::IndexBuilder;
 use logex_server::AppState;
 use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 
-const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 4;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 64;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
+const BYTES_PER_KIB: u64 = 1024;
+const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const ACTIVE_SYNC_COMPACTION_MIN_AVAILABLE_MEMORY_BYTES: u64 = 2 * BYTES_PER_GIB;
 
 #[derive(Debug, Clone, Copy)]
 struct CompactionReport {
@@ -41,6 +44,40 @@ pub async fn run_background_indexer(
 
         {
             let active_sync = sync_is_active(&state) || historical_sync_is_incomplete(&state).await;
+            if active_sync
+                && let Some(available_memory_bytes) = active_sync_compaction_memory_pressure()
+            {
+                let storage = Arc::clone(&state.storage);
+                match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
+                    let storage = storage.blocking_read();
+                    Ok(CompactionReport {
+                        compacted: 0,
+                        raw_backlog: Some(storage.raw_compaction_backlog_count()?),
+                        profile_rewrite_backlog: None,
+                    })
+                })
+                .await
+                {
+                    Ok(Ok(report)) => update_compaction_status(&state, report),
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            %error,
+                            "failed to refresh compaction backlog under memory pressure"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "compaction backlog refresh task failed under memory pressure"
+                        );
+                    }
+                }
+                tracing::debug!(
+                    available_memory_bytes,
+                    "skipping active-sync storage compaction under memory pressure"
+                );
+                continue;
+            }
             let compaction_limit = if active_sync {
                 ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT
             } else {
@@ -205,6 +242,27 @@ fn update_compaction_status(state: &AppState, report: CompactionReport) {
 
 fn should_defer_background_indexing(status: &SyncStatus) -> bool {
     status.syncing || status.historical_eta_seconds.is_some()
+}
+
+fn active_sync_compaction_memory_pressure() -> Option<u64> {
+    let available_memory_bytes = linux_available_memory_bytes()?;
+    (available_memory_bytes < ACTIVE_SYNC_COMPACTION_MIN_AVAILABLE_MEMORY_BYTES)
+        .then_some(available_memory_bytes)
+}
+
+fn linux_available_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        let Some(rest) = line.strip_prefix("MemAvailable:") else {
+            continue;
+        };
+        let kib = rest
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())?;
+        return kib.checked_mul(BYTES_PER_KIB);
+    }
+    None
 }
 
 async fn historical_sync_is_incomplete(state: &AppState) -> bool {

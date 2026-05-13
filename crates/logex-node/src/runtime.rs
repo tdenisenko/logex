@@ -27,6 +27,8 @@ use reth_ethereum_forks::Head;
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::resolve_checkpoint;
 
+const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
     pub checkpoint: Option<String>,
@@ -298,10 +300,11 @@ pub async fn run_sync(options: RunSyncOptions) {
             signal = wait_for_shutdown_signal() => {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
                 let _ = shutdown_tx.send(true);
-                match tokio::time::timeout(Duration::from_secs(15), &mut engine_run).await {
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
                     Ok(result) => result,
                     Err(_) => {
                         tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
                             "sync engine did not stop within shutdown timeout, closing network tasks"
                         );
                         Ok(())
