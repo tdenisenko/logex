@@ -40,6 +40,8 @@ pub struct RunSyncOptions {
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
+    pub dashboard_enabled: bool,
+    pub dashboard_password: Option<String>,
 }
 
 pub async fn run_sync(options: RunSyncOptions) {
@@ -56,6 +58,8 @@ pub async fn run_sync(options: RunSyncOptions) {
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
+        dashboard_enabled,
+        dashboard_password,
     } = options;
     let nat = match nat.parse::<NatResolver>() {
         Ok(nat) => nat,
@@ -221,7 +225,13 @@ pub async fn run_sync(options: RunSyncOptions) {
     let http_shutdown = shutdown_rx.clone();
     let http_handle = tokio::spawn(async move {
         tracing::info!(%http_addr, "HTTP server starting");
-        if let Err(e) = logex_server::serve(http_state, http_addr, http_shutdown).await {
+        let http_config = logex_server::HttpServerConfig {
+            dashboard_enabled,
+            dashboard_password,
+        };
+        if let Err(e) =
+            logex_server::serve_with_config(http_state, http_addr, http_shutdown, http_config).await
+        {
             tracing::error!(error = %e, "HTTP server error");
         }
     });
