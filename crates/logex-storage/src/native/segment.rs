@@ -51,7 +51,7 @@ pub(crate) fn write_compacted_rows(
             compact_u64_values(
                 segment_dir,
                 "block_number",
-                CompressionCodec::Delta,
+                CompressionCodec::DeltaZigZag,
                 rows.iter().map(|row| row.block_number),
             )
         });
@@ -279,7 +279,7 @@ pub(crate) fn compact_segment(
 
     let columns = vec![
         compact_address_column(&segment_dir)?,
-        compact_u64_column(&segment_dir, "block_number", CompressionCodec::Delta)?,
+        compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)?,
         compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)?,
         compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)?,
         compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)?,
@@ -375,7 +375,7 @@ fn columns_match_current_profile(columns: &[ColumnDescriptor]) -> bool {
 fn current_column_profile() -> &'static [(&'static str, CompressionCodec)] {
     &[
         ("address", CompressionCodec::AdaptiveFixed),
-        ("block_number", CompressionCodec::Delta),
+        ("block_number", CompressionCodec::DeltaZigZag),
         ("block_hash", CompressionCodec::AdaptiveFixed),
         ("timestamp", CompressionCodec::DeltaOfDelta),
         ("tx_hash", CompressionCodec::AdaptiveFixed),

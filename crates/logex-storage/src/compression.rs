@@ -218,6 +218,70 @@ pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
 }
 
 // ---------------------------------------------------------------------------
+// Signed delta codec: for u64 values that may move up or down by small steps
+// (for example historical block numbers during reverse sync).
+// Format: [base: u64] [max_zigzag_bits: u8] [packed zigzag deltas...]
+// ---------------------------------------------------------------------------
+
+pub fn signed_delta_encode(values: &[u64]) -> Vec<u8> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    let base = values[0];
+    let mut deltas: Vec<u64> = Vec::with_capacity(values.len().saturating_sub(1));
+    let mut prev = base;
+    for &value in &values[1..] {
+        let delta = value.wrapping_sub(prev) as i64;
+        deltas.push(zigzag_encode(delta));
+        prev = value;
+    }
+
+    let max_delta = deltas.iter().copied().max().unwrap_or(0);
+    let bits = if max_delta == 0 {
+        1
+    } else {
+        64 - max_delta.leading_zeros() as u8
+    };
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&base.to_le_bytes());
+    out.push(bits);
+    bitpack_u64(&deltas, bits, &mut out);
+
+    out
+}
+
+pub fn signed_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
+    if row_count == 0 {
+        return Ok(Vec::new());
+    }
+    if data.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "signed delta data too short",
+        ));
+    }
+
+    let base = u64::from_le_bytes(data[0..8].try_into().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "signed delta header truncated")
+    })?);
+    let bits = data[8];
+    let deltas = bitunpack_u64(&data[9..], row_count - 1, bits)?;
+
+    let mut result = Vec::with_capacity(row_count);
+    result.push(base);
+    let mut prev = base;
+    for delta in deltas {
+        let signed = zigzag_decode(delta);
+        prev = prev.wrapping_add(signed as u64);
+        result.push(prev);
+    }
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Delta-of-delta codec: for near-constant-interval u64 (timestamp)
 // Format: [base: u64] [first_delta: i64] [max_dd_bits: u8] [packed dd as zigzag...]
 // ---------------------------------------------------------------------------
@@ -510,6 +574,19 @@ mod tests {
         let encoded = delta_encode(&values);
         let decoded = delta_decode(&encoded, 100).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_signed_delta_roundtrip_descending() {
+        let values: Vec<u64> = vec![1_000, 1_000, 999, 999, 998, 997, 997];
+        let encoded = signed_delta_encode(&values);
+        let decoded = signed_delta_decode(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+        assert!(
+            encoded.len() < values.len() * 8,
+            "encoded size: {}",
+            encoded.len()
+        );
     }
 
     #[test]

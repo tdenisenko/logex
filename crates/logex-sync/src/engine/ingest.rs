@@ -415,7 +415,9 @@ fn coalesce_historical_write_chunks(
     write_chunks
 }
 
-fn collect_validated_historical_rows(blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
+fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
+    blocks.sort_unstable_by_key(|block| block.header.number());
+
     let total_rows = blocks
         .iter()
         .map(|block| {

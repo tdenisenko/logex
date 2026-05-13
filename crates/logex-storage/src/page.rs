@@ -4,8 +4,8 @@ use alloy_primitives::Bytes;
 
 use crate::compression::{
     delta_decode, delta_encode, delta_of_delta_decode, delta_of_delta_encode, dict_decode,
-    dict_encode_raw, lz4_compress, lz4_decompress, zstd_compress, zstd_compress_level,
-    zstd_decompress,
+    dict_encode_raw, lz4_compress, lz4_decompress, signed_delta_decode, signed_delta_encode,
+    zstd_compress, zstd_compress_level, zstd_decompress,
 };
 use crate::native::CompressionCodec;
 
@@ -272,6 +272,7 @@ pub fn encode_u64_page(values: &[u64], codec: CompressionCodec) -> io::Result<Ve
     match codec {
         CompressionCodec::None => Ok(raw),
         CompressionCodec::Delta => Ok(delta_encode(values)),
+        CompressionCodec::DeltaZigZag => Ok(signed_delta_encode(values)),
         CompressionCodec::DeltaOfDelta => Ok(delta_of_delta_encode(values)),
         CompressionCodec::Zstd => zstd_compress(&raw),
         CompressionCodec::Lz4 => Ok(lz4_compress(&raw)),
@@ -290,6 +291,7 @@ pub fn decode_u64_page(
     match codec {
         CompressionCodec::None => decode_plain_u64_page(encoded, row_count),
         CompressionCodec::Delta => delta_decode(encoded, row_count),
+        CompressionCodec::DeltaZigZag => signed_delta_decode(encoded, row_count),
         CompressionCodec::DeltaOfDelta => delta_of_delta_decode(encoded, row_count),
         CompressionCodec::Zstd => decode_plain_u64_page(&zstd_decompress(encoded)?, row_count),
         CompressionCodec::Lz4 => decode_plain_u64_page(&lz4_decompress(encoded)?, row_count),

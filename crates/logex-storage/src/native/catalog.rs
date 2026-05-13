@@ -74,6 +74,7 @@ pub enum SegmentKind {
 pub enum CompressionCodec {
     None,
     Delta,
+    DeltaZigZag,
     DeltaOfDelta,
     Dictionary,
     Zstd,

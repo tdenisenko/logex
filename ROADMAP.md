@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest warmed 4096-block/depth-3 historical run reached roughly 718 historical blocks/sec with an ETA near 5.1 hours while leaving the remote client running for longer observation.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest warmed 4096-block/depth-3 historical run reached roughly 718 historical blocks/sec with an ETA near 5.1 hours. A later storage pass found and fixed reverse-order block-number compression amplification; newly compacted dense historical segments now store block-number pages in tens of KiB instead of multiple MiB.
 
 ## Completed Since Last Run
 
@@ -17,6 +17,8 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Capped paired body/receipt chunk fanout by counting both request types, shortened bounded hedging for slow chunks, and kept the high-memory lookahead at six queued fetches after an eight-deep trial consumed too much memory for little gain.
 - Changed the dashboard Execution Layer sync percentage to two decimal places.
 - Reworked high-memory historical lookahead to use 4096-block batches at depth 3 once enough connected/serving peers are available, and removed the 16-block wide-peer chunk downshift so the paired request cap controls pressure.
+- Sorted validated historical blocks into ascending block order before storage extraction so the columnar encoders receive locality-friendly rows without changing EL validation.
+- Added a signed-delta `block_number` storage codec for reverse-sync segments, reducing newly compacted dense segment `block_number.pages` from about 2.3-2.6 MiB to about 60-68 KiB per roughly 300k rows.
 
 ## Remaining TODOs
 
@@ -56,6 +58,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
+- Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. This keeps raw compaction efficient and remains backward-compatible with existing compacted segments that still declare the older codec.
 
 ## Challenges and Resolutions
 
@@ -101,6 +104,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Challenge: The 2048-block/depth-6 high-memory path stabilized near 500-550 historical blocks/sec, still above the six-hour target.
   - Resolution: Switched the high-memory path to 4096-block batches at depth three and kept 32-block body/receipt chunks so a full 2048-block prefix can fit within the paired request cap. The warmed remote run reached about 718 historical blocks/sec with stable memory headroom.
 
+- Challenge: Dense historical segments were spending several MiB per compacted `block_number` column because reverse-order rows defeated the unsigned delta codec.
+  - Resolution: Historical rows are now extracted in ascending block order, and `block_number` compaction uses signed deltas so both old reverse-order raw segments and new sorted segments compress efficiently.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, and dashboard sync display.
@@ -109,13 +115,14 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Kept the memory-aware lookahead, compaction guards, paired request accounting, and bounded chunk hedging because they directly address observed slowdown/OOM or timeout risks.
 - Reverted an outbound-heavy peer split trial because it under-filled the peer pool compared with the established split.
 - Removed the 16-block wide-peer body/receipt chunk cap after it forced extra request waves under the paired in-flight cap.
+- Replaced the old unsigned `block_number` compaction profile for new compactions with signed delta encoding; existing compacted segments remain readable through their manifest-declared codec.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
