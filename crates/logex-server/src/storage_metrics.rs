@@ -10,11 +10,13 @@ const STORAGE_METRICS_TTL: Duration = Duration::from_secs(15);
 pub struct StorageMetrics {
     pub storage_used_bytes: Option<u64>,
     pub disk_free_bytes: Option<u64>,
+    pub cpu_utilization_pct: Option<f64>,
 }
 
 #[derive(Debug, Default)]
 pub struct CachedStorageMetrics {
     refreshed_at: Option<Instant>,
+    process_cpu_time: Option<Duration>,
     metrics: StorageMetrics,
 }
 
@@ -45,11 +47,24 @@ pub async fn load_or_refresh(
         }
     }
 
-    let metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
+    let mut metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
         .await
         .unwrap_or_default();
 
     let mut guard = cache.lock().await;
+    let now = Instant::now();
+    let process_cpu_time = process_cpu_time();
+    metrics.cpu_utilization_pct = guard
+        .refreshed_at
+        .zip(guard.process_cpu_time)
+        .zip(process_cpu_time)
+        .and_then(|((refreshed_at, previous_cpu_time), current_cpu_time)| {
+            let elapsed = now.saturating_duration_since(refreshed_at);
+            let cpu_delta = current_cpu_time.checked_sub(previous_cpu_time)?;
+            (elapsed.as_secs_f64() > 0.0)
+                .then_some(cpu_delta.as_secs_f64() / elapsed.as_secs_f64() * 100.0)
+        });
+    guard.process_cpu_time = process_cpu_time;
     guard.update(metrics.clone());
     metrics
 }
@@ -58,7 +73,32 @@ fn collect_storage_metrics(data_dir: &Path) -> StorageMetrics {
     StorageMetrics {
         storage_used_bytes: dir_size_bytes(data_dir).ok(),
         disk_free_bytes: free_space_bytes(data_dir).ok(),
+        cpu_utilization_pct: None,
     }
+}
+
+#[cfg(unix)]
+fn process_cpu_time() -> Option<Duration> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+
+    let usage = unsafe { usage.assume_init() };
+    Some(timeval_duration(usage.ru_utime)? + timeval_duration(usage.ru_stime)?)
+}
+
+#[cfg(unix)]
+fn timeval_duration(value: libc::timeval) -> Option<Duration> {
+    let secs = u64::try_from(value.tv_sec).ok()?;
+    let micros = u32::try_from(value.tv_usec).ok()?;
+    Some(Duration::new(secs, micros.saturating_mul(1_000)))
+}
+
+#[cfg(not(unix))]
+fn process_cpu_time() -> Option<Duration> {
+    None
 }
 
 fn dir_size_bytes(root: &Path) -> io::Result<u64> {

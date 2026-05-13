@@ -60,12 +60,24 @@ fn main() {
             cl_discovery_port,
             cl_p2p_port,
             cl_max_peers,
+            disable_dashboard,
+            dashboard_password,
         } => {
             let nat = if nat == "any" {
                 config_nat.unwrap_or(nat)
             } else {
                 nat
             };
+            let dashboard_enabled =
+                file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
+            let dashboard_password = dashboard_password.or(file_config.dashboard_password);
+            if dashboard_password
+                .as_ref()
+                .is_some_and(|password| password.is_empty())
+            {
+                eprintln!("Error: dashboard password cannot be empty");
+                std::process::exit(1);
+            }
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
@@ -80,6 +92,8 @@ fn main() {
                 cl_discovery_port,
                 cl_p2p_port,
                 cl_max_peers,
+                dashboard_enabled,
+                dashboard_password,
             }));
         }
         Command::BuildIndexes => commands::run_build_indexes(pm_config),

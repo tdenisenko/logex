@@ -201,6 +201,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         },
         "storage_used_bytes": storage_metrics.storage_used_bytes,
         "disk_free_bytes": storage_metrics.disk_free_bytes,
+        "cpu_utilization_pct": storage_metrics.cpu_utilization_pct,
         "eta_seconds": sync.eta_seconds,
         "historical_execution_floor": historical_floor,
         "historical_execution_anchor": historical_anchor,
@@ -249,12 +250,18 @@ pub async fn handle_web_ui() -> Html<&'static str> {
     Html(include_str!("web_ui.html"))
 }
 
+/// Handle GET / when the dashboard has been explicitly disabled.
+pub async fn handle_dashboard_disabled() -> Response {
+    (StatusCode::NOT_FOUND, "dashboard disabled").into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, bytes};
     use axum::body::Body;
     use axum::http::Request;
+    use base64::Engine;
     use logex_index::IndexBuilder;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
@@ -314,6 +321,86 @@ mod tests {
         mgr.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
         (tmp, mgr)
+    }
+
+    fn basic_auth_header(password: &str) -> String {
+        let credentials = format!("logex:{password}");
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(credentials)
+        )
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_can_be_disabled() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router_with_config(
+            state,
+            crate::HttpServerConfig {
+                dashboard_enabled: false,
+                dashboard_password: None,
+            },
+        );
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_password_protects_status_and_query_routes() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router_with_config(
+            state,
+            crate::HttpServerConfig {
+                dashboard_enabled: true,
+                dashboard_password: Some("secret".to_owned()),
+            },
+        );
+
+        let status_req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+        let status_resp = app.clone().oneshot(status_req).await.unwrap();
+        assert_eq!(status_resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(status_resp.headers().contains_key("www-authenticate"));
+
+        let health_req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let health_resp = app.clone().oneshot(health_req).await.unwrap();
+        assert_eq!(health_resp.status(), StatusCode::OK);
+
+        let authed_status_req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", basic_auth_header("secret"))
+            .body(Body::empty())
+            .unwrap();
+        let authed_status_resp = app.clone().oneshot(authed_status_req).await.unwrap();
+        assert_eq!(authed_status_resp.status(), StatusCode::OK);
+
+        let query_body = serde_json::json!({ "sql": "SELECT * FROM logs" });
+        let query_req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("authorization", basic_auth_header("secret"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&query_body).unwrap()))
+            .unwrap();
+        let query_resp = app.oneshot(query_req).await.unwrap();
+        assert_eq!(query_resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

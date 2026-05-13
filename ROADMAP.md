@@ -2,26 +2,26 @@
 
 ## Current Status
 
-LogEx boots from a recent weak-subjectivity checkpoint, follows CL head/finality over native CL P2P, and uses CL-authenticated execution anchors as the pivot for EL validation. EL P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
+LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer head/finality over native P2P, and uses authenticated execution anchors as the pivot for Execution Layer validation. Execution Layer P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The active branch is `feature/el-reverse-sync` and the active draft PR is #76. The current work is focused on EL reverse-sync throughput, peer warmup, and storage pressure. Remote testing is on `root@164.92.232.250` with fixed HTTP port `18683` and data dir `/root/logex-data-remote`.
-
-The latest meaningful bottleneck is no longer raw log storage. Historical batches write raw sealed segments quickly, compress them in the background, and now coalesce historical writes into larger 1024-block chunks to reduce segment churn. On the current 4-vCPU/8 GB remote, the best comparable sample after this change reached roughly 318 historical blocks/sec with a zero raw-segment backlog. The remaining bottleneck is local receipt-root validation/log extraction plus body/receipt P2P latency while the serving peer pool warms up.
+The active task branch is `ui/minimal-sync-dashboard`, opened as draft PR #77 against `feature/el-reverse-sync` / draft PR #76. This branch focuses on the dashboard surface and HTTP access controls while the parent branch remains focused on Execution Layer reverse-sync throughput.
 
 ## Completed Since Last Run
 
-- Increased historical write coalescing from 512 to 1024 blocks after remote testing showed lower write churn and raw backlog without a throughput regression.
-- Added explicit mainnet Merge/terminal PoW block constants to the status surface and tested them against the Reth mainnet chainspec.
-- Documented the pre-Merge validation model: finalized post-Merge ancestry plus per-block body and receipt-root validation, without independent Ethash replay.
-- Tested a 48-task validation/extraction fanout and reverted it because the remote sample did not clearly beat the existing 32-task configuration.
+- Reworked the dashboard around the primary user-facing signals: Execution Layer sync progress, Consensus Layer status, verified log block range, storage usage, and the query tool.
+- Added split Chart.js performance charts for historical blocks/sec, serving peers, and process CPU utilization, with 1-hour, 6-hour, and 12-hour windows.
+- Moved secondary operational details into a collapsed advanced section.
+- Added HTTP dashboard controls: dashboard enabled by default, `--disable-dashboard`, config-level `dashboard_enabled`, and `--dashboard-password` / `dashboard_password` for HTTP Basic authentication.
+- Restored the softer pre-existing dashboard styling while keeping the simplified DOM and green animated Execution Layer progress bar.
+- Refined the dashboard review build: the Execution Layer panel now carries the primary status details, performance charts use rounded wall-clock ticks, and the query panel paginates loaded capped results with CSV export.
 
 ## Remaining TODOs
 
-1. Reduce EL reverse-sync ETA below the production target.
-   - Reason: Current remote runs are still far above the sub-6-hour full-history target.
+1. Reduce Execution Layer reverse-sync ETA below the production target.
+   - Reason: Current remote runs are still above the sub-6-hour full-history target.
    - Completion criteria: A fresh mainnet-like run sustains sub-6-hour ETA on adequate hardware, or a documented architecture decision replaces full P2P receipt backfill with another trustless strategy.
 
-2. Stabilize EL peer ramp and body/receipt throughput.
+2. Stabilize Execution Layer peer ramp and body/receipt throughput.
    - Reason: The downloader needs enough serving peers to hide request latency and keep wide fetch windows active.
    - Completion criteria: Long remote runs retain a large serving pool, keep lookahead filled, and do not regress peer retention compared with the best observed run.
 
@@ -30,58 +30,49 @@ The latest meaningful bottleneck is no longer raw log storage. Historical batche
    - Completion criteria: LogEx has its own recent-checkpoint source or a documented multi-source verification flow, with stale checkpoint rejection aligned to consensus weak-subjectivity rules.
 
 4. Complete release validation.
-   - Reason: CL, EL, storage, query, and UI surfaces need shared evidence for what is verified and queryable.
-   - Completion criteria: End-to-end tests or smokes cover checkpoint bootstrap, live anchors, reverse EL headers/bodies/receipts, restart/resume, Merge boundary behavior, query coverage, limits, and pagination.
+   - Reason: Consensus Layer, Execution Layer, storage, query, and UI surfaces need shared evidence for what is verified and queryable.
+   - Completion criteria: End-to-end tests or smokes cover checkpoint bootstrap, live anchors, reverse Execution Layer headers/bodies/receipts, restart/resume, Merge boundary behavior, query coverage, limits, pagination, and dashboard auth behavior.
+
+5. Harden non-HTTP query surfaces before public exposure.
+   - Reason: The new dashboard password protects HTTP dashboard/status/query/JSON-RPC/WebSocket routes, but gRPC is still a separate unauthenticated listener.
+   - Completion criteria: Either gRPC is bound/firewalled to trusted networks by default, gains equivalent authentication, or is explicitly disabled in deployment profiles that expose the HTTP dashboard.
 
 ## Design Decisions
 
-- CL sync is forward-only from a recent checkpoint; EL historical sync is responsible for walking execution data back toward genesis.
+- Consensus Layer sync is forward-only from a recent checkpoint; Execution Layer historical sync is responsible for walking execution data back toward genesis.
 - Logs are valid only inside the verified contiguous stored range. Unsynced historical gaps remain outside query coverage.
-- Historical storage writes raw sealed segments on the sync hot path and compresses them through periodic background compaction.
-- Historical fetch width is peer-count and memory aware. Small 8 GB hosts stay conservative; larger hosts can use wider windows when the serving peer pool is strong.
+- The dashboard keeps the query tool on the main page because querying verified logs is a primary product workflow.
+- Performance charts use Chart.js rather than custom SVG path generation.
+- Dashboard authentication uses HTTP Basic auth as a lightweight local/server operator control. It should be paired with localhost binding, firewalling, SSH tunneling, or TLS termination when exposed outside a trusted machine.
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
-- Pre-Merge log validity is derived from the CL-finalized post-Merge execution header's recursive parent-hash ancestry. LogEx walks that canonical header chain to genesis and validates each block's bodies and receipts against the committed header roots; it does not independently replay Ethash or rederive total difficulty from genesis.
+- Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 
 ## Challenges and Resolutions
 
-- Challenge: Inline compression made dense historical batches spend too much time in storage writes.
-  - Resolution: Raw sealed writes are now used on the hot path, with background compaction handling compression continuously.
+- Challenge: The dashboard had too many competing metrics and made Execution Layer/log coverage hard to interpret.
+  - Resolution: The main view now shows one Execution Layer progress bar, Consensus Layer status, log range, storage, performance chart, and the query panel.
 
-- Challenge: Wider fetch windows improved latency hiding but could push the 8 GB remote into unsafe memory pressure.
-  - Resolution: Fetch window and lookahead depth now require enough total memory before widening beyond the 2048-block tier.
-
-- Challenge: Post-Osaka block validation duplicated body/root work and cloned full bodies.
-  - Resolution: Validation now keeps the required checks while replacing the duplicate Reth block validator call with the specific Osaka max-RLP-size check.
-
-- Challenge: Recent peer behavior regressed from the best observed branch state.
-  - Resolution: Peer-warmup constants were pulled back toward commit `8f97cef`; longer remote sampling is still needed to confirm recovery.
-
-- Challenge: More validation workers could have reduced tail latency, but the 48-task fanout produced flat-to-worse remote results.
-  - Resolution: The fanout experiment was reverted and the stable 32-task configuration was kept.
+- Challenge: The query engine could be abused if the HTTP server URL is reachable by untrusted users.
+  - Resolution: Added optional HTTP Basic auth for HTTP dashboard, status, query, JSON-RPC, and WebSocket endpoints while keeping `/health` public for liveness checks.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected historical sync, storage compaction, validation, and peer-manager changes for experimental code.
-- Removed stale-dial quarantine/demotion behavior from this branch before the current run.
-- Removed obsolete prepared decoded-row lookahead; current lookahead stays at the fetched body/receipt layer.
-- Reverted the experimental 48-task validation/extraction fanout after it failed to produce a meaningful throughput gain.
-- Kept the raw-segment reader/compactor paths because they are required for immediate queryability plus deferred compression.
-- Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` directories are present but empty, so they could not be used for this pass.
+- Removed the old dense dashboard sections that duplicated sync range information or exposed low-level metrics by default.
+- Removed the custom SVG line-chart path generation after switching to Chart.js.
+- Kept the HTTP `/query`, JSON-RPC, WebSocket, gRPC, and storage query code paths because they remain active APIs.
+- No experimental Execution Layer peer-retention or sync-performance code was changed in this UI branch.
 
 ## Git Workflow
 
-- Current branch: `feature/el-reverse-sync`
-- New branch created this run: no
-- Commits made during this run: `perf: reduce historical write segment churn`
-- Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
-- Merge status: not ready; throughput target and longer release validation remain incomplete.
+- Current branch: `ui/minimal-sync-dashboard`
+- New branch created this run: yes
+- Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`
+- Pull request status: PR #77 (`https://github.com/tdenisenko/logex/pull/77`) approved for merge into `feature/el-reverse-sync`.
+- Merge status: pending final PR merge.
 - Git/GitHub blockers: none known.
 
 ## Known Issues or Risks
 
-- Current EL reverse-sync ETA remains above target.
-- The current remote is small; larger RAM can safely activate wider fetch windows, but CPU and receipt validation still need profiling.
-- Full public-P2P receipt backfill may not match snap-sync full-node timings without deeper architectural changes or another trustless data source.
-- LogEx does not independently replay pre-Merge PoW fork choice; it relies on finalized post-Merge ancestry plus receipt-root validation for light-client log validity.
-- The latest remote peer ramp is still under observation after restoring `8f97cef`-style warmup constants.
-- The latest comparable 8 GB remote sample is still far above target at roughly 18 hours ETA.
+- HTTP Basic auth does not encrypt traffic. Use it behind localhost, a firewall, an SSH tunnel, or a TLS-terminating reverse proxy.
+- gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
+- The parent Execution Layer performance branch is still above the long-term sync ETA target.

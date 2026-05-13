@@ -77,6 +77,14 @@ pub enum Command {
         /// Maximum dialable CL peers to retain from discovery.
         #[arg(long, default_value = "32")]
         cl_max_peers: usize,
+
+        /// Disable the embedded HTTP dashboard. Query APIs remain available.
+        #[arg(long)]
+        disable_dashboard: bool,
+
+        /// Require HTTP Basic authentication for dashboard, status, query, JSON-RPC, and WebSocket endpoints.
+        #[arg(long, value_name = "PASSWORD")]
+        dashboard_password: Option<String>,
     },
 
     /// Build or rebuild indexes on the hot partition.
@@ -108,6 +116,10 @@ pub struct Config {
     pub checkpoint_sync_url: Option<String>,
     #[serde(default)]
     pub nat: Option<String>,
+    #[serde(default)]
+    pub dashboard_enabled: Option<bool>,
+    #[serde(default)]
+    pub dashboard_password: Option<String>,
 }
 
 impl Config {
