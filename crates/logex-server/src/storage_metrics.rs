@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -102,26 +103,72 @@ fn process_cpu_time() -> Option<Duration> {
 }
 
 fn dir_size_bytes(root: &Path) -> io::Result<u64> {
-    if !root.exists() {
-        return Ok(0);
-    }
-
     let mut total = 0_u64;
+    let mut visited_dirs = HashSet::new();
+    let mut visited_files = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(path) = stack.pop() {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+
+        if metadata.is_file() {
+            add_file_size(&mut total, &mut visited_files, &metadata);
+            continue;
+        }
+
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        if let Some(id) = metadata_id(&metadata)
+            && !visited_dirs.insert(id)
+        {
+            continue;
+        }
+
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() {
-                total = total.saturating_add(entry.metadata()?.len());
-            }
+            stack.push(entry.path());
         }
     }
 
     Ok(total)
+}
+
+fn add_file_size(
+    total: &mut u64,
+    visited_files: &mut HashSet<MetadataId>,
+    metadata: &fs::Metadata,
+) {
+    if let Some(id) = metadata_id(metadata)
+        && !visited_files.insert(id)
+    {
+        return;
+    }
+
+    *total = total.saturating_add(metadata.len());
+}
+
+#[cfg(unix)]
+type MetadataId = (u64, u64);
+
+#[cfg(unix)]
+fn metadata_id(metadata: &fs::Metadata) -> Option<MetadataId> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+type MetadataId = ();
+
+#[cfg(not(unix))]
+fn metadata_id(_metadata: &fs::Metadata) -> Option<MetadataId> {
+    None
 }
 
 #[cfg(unix)]
@@ -167,6 +214,24 @@ mod tests {
         let mut inner = fs::File::create(nested.join("inner.bin")).expect("inner file");
         top.write_all(&[0_u8; 7]).expect("write top");
         inner.write_all(&[0_u8; 11]).expect("write inner");
+
+        assert_eq!(dir_size_bytes(tmp.path()).expect("size"), 18);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_follows_symlinked_directories_once() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external tempdir");
+        let segments = tmp.path().join("segments");
+        fs::create_dir_all(&segments).expect("segments dir");
+
+        fs::write(tmp.path().join("root.bin"), [0_u8; 7]).expect("root file");
+        fs::write(external.path().join("moved.bin"), [0_u8; 11]).expect("moved file");
+        symlink(external.path(), segments.join("s_0001")).expect("first symlink");
+        symlink(external.path(), segments.join("s_0001_alias")).expect("second symlink");
 
         assert_eq!(dir_size_bytes(tmp.path()).expect("size"), 18);
     }

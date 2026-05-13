@@ -867,7 +867,7 @@ fn load_manifest_descriptors(
 
     for entry in fs::read_dir(segments_dir)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        if !entry.path().is_dir() {
             continue;
         }
 
@@ -1109,6 +1109,47 @@ mod tests {
         assert_eq!(reloaded.total_rows(), 25);
         assert_eq!(reloaded.sealed_count(), 3);
         assert_eq!(reloaded.hot_partition_meta().row_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_repair_recovers_symlinked_segment_directories() {
+        let tmp = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let rows = make_rows(10, 100);
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage.write_historical_batch(&rows).unwrap();
+        let segment_id = storage
+            .segments()
+            .iter()
+            .find(|segment| segment.kind == SegmentKind::Sealed)
+            .map(|segment| segment.id)
+            .unwrap();
+        let segment_path = storage.segment_path(segment_id);
+        let external_path = external
+            .path()
+            .join(segment_path.file_name().expect("segment path has a name"));
+        fs::rename(&segment_path, &external_path).unwrap();
+        std::os::unix::fs::symlink(&external_path, &segment_path).unwrap();
+        fs::remove_file(storage.paths.catalog_path()).unwrap();
+        drop(storage);
+
+        let reloaded = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        assert_eq!(reloaded.total_rows(), 10);
+        assert_eq!(reloaded.sealed_count(), 1);
+        assert!(reloaded.segment_path(segment_id).is_dir());
     }
 
     #[test]

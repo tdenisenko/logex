@@ -4,17 +4,14 @@
 
 LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer head/finality over native P2P, and uses authenticated execution anchors as the pivot for Execution Layer validation. Execution Layer P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch; the remaining focus is Execution Layer reverse-sync throughput and production readiness.
+The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
 ## Completed Since Last Run
 
-- Reworked the dashboard around the primary user-facing signals: Execution Layer sync progress, Consensus Layer status, verified log block range, storage usage, and the query tool.
-- Added split Chart.js performance charts for historical blocks/sec, serving peers, and process CPU utilization, with 1-hour, 6-hour, and 12-hour windows.
-- Moved secondary operational details into a collapsed advanced section.
-- Added HTTP dashboard controls: dashboard enabled by default, `--disable-dashboard`, config-level `dashboard_enabled`, and `--dashboard-password` / `dashboard_password` for HTTP Basic authentication.
-- Restored the softer pre-existing dashboard styling while keeping the simplified DOM and green animated Execution Layer progress bar.
-- Refined the dashboard review build: the Execution Layer panel now carries the primary status details, performance charts use rounded wall-clock ticks, and the query panel paginates loaded capped results with CSV export.
-- Merged dashboard PR #77 into `feature/el-reverse-sync`.
+- Mounted the remote 100GB volume at `/mnt/logex-extra` and moved older sealed segment directories there to keep the active run alive without keeping multiple data directories.
+- Fixed storage catalog repair so symlinked segment directories remain discoverable after restart.
+- Fixed dashboard storage accounting so `storage_used_bytes` follows symlinked segment directories and avoids double-counting repeated links.
+- Reduced startup/query disk pressure for compacted segments by reading only selected page payloads instead of loading full column files for sparse row reads.
 
 ## Remaining TODOs
 
@@ -47,6 +44,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Dashboard authentication uses HTTP Basic auth as a lightweight local/server operator control. It should be paired with localhost binding, firewalling, SSH tunneling, or TLS termination when exposed outside a trusted machine.
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
+- Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
 
 ## Challenges and Resolutions
 
@@ -56,20 +54,22 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: The query engine could be abused if the HTTP server URL is reachable by untrusted users.
   - Resolution: Added optional HTTP Basic auth for HTTP dashboard, status, query, JSON-RPC, and WebSocket endpoints while keeping `/health` public for liveness checks.
 
+- Challenge: The remote root filesystem was close to full while the active data directory still needed to be preserved for performance testing.
+  - Resolution: Mounted the additional volume, moved older sealed segments onto it, fixed symlink-aware catalog repair and storage metrics, and reduced compacted selected-row reads so startup does not scan entire column files unnecessarily.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Removed the old dense dashboard sections that duplicated sync range information or exposed low-level metrics by default.
-- Removed the custom SVG line-chart path generation after switching to Chart.js.
-- Kept the HTTP `/query`, JSON-RPC, WebSocket, gRPC, and storage query code paths because they remain active APIs.
-- No experimental Execution Layer peer-retention or sync-performance code was changed in this UI branch.
+- Inspected storage startup, segment-reader, and server metric code paths affected by the remote volume split.
+- Kept the symlink-based segment relocation support because it is required by the active remote run.
+- No experimental Execution Layer peer-retention code was added or retained in this storage pass.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
-- New branch created this run: `ui/minimal-sync-dashboard` was created for the completed dashboard task and has been merged back.
-- Commits made during this run: `feat: simplify dashboard and protect query routes`, `docs: record dashboard PR`, `fix: restore dashboard styling and split charts`, `fix: refine dashboard review flow`
-- Pull request status: PR #77 (`https://github.com/tdenisenko/logex/pull/77`) merged into `feature/el-reverse-sync`.
-- Merge status: merged via squash commit `5e9bcd80ec9f4edce67171e717e8886be1b08b87`.
+- New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
+- Commits made during this run: storage-volume compatibility commit on this branch.
+- Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
+- Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
 
 ## Known Issues or Risks
@@ -77,3 +77,4 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - HTTP Basic auth does not encrypt traffic. Use it behind localhost, a firewall, an SSH tunnel, or a TLS-terminating reverse proxy.
 - gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
 - The parent Execution Layer performance branch is still above the long-term sync ETA target.
+- Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
