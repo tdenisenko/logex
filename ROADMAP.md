@@ -12,6 +12,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Fixed storage catalog repair so symlinked segment directories remain discoverable after restart.
 - Fixed dashboard storage accounting so `storage_used_bytes` follows symlinked segment directories and avoids double-counting repeated links.
 - Reduced startup/query disk pressure for compacted segments by reading only selected page payloads instead of loading full column files for sparse row reads.
+- Increased medium-peer historical fetch lookahead after the remote batch logs showed better fetch/validation overlap without making memory the limiting resource.
 
 ## Remaining TODOs
 
@@ -45,6 +46,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
+- Medium-peer historical reverse sync keeps four body/receipt fetches queued. The remote run showed this improves pipeline overlap while CPU-bound receipt validation and log extraction remain the main limiter.
 
 ## Challenges and Resolutions
 
@@ -57,6 +59,9 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 - Challenge: The remote root filesystem was close to full while the active data directory still needed to be preserved for performance testing.
   - Resolution: Mounted the additional volume, moved older sealed segments onto it, fixed symlink-aware catalog repair and storage metrics, and reduced compacted selected-row reads so startup does not scan entire column files unnecessarily.
 
+- Challenge: Historical sync still had visible wait time between body/receipt fetches and local processing.
+  - Resolution: Raised medium-peer lookahead to four queued fetches after comparing remote batch logs; the run remains CPU-bound rather than peer- or IO-bound.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage startup, segment-reader, and server metric code paths affected by the remote volume split.
@@ -67,7 +72,7 @@ The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboar
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: storage-volume compatibility commit on this branch.
+- Commits made during this run: storage-volume compatibility commit on this branch; medium-peer historical lookahead change pending validation.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
