@@ -17,8 +17,8 @@ use super::catalog::{
     StorageCatalogPaths,
 };
 use super::segment::{
-    append_rows, apply_rows_to_descriptor, compact_segment, persist_segment_manifest,
-    segment_uses_current_compaction_profile,
+    append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
+    persist_segment_manifest, segment_uses_current_compaction_profile,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -292,7 +292,7 @@ impl NativeStorage {
                 fs::remove_dir_all(&segment_dir)?;
             }
             append_rows(&segment_dir, 0, chunk)?;
-            apply_rows_to_descriptor(&mut descriptor, chunk);
+            apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
             persist_segment_manifest(&self.paths, &descriptor)?;
             self.catalog.segments.push(descriptor);
             self.persist_catalog()?;

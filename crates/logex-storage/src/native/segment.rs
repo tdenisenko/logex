@@ -195,6 +195,32 @@ pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows:
     descriptor.row_count += rows.len() as u64;
 }
 
+pub(crate) fn apply_ordered_rows_to_descriptor(
+    descriptor: &mut SegmentDescriptor,
+    rows: &[LogRow],
+) {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return;
+    };
+
+    let min_block = first.block_number.min(last.block_number);
+    let max_block = first.block_number.max(last.block_number);
+
+    descriptor.min_block = Some(
+        descriptor
+            .min_block
+            .map(|current| current.min(min_block))
+            .unwrap_or(min_block),
+    );
+    descriptor.max_block = Some(
+        descriptor
+            .max_block
+            .map(|current| current.max(max_block))
+            .unwrap_or(max_block),
+    );
+    descriptor.row_count += rows.len() as u64;
+}
+
 pub(crate) fn persist_segment_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,

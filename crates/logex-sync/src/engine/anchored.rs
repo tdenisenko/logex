@@ -288,7 +288,16 @@ fn validate_and_extract_historical_block_chunk(
     let validation_started = std::time::Instant::now();
     let start_index = jobs.first().map_or(0, |job| job.index);
     let block_count = jobs.len();
-    let mut rows = Vec::new();
+    let total_log_capacity = jobs
+        .iter()
+        .map(|job| {
+            job.receipts
+                .iter()
+                .map(|receipt| receipt.logs().len())
+                .sum::<usize>()
+        })
+        .sum();
+    let mut rows = Vec::with_capacity(total_log_capacity);
     let mut peer_notes = Vec::with_capacity(block_count.saturating_mul(2));
     let mut lowest_header = None;
     let mut lowest_block = u64::MAX;
@@ -331,12 +340,6 @@ fn validate_and_extract_historical_block_chunk(
             }));
         }
 
-        let log_count = job
-            .receipts
-            .iter()
-            .map(|receipt| receipt.logs().len())
-            .sum::<usize>();
-        rows.reserve(log_count);
         let extraction_started = std::time::Instant::now();
         extract::append_from_body_receipts(
             &mut rows,

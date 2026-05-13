@@ -17,6 +17,7 @@ The latest meaningful bottleneck is no longer raw log storage. Historical batche
 - Reused validated reverse-header hashes and removed duplicate post-Osaka block validation work; LogEx now performs direct body/header checks plus the Osaka max-RLP-size check instead of cloning and revalidating each block body.
 - Restored peer-warmup behavior toward commit `8f97cef`: Geth-style outbound/inbound split, pending dial slot accounting, and conservative initial body/receipt request limits.
 - Re-tested the higher 32-task historical validation fanout after removing duplicate Osaka validation; it improved the latest remote sample without exhausting the 8 GB host.
+- Removed avoidable row-buffer reallocations and historical descriptor scans from the ordered reverse-sync hot path.
 
 ## Remaining TODOs
 
@@ -74,7 +75,7 @@ The latest meaningful bottleneck is no longer raw log storage. Historical batche
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: no
-- Commits made during this run: pending
+- Commits made during this run: performance checkpoint plus ordered-row hot-path cleanup
 - Pull request status: draft PR #76 (`https://github.com/tdenisenko/logex/pull/76`)
 - Merge status: not ready; throughput target and pre-Merge validation remain incomplete.
 - Git/GitHub blockers: none known.
