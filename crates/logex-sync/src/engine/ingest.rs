@@ -8,11 +8,7 @@ const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 512;
 const HISTORICAL_EXTRACTION_PIPELINE_DEPTH: usize = 4;
 
 pub(super) struct HistoricalExtractedBatch {
-    pub(super) block_count: u64,
-    pub(super) row_count: u64,
-    pub(super) lowest_header: Header,
     pub(super) chunks: Vec<HistoricalExtractedChunk>,
-    pub(super) extraction_elapsed: Duration,
 }
 
 pub(super) struct HistoricalExtractedChunk {
@@ -21,6 +17,19 @@ pub(super) struct HistoricalExtractedChunk {
     pub(super) block_count: usize,
     pub(super) lowest_header: Header,
     pub(super) extraction_elapsed: Duration,
+}
+
+pub(super) struct HistoricalBatchWriter {
+    storage: Arc<RwLock<PartitionManager>>,
+    subscriptions: Option<SubscriptionManager>,
+    write_buffer: Option<HistoricalExtractedChunk>,
+    write_elapsed: Duration,
+    floor: Option<ExecutionBlockMarker>,
+    anchor: Option<ExecutionBlockMarker>,
+    lowest_header: Option<Header>,
+    block_count: u64,
+    row_count: u64,
+    extraction_elapsed: Duration,
 }
 
 struct HistoricalChunkWriteOutcome {
@@ -38,6 +47,104 @@ impl HistoricalExtractedChunk {
             self.lowest_header = other.lowest_header;
         }
         self.extraction_elapsed += other.extraction_elapsed;
+    }
+}
+
+impl HistoricalBatchWriter {
+    pub(super) fn new(
+        storage: Arc<RwLock<PartitionManager>>,
+        subscriptions: Option<SubscriptionManager>,
+    ) -> Self {
+        Self {
+            storage,
+            subscriptions,
+            write_buffer: None,
+            write_elapsed: Duration::ZERO,
+            floor: None,
+            anchor: None,
+            lowest_header: None,
+            block_count: 0,
+            row_count: 0,
+            extraction_elapsed: Duration::ZERO,
+        }
+    }
+
+    pub(super) async fn push_chunk(&mut self, chunk: HistoricalExtractedChunk) -> Result<()> {
+        self.block_count = self.block_count.saturating_add(chunk.block_count as u64);
+        self.row_count = self.row_count.saturating_add(chunk.row_count);
+        self.extraction_elapsed += chunk.extraction_elapsed;
+        if self
+            .lowest_header
+            .as_ref()
+            .is_none_or(|header| chunk.lowest_header.number() < header.number())
+        {
+            self.lowest_header = Some(chunk.lowest_header.clone());
+        }
+
+        match self.write_buffer.as_mut() {
+            Some(buffer) => buffer.merge(chunk),
+            None => self.write_buffer = Some(chunk),
+        }
+
+        if self
+            .write_buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS)
+        {
+            self.flush_buffer().await?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn finish(mut self) -> Result<HistoricalIngestOutcome> {
+        self.flush_buffer().await?;
+
+        if self.block_count == 0 {
+            return Ok(HistoricalIngestOutcome {
+                block_count: 0,
+                row_count: 0,
+                floor: ExecutionBlockMarker {
+                    block_number: 0,
+                    block_hash: B256::ZERO,
+                    timestamp: 0,
+                },
+                anchor: None,
+                extraction_elapsed: Duration::ZERO,
+                write_elapsed: Duration::ZERO,
+            });
+        }
+
+        let lowest_header = self
+            .lowest_header
+            .expect("non-empty historical writer has a lowest header");
+        Ok(HistoricalIngestOutcome {
+            block_count: self.block_count,
+            row_count: self.row_count,
+            floor: self
+                .floor
+                .unwrap_or_else(|| execution_marker_from_header(&lowest_header)),
+            anchor: self.anchor,
+            extraction_elapsed: self.extraction_elapsed,
+            write_elapsed: self.write_elapsed,
+        })
+    }
+
+    async fn flush_buffer(&mut self) -> Result<()> {
+        let Some(chunk) = self.write_buffer.take() else {
+            return Ok(());
+        };
+
+        let chunk_outcome = write_extracted_historical_chunk(
+            Arc::clone(&self.storage),
+            self.subscriptions.clone(),
+            chunk,
+        )
+        .await?;
+        self.write_elapsed += chunk_outcome.write_elapsed;
+        self.floor = chunk_outcome.floor;
+        self.anchor = chunk_outcome.anchor;
+        Ok(())
     }
 }
 
@@ -143,26 +250,9 @@ pub(super) async fn extract_validated_historical_blocks(
     blocks: Vec<HistoricalValidatedBlock>,
 ) -> Result<HistoricalExtractedBatch> {
     if blocks.is_empty() {
-        return Ok(HistoricalExtractedBatch {
-            block_count: 0,
-            row_count: 0,
-            lowest_header: Header {
-                number: 0,
-                ..Default::default()
-            },
-            chunks: Vec::new(),
-            extraction_elapsed: Duration::ZERO,
-        });
+        return Ok(HistoricalExtractedBatch { chunks: Vec::new() });
     }
 
-    let lowest_header = blocks
-        .iter()
-        .min_by_key(|block| block.header.number())
-        .map(|block| block.header.clone())
-        .expect("non-empty historical block batch has a lowest header");
-    let block_count = blocks.len() as u64;
-    let mut row_count = 0u64;
-    let mut extraction_elapsed = Duration::ZERO;
     let mut chunks = Vec::new();
 
     let mut block_chunks = blocks.into_iter();
@@ -187,25 +277,15 @@ pub(super) async fn extract_validated_historical_blocks(
             let extracted = write_buffer
                 .take()
                 .expect("historical write buffer is present when ready");
-            row_count = row_count.saturating_add(extracted.row_count);
-            extraction_elapsed += extracted.extraction_elapsed;
             chunks.push(extracted);
         }
     }
 
     if let Some(extracted) = write_buffer.take() {
-        row_count = row_count.saturating_add(extracted.row_count);
-        extraction_elapsed += extracted.extraction_elapsed;
         chunks.push(extracted);
     }
 
-    Ok(HistoricalExtractedBatch {
-        block_count,
-        row_count,
-        lowest_header,
-        chunks,
-        extraction_elapsed,
-    })
+    Ok(HistoricalExtractedBatch { chunks })
 }
 
 pub(super) async fn write_extracted_historical_batch(
@@ -213,46 +293,12 @@ pub(super) async fn write_extracted_historical_batch(
     subscriptions: Option<SubscriptionManager>,
     extracted: HistoricalExtractedBatch,
 ) -> Result<HistoricalIngestOutcome> {
-    if extracted.block_count == 0 {
-        return Ok(HistoricalIngestOutcome {
-            block_count: 0,
-            row_count: 0,
-            floor: ExecutionBlockMarker {
-                block_number: 0,
-                block_hash: B256::ZERO,
-                timestamp: 0,
-            },
-            anchor: None,
-            extraction_elapsed: Duration::ZERO,
-            write_elapsed: Duration::ZERO,
-        });
-    }
-
-    let mut write_elapsed = Duration::ZERO;
-    let mut floor = None;
-    let mut anchor = None;
-
+    let mut writer = HistoricalBatchWriter::new(storage, subscriptions);
     let write_chunks = coalesce_historical_write_chunks(extracted.chunks);
-    let last_chunk_index = write_chunks.len().saturating_sub(1);
-    for (index, chunk) in write_chunks.into_iter().enumerate() {
-        let chunk_outcome =
-            write_extracted_historical_chunk(Arc::clone(&storage), subscriptions.clone(), chunk)
-                .await?;
-        write_elapsed += chunk_outcome.write_elapsed;
-        if index == last_chunk_index {
-            floor = chunk_outcome.floor;
-            anchor = chunk_outcome.anchor;
-        }
+    for chunk in write_chunks {
+        writer.push_chunk(chunk).await?;
     }
-
-    Ok(HistoricalIngestOutcome {
-        block_count: extracted.block_count,
-        row_count: extracted.row_count,
-        floor: floor.unwrap_or_else(|| execution_marker_from_header(&extracted.lowest_header)),
-        anchor,
-        extraction_elapsed: extracted.extraction_elapsed,
-        write_elapsed,
-    })
+    writer.finish().await
 }
 
 fn fill_historical_extraction_pipeline(

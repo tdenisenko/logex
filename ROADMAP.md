@@ -4,7 +4,7 @@
 
 LogEx bootstraps from a recent weak-subjectivity checkpoint, follows CL head/finality over native CL P2P, and uses CL-authenticated execution anchors as the pivot for EL validation. EL P2P can follow head, fetch historical headers/bodies/receipts backward from the pivot, verify receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
 
-The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote runs on May 13, 2026 use `/root/logex-data-remote` and fixed HTTP port `18683`. Historical backfill now keeps lookahead at the body/receipt fetch layer, overlaps the next fetch with current validation/storage work, starts earlier on fresh peer pools, and keeps decoded receipt/log memory bounded. Dense recent ranges still remain below the sub-6-hour full-history target; after peer retention improved, the current bottleneck is CPU-heavy local validation/extraction/compression plus body/receipt latency variance.
+The current branch is focused on EL reverse-sync throughput and peer behavior. The latest remote runs on May 13, 2026 use `/root/logex-data-remote` and fixed HTTP port `18683`. Historical backfill now keeps lookahead at the body/receipt fetch layer, streams ordered validation/extraction chunks into storage, overlaps the next fetch with current local processing, and scales fetch depth with the serving peer pool. Dense recent ranges still remain below the sub-6-hour full-history target; after peer retention improved, the current bottleneck is CPU-heavy local validation/extraction/compression plus body/receipt latency variance.
 
 ## Completed Since Last Run
 
@@ -19,6 +19,10 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Removed prepared decoded-row lookahead and kept historical lookahead at the fetched body/receipt layer so current-batch rows are no longer retained alongside prepared next-batch rows.
 - Raised dense body/receipt return blocks back to 1024 after the fetch-only lookahead change reduced memory enough to avoid the previous prepared-batch OOM pattern.
 - Sampled the fresh 4-vCPU remote after the 1024-window run reached 44 connected / 41 serving peers; ETA improved to roughly 34 hours, with CPU bursts dominant and disk utilization low.
+- Streamed ordered historical validation/extraction chunks directly into storage so completed chunks no longer wait for the entire batch to be decoded before writing.
+- Restored the likely best peer-retention chunk width from commit `8f97cef` by capping wide body/receipt chunks at 16 blocks.
+- Added serving-peer-based historical fetch depth: low peer pools keep 2 fetches in flight, 16+ serving peers use 3, and 32+ serving peers can use 4.
+- Sampled the dynamic-depth remote run after it crossed 16 serving peers; dense batches expanded from 1024 requested headers to 2048-header windows returning about 1350 verified blocks, while ETA remained roughly 34 hours.
 - Removed stale-dial quarantine/demotion experiments that hurt fresh peer ramp, retested the earlier Geth-style 33/67 outbound/inbound split, and kept aggressive dial submission because exact pending-dial slot accounting slowed warmup on the fresh remote.
 - Rejected 2048-block dense body/receipt batches on the 8 GB remote after an OOM kill, then reduced dense batches/write chunks again after high-log 1024-block batches still exceeded memory with lookahead.
 - Confirmed the current remote only has `/root/logex-data-remote`; no old remote data directories remain to delete.
@@ -54,7 +58,7 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - EL historical validation targets genesis because the CL checkpoint only proves a recent execution pivot.
 - Historical log queries are valid for the verified stored range, not for unsynced gaps below the historical floor.
 - Historical floor advancement only uses contiguous verified blocks. A partial body/receipt window may be ingested once the contiguous prefix reaches the accepted dense threshold; dense body/receipt tail data is not retained across batches.
-- Reverse-sync requested windows scale with serving peers and gas density. Dense ranges return about 1024 blocks after fetched-only lookahead removed prepared-row retention, while sparse ranges can return larger batches.
+- Reverse-sync requested windows scale with serving peers and gas density. Low-peer dense ranges return about 1024 blocks, 16+ serving peers can request 2048-header windows, and sparse ranges can return larger batches.
 - The peer pool uses a Geth-style 1/3 outbound and 2/3 inbound capacity split, but pending dial submissions are not counted as filled peer slots because that exact behavior slowed fresh warmup in remote testing.
 - Historical backfill may begin at 8 connected peers so the client can classify serving peers through real requests instead of idling during fresh peer warmup.
 - Outbound dial capacity is intentionally higher than a general-purpose full node because LogEx is a sync-focused reader and needs to rebuild a serving peer pool quickly after restart.
@@ -74,8 +78,8 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Challenge: 2048-block dense body/receipt batches exceeded the 8 GB remote memory ceiling.
   - Resolution: Restored the dense 1024-block gas cap and kept larger windows only for sparse ranges until historical ingestion can stream chunks without retaining full decoded batches.
 
-- Challenge: High-log 1024-block dense batches still exceeded the 8 GB remote memory ceiling when multiple prepared batches were retained.
-  - Resolution: Removed prepared decoded-row lookahead and restored 1024-block dense returns. The next performance fix still needs streaming/chunked ingestion so storage can consume verified chunks without retaining a full extracted batch.
+- Challenge: High-log 1024-block dense batches exceeded the 8 GB remote memory ceiling when multiple prepared batches were retained.
+  - Resolution: Removed prepared decoded-row lookahead and added ordered chunk streaming so verified chunks are written without retaining a full extracted batch.
 
 - Challenge: Body/receipt fetch latency still drains lookahead in dense ranges.
   - Resolution: Increased per-peer chunk scheduling, bounded hedge retries, and rejected tiny partial prefixes under the accepted dense threshold; longer remote sampling is still needed.
@@ -83,12 +87,16 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 - Challenge: The latest 4-vCPU remote run reached a useful serving peer pool but still stayed well above the target ETA.
   - Resolution: Identified CPU-heavy receipt validation, log extraction, and compression as the next bottleneck to reduce; disk I/O was not saturated in the sampled run.
 
+- Challenge: Wider fetch lookahead can improve latency hiding but may overload small peer pools.
+  - Resolution: Made historical fetch depth depend on serving peers so the client starts conservatively and widens only after the serving pool grows.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical downloader, peer lifecycle/state, request scheduler, storage compression path, and roadmap notes for obsolete experimental code.
 - Removed stale-dial quarantine/demotion code and tests.
 - Removed unsafe dense 2048+ and high-log 1024-block admission from the current memory-bounded build.
 - Removed prepared decoded-row lookahead that retained extra batches without improving fetch overlap.
+- Removed the obsolete prepared-batch type and writer path after replacing it with ordered streaming ingestion.
 - Kept the hedge retry change because remote samples showed body/receipt fetch remains the dominant dense-range stage.
 - Removed obsolete roadmap notes for rejected tail-cache, deferred-compaction, and stale-dial experiments.
 - Confirmed query limits, inline compressed historical writes, and topic dictionary/page compression remain active.
@@ -105,6 +113,6 @@ The current branch is focused on EL reverse-sync throughput and peer behavior. T
 
 - Reverse sync remains too slow for the target ETA.
 - Full-history receipt/log acquisition over public EL P2P may not realistically match snap-sync full-node timings unless the downloader is redesigned around deeper task queues or another trustless data source.
-- Current remote ETA is still above target; the latest 1024-block fetched-lookahead run sampled around 34 hours on the 4-vCPU remote.
-- Larger dense batches require a streaming/chunked ingestion redesign or more memory; simply increasing the batch size is not safe until row retention is reduced further.
+- Current remote ETA is still above target; the latest dynamic-depth run sampled around 34 hours on the 4-vCPU remote after crossing 16 serving peers.
+- Larger dense batches still require careful memory and CPU profiling even after streaming ingestion; simply increasing the batch size is not safe without longer high-peer samples.
 - Pre-Merge PoW validation is still incomplete.

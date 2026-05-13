@@ -15,7 +15,7 @@ const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(5);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
-const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 32;
+const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_WIDE: usize = 16;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
@@ -3235,8 +3235,8 @@ mod tests {
     #[test]
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
         assert_eq!(body_receipt_chunk_cap(31), 32);
-        assert_eq!(body_receipt_chunk_cap(32), 32);
-        assert_eq!(body_receipt_chunk_limit(128, 128, 32), 32);
+        assert_eq!(body_receipt_chunk_cap(32), 16);
+        assert_eq!(body_receipt_chunk_limit(128, 128, 16), 16);
         assert_eq!(body_receipt_chunk_limit(16, 128, 32), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 32), 8);
     }

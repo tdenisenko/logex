@@ -103,18 +103,6 @@ pub(super) struct HistoricalIngestOutcome {
     write_elapsed: Duration,
 }
 
-pub(super) struct PreparedHistoricalBatch {
-    requested_headers: usize,
-    header_elapsed: Duration,
-    body_receipt_elapsed: Duration,
-    peer_notes: Vec<PeerId>,
-    extracted: ingest::HistoricalExtractedBatch,
-    lowest_block: u64,
-    highest_block: u64,
-    block_count: usize,
-    validation_elapsed: Duration,
-}
-
 pub(super) struct WrittenHistoricalBatch {
     requested_headers: usize,
     header_elapsed: Duration,
@@ -126,7 +114,7 @@ pub(super) struct WrittenHistoricalBatch {
     block_count: usize,
     validation_elapsed: Duration,
     prepare_wait_elapsed: Duration,
-    storage_elapsed: Duration,
+    processing_elapsed: Duration,
 }
 
 pub(super) struct HistoricalValidationFailure {
@@ -140,7 +128,7 @@ pub(super) struct HistoricalValidationFailure {
 pub(super) struct HistoricalPrepareTask {
     next_child_header: Option<Header>,
     handle: JoinHandle<
-        Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
+        Result<std::result::Result<WrittenHistoricalBatch, Box<HistoricalValidationFailure>>>,
     >,
 }
 
