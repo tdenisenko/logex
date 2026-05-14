@@ -10,9 +10,8 @@ use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 4;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 8;
-const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 64;
-const ACTIVE_SYNC_PROFILE_REWRITE_CATCH_UP_LIMIT: usize = 4;
-const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 16;
+const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 384;
+const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
 const BYTES_PER_KIB: u64 = 1024;
@@ -91,21 +90,11 @@ pub async fn run_background_indexer(
                     let (raw_plan, profile_plan, compaction_limit) = {
                         let storage = storage.blocking_read();
                         let backlog = storage.raw_compaction_backlog_count()?;
-                        let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG
-                        {
-                            ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
-                        } else {
-                            compaction_limit
-                        };
+                        let (compaction_limit, profile_rewrite_limit) =
+                            active_sync_compaction_limits(backlog, compaction_limit);
                         (
                             storage.raw_segment_compaction_plan(compaction_limit)?,
-                            storage.profile_rewrite_compaction_plan(
-                                if backlog <= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
-                                    ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT
-                                } else {
-                                    ACTIVE_SYNC_PROFILE_REWRITE_CATCH_UP_LIMIT
-                                },
-                            )?,
+                            storage.profile_rewrite_compaction_plan(profile_rewrite_limit)?,
                             compaction_limit,
                         )
                     };
@@ -252,6 +241,21 @@ fn update_compaction_status(state: &AppState, report: CompactionReport) {
 
 fn should_defer_background_indexing(status: &SyncStatus) -> bool {
     status.syncing || status.historical_eta_seconds.is_some()
+}
+
+fn active_sync_compaction_limits(raw_backlog: usize, base_limit: usize) -> (usize, usize) {
+    let raw_limit = if raw_backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
+        ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
+    } else {
+        base_limit
+    };
+    let profile_rewrite_limit = if raw_backlog == 0 {
+        ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT
+    } else {
+        0
+    };
+
+    (raw_limit, profile_rewrite_limit)
 }
 
 fn active_sync_compaction_memory_pressure() -> Option<u64> {
@@ -423,5 +427,31 @@ mod tests {
             EXECUTION_HISTORY_TARGET_BLOCK
         )));
         assert!(!should_defer_for_historical_floor(None));
+    }
+
+    #[test]
+    fn active_sync_compaction_defers_profile_rewrites_until_raw_backlog_clears() {
+        assert_eq!(
+            active_sync_compaction_limits(1, ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT),
+            (ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT, 0)
+        );
+        assert_eq!(
+            active_sync_compaction_limits(0, ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT),
+            (
+                ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT,
+                ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT
+            )
+        );
+    }
+
+    #[test]
+    fn active_sync_compaction_uses_catch_up_limit_for_large_raw_backlog() {
+        assert_eq!(
+            active_sync_compaction_limits(
+                ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG,
+                ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT
+            ),
+            (ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT, 0)
+        );
     }
 }
