@@ -20,8 +20,10 @@ The latest stable direction is:
 - Removed the redundant advanced storage free-space row so the UI has one user-facing `Disk free` metric.
 - Optimized adaptive variable-byte page compression by using 32-bit offsets directly when the page fits, avoiding a redundant zstd pass over normal log data pages.
 - Added a Linux-only allocator trim under sustained historical-sync memory pressure to help return freed dense-batch arenas to the OS without changing sync correctness.
+- Raised the high-memory dense historical window cap from 2,048 to 4,096 blocks so recent dense ranges need fewer pipeline turns while low-memory backoff still forces 1,024-block windows.
 - Deployed the compression/storage UI changes to the remote client and confirmed the service restarts gracefully with storage integrity passing.
 - Tested a deeper dense fetch pipeline; it increased RSS and worsened ETA, so it was reverted.
+- Tested prefetch cancellation and write-buffer preallocation; both were reverted because they reduced lookahead or increased memory pressure without improving ETA.
 
 ## Remaining TODOs
 
@@ -56,6 +58,7 @@ The latest stable direction is:
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS or peer usefulness should be reverted.
 - Memory-pressure handling may ask glibc to trim free allocator arenas after dense historical batches; it is rate-limited and disabled on non-glibc targets.
+- Dense historical ranges use a 4,096-block cap only when the memory tier would otherwise allow larger windows; lower-memory machines still fall back to smaller windows.
 
 ## Challenges and Resolutions
 
@@ -74,18 +77,21 @@ The latest stable direction is:
 - Challenge: Dense historical batches left high RSS after data was freed, which pushed the adaptive sync planner into low-memory mode.
   - Resolution: Added a rate-limited allocator trim for Linux/glibc runs and confirmed it fires only under the low-memory threshold.
 
+- Challenge: Some scheduler and allocation experiments looked promising but hurt the live run.
+  - Resolution: Reverted prefetch cancellation because it drained lookahead to depth 1, and reverted dense write-buffer preallocation because it increased RSS and trim frequency.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage metrics UI code and removed obsolete volume-label rendering, the redundant advanced disk-free row, and related JavaScript.
 - Inspected the adaptive byte-page encoder and removed the now-unneeded dual-compression path for normal pages.
-- Inspected the dense fetch-depth experiment after measurement and reverted it because it did not improve the run.
+- Inspected the dense fetch-depth, prefetch-cancellation, and write-preallocation experiments after measurement and reverted the variants that did not improve the run.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: latest checkpoint commit `perf: trim allocator during dense historical sync`.
+- Commits made during this run: `perf: trim allocator during dense historical sync`; pending checkpoint for dense-window tuning.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL performance and validation work remain incomplete.
 - Blockers: none known.
