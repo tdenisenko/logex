@@ -22,6 +22,7 @@ The latest stable direction is:
 - Added a Linux-only allocator trim under sustained historical-sync memory pressure to help return freed dense-batch arenas to the OS without changing sync correctness.
 - Raised the high-memory dense historical window cap from 2,048 to 4,096 blocks so recent dense ranges need fewer pipeline turns while low-memory backoff still forces 1,024-block windows.
 - Reduced historical validation/extraction task fragmentation so dense 5,000-block batches do less scheduler and allocator work while preserving per-block cryptographic checks.
+- Added a guarded sparse-history lookahead boost so older low-log-density ranges can keep more body/receipt requests in flight when serving peers and memory are healthy.
 - Deployed the compression/storage UI changes to the remote client and confirmed the service restarts gracefully with storage integrity passing.
 - Tested a deeper dense fetch pipeline; it increased RSS and worsened ETA, so it was reverted.
 - Tested a higher high-memory lookahead depth; it increased memory pressure and allocator trims without a durable throughput win, so it was reverted.
@@ -62,6 +63,7 @@ The latest stable direction is:
 - Memory-pressure handling may ask glibc to trim free allocator arenas after dense historical batches; it is rate-limited and disabled on non-glibc targets.
 - Dense historical ranges use a 4,096-block cap only when the memory tier would otherwise allow larger windows; lower-memory machines still fall back to smaller windows.
 - Dense historical validation uses fewer, larger blocking chunks than the first parallel version; this keeps all validation semantics while reducing overhead from hundreds of tiny tasks per batch.
+- Sparse historical ranges may raise fetch lookahead depth, but only after observed density falls below 100 logs/block, serving peers are plentiful, and memory is above the low-water mark.
 
 ## Challenges and Resolutions
 
@@ -86,18 +88,22 @@ The latest stable direction is:
 - Challenge: Dense batches spent avoidable time in task scheduling and allocation.
   - Resolution: Reduced validation/extraction task fan-out from 32 to 16 chunks per CPU, which improved remote dense-batch processing without changing validation logic.
 
+- Challenge: Older sparse ranges need a different strategy than recent dense ranges.
+  - Resolution: Added a density-gated lookahead boost that remains inactive in dense ranges and backs off automatically under memory pressure.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected storage metrics UI code and removed obsolete volume-label rendering, the redundant advanced disk-free row, and related JavaScript.
 - Inspected the adaptive byte-page encoder and removed the now-unneeded dual-compression path for normal pages.
 - Inspected the dense fetch-depth, high-memory lookahead-depth, prefetch-cancellation, and write-preallocation experiments after measurement and reverted the variants that did not improve the run.
+- Inspected historical density controls and kept the sparse lookahead boost isolated from dense-range caps so the earlier memory regressions are not reintroduced.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `perf: trim allocator during dense historical sync`; `perf: relax dense historical window cap`; pending checkpoint for validation task fragmentation.
+- Commits made during this run: `perf: trim allocator during dense historical sync`; `perf: relax dense historical window cap`; `perf: reduce dense validation task fragmentation`; pending checkpoint for sparse-history lookahead.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL performance and validation work remain incomplete.
 - Blockers: none known.

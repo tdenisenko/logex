@@ -29,12 +29,15 @@ const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
+const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
+const HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
+const HISTORICAL_SPARSE_ROWS_PER_BLOCK: f64 = 100.0;
 const HISTORICAL_DENSE_ROWS_PER_BLOCK: f64 = 500.0;
 const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
@@ -46,6 +49,8 @@ const HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES: u64 = 2 * BYTES_PER_GIB;
 const HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES: u64 = 4 * BYTES_PER_GIB;
 const HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 12 * BYTES_PER_GIB;
 const HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 14 * BYTES_PER_GIB;
+const HISTORICAL_SPARSE_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 =
+    HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES;
 const HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 24 * BYTES_PER_GIB;
 const HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 48 * BYTES_PER_GIB;
 const HISTORICAL_ALLOCATOR_TRIM_INTERVAL: Duration = Duration::from_secs(30);
@@ -309,6 +314,24 @@ fn historical_density_fetch_pipeline_depth_cap(rows_per_block: Option<f64>) -> O
     }
 }
 
+fn historical_sparse_fetch_pipeline_depth_boost(
+    serving_peers: usize,
+    total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
+    rows_per_block: Option<f64>,
+) -> Option<usize> {
+    if serving_peers < HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS
+        || !historical_allows_sparse_pipeline(total_memory_bytes)
+        || historical_available_memory_is_low(available_memory_bytes)
+    {
+        return None;
+    }
+
+    let rows_per_block = rows_per_block?;
+    (rows_per_block <= HISTORICAL_SPARSE_ROWS_PER_BLOCK)
+        .then_some(HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH)
+}
+
 fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u64> {
     let rows_per_block = rows_per_block?;
     if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
@@ -336,6 +359,11 @@ fn update_historical_density_ewma(current: Option<f64>, rows: u64, blocks: usize
 
 fn historical_allows_high_memory_pipeline(total_memory_bytes: Option<u64>) -> bool {
     total_memory_bytes.is_none_or(|bytes| bytes >= HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES)
+}
+
+fn historical_allows_sparse_pipeline(total_memory_bytes: Option<u64>) -> bool {
+    total_memory_bytes
+        .is_none_or(|bytes| bytes >= HISTORICAL_SPARSE_PIPELINE_MIN_TOTAL_MEMORY_BYTES)
 }
 
 fn historical_allows_medium_memory_pipeline(total_memory_bytes: Option<u64>) -> bool {
@@ -1304,6 +1332,15 @@ impl SyncEngine {
             historical_total_memory_bytes(),
             available_memory_bytes,
         );
+        let sparse_pipeline_boost = historical_sparse_fetch_pipeline_depth_boost(
+            self.peers.serving_peer_count(),
+            historical_total_memory_bytes(),
+            available_memory_bytes,
+            self.historical_rows_per_block_ewma,
+        );
+        let base_pipeline_depth = sparse_pipeline_boost
+            .map(|boost| base_pipeline_depth.max(boost))
+            .unwrap_or(base_pipeline_depth);
         let density_pipeline_cap =
             historical_density_fetch_pipeline_depth_cap(self.historical_rows_per_block_ewma);
         let pipeline_depth = density_pipeline_cap
@@ -2333,6 +2370,50 @@ mod tests {
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+    }
+
+    #[test]
+    fn historical_sparse_density_can_boost_fetch_lookahead() {
+        let high_memory = Some(HISTORICAL_SPARSE_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
+        let healthy_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES);
+        let low_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1);
+
+        assert_eq!(
+            historical_sparse_fetch_pipeline_depth_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK),
+            ),
+            Some(HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH)
+        );
+        assert_eq!(
+            historical_sparse_fetch_pipeline_depth_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS - 1,
+                high_memory,
+                healthy_available,
+                Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK),
+            ),
+            None
+        );
+        assert_eq!(
+            historical_sparse_fetch_pipeline_depth_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                low_available,
+                Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK),
+            ),
+            None
+        );
+        assert_eq!(
+            historical_sparse_fetch_pipeline_depth_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK + 1.0),
+            ),
+            None
         );
     }
 
