@@ -251,6 +251,8 @@ pub struct SyncStatus {
     pub historical_target_block: u64,
     /// Historical reverse-sync throughput.
     pub historical_blocks_per_sec: f64,
+    /// Historical reverse-sync log ingestion throughput.
+    pub historical_logs_per_sec: f64,
     /// Wall-clock time when historical reverse-sync throughput last advanced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_rate_updated_at_unix_ms: Option<u64>,

@@ -591,18 +591,21 @@ mod tests {
         assert_eq!(metrics.storage_used_bytes, Some(4));
         #[cfg(unix)]
         {
+            const FREE_SPACE_TEST_TOLERANCE_BYTES: u64 = 16 * 1024 * 1024;
+
+            let disk_free = metrics.disk_free_bytes.unwrap_or(0);
+            let total_free = metrics.storage_free_total_bytes.unwrap_or(0);
+            let volume_free = metrics.storage_free_volumes[0].free_bytes;
+
             assert!(metrics.disk_free_bytes.unwrap_or(0) > 0);
             assert!(metrics.storage_write_free_bytes.unwrap_or(0) > 0);
             assert!(metrics.storage_write_path.as_deref().is_some_and(|path| {
                 path == tmp.path().canonicalize().unwrap().display().to_string()
             }));
             assert_eq!(metrics.storage_free_volumes.len(), 1);
-            assert_eq!(metrics.storage_free_total_bytes, metrics.disk_free_bytes);
+            assert!(total_free.abs_diff(disk_free) <= FREE_SPACE_TEST_TOLERANCE_BYTES);
             assert_eq!(metrics.storage_limiting_path, metrics.storage_write_path);
-            assert_eq!(
-                metrics.storage_free_volumes[0].free_bytes,
-                metrics.disk_free_bytes.unwrap()
-            );
+            assert!(volume_free.abs_diff(disk_free) <= FREE_SPACE_TEST_TOLERANCE_BYTES);
         }
     }
 

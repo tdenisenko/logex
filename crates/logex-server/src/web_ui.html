@@ -657,7 +657,7 @@
       </div>
       <div class="mini-grid">
         <div class="mini"><span class="k">Remaining</span><span class="v" id="executionRemaining">--</span></div>
-        <div class="mini"><span class="k">Rate</span><span class="v" id="executionRate">--</span></div>
+        <div class="mini"><span class="k">Logs/sec</span><span class="v" id="executionRate">--</span></div>
         <div class="mini"><span class="k">Estimate</span><span class="v" id="executionEta">--</span></div>
         <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
         <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
@@ -682,8 +682,8 @@
     </div>
     <div class="charts-grid">
       <div class="chart-card">
-        <div class="chart-title"><strong>Blocks/sec</strong><span id="rateLegend">--</span></div>
-        <div class="chart-canvas-wrap"><canvas id="blocksChart" aria-label="Historical blocks per second chart"></canvas></div>
+        <div class="chart-title"><strong>Logs/sec</strong><span id="rateLegend">--</span></div>
+        <div class="chart-canvas-wrap"><canvas id="blocksChart" aria-label="Historical logs per second chart"></canvas></div>
       </div>
       <div class="chart-card">
         <div class="chart-title"><strong>Peers</strong><span id="peerLegend">--</span></div>
@@ -714,6 +714,9 @@
           <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
+          <div class="debug-item"><span class="k">Historical log rate</span><span class="v" id="debugLogRate">--</span></div>
+          <div class="debug-item"><span class="k">Historical block rate</span><span class="v" id="debugBlockRate">--</span></div>
+          <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
           <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
@@ -774,6 +777,7 @@ var queryWasCapped = false;
 var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
+var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v2.samples';
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
@@ -837,6 +841,26 @@ function fmtRate(value) {
   var number = numberOrNull(value);
   if (number === null || number <= 0) return '--';
   return fmtDecimal(number, number >= 100 ? 0 : 1) + '/s';
+}
+
+function fmtLogMagnitude(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  if (number >= 1000000) return fmtDecimal(number / 1000000, number >= 10000000 ? 0 : 1) + 'm';
+  if (number >= 1000) return fmtDecimal(number / 1000, number >= 100000 ? 0 : 1) + 'k';
+  return fmt(number);
+}
+
+function fmtLogRate(value) {
+  var number = numberOrNull(value);
+  if (number === null || number <= 0) return '--';
+  return fmtLogMagnitude(number) + ' logs/s';
+}
+
+function fmtLogCount(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  return fmtLogMagnitude(number) + ' logs';
 }
 
 function fmtPct(value) {
@@ -984,7 +1008,8 @@ function updateStatus(data) {
   var optimisticTime = anchorTime(data.optimistic_execution_head);
   var materializedBlock = anchorBlock(data.materialized_execution_ceiling);
   var materializedTime = anchorTime(data.materialized_execution_ceiling);
-  var rate = numberOrNull(data.historical_blocks_per_sec) || 0;
+  var blockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
+  var logRate = numberOrNull(data.historical_logs_per_sec) || 0;
   var servingPeers = numberOrNull(data.serving_peers) || 0;
   var connectedPeers = numberOrNull(data.connected_peers) || 0;
   var pendingPeers = numberOrNull(data.pending_peers) || 0;
@@ -1004,7 +1029,7 @@ function updateStatus(data) {
   setWidth('executionBar', pct);
   setExecutionBarState(active, false);
   setText('executionRemaining', remaining == null ? '--' : fmtBlocks(remaining));
-  setText('executionRate', fmtRate(rate));
+  setText('executionRate', fmtLogRate(logRate));
   setText('executionEta', fmtEta(data.historical_eta_seconds));
   setText('executionPeers', fmt(servingPeers));
 
@@ -1037,6 +1062,9 @@ function updateStatus(data) {
   setText('debugConnectedPeers', fmt(connectedPeers));
   setText('debugServingPeers', fmt(servingPeers));
   setText('debugPeerCandidates', fmt(numberOrNull(executionNetwork.queued_candidates) == null ? pendingPeers : executionNetwork.queued_candidates));
+  setText('debugLogRate', fmtLogRate(logRate));
+  setText('debugBlockRate', fmtRate(blockRate));
+  setText('debugRemainingLogs', fmtLogCount(data.historical_remaining_logs_estimate));
   setText('debugConsensusStatus', consensusStatus);
   setText('debugConsensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
@@ -1061,7 +1089,8 @@ function updateStatus(data) {
   addPerfSample({
     ts: Date.now(),
     peers: servingPeers,
-    rate: rate,
+    rate: logRate,
+    blockRate: blockRate,
     cpu: numberOrNull(data.cpu_utilization_pct)
   });
   renderChart();
@@ -1092,7 +1121,7 @@ function fetchStatus() {
 
 function loadPerfSamples() {
   try {
-    var parsed = JSON.parse(localStorage.getItem('logex.performance.samples') || '[]');
+    var parsed = JSON.parse(localStorage.getItem(PERF_SAMPLE_STORAGE_KEY) || '[]');
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(function(sample) {
       return sample && Number.isFinite(Number(sample.ts));
@@ -1104,7 +1133,7 @@ function loadPerfSamples() {
 
 function savePerfSamples() {
   try {
-    localStorage.setItem('logex.performance.samples', JSON.stringify(perfSamples));
+    localStorage.setItem(PERF_SAMPLE_STORAGE_KEY, JSON.stringify(perfSamples));
   } catch (_) {}
 }
 
@@ -1116,6 +1145,7 @@ function addPerfSample(sample) {
     ts: sample.ts,
     peers: Math.max(0, Number(sample.peers) || 0),
     rate: Math.max(0, Number(sample.rate) || 0),
+    blockRate: Math.max(0, Number(sample.blockRate) || 0),
     cpu: sample.cpu == null ? null : Math.max(0, Number(sample.cpu) || 0)
   });
   perfSamples = perfSamples.filter(function(item) { return item.ts >= cutoff; });
@@ -1144,8 +1174,8 @@ function renderChart() {
 
   byId('chartUnavailable').style.display = 'none';
   ensureCharts();
-  updateChart('blocks', samples, start, now, 'rate', 'Blocks/sec', '#48d6b8', function(value) {
-    return fmtDecimal(value, value >= 100 ? 0 : 1);
+  updateChart('blocks', samples, start, now, 'rate', 'Logs/sec', '#48d6b8', function(value) {
+    return fmtLogRate(value);
   });
   updateChart('peers', samples, start, now, 'peers', 'Serving peers', '#6aa7ff', function(value) {
     return fmtDecimal(value, 0);
@@ -1155,7 +1185,7 @@ function renderChart() {
   });
 
   var latest = samples.length ? samples[samples.length - 1] : null;
-  setText('rateLegend', latest ? fmtRate(latest.rate) : '--');
+  setText('rateLegend', latest ? fmtLogRate(latest.rate) : '--');
   setText('peerLegend', latest ? fmt(latest.peers) : '--');
   setText('cpuLegend', latest ? fmtPct(latest.cpu) : '--');
 }
@@ -1171,7 +1201,7 @@ function downsampleSamples(samples, maxPoints) {
 
 function ensureCharts() {
   if (performanceCharts.blocks) return;
-  performanceCharts.blocks = createLineChart('blocksChart', 'Blocks/sec', '#48d6b8');
+  performanceCharts.blocks = createLineChart('blocksChart', 'Logs/sec', '#48d6b8');
   performanceCharts.peers = createLineChart('peersChart', 'Serving peers', '#6aa7ff');
   performanceCharts.cpu = createLineChart('cpuChart', 'CPU utilization (%)', '#f2b84b');
 }
@@ -1278,6 +1308,9 @@ function updateChart(chartId, samples, startMs, endMs, key, yTitle, color, forma
     axis.ticks = roundedChartTicks(startMs, endMs).map(function(value) { return { value: value }; });
   };
   chart.options.scales.y.title.text = yTitle;
+  chart.options.scales.y.ticks.callback = function(value) {
+    return formatter(value);
+  };
   chart.options.plugins.tooltip.callbacks.label = function(context) {
     var value = context.parsed.y;
     return yTitle + ': ' + (value == null ? '--' : formatter(value));

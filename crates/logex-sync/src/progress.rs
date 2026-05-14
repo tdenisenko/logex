@@ -22,6 +22,7 @@ pub struct ProgressTracker {
     historical_logs_ingested: u64,
     historical_rate_at: Instant,
     historical_recent_blocks_per_sec: f64,
+    historical_recent_logs_per_sec: f64,
     last_historical_log_block: u64,
     last_historical_log_at: Instant,
 }
@@ -39,6 +40,7 @@ impl ProgressTracker {
             historical_logs_ingested: 0,
             historical_rate_at: Instant::now(),
             historical_recent_blocks_per_sec: 0.0,
+            historical_recent_logs_per_sec: 0.0,
             last_historical_log_block: u64::MAX,
             last_historical_log_at: Instant::now(),
         }
@@ -220,9 +222,15 @@ impl ProgressTracker {
         } else {
             0.0
         };
-        let bps =
-            smoothed_historical_blocks_per_sec(self.historical_recent_blocks_per_sec, recent_bps);
+        let bps = smoothed_historical_rate(self.historical_recent_blocks_per_sec, recent_bps);
         self.historical_recent_blocks_per_sec = bps;
+        let recent_lps = if interval > 0.0 {
+            log_count as f64 / interval
+        } else {
+            0.0
+        };
+        let lps = smoothed_historical_rate(self.historical_recent_logs_per_sec, recent_lps);
+        self.historical_recent_logs_per_sec = lps;
 
         let mut status = self.status.lock().unwrap();
         status.node_state = NodeState::Syncing;
@@ -231,6 +239,7 @@ impl ProgressTracker {
         status.historical_execution_anchor = anchor.or(status.historical_execution_anchor);
         status.historical_target_block = target_block;
         status.historical_blocks_per_sec = bps;
+        status.historical_logs_per_sec = lps;
         status.historical_rate_updated_at_unix_ms = Some(unix_time_millis());
         status.historical_eta_seconds = historical_eta(Some(floor), target_block, bps);
         status.logs_ingested = self.logs_ingested;
@@ -247,6 +256,7 @@ impl ProgressTracker {
                 total_historical_blocks = self.historical_blocks_processed,
                 total_historical_logs = self.historical_logs_ingested,
                 historical_blocks_per_sec = format!("{bps:.2}"),
+                historical_logs_per_sec = format!("{lps:.2}"),
                 historical_eta_seconds =
                     status.historical_eta_seconds.map(|eta| eta.round() as u64),
                 "historical reverse sync progress"
@@ -275,6 +285,7 @@ impl ProgressTracker {
             .is_none_or(|floor| floor.block_number <= status.historical_target_block)
         {
             status.historical_blocks_per_sec = 0.0;
+            status.historical_logs_per_sec = 0.0;
             status.historical_rate_updated_at_unix_ms = None;
             status.historical_eta_seconds = None;
         }
@@ -302,7 +313,7 @@ fn historical_eta(
     Some((floor.block_number - target_block) as f64 / blocks_per_sec)
 }
 
-fn smoothed_historical_blocks_per_sec(previous: f64, recent: f64) -> f64 {
+fn smoothed_historical_rate(previous: f64, recent: f64) -> f64 {
     if recent <= 0.0 {
         return previous.max(0.0);
     }
@@ -373,9 +384,9 @@ mod tests {
 
     #[test]
     fn historical_rate_smoothing_uses_recent_progress() {
-        assert_eq!(smoothed_historical_blocks_per_sec(0.0, 128.0), 128.0);
-        assert_eq!(smoothed_historical_blocks_per_sec(100.0, 0.0), 100.0);
-        let smoothed = smoothed_historical_blocks_per_sec(100.0, 200.0);
+        assert_eq!(smoothed_historical_rate(0.0, 128.0), 128.0);
+        assert_eq!(smoothed_historical_rate(100.0, 0.0), 100.0);
+        let smoothed = smoothed_historical_rate(100.0, 200.0);
         assert!(smoothed > 100.0);
         assert!(smoothed < 200.0);
     }

@@ -15,6 +15,9 @@ use crate::storage_metrics;
 const HISTORICAL_RATE_STALE_AFTER_MS: u64 = 10_000;
 const HISTORICAL_RATE_DECAY_HALF_LIFE_MS: f64 = 5_000.0;
 const HISTORICAL_RATE_ZERO_THRESHOLD: f64 = 0.01;
+const HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK: u64 = 25_093_066;
+const HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL: f64 = 6_780_563_686.0;
+const HISTORICAL_LOG_ESTIMATE_RECENT_LOGS_PER_BLOCK: f64 = 733.0;
 
 /// Request body for POST /query.
 #[derive(serde::Deserialize)]
@@ -175,18 +178,37 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let historical_incomplete =
         historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
     let historical_blocks_per_sec = if historical_incomplete {
-        effective_historical_blocks_per_sec(
+        effective_historical_rate(
             sync.historical_blocks_per_sec,
             sync.historical_rate_updated_at_unix_ms,
         )
     } else {
         0.0
     };
-    let historical_eta_seconds = rest_historical_eta(
-        historical_floor,
-        sync.historical_target_block,
-        historical_blocks_per_sec,
-    );
+    let historical_logs_per_sec = if historical_incomplete {
+        effective_historical_rate(
+            sync.historical_logs_per_sec,
+            sync.historical_rate_updated_at_unix_ms,
+        )
+    } else {
+        0.0
+    };
+    let historical_log_estimate_top_block = historical_anchor
+        .map(|anchor| anchor.block_number)
+        .or(canonical_top_block);
+    let historical_total_logs_estimate =
+        estimated_total_logs_through_block(historical_log_estimate_top_block);
+    let historical_remaining_logs_estimate =
+        historical_total_logs_estimate.map(|estimated| (estimated - total_rows as f64).max(0.0));
+    let historical_eta_seconds =
+        rest_historical_log_eta(historical_remaining_logs_estimate, historical_logs_per_sec)
+            .or_else(|| {
+                rest_historical_eta(
+                    historical_floor,
+                    sync.historical_target_block,
+                    historical_blocks_per_sec,
+                )
+            });
     let verified_from_block = historical_floor
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
@@ -235,6 +257,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "execution_merge_block": logex_types::EXECUTION_MERGE_BLOCK,
         "execution_terminal_pow_block": logex_types::EXECUTION_TERMINAL_POW_BLOCK,
         "historical_blocks_per_sec": historical_blocks_per_sec,
+        "historical_logs_per_sec": historical_logs_per_sec,
+        "historical_total_logs_estimate": historical_total_logs_estimate,
+        "historical_remaining_logs_estimate": historical_remaining_logs_estimate,
         "historical_rate_updated_at_unix_ms": sync.historical_rate_updated_at_unix_ms,
         "historical_eta_seconds": historical_eta_seconds,
         "raw_log_segment_backlog": sync.raw_log_segment_backlog,
@@ -285,11 +310,40 @@ fn rest_historical_eta(
     Some((floor.block_number - target_block) as f64 / blocks_per_sec)
 }
 
-fn effective_historical_blocks_per_sec(
-    blocks_per_sec: f64,
-    updated_at_unix_ms: Option<u64>,
-) -> f64 {
-    if blocks_per_sec <= 0.0 {
+fn rest_historical_log_eta(remaining_logs: Option<f64>, logs_per_sec: f64) -> Option<f64> {
+    let remaining_logs = remaining_logs?;
+    if logs_per_sec <= 0.0 || remaining_logs <= 0.0 {
+        return None;
+    }
+
+    Some(remaining_logs / logs_per_sec)
+}
+
+fn estimated_total_logs_through_block(block_number: Option<u64>) -> Option<f64> {
+    let block_number = block_number?;
+    if block_number == 0 {
+        return Some(0.0);
+    }
+
+    if block_number == HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK {
+        return Some(HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL);
+    }
+
+    if block_number < HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK {
+        let reference_average = HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL
+            / HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK as f64;
+        return Some(reference_average * block_number as f64);
+    }
+
+    Some(
+        HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL
+            + block_number.saturating_sub(HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK) as f64
+                * HISTORICAL_LOG_ESTIMATE_RECENT_LOGS_PER_BLOCK,
+    )
+}
+
+fn effective_historical_rate(rate: f64, updated_at_unix_ms: Option<u64>) -> f64 {
+    if rate <= 0.0 {
         return 0.0;
     }
 
@@ -298,20 +352,19 @@ fn effective_historical_blocks_per_sec(
     };
 
     let now = unix_time_millis();
-    historical_blocks_per_sec_for_age(blocks_per_sec, now.saturating_sub(updated_at_unix_ms))
+    historical_rate_for_age(rate, now.saturating_sub(updated_at_unix_ms))
 }
 
-fn historical_blocks_per_sec_for_age(blocks_per_sec: f64, age_ms: u64) -> f64 {
-    if blocks_per_sec <= 0.0 {
+fn historical_rate_for_age(rate: f64, age_ms: u64) -> f64 {
+    if rate <= 0.0 {
         return 0.0;
     }
     if age_ms <= HISTORICAL_RATE_STALE_AFTER_MS {
-        return blocks_per_sec;
+        return rate;
     }
 
     let stale_ms = age_ms - HISTORICAL_RATE_STALE_AFTER_MS;
-    let decayed =
-        blocks_per_sec * 0.5_f64.powf(stale_ms as f64 / HISTORICAL_RATE_DECAY_HALF_LIFE_MS);
+    let decayed = rate * 0.5_f64.powf(stale_ms as f64 / HISTORICAL_RATE_DECAY_HALF_LIFE_MS);
     if decayed < HISTORICAL_RATE_ZERO_THRESHOLD {
         0.0
     } else {
@@ -414,13 +467,26 @@ mod tests {
 
     #[test]
     fn historical_rate_decays_after_stale_progress() {
-        assert_eq!(historical_blocks_per_sec_for_age(500.0, 9_999), 500.0);
+        assert_eq!(historical_rate_for_age(500.0, 9_999), 500.0);
 
-        let decayed = historical_blocks_per_sec_for_age(500.0, 20_000);
+        let decayed = historical_rate_for_age(500.0, 20_000);
         assert!(decayed > 0.0);
         assert!(decayed < 500.0);
 
-        assert_eq!(historical_blocks_per_sec_for_age(500.0, 100_000), 0.0);
+        assert_eq!(historical_rate_for_age(500.0, 100_000), 0.0);
+    }
+
+    #[test]
+    fn historical_log_estimate_extends_reference_with_recent_density() {
+        assert_eq!(
+            estimated_total_logs_through_block(Some(HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK)),
+            Some(HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL)
+        );
+        assert_eq!(
+            estimated_total_logs_through_block(Some(HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK + 10)),
+            Some(HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL + 7_330.0)
+        );
+        assert_eq!(estimated_total_logs_through_block(Some(0)), Some(0.0));
     }
 
     #[tokio::test]
@@ -460,6 +526,58 @@ mod tests {
         let rate = status["historical_blocks_per_sec"].as_f64().unwrap();
         assert!(rate < 1.0);
         assert!(status["historical_eta_seconds"].as_f64().unwrap() > 1_000.0);
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_reports_log_based_historical_eta() {
+        let (_tmp, storage) = setup_storage();
+        let top_block = HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK + 10;
+        let estimated_total = HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL + 7_330.0;
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                historical_execution_floor: Some(ExecutionBlockMarker {
+                    block_number: top_block,
+                    block_hash: B256::repeat_byte(0x11),
+                    timestamp: 1_700_000_000,
+                }),
+                historical_execution_anchor: Some(ExecutionBlockMarker {
+                    block_number: top_block,
+                    block_hash: B256::repeat_byte(0x22),
+                    timestamp: 1_700_000_000,
+                }),
+                historical_target_block: 0,
+                historical_blocks_per_sec: 1_000.0,
+                historical_logs_per_sec: 7_330.0,
+                historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                ..Default::default()
+            },
+        ));
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["historical_logs_per_sec"], 7_330.0);
+        assert_eq!(status["historical_total_logs_estimate"], estimated_total);
+        assert_eq!(
+            status["historical_remaining_logs_estimate"],
+            estimated_total - 2.0
+        );
+
+        let eta = status["historical_eta_seconds"].as_f64().unwrap();
+        assert!((eta - ((estimated_total - 2.0) / 7_330.0)).abs() < 0.001);
     }
 
     #[tokio::test]
@@ -791,6 +909,7 @@ mod tests {
                 historical_execution_anchor: None,
                 historical_target_block: logex_types::EXECUTION_HISTORY_TARGET_BLOCK,
                 historical_blocks_per_sec: 0.0,
+                historical_logs_per_sec: 0.0,
                 historical_rate_updated_at_unix_ms: None,
                 historical_eta_seconds: None,
                 raw_log_segment_backlog: Some(2),
