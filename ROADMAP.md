@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto mounted extra volumes through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The current run retained roughly 100 connected peers and 80+ serving peers, so peer retention is no longer the active limiter. The latest slowdown correlated with dense historical log writes plus background compaction saturating the root volume; active-sync compaction now prioritizes raw space reclamation and defers profile rewrites until raw backlog clears.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The current run retained roughly 100 connected peers and 80+ serving peers, so peer retention is no longer the active limiter. The latest slowdown correlated with dense historical log writes plus background compaction and blocking status storage scans; active-sync compaction now runs in smaller raw-only passes and dashboard storage metrics refresh asynchronously.
 
 ## Completed Since Last Run
 
@@ -16,6 +16,8 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Deployed the low-disk guard to the remote host and restarted the performance run on the fixed HTTP port `18683`.
 - Investigated the CPU/block-rate spike during the remote run and traced the drop to local write stalls, not peer loss.
 - Reduced active-sync background compaction pressure by delaying profile rewrites while raw sealed segments still need first-time compaction.
+- Smoothed active-sync maintenance further by limiting raw compaction to smaller per-pass batches and reserving catch-up bursts for larger raw backlogs.
+- Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task, preventing `/status` polling from blocking the UI during large-catalog scans.
 
 ## Remaining TODOs
 
@@ -62,6 +64,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 - During active historical sync, background compaction favors raw segment compaction and defers profile-only rewrites while raw backlog exists. Raw compaction protects disk usage; profile migration is an optimization that can catch up after ingestion pressure drops.
+- Dashboard storage metrics are eventually consistent: `/status` returns the last cached storage sample and starts one background refresh when the sample expires. This protects the dashboard and sync loop from recursive storage-size scans on large multi-volume data directories.
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 - The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
 - LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.
@@ -125,6 +128,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Challenge: A later run briefly dropped block/sec despite 100+ connected peers and 80+ serving peers.
   - Resolution: `pidstat`, `iostat`, status, and batch logs showed root-volume write stalls during dense historical writes and background compaction. Active-sync compaction now skips profile rewrites until raw compaction backlog clears and waits longer before using the raw catch-up limit.
 
+- Challenge: Block/sec ramped up, then dropped sharply while CPU spiked and the dashboard became intermittently unresponsive.
+  - Resolution: Remote logs showed the drops lining up with local maintenance, especially raw compaction overlapping dense writes, and `/status` could block on full data-dir storage scans. Active-sync raw compaction now uses smaller smoothing passes, and storage metrics refresh is nonblocking and single-flight.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, storage metrics, and dashboard sync display.
@@ -141,12 +147,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - No obsolete low-disk loop or retry code was found in the node runtime; the new guard was added at the top-level runtime select so existing shutdown code remains the single stop path.
 - Extended the low-disk scan to discover relocated segment symlink targets instead of leaving the emergency multi-volume layout unmonitored.
 - Inspected the background compaction loop after the write-stall investigation; removed the active-sync profile rewrite catch-up path because it competes with historical ingest and can safely run after raw compaction pressure clears.
+- Inspected the status storage-metrics path and active-sync compaction loop after the spike/drop report; no experimental code paths remained, but the blocking status refresh and oversized active raw compaction pass were replaced.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -159,6 +166,6 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - The 8-vCPU/16GB remote host has headroom, but throughput is still sensitive to useful body/receipt peer supply and dense-log local processing.
 - Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
 - Relocated segment symlinks keep the current deployment running but still require manual rebalancing until a first-class multi-volume storage allocator exists.
-- The current remote run remains below the six-hour target overall, but dense-log ranges can still swing ETA while local writes and compaction share one physical root volume.
+- The current remote run remains below the six-hour target overall, but dense-log ranges still need observation after the maintenance smoothing change to confirm ETA no longer swings sharply.
 - Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.
 - Verification-critical security review is still required before calling the implementation production-secure.

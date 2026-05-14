@@ -818,6 +818,11 @@ mod tests {
                 }),
             },
         ));
+        let data_dir = {
+            let storage = state.storage.read().await;
+            storage.data_dir().to_path_buf()
+        };
+        storage_metrics::refresh_for_test(Arc::clone(&state.storage_metrics), data_dir).await;
         let app = crate::build_router(state);
 
         let req = Request::builder()

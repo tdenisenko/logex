@@ -18,6 +18,7 @@ pub struct StorageMetrics {
 pub struct CachedStorageMetrics {
     refreshed_at: Option<Instant>,
     process_cpu_time: Option<Duration>,
+    refresh_in_progress: bool,
     metrics: StorageMetrics,
 }
 
@@ -41,18 +42,45 @@ pub async fn load_or_refresh(
     cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     data_dir: PathBuf,
 ) -> StorageMetrics {
-    {
-        let guard = cache.lock().await;
-        if guard.is_fresh() {
+    let cached = {
+        let mut guard = cache.lock().await;
+        if guard.is_fresh() || guard.refresh_in_progress {
             return guard.metrics();
         }
-    }
 
-    let mut metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
+        guard.refresh_in_progress = true;
+        guard.metrics()
+    };
+
+    tokio::spawn(async move {
+        let metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
+            .await
+            .unwrap_or_default();
+
+        let mut guard = cache.lock().await;
+        update_cached_metrics(&mut guard, metrics);
+    });
+
+    cached
+}
+
+#[cfg(test)]
+pub async fn refresh_for_test(
+    cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
+    data_dir: PathBuf,
+) -> StorageMetrics {
+    let metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
         .await
         .unwrap_or_default();
 
     let mut guard = cache.lock().await;
+    update_cached_metrics(&mut guard, metrics)
+}
+
+fn update_cached_metrics(
+    guard: &mut CachedStorageMetrics,
+    mut metrics: StorageMetrics,
+) -> StorageMetrics {
     let now = Instant::now();
     let process_cpu_time = process_cpu_time();
     metrics.cpu_utilization_pct = guard
@@ -66,8 +94,24 @@ pub async fn load_or_refresh(
                 .then_some(cpu_delta.as_secs_f64() / elapsed.as_secs_f64() * 100.0)
         });
     guard.process_cpu_time = process_cpu_time;
+    guard.refresh_in_progress = false;
     guard.update(metrics.clone());
     metrics
+}
+
+#[cfg(test)]
+pub async fn refresh_in_progress_for_test(
+    cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
+) -> bool {
+    cache.lock().await.refresh_in_progress
+}
+
+#[cfg(test)]
+pub async fn expire_for_test(cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>) {
+    let mut guard = cache.lock().await;
+    if let Some(refreshed_at) = guard.refreshed_at {
+        guard.refreshed_at = Some(refreshed_at - STORAGE_METRICS_TTL - Duration::from_secs(1));
+    }
 }
 
 fn collect_storage_metrics(data_dir: &Path) -> StorageMetrics {
@@ -245,5 +289,33 @@ mod tests {
         assert_eq!(metrics.storage_used_bytes, Some(4));
         #[cfg(unix)]
         assert!(metrics.disk_free_bytes.unwrap_or(0) > 0);
+    }
+
+    #[tokio::test]
+    async fn load_or_refresh_returns_stale_metrics_while_refresh_runs() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut file = fs::File::create(tmp.path().join("data.bin")).expect("file");
+        file.write_all(&[0_u8; 9]).expect("write");
+        drop(file);
+
+        let cache = Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default()));
+        let empty = load_or_refresh(Arc::clone(&cache), tmp.path().to_path_buf()).await;
+        assert_eq!(empty.storage_used_bytes, None);
+        assert!(refresh_in_progress_for_test(Arc::clone(&cache)).await);
+
+        for _ in 0..50 {
+            if !refresh_in_progress_for_test(Arc::clone(&cache)).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let refreshed = cache.lock().await.metrics();
+        assert_eq!(refreshed.storage_used_bytes, Some(9));
+
+        expire_for_test(Arc::clone(&cache)).await;
+        let stale = load_or_refresh(Arc::clone(&cache), tmp.path().to_path_buf()).await;
+        assert_eq!(stale.storage_used_bytes, Some(9));
+        assert!(refresh_in_progress_for_test(cache).await);
     }
 }
