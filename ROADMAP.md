@@ -11,9 +11,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 ## Completed Since Last Run
 
 - Formatted and mounted the new 100GB remote volume at `/mnt/logex-extra/extra2`, then moved older sealed segment directories onto it and replaced them with symlinks so the active data directory could continue running.
-- Restored the remote root filesystem from 100% full to roughly 72% used and restarted the client on the fixed HTTP port `18683`.
-- Added a runtime low-disk guard that polls the data-dir filesystem and triggers the existing graceful shutdown path when free space drops below 10 GiB.
-- Deployed the low-disk guard to the remote host and restarted the performance run for a fresh warm-up sample.
+- Rebalanced about 8 GiB of relocated segments from `/mnt/logex-extra/extra2` to `/mnt/logex-extra` so both extra filesystems stay above the 10 GiB safety floor.
+- Added a runtime low-disk guard that polls the data-dir filesystem plus relocated segment symlink target filesystems and triggers the existing graceful shutdown path when any monitored filesystem drops below 10 GiB free.
+- Deployed the low-disk guard to the remote host and restarted the performance run on the fixed HTTP port `18683`.
 
 ## Remaining TODOs
 
@@ -56,7 +56,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
-- The node treats low data-dir free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
+- The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
 
 ## Challenges and Resolutions
 
@@ -112,7 +112,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
   - Resolution: Segment integrity verification now runs in a bounded worker pool while preserving the same row-count, canonical bitmap, and block-boundary checks.
 
 - Challenge: The remote root filesystem reached 100% usage and the client could not continue writing safely.
-  - Resolution: Mounted the new volume, relocated old sealed segment directories onto it, deployed a low-disk shutdown guard, and restarted the client after confirming free space had recovered.
+  - Resolution: Mounted the new volume, relocated old sealed segment directories onto it, rebalanced the extra volumes above the safety floor, deployed a symlink-aware low-disk shutdown guard, and restarted the client after confirming free space had recovered.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -128,12 +128,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - No new obsolete EL sync paths were found in the changed areas; the current write coalescing and threshold tuning replaced runtime constants rather than leaving alternate code paths.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 - No obsolete low-disk loop or retry code was found in the node runtime; the new guard was added at the top-level runtime select so existing shutdown code remains the single stop path.
+- Extended the low-disk scan to discover relocated segment symlink targets instead of leaving the emergency multi-volume layout unmonitored.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; pending low-disk guard commit.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; pending symlink-volume guard commit.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -145,6 +146,6 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - The parent Execution Layer performance branch is still above the long-term sync ETA target on the current observed runs.
 - The 8-vCPU/16GB remote host has headroom, but throughput is still sensitive to useful body/receipt peer supply and dense-log local processing.
 - Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
-- The new low-disk guard monitors the active data-dir filesystem. Existing relocated segment symlink targets still need enough free space for compaction and migration work.
+- Relocated segment symlinks keep the current deployment running but still require manual rebalancing until a first-class multi-volume storage allocator exists.
 - The post-storage-expansion run is still warming after restart; the first sample is below the previous warmed throughput and should not be treated as final performance evidence.
 - Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.

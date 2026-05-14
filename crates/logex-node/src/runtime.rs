@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -543,24 +544,63 @@ async fn wait_for_low_disk_space(path: PathBuf) -> LowDiskSpace {
 
     loop {
         interval.tick().await;
-        match free_space_bytes(&path) {
-            Ok(free_bytes) if disk_space_is_low(free_bytes, LOW_DISK_SPACE_MIN_FREE_BYTES) => {
-                return LowDiskSpace {
-                    path,
-                    free_bytes,
-                    min_free_bytes: LOW_DISK_SPACE_MIN_FREE_BYTES,
-                };
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "failed to check data directory free space"
-                );
+        for probe_path in disk_space_probe_paths(&path) {
+            match free_space_bytes(&probe_path) {
+                Ok(free_bytes) if disk_space_is_low(free_bytes, LOW_DISK_SPACE_MIN_FREE_BYTES) => {
+                    return LowDiskSpace {
+                        path: probe_path,
+                        free_bytes,
+                        min_free_bytes: LOW_DISK_SPACE_MIN_FREE_BYTES,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %probe_path.display(),
+                        %error,
+                        "failed to check data directory free space"
+                    );
+                }
             }
         }
     }
+}
+
+fn disk_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut probes = BTreeSet::new();
+    insert_disk_space_probe_path(&mut probes, data_dir.to_path_buf());
+
+    let segments_dir = data_dir.join("segments");
+    insert_disk_space_probe_path(&mut probes, segments_dir.clone());
+
+    if let Ok(entries) = std::fs::read_dir(&segments_dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_symlink() {
+                continue;
+            }
+
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let target = if target.is_absolute() {
+                target
+            } else {
+                segments_dir.join(target)
+            };
+            let probe = target.parent().map(Path::to_path_buf).unwrap_or(target);
+            insert_disk_space_probe_path(&mut probes, probe);
+        }
+    }
+
+    probes.into_iter().collect()
+}
+
+fn insert_disk_space_probe_path(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
+    let path = path.canonicalize().unwrap_or(path);
+    probes.insert(path);
 }
 
 fn disk_space_is_low(free_bytes: u64, min_free_bytes: u64) -> bool {
@@ -628,5 +668,28 @@ mod tests {
     fn disk_space_guard_trips_below_threshold() {
         assert!(disk_space_is_low(9, 10));
         assert!(!disk_space_is_low(10, 10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_space_probe_paths_include_segment_symlink_targets() {
+        let base =
+            std::env::temp_dir().join(format!("logex-node-disk-probes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data_dir = base.join("data");
+        let segments_dir = data_dir.join("segments");
+        let extra_segments_dir = base.join("extra").join("segments");
+        let target_segment = extra_segments_dir.join("s_1");
+        std::fs::create_dir_all(&segments_dir).unwrap();
+        std::fs::create_dir_all(&target_segment).unwrap();
+        std::os::unix::fs::symlink(&target_segment, segments_dir.join("s_1")).unwrap();
+
+        let probes = disk_space_probe_paths(&data_dir);
+
+        assert!(probes.contains(&data_dir.canonicalize().unwrap()));
+        assert!(probes.contains(&segments_dir.canonicalize().unwrap()));
+        assert!(probes.contains(&extra_segments_dir.canonicalize().unwrap()));
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
