@@ -17,7 +17,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Investigated the CPU/block-rate spike during the remote run and traced the drop to local write stalls, not peer loss.
 - Reduced active-sync background compaction pressure by delaying profile rewrites while raw sealed segments still need first-time compaction.
 - Smoothed active-sync maintenance further by limiting raw compaction to smaller per-pass batches and reserving catch-up bursts for larger raw backlogs.
-- Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task, preventing `/status` polling from blocking the UI during large-catalog scans.
+- Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task at a lower cadence, preventing `/status` polling from blocking the UI or repeatedly walking the large catalog.
 
 ## Remaining TODOs
 
@@ -64,7 +64,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 - During active historical sync, background compaction favors raw segment compaction and defers profile-only rewrites while raw backlog exists. Raw compaction protects disk usage; profile migration is an optimization that can catch up after ingestion pressure drops.
-- Dashboard storage metrics are eventually consistent: `/status` returns the last cached storage sample and starts one background refresh when the sample expires. This protects the dashboard and sync loop from recursive storage-size scans on large multi-volume data directories.
+- Dashboard storage metrics are eventually consistent: `/status` returns the last cached storage sample and starts one background refresh when the one-minute sample expires. This protects the dashboard and sync loop from recursive storage-size scans on large multi-volume data directories.
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 - The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
 - LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.

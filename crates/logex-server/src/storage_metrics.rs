@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const STORAGE_METRICS_TTL: Duration = Duration::from_secs(15);
+const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default)]
 pub struct StorageMetrics {
