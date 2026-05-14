@@ -1,4 +1,3 @@
-use alloy_consensus::{BlockHeader as _, Header};
 use alloy_eips::BlockHashOrNumber;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
@@ -364,14 +363,13 @@ impl PeerManager {
         .await
     }
 
-    pub(crate) async fn prepare_bodies_and_receipts_request_for_headers(
+    pub(crate) async fn prepare_bodies_and_receipts_request_for_hashes_and_gas(
         &mut self,
-        headers: &[Header],
+        hashes: Vec<B256>,
+        gas_used: Vec<u64>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
-        let hashes = headers.iter().map(|header| header.hash_slow()).collect();
-        let gas_used = headers.iter().map(|header| header.gas_used()).collect();
         self.prepare_bodies_and_receipts_request_inner(
             hashes,
             Some(gas_used),

@@ -1598,10 +1598,17 @@ impl SyncEngine {
             return Ok(None);
         }
 
+        let body_receipt_hashes = header_batch.hashes.clone();
+        let body_receipt_gas_used = header_batch
+            .headers
+            .iter()
+            .map(|header| header.gas_used())
+            .collect();
         let body_receipt_plan = self
             .peers
-            .prepare_bodies_and_receipts_request_for_headers(
-                &header_batch.headers,
+            .prepare_bodies_and_receipts_request_for_hashes_and_gas(
+                body_receipt_hashes,
+                body_receipt_gas_used,
                 header_batch.required_block,
                 &[header_batch.header_peer],
             )
