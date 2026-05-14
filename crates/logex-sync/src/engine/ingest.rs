@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
 const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 2048;
+const HISTORICAL_WRITE_CHUNK_ROWS: u64 = 500_000;
 const HISTORICAL_EXTRACTION_PIPELINE_DEPTH: usize = 4;
 
 pub(super) struct HistoricalExtractedBatch {
@@ -89,7 +90,7 @@ impl HistoricalBatchWriter {
         if self
             .write_buffer
             .as_ref()
-            .is_some_and(|buffer| buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS)
+            .is_some_and(historical_write_chunk_is_ready)
         {
             self.flush_buffer().await?;
         }
@@ -272,7 +273,7 @@ pub(super) async fn extract_validated_historical_blocks(
 
         let should_write = write_buffer
             .as_ref()
-            .is_some_and(|buffer| buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS);
+            .is_some_and(historical_write_chunk_is_ready);
         if should_write {
             let extracted = write_buffer
                 .take()
@@ -398,7 +399,7 @@ fn coalesce_historical_write_chunks(
 
         if write_buffer
             .as_ref()
-            .is_some_and(|buffer| buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS)
+            .is_some_and(historical_write_chunk_is_ready)
         {
             write_chunks.push(
                 write_buffer
@@ -413,6 +414,11 @@ fn coalesce_historical_write_chunks(
     }
 
     write_chunks
+}
+
+fn historical_write_chunk_is_ready(buffer: &HistoricalExtractedChunk) -> bool {
+    buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS
+        || buffer.row_count >= HISTORICAL_WRITE_CHUNK_ROWS
 }
 
 fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
@@ -455,9 +461,17 @@ mod tests {
     use super::*;
 
     fn extracted_chunk(block_count: usize, lowest_block: u64) -> HistoricalExtractedChunk {
+        extracted_chunk_with_rows(block_count, 0, lowest_block)
+    }
+
+    fn extracted_chunk_with_rows(
+        block_count: usize,
+        row_count: u64,
+        lowest_block: u64,
+    ) -> HistoricalExtractedChunk {
         HistoricalExtractedChunk {
             rows: Vec::new(),
-            row_count: 0,
+            row_count,
             block_count,
             lowest_header: Header {
                 number: lowest_block,
@@ -489,5 +503,22 @@ mod tests {
         assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, 600);
         assert_eq!(write_chunks[0].lowest_header.number(), 400);
+    }
+
+    #[test]
+    fn coalesces_dense_historical_chunks_by_row_count() {
+        let chunks = vec![
+            extracted_chunk_with_rows(128, 300_000, 900),
+            extracted_chunk_with_rows(128, 250_000, 772),
+            extracted_chunk_with_rows(128, 1, 644),
+        ];
+
+        let write_chunks = coalesce_historical_write_chunks(chunks);
+
+        assert_eq!(write_chunks.len(), 2);
+        assert_eq!(write_chunks[0].block_count, 256);
+        assert_eq!(write_chunks[0].row_count, 550_000);
+        assert_eq!(write_chunks[0].lowest_header.number(), 772);
+        assert_eq!(write_chunks[1].block_count, 128);
     }
 }

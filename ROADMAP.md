@@ -26,6 +26,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. Peer retention has r
 - Lowered the high-memory historical fetch window threshold to 8 serving peers so the upgraded host can use 5000-block batches earlier in peer ramp. The remote run later exceeded 1300 historical blocks/sec after restart.
 - Added a hard body/receipt plan timeout so one slow or gapped wide-window fetch cannot make historical sync appear stuck indefinitely.
 - Added a last-progress timestamp for historical sync and made `/status` decay historical blocks/sec and ETA when no new historical batch completes.
+- Widened sparse historical body/receipt chunks while preserving the gas-based dense-range cap, and added a row-count flush threshold so dense log ranges do not build oversized in-memory write buffers.
 
 ## Remaining TODOs
 
@@ -80,6 +81,8 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. Peer retention has r
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 - The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
 - LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.
+- Historical body/receipt chunking now uses gas, not only block count, as the safety bound: sparse old ranges can use larger chunks to reduce request waves, while dense ranges remain bounded by the receipt gas target.
+- Historical ingest flushes on either block count or row count so recent log-heavy ranges bound memory and write stalls without shrinking sparse old-range batches.
 
 ## Challenges and Resolutions
 
@@ -161,6 +164,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. Peer retention has r
 - Challenge: A 5000-block remote run appeared stuck at block 898608 while the dashboard kept showing the last high historical blocks/sec value.
   - Resolution: Added a body/receipt plan timeout so wide windows can reset around slow request gaps, and made `/status` decay historical throughput after stale progress. The remote run resumed past the block and the dashboard now reports `0.0` historical bps after restart until fresh batches complete.
 
+- Challenge: Sparse pre-genesis-era ranges were still paying the request-wave overhead of 32-block body/receipt chunks, while dense recent ranges need bounded local write batches.
+  - Resolution: Increased the chunk block cap to 128 under the existing gas target and added row-count-triggered historical write flushing.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, storage metrics, and dashboard sync display.
@@ -183,12 +189,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. Peer retention has r
 - Inspected the storage metric UI labels after the multi-volume confusion report; the main dashboard no longer duplicates advanced storage explanations, and the detailed headroom/volume labels remain in the advanced metrics grid.
 - Inspected the active-sync compaction loop after write stalls persisted with one-segment compaction; replaced per-tick full backlog scans with slower refreshes and recent-first raw plans rather than leaving the older scan-heavy path in use during active sync.
 - Inspected historical progress reporting after the stale-rate issue; kept the existing batch EWMA for completed work and added status-time decay rather than duplicating progress counters.
+- Inspected the historical request chunker and ingest writer while adding density-aware tuning; no obsolete alternate chunking or writer path remained.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`; `fix: report limiting storage free space`; pending local commit for storage metric clarity, historical backfill smoothing, body/receipt plan timeout, and stale-rate reporting.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`; `fix: report limiting storage free space`; pending local commit for density-aware historical chunking and write flushing.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
