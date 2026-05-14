@@ -1,11 +1,11 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 
@@ -13,7 +13,18 @@ const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 pub struct StorageMetrics {
     pub storage_used_bytes: Option<u64>,
     pub disk_free_bytes: Option<u64>,
+    pub storage_write_free_bytes: Option<u64>,
+    pub storage_write_path: Option<String>,
+    pub storage_free_total_bytes: Option<u64>,
+    pub storage_free_volumes: Vec<StorageVolumeMetrics>,
+    pub storage_limiting_path: Option<String>,
     pub cpu_utilization_pct: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StorageVolumeMetrics {
+    pub path: String,
+    pub free_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -127,10 +138,34 @@ fn collect_storage_metrics(
     mut size_cache: StorageSizeCache,
 ) -> (StorageMetrics, StorageSizeCache) {
     let storage_used_bytes = dir_size_bytes(data_dir, &mut size_cache).ok();
+    let storage_write_path = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    let storage_write_free_bytes = free_space_bytes(&storage_write_path).ok();
+    let storage_free_volumes = storage_free_volumes(data_dir);
+    let disk_free_bytes = storage_free_volumes
+        .iter()
+        .map(|volume| volume.free_bytes)
+        .min();
+    let storage_limiting_path = storage_free_volumes
+        .iter()
+        .min_by_key(|volume| volume.free_bytes)
+        .map(|volume| volume.path.clone());
+    let storage_free_total_bytes = (!storage_free_volumes.is_empty()).then_some(
+        storage_free_volumes
+            .iter()
+            .map(|volume| volume.free_bytes)
+            .fold(0_u64, u64::saturating_add),
+    );
     (
         StorageMetrics {
             storage_used_bytes,
-            disk_free_bytes: min_storage_free_space_bytes(data_dir).ok(),
+            disk_free_bytes,
+            storage_write_free_bytes,
+            storage_write_path: Some(storage_write_path.display().to_string()),
+            storage_free_total_bytes,
+            storage_free_volumes,
+            storage_limiting_path,
             cpu_utilization_pct: None,
         },
         size_cache,
@@ -373,15 +408,6 @@ fn metadata_id(_metadata: &fs::Metadata) -> Option<MetadataId> {
     None
 }
 
-fn min_storage_free_space_bytes(data_dir: &Path) -> io::Result<u64> {
-    storage_free_space_probe_paths(data_dir)
-        .into_iter()
-        .map(|path| free_space_bytes(&path))
-        .try_fold(u64::MAX, |min_free, free| {
-            free.map(|free| min_free.min(free))
-        })
-}
-
 fn storage_free_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
     let mut probes = BTreeSet::new();
     insert_storage_free_space_probe(&mut probes, data_dir.to_path_buf());
@@ -417,6 +443,57 @@ fn storage_free_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
 
 fn insert_storage_free_space_probe(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
     probes.insert(path.canonicalize().unwrap_or(path));
+}
+
+fn storage_free_volumes(data_dir: &Path) -> Vec<StorageVolumeMetrics> {
+    let mut volumes = BTreeMap::<StorageVolumeKey, StorageVolumeMetrics>::new();
+    for path in storage_free_space_probe_paths(data_dir) {
+        let Ok(free_bytes) = free_space_bytes(&path) else {
+            continue;
+        };
+        let key = storage_volume_key(&path);
+        volumes
+            .entry(key)
+            .and_modify(|volume| {
+                let candidate_path = path.display().to_string();
+                if candidate_path.len() < volume.path.len() {
+                    volume.path = candidate_path;
+                }
+                volume.free_bytes = volume.free_bytes.min(free_bytes);
+            })
+            .or_insert_with(|| StorageVolumeMetrics {
+                path: path.display().to_string(),
+                free_bytes,
+            });
+    }
+    volumes.into_values().collect()
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StorageVolumeKey {
+    Device(u64),
+    Path(PathBuf),
+}
+
+#[cfg(unix)]
+fn storage_volume_key(path: &Path) -> StorageVolumeKey {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::metadata(path)
+        .map(|metadata| StorageVolumeKey::Device(metadata.dev()))
+        .unwrap_or_else(|_| StorageVolumeKey::Path(path.to_path_buf()))
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StorageVolumeKey {
+    Path(PathBuf),
+}
+
+#[cfg(not(unix))]
+fn storage_volume_key(path: &Path) -> StorageVolumeKey {
+    StorageVolumeKey::Path(path.to_path_buf())
 }
 
 #[cfg(unix)]
@@ -516,7 +593,20 @@ mod tests {
         let (metrics, _) = collect_storage_metrics(tmp.path(), StorageSizeCache::default());
         assert_eq!(metrics.storage_used_bytes, Some(4));
         #[cfg(unix)]
-        assert!(metrics.disk_free_bytes.unwrap_or(0) > 0);
+        {
+            assert!(metrics.disk_free_bytes.unwrap_or(0) > 0);
+            assert!(metrics.storage_write_free_bytes.unwrap_or(0) > 0);
+            assert!(metrics.storage_write_path.as_deref().is_some_and(|path| {
+                path == tmp.path().canonicalize().unwrap().display().to_string()
+            }));
+            assert_eq!(metrics.storage_free_volumes.len(), 1);
+            assert_eq!(metrics.storage_free_total_bytes, metrics.disk_free_bytes);
+            assert_eq!(metrics.storage_limiting_path, metrics.storage_write_path);
+            assert_eq!(
+                metrics.storage_free_volumes[0].free_bytes,
+                metrics.disk_free_bytes.unwrap()
+            );
+        }
     }
 
     #[test]

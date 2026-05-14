@@ -10,10 +10,11 @@ use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT: usize = 1;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT: usize = 2;
-const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 768;
+const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 2_048;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
+const ACTIVE_SYNC_BACKLOG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 const ACTIVE_SYNC_COMPACTION_MIN_AVAILABLE_MEMORY_BYTES: u64 = 2 * BYTES_PER_GIB;
@@ -31,6 +32,7 @@ pub async fn run_background_indexer(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut last_indexed: Option<HotIndexState> = None;
+    let mut last_active_backlog_refresh: Option<std::time::Instant> = None;
     let mut ticker = tokio::time::interval(BACKGROUND_COMPACTION_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -84,30 +86,54 @@ pub async fn run_background_indexer(
             } else {
                 BACKGROUND_COMPACTION_SEGMENT_LIMIT
             };
+            let refresh_active_backlog = active_sync
+                && last_active_backlog_refresh.is_none_or(|refreshed_at| {
+                    refreshed_at.elapsed() >= ACTIVE_SYNC_BACKLOG_REFRESH_INTERVAL
+                });
             let storage = Arc::clone(&state.storage);
             match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
                 if active_sync {
-                    let (raw_plan, profile_plan, compaction_limit) = {
+                    let (
+                        raw_plan,
+                        profile_plan,
+                        raw_backlog_before,
+                        profile_rewrite_backlog,
+                        compaction_limit,
+                    ) = {
                         let storage = storage.blocking_read();
-                        let backlog = storage.raw_compaction_backlog_count()?;
+                        let raw_backlog_before = if refresh_active_backlog {
+                            Some(storage.raw_compaction_backlog_count()?)
+                        } else {
+                            None
+                        };
+                        let profile_rewrite_backlog = if refresh_active_backlog {
+                            Some(storage.profile_rewrite_backlog_count()?)
+                        } else {
+                            None
+                        };
                         let (compaction_limit, profile_rewrite_limit) =
-                            active_sync_compaction_limits(backlog, compaction_limit);
+                            active_sync_compaction_limits(
+                                raw_backlog_before.unwrap_or(1),
+                                compaction_limit,
+                            );
                         (
-                            storage.raw_segment_compaction_plan(compaction_limit)?,
+                            storage.recent_raw_segment_compaction_plan(compaction_limit)?,
                             storage.profile_rewrite_compaction_plan(profile_rewrite_limit)?,
+                            raw_backlog_before,
+                            profile_rewrite_backlog,
                             compaction_limit,
                         )
                     };
 
                     debug_assert!(raw_plan.len() <= compaction_limit);
+                    let raw_plan_len = raw_plan.len();
                     let compacted = raw_plan.compact()? + profile_plan.compact()?;
-                    let storage = storage.blocking_read();
-                    let raw_backlog = storage.raw_compaction_backlog_count()?;
-                    let profile_rewrite_backlog = storage.profile_rewrite_backlog_count()?;
+                    let raw_backlog =
+                        raw_backlog_before.map(|backlog| backlog.saturating_sub(raw_plan_len));
                     return Ok(CompactionReport {
                         compacted,
-                        raw_backlog: Some(raw_backlog),
-                        profile_rewrite_backlog: Some(profile_rewrite_backlog),
+                        raw_backlog,
+                        profile_rewrite_backlog,
                     });
                 }
 
@@ -139,7 +165,11 @@ pub async fn run_background_indexer(
             .await
             {
                 Ok(Ok(report)) => {
+                    let refreshed_active_backlog = active_sync && report.raw_backlog.is_some();
                     update_compaction_status(&state, report);
+                    if refreshed_active_backlog {
+                        last_active_backlog_refresh = Some(std::time::Instant::now());
+                    }
                     if report.compacted > 0 {
                         tracing::info!(
                             segments = report.compacted,
@@ -235,8 +265,12 @@ fn update_compaction_status(state: &AppState, report: CompactionReport) {
         .sync_status
         .lock()
         .expect("sync status mutex poisoned");
-    status.raw_log_segment_backlog = report.raw_backlog;
-    status.storage_profile_rewrite_backlog = report.profile_rewrite_backlog;
+    if let Some(raw_backlog) = report.raw_backlog {
+        status.raw_log_segment_backlog = Some(raw_backlog);
+    }
+    if let Some(profile_rewrite_backlog) = report.profile_rewrite_backlog {
+        status.storage_profile_rewrite_backlog = Some(profile_rewrite_backlog);
+    }
 }
 
 fn should_defer_background_indexing(status: &SyncStatus) -> bool {

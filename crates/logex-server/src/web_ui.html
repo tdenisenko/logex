@@ -453,6 +453,15 @@
     overflow-wrap: anywhere;
   }
 
+  .debug-item.full {
+    grid-column: 1 / -1;
+  }
+
+  .debug-item.storage-volumes .v {
+    line-height: 1.45;
+    white-space: pre-line;
+  }
+
   .query-panel {
     display: grid;
     gap: 12px;
@@ -658,8 +667,8 @@
         <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
         <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
         <div class="mini"><span class="k">Log block range</span><span class="v" id="logRange">--</span><span class="note" id="logRangeDetail">Verified local logs available for queries.</span></div>
-        <div class="mini"><span class="k">Storage used</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail">--</span></div>
-        <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary">--</span></div>
+        <div class="mini"><span class="k">Storage used</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail"></span></div>
+        <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary"></span></div>
       </div>
     </div>
   </section>
@@ -713,10 +722,16 @@
           <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
           <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
-          <div class="debug-item"><span class="k">Storage used</span><span class="v" id="debugStorageUsed">--</span></div>
-          <div class="debug-item"><span class="k">Disk free</span><span class="v" id="debugDiskFree">--</span></div>
+          <div class="debug-item"><span class="k">LogEx storage used</span><span class="v" id="debugStorageUsed">--</span></div>
+          <div class="debug-item"><span class="k">Main write volume free</span><span class="v" id="debugStorageWriteFree">--</span></div>
+          <div class="debug-item"><span class="k">Limiting storage headroom</span><span class="v" id="debugStorageHeadroom">--</span></div>
+          <div class="debug-item"><span class="k">Total free on LogEx volumes</span><span class="v" id="debugStorageFreeTotal">--</span></div>
           <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
-          <div class="debug-item"><span class="k">Raw log segments pending compression</span><span class="v" id="debugRawBacklog">--</span></div>
+          <div class="debug-item"><span class="k">Main write path</span><span class="v" id="debugStorageWritePath">--</span></div>
+          <div class="debug-item"><span class="k">Limiting volume path</span><span class="v" id="debugStorageLimitingPath">--</span></div>
+          <div class="debug-item"><span class="k">Raw segments pending first compression</span><span class="v" id="debugRawBacklog">--</span></div>
+          <div class="debug-item"><span class="k">Profile rewrites pending</span><span class="v" id="debugProfileBacklog">--</span></div>
+          <div class="debug-item full storage-volumes"><span class="k">Free space by LogEx volume</span><span class="v" id="debugStorageVolumes">--</span></div>
           <div class="debug-item"><span class="k">Lowest verified block</span><span class="v" id="debugHistoricalFloor">--</span></div>
           <div class="debug-item"><span class="k">Historical pivot block</span><span class="v" id="debugHistoricalAnchor">--</span></div>
           <div class="debug-item"><span class="k">Latest execution block</span><span class="v" id="debugLatestBlock">--</span></div>
@@ -856,6 +871,14 @@ function fmtBytes(value) {
     index += 1;
   }
   return fmtDecimal(number, number >= 10 || index === 0 ? 0 : 1) + ' ' + units[index];
+}
+
+function fmtStorageVolumes(volumes) {
+  if (!Array.isArray(volumes) || volumes.length === 0) return '--';
+  return volumes.map(function(volume) {
+    var path = volume && volume.path ? volume.path : 'unknown volume';
+    return path + ': ' + fmtBytes(volume && volume.free_bytes);
+  }).join('\n');
 }
 
 function fmtEta(seconds) {
@@ -1021,10 +1044,14 @@ function updateStatus(data) {
     ? 'No verified local log range yet.'
     : fmt(query.stored_rows) + ' rows; latest query tag resolves to ' + blockWithAge(latestBlock, latestTime) + '.');
 
+  var storageHeadroom = data.storage_headroom_bytes != null ? data.storage_headroom_bytes : data.disk_free_bytes;
+  var storageWriteFree = data.storage_write_free_bytes != null ? data.storage_write_free_bytes : storageHeadroom;
+  var rawSegmentBacklog = numberOrNull(data.raw_log_segment_backlog);
+  var profileRewriteBacklog = numberOrNull(data.storage_profile_rewrite_backlog);
   setText('storageUsed', fmtBytes(data.storage_used_bytes));
-  setText('storageDetail', fmtBytes(data.disk_free_bytes) + ' free; ' + fmt(data.raw_log_segment_backlog) + ' raw segments pending compression.');
-  setText('diskFree', fmtBytes(data.disk_free_bytes));
-  setText('rawBacklogSummary', fmt(data.raw_log_segment_backlog) + ' raw segments pending compression.');
+  setText('storageDetail', '');
+  setText('diskFree', fmtBytes(storageWriteFree));
+  setText('rawBacklogSummary', '');
 
   setText('debugConnectedPeers', fmt(connectedPeers));
   setText('debugServingPeers', fmt(servingPeers));
@@ -1035,9 +1062,15 @@ function updateStatus(data) {
     : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
   setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
-  setText('debugDiskFree', fmtBytes(data.disk_free_bytes));
+  setText('debugStorageWriteFree', fmtBytes(storageWriteFree));
+  setText('debugStorageHeadroom', fmtBytes(storageHeadroom));
+  setText('debugStorageFreeTotal', fmtBytes(data.storage_free_total_bytes));
+  setText('debugStorageWritePath', data.storage_write_path);
+  setText('debugStorageLimitingPath', data.storage_limiting_path);
+  setText('debugStorageVolumes', fmtStorageVolumes(data.storage_free_volumes));
   setText('debugCpu', fmtPct(data.cpu_utilization_pct));
-  setText('debugRawBacklog', fmt(data.raw_log_segment_backlog));
+  setText('debugRawBacklog', fmt(rawSegmentBacklog));
+  setText('debugProfileBacklog', fmt(profileRewriteBacklog));
   setText('debugHistoricalFloor', blockWithAge(floorBlock, floorTime));
   setText('debugHistoricalAnchor', blockWithAge(anchorBlockNumber, anchorTimeValue));
   setText('debugLatestBlock', blockWithAge(optimisticBlock || latestBlock, optimisticTime || latestTime));

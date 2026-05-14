@@ -130,6 +130,14 @@ impl PartitionManager {
         self.inner.raw_segment_compaction_plan(limit)
     }
 
+    /// Select recent raw sealed segments that can be compacted outside the storage lock.
+    pub fn recent_raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.recent_raw_segment_compaction_plan(limit)
+    }
+
     /// Select compacted sealed segments that only need migration to the current profile.
     pub fn profile_rewrite_compaction_plan(
         &self,

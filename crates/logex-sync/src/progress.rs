@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use logex_types::{
     ChainAnchors, ExecutionBlockMarker, ExecutionNetworkStatus, NodeState, SyncStatus,
@@ -231,6 +231,7 @@ impl ProgressTracker {
         status.historical_execution_anchor = anchor.or(status.historical_execution_anchor);
         status.historical_target_block = target_block;
         status.historical_blocks_per_sec = bps;
+        status.historical_rate_updated_at_unix_ms = Some(unix_time_millis());
         status.historical_eta_seconds = historical_eta(Some(floor), target_block, bps);
         status.logs_ingested = self.logs_ingested;
 
@@ -269,6 +270,14 @@ impl ProgressTracker {
         status.syncing = false;
         status.target_block = status.current_block;
         status.eta_seconds = None;
+        if status
+            .historical_execution_floor
+            .is_none_or(|floor| floor.block_number <= status.historical_target_block)
+        {
+            status.historical_blocks_per_sec = 0.0;
+            status.historical_rate_updated_at_unix_ms = None;
+            status.historical_eta_seconds = None;
+        }
     }
 
     pub fn blocks_processed(&self) -> u64 {
@@ -302,6 +311,13 @@ fn smoothed_historical_blocks_per_sec(previous: f64, recent: f64) -> f64 {
     }
 
     (previous * (1.0 - HISTORICAL_RATE_EWMA_WEIGHT)) + (recent * HISTORICAL_RATE_EWMA_WEIGHT)
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

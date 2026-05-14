@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -10,6 +11,10 @@ use serde::Serialize;
 
 use crate::handler::AppState;
 use crate::storage_metrics;
+
+const HISTORICAL_RATE_STALE_AFTER_MS: u64 = 10_000;
+const HISTORICAL_RATE_DECAY_HALF_LIFE_MS: f64 = 5_000.0;
+const HISTORICAL_RATE_ZERO_THRESHOLD: f64 = 0.01;
 
 /// Request body for POST /query.
 #[derive(serde::Deserialize)]
@@ -167,6 +172,21 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         .map(|(top, finalized)| top.saturating_sub(finalized));
     let historical_floor = historical_floor.or(sync.historical_execution_floor);
     let historical_anchor = historical_anchor.or(sync.historical_execution_anchor);
+    let historical_incomplete =
+        historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
+    let historical_blocks_per_sec = if historical_incomplete {
+        effective_historical_blocks_per_sec(
+            sync.historical_blocks_per_sec,
+            sync.historical_rate_updated_at_unix_ms,
+        )
+    } else {
+        0.0
+    };
+    let historical_eta_seconds = rest_historical_eta(
+        historical_floor,
+        sync.historical_target_block,
+        historical_blocks_per_sec,
+    );
     let verified_from_block = historical_floor
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
@@ -201,6 +221,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         },
         "storage_used_bytes": storage_metrics.storage_used_bytes,
         "disk_free_bytes": storage_metrics.disk_free_bytes,
+        "storage_headroom_bytes": storage_metrics.disk_free_bytes,
+        "storage_write_free_bytes": storage_metrics.storage_write_free_bytes,
+        "storage_write_path": storage_metrics.storage_write_path,
+        "storage_free_total_bytes": storage_metrics.storage_free_total_bytes,
+        "storage_free_volumes": storage_metrics.storage_free_volumes,
+        "storage_limiting_path": storage_metrics.storage_limiting_path,
         "cpu_utilization_pct": storage_metrics.cpu_utilization_pct,
         "eta_seconds": sync.eta_seconds,
         "historical_execution_floor": historical_floor,
@@ -208,8 +234,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "historical_target_block": sync.historical_target_block,
         "execution_merge_block": logex_types::EXECUTION_MERGE_BLOCK,
         "execution_terminal_pow_block": logex_types::EXECUTION_TERMINAL_POW_BLOCK,
-        "historical_blocks_per_sec": sync.historical_blocks_per_sec,
-        "historical_eta_seconds": sync.historical_eta_seconds,
+        "historical_blocks_per_sec": historical_blocks_per_sec,
+        "historical_rate_updated_at_unix_ms": sync.historical_rate_updated_at_unix_ms,
+        "historical_eta_seconds": historical_eta_seconds,
         "raw_log_segment_backlog": sync.raw_log_segment_backlog,
         "storage_profile_rewrite_backlog": sync.storage_profile_rewrite_backlog,
         "progress_pct": progress_pct,
@@ -245,6 +272,60 @@ fn stored_log_range(storage: &PartitionManager) -> Option<(u64, u64)> {
         })
 }
 
+fn rest_historical_eta(
+    floor: Option<logex_types::ExecutionBlockMarker>,
+    target_block: u64,
+    blocks_per_sec: f64,
+) -> Option<f64> {
+    let floor = floor?;
+    if blocks_per_sec <= 0.0 || floor.block_number <= target_block {
+        return None;
+    }
+
+    Some((floor.block_number - target_block) as f64 / blocks_per_sec)
+}
+
+fn effective_historical_blocks_per_sec(
+    blocks_per_sec: f64,
+    updated_at_unix_ms: Option<u64>,
+) -> f64 {
+    if blocks_per_sec <= 0.0 {
+        return 0.0;
+    }
+
+    let Some(updated_at_unix_ms) = updated_at_unix_ms else {
+        return 0.0;
+    };
+
+    let now = unix_time_millis();
+    historical_blocks_per_sec_for_age(blocks_per_sec, now.saturating_sub(updated_at_unix_ms))
+}
+
+fn historical_blocks_per_sec_for_age(blocks_per_sec: f64, age_ms: u64) -> f64 {
+    if blocks_per_sec <= 0.0 {
+        return 0.0;
+    }
+    if age_ms <= HISTORICAL_RATE_STALE_AFTER_MS {
+        return blocks_per_sec;
+    }
+
+    let stale_ms = age_ms - HISTORICAL_RATE_STALE_AFTER_MS;
+    let decayed =
+        blocks_per_sec * 0.5_f64.powf(stale_ms as f64 / HISTORICAL_RATE_DECAY_HALF_LIFE_MS);
+    if decayed < HISTORICAL_RATE_ZERO_THRESHOLD {
+        0.0
+    } else {
+        decayed
+    }
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
 /// Handle GET / — serve the embedded web UI.
 pub async fn handle_web_ui() -> Html<&'static str> {
     Html(include_str!("web_ui.html"))
@@ -266,8 +347,8 @@ mod tests {
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
         ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
-        ExecutionNetworkStatus, LightClientBootstrapStatus, LightClientExecutionData,
-        LightClientHeaderSummary, LogRow, NodeState, Source, SyncStatus,
+        ExecutionBlockMarker, ExecutionNetworkStatus, LightClientBootstrapStatus,
+        LightClientExecutionData, LightClientHeaderSummary, LogRow, NodeState, Source, SyncStatus,
         WeakSubjectivityCheckpoint,
     };
     use tempfile::TempDir;
@@ -329,6 +410,56 @@ mod tests {
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(credentials)
         )
+    }
+
+    #[test]
+    fn historical_rate_decays_after_stale_progress() {
+        assert_eq!(historical_blocks_per_sec_for_age(500.0, 9_999), 500.0);
+
+        let decayed = historical_blocks_per_sec_for_age(500.0, 20_000);
+        assert!(decayed > 0.0);
+        assert!(decayed < 500.0);
+
+        assert_eq!(historical_blocks_per_sec_for_age(500.0, 100_000), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_decays_stale_historical_rate() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                historical_execution_floor: Some(ExecutionBlockMarker {
+                    block_number: 1_000,
+                    block_hash: B256::repeat_byte(0x11),
+                    timestamp: 1_700_000_000,
+                }),
+                historical_target_block: 0,
+                historical_blocks_per_sec: 500.0,
+                historical_rate_updated_at_unix_ms: Some(unix_time_millis().saturating_sub(60_000)),
+                historical_eta_seconds: Some(2.0),
+                ..Default::default()
+            },
+        ));
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rate = status["historical_blocks_per_sec"].as_f64().unwrap();
+        assert!(rate < 1.0);
+        assert!(status["historical_eta_seconds"].as_f64().unwrap() > 1_000.0);
     }
 
     #[tokio::test]
@@ -660,6 +791,7 @@ mod tests {
                 historical_execution_anchor: None,
                 historical_target_block: logex_types::EXECUTION_HISTORY_TARGET_BLOCK,
                 historical_blocks_per_sec: 0.0,
+                historical_rate_updated_at_unix_ms: None,
                 historical_eta_seconds: None,
                 raw_log_segment_backlog: Some(2),
                 storage_profile_rewrite_backlog: Some(5),
@@ -902,6 +1034,29 @@ mod tests {
         );
         assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
         assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(status["storage_headroom_bytes"], status["disk_free_bytes"]);
+        assert!(status["storage_write_free_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            status["storage_write_path"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
+        );
+        assert!(
+            status["storage_limiting_path"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
+        );
+        assert!(status["storage_free_total_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            status["storage_free_volumes"]
+                .as_array()
+                .is_some_and(|volumes| {
+                    !volumes.is_empty()
+                        && volumes.iter().all(|volume| {
+                            volume["path"].is_string() && volume["free_bytes"].is_u64()
+                        })
+                })
+        );
     }
 
     #[tokio::test]

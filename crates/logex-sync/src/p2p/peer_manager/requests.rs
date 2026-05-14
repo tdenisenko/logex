@@ -12,6 +12,7 @@ use super::*;
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
+const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 32;
@@ -508,6 +509,7 @@ impl BodyReceiptRequestPlan {
     }
 
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
+        let plan_started_at = Instant::now();
         let mut chunks = BTreeMap::new();
         let mut failures = Vec::new();
         let mut stats = Vec::new();
@@ -550,11 +552,35 @@ impl BodyReceiptRequestPlan {
             }
 
             while !attempts.is_empty() {
-                let chunk = match timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await
+                let Some(wait_timeout) =
+                    PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT.checked_sub(plan_started_at.elapsed())
+                else {
+                    debug!(
+                        elapsed_ms = plan_started_at.elapsed().as_millis(),
+                        chunks = chunks.len(),
+                        in_flight = in_flight.len(),
+                        "body/receipt chunk pipeline hit plan timeout"
+                    );
+                    break;
+                };
+                let chunk = match timeout(
+                    wait_timeout.min(PIPELINED_BODY_RECEIPT_HEDGE_DELAY),
+                    attempts.next(),
+                )
+                .await
                 {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
                     Err(_) => {
+                        if plan_started_at.elapsed() >= PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT {
+                            debug!(
+                                elapsed_ms = plan_started_at.elapsed().as_millis(),
+                                chunks = chunks.len(),
+                                in_flight = in_flight.len(),
+                                "body/receipt chunk pipeline hit plan timeout"
+                            );
+                            break;
+                        }
                         if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
                             && let Some((range, chunk_index)) = body_receipt_hedge_candidate(
                                 &mut in_flight,

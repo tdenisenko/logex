@@ -43,6 +43,12 @@ enum CompactionMode {
     CurrentProfile,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CompactionOrder {
+    OldestFirst,
+    NewestFirst,
+}
+
 #[derive(Debug, Clone)]
 pub struct SegmentCompactionTask {
     paths: StorageCatalogPaths,
@@ -394,6 +400,17 @@ impl NativeStorage {
         self.compaction_plan(limit, CompactionMode::RawOnly)
     }
 
+    pub fn recent_raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.compaction_plan_with_order(
+            limit,
+            CompactionMode::RawOnly,
+            CompactionOrder::NewestFirst,
+        )
+    }
+
     pub fn segment_compaction_plan(&self, limit: usize) -> std::io::Result<SegmentCompactionPlan> {
         self.compaction_plan(limit, CompactionMode::CurrentProfile)
     }
@@ -410,26 +427,56 @@ impl NativeStorage {
         limit: usize,
         mode: CompactionMode,
     ) -> std::io::Result<SegmentCompactionPlan> {
+        self.compaction_plan_with_order(limit, mode, CompactionOrder::OldestFirst)
+    }
+
+    fn compaction_plan_with_order(
+        &self,
+        limit: usize,
+        mode: CompactionMode,
+        order: CompactionOrder,
+    ) -> std::io::Result<SegmentCompactionPlan> {
         if limit == 0 {
             return Ok(SegmentCompactionPlan::default());
         }
 
         let mut eligible = Vec::new();
-        for segment in &self.catalog.segments {
-            if eligible.len() >= limit {
-                break;
+        match order {
+            CompactionOrder::OldestFirst => {
+                for segment in &self.catalog.segments {
+                    if eligible.len() >= limit {
+                        break;
+                    }
+                    if self.segment_matches_compaction_mode(segment, mode)? {
+                        eligible.push(segment.clone());
+                    }
+                }
             }
-            let needs_compaction = match mode {
-                CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment)?,
-                CompactionMode::ProfileRewrite => self.segment_needs_profile_rewrite(segment)?,
-                CompactionMode::CurrentProfile => self.segment_needs_compaction(segment)?,
-            };
-            if needs_compaction {
-                eligible.push(segment.clone());
+            CompactionOrder::NewestFirst => {
+                for segment in self.catalog.segments.iter().rev() {
+                    if eligible.len() >= limit {
+                        break;
+                    }
+                    if self.segment_matches_compaction_mode(segment, mode)? {
+                        eligible.push(segment.clone());
+                    }
+                }
             }
         }
 
         Ok(SegmentCompactionPlan::new(self.paths.clone(), eligible))
+    }
+
+    fn segment_matches_compaction_mode(
+        &self,
+        segment: &SegmentDescriptor,
+        mode: CompactionMode,
+    ) -> std::io::Result<bool> {
+        match mode {
+            CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment),
+            CompactionMode::ProfileRewrite => self.segment_needs_profile_rewrite(segment),
+            CompactionMode::CurrentProfile => self.segment_needs_compaction(segment),
+        }
     }
 
     pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
@@ -1171,10 +1218,20 @@ mod tests {
             .record_sync_head(10_000, B256::repeat_byte(0xAA), 999)
             .unwrap();
         assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 3);
+        let last_segment = storage.segment_path(sealed[2].id);
+        let recent_plan = storage.recent_raw_segment_compaction_plan(1).unwrap();
+        assert_eq!(recent_plan.len(), 1);
+        assert_eq!(recent_plan.compact().unwrap(), 1);
+        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 2);
+        assert!(first_segment.join("address.col").exists());
+        assert!(!first_segment.join("columns/address.pages").exists());
+        assert!(!last_segment.join("address.col").exists());
+        assert!(last_segment.join("columns/address.pages").exists());
+
         let raw_plan = storage.raw_segment_compaction_plan(2).unwrap();
         assert_eq!(raw_plan.len(), 2);
         assert_eq!(raw_plan.compact().unwrap(), 2);
-        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 1);
+        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
         assert!(!first_segment.join("address.col").exists());
         assert!(first_segment.join("columns/address.pages").exists());
 
