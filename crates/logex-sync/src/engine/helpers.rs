@@ -110,7 +110,7 @@ impl SyncEngine {
     }
 
     pub(super) fn shutdown_requested(&self) -> bool {
-        self.shutdown.has_changed().unwrap_or(true)
+        shutdown_requested(&self.shutdown)
     }
 
     pub(super) fn finish_shutdown(&self) -> Result<()> {
@@ -134,6 +134,10 @@ impl SyncEngine {
             self.sync_status_peers();
         }
     }
+}
+
+pub(super) fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
 }
 
 pub(super) fn should_mark_historical_complete(
@@ -466,5 +470,15 @@ mod tests {
         assert!(should_note_serving_peer(first, &mut seen));
         assert!(!should_note_serving_peer(first, &mut seen));
         assert!(!should_note_serving_peer(PeerId::ZERO, &mut seen));
+    }
+
+    #[tokio::test]
+    async fn shutdown_requested_stays_true_after_change_is_observed() {
+        let (tx, mut rx) = watch::channel(false);
+
+        tx.send(true).unwrap();
+        rx.changed().await.unwrap();
+
+        assert!(shutdown_requested(&rx));
     }
 }

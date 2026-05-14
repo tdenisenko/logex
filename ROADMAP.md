@@ -19,6 +19,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Smoothed active-sync maintenance further by limiting raw compaction to smaller per-pass batches and reserving catch-up bursts for larger raw backlogs.
 - Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task at a lower cadence, preventing `/status` polling from blocking the UI or repeatedly walking the large catalog.
 - Added segment-aware storage-size caching so old sealed segments are not recursively rescanned unless their manifest changes; the active hot segment and new segments are still measured exactly.
+- Fixed shutdown polling so SIGINT/SIGTERM remains visible after the first async watcher observes it, preventing historical sync from continuing after graceful shutdown starts.
 
 ## Remaining TODOs
 
@@ -66,6 +67,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 - During active historical sync, background compaction favors raw segment compaction and defers profile-only rewrites while raw backlog exists. Raw compaction protects disk usage; profile migration is an optimization that can catch up after ingestion pressure drops.
 - Dashboard storage metrics are eventually consistent: `/status` returns the last cached storage sample and starts one background refresh when the one-minute sample expires. Segment-size accounting caches sealed segment directory sizes by filesystem identity and manifest metadata, while always rescanning the active hot segment and newly discovered segment directories.
+- Shutdown checks read the current watch value instead of the unread-change flag, because several async wait paths can consume the change notification before later engine loops poll for shutdown.
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 - The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
 - LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.
@@ -132,6 +134,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Challenge: Block/sec ramped up, then dropped sharply while CPU spiked and the dashboard became intermittently unresponsive.
   - Resolution: Remote logs showed the drops lining up with local maintenance, especially raw compaction overlapping dense writes, and `/status` could block on full data-dir storage scans. Active-sync raw compaction now uses smaller smoothing passes, and storage metrics refresh is nonblocking, single-flight, lower-cadence, and segment-cache aware.
 
+- Challenge: A remote SIGINT logged graceful shutdown but historical backfill kept completing batches.
+  - Resolution: Shutdown polling no longer depends on `watch::Receiver::has_changed()`, which becomes false after another wait path observes the signal. Historical prefetch cancellation also checks the sticky shutdown value before falling back to sequential fetch.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, storage metrics, and dashboard sync display.
@@ -149,12 +154,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Extended the low-disk scan to discover relocated segment symlink targets instead of leaving the emergency multi-volume layout unmonitored.
 - Inspected the background compaction loop after the write-stall investigation; removed the active-sync profile rewrite catch-up path because it competes with historical ingest and can safely run after raw compaction pressure clears.
 - Inspected the status storage-metrics path and active-sync compaction loop after the spike/drop report; no experimental code paths remained, but the blocking status refresh and oversized active raw compaction pass were replaced. The follow-up storage metric cache avoids recursively reading unchanged sealed segment directories.
+- Inspected the shutdown and historical prefetch paths after the remote stop hang; no duplicate shutdown path was added, and the existing graceful stop path now uses a sticky shutdown signal.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.

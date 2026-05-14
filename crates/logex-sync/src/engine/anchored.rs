@@ -1116,6 +1116,10 @@ impl SyncEngine {
             .fetch_historical_combined_batch(child_header.clone())
             .await?
         else {
+            if self.shutdown_requested() {
+                self.finish_shutdown()?;
+                return Ok(false);
+            }
             return self
                 .ingest_historical_backfill_batch_sequential(child_header)
                 .await;
