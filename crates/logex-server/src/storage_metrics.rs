@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -130,7 +130,7 @@ fn collect_storage_metrics(
     (
         StorageMetrics {
             storage_used_bytes,
-            disk_free_bytes: free_space_bytes(data_dir).ok(),
+            disk_free_bytes: min_storage_free_space_bytes(data_dir).ok(),
             cpu_utilization_pct: None,
         },
         size_cache,
@@ -373,6 +373,52 @@ fn metadata_id(_metadata: &fs::Metadata) -> Option<MetadataId> {
     None
 }
 
+fn min_storage_free_space_bytes(data_dir: &Path) -> io::Result<u64> {
+    storage_free_space_probe_paths(data_dir)
+        .into_iter()
+        .map(|path| free_space_bytes(&path))
+        .try_fold(u64::MAX, |min_free, free| {
+            free.map(|free| min_free.min(free))
+        })
+}
+
+fn storage_free_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut probes = BTreeSet::new();
+    insert_storage_free_space_probe(&mut probes, data_dir.to_path_buf());
+    let segments_dir = data_dir.join("segments");
+    if segments_dir.exists() {
+        insert_storage_free_space_probe(&mut probes, segments_dir.clone());
+    }
+
+    if let Ok(entries) = fs::read_dir(&segments_dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_symlink() {
+                continue;
+            }
+
+            let Ok(target) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            let target = if target.is_absolute() {
+                target
+            } else {
+                segments_dir.join(target)
+            };
+            let probe = target.parent().map(Path::to_path_buf).unwrap_or(target);
+            insert_storage_free_space_probe(&mut probes, probe);
+        }
+    }
+
+    probes.into_iter().collect()
+}
+
+fn insert_storage_free_space_probe(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
+    probes.insert(path.canonicalize().unwrap_or(path));
+}
+
 #[cfg(unix)]
 fn free_space_bytes(path: &Path) -> io::Result<u64> {
     use std::ffi::CString;
@@ -440,6 +486,26 @@ mod tests {
 
         let mut cache = StorageSizeCache::default();
         assert_eq!(dir_size_bytes(tmp.path(), &mut cache).expect("size"), 18);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn free_space_probe_paths_include_segment_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external tempdir");
+        let segments = tmp.path().join("segments");
+        let target_segment = external.path().join("segments").join("s_0000000000000001");
+        fs::create_dir_all(&segments).expect("segments dir");
+        fs::create_dir_all(&target_segment).expect("target segment");
+        symlink(&target_segment, segments.join("s_0000000000000001")).expect("segment symlink");
+
+        let probes = storage_free_space_probe_paths(tmp.path());
+
+        assert!(probes.contains(&tmp.path().canonicalize().unwrap()));
+        assert!(probes.contains(&segments.canonicalize().unwrap()));
+        assert!(probes.contains(&target_segment.parent().unwrap().canonicalize().unwrap()));
     }
 
     #[test]

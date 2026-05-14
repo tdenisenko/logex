@@ -20,6 +20,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task at a lower cadence, preventing `/status` polling from blocking the UI or repeatedly walking the large catalog.
 - Added segment-aware storage-size caching so old sealed segments are not recursively rescanned unless their manifest changes; the active hot segment and new segments are still measured exactly.
 - Fixed shutdown polling so SIGINT/SIGTERM remains visible after the first async watcher observes it, preventing historical sync from continuing after graceful shutdown starts.
+- Changed the dashboard disk-free status metric to report the limiting filesystem across the data directory and relocated segment symlink targets, matching the low-disk guard.
 
 ## Remaining TODOs
 
@@ -57,6 +58,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
+- Dashboard disk-free reporting uses the minimum free space across the active data directory and relocated segment filesystems, because the smallest writable backing store is the actual safety limit.
 - Medium-peer historical reverse sync keeps four 2048-block body/receipt fetches queued once at least 8 serving peers are available. High-memory runs with at least 12 connected/serving peers use 4096-block batches at depth three, which keeps a similar in-flight block footprint while reducing scheduling overhead. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
 - Peer dialing prefers known productive peers but reserves roughly one third of each refill for fresh discovery candidates, because persisted peer caches can become stale after restarts or host replacement.
 - Startup storage integrity verification remains full verification, but segment checks run across a bounded worker pool so large catalogs do not block HTTP readiness on one thread.
@@ -137,6 +139,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Challenge: A remote SIGINT logged graceful shutdown but historical backfill kept completing batches.
   - Resolution: Shutdown polling no longer depends on `watch::Receiver::has_changed()`, which becomes false after another wait path observes the signal. Historical prefetch cancellation also checks the sticky shutdown value before falling back to sequential fetch.
 
+- Challenge: The dashboard free-space metric could overstate safety on multi-volume runs by reporting only the root data-dir filesystem.
+  - Resolution: Status storage metrics now probe the data directory, `segments/`, and symlinked segment target directories, then report the lowest free-space value.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, storage metrics, and dashboard sync display.
@@ -155,12 +160,13 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The current run reta
 - Inspected the background compaction loop after the write-stall investigation; removed the active-sync profile rewrite catch-up path because it competes with historical ingest and can safely run after raw compaction pressure clears.
 - Inspected the status storage-metrics path and active-sync compaction loop after the spike/drop report; no experimental code paths remained, but the blocking status refresh and oversized active raw compaction pass were replaced. The follow-up storage metric cache avoids recursively reading unchanged sealed segment directories.
 - Inspected the shutdown and historical prefetch paths after the remote stop hang; no duplicate shutdown path was added, and the existing graceful stop path now uses a sticky shutdown signal.
+- Inspected dashboard storage metric accounting after adding sealed-segment caching; no obsolete metric path remained, but disk-free reporting was aligned with the existing symlink-aware low-disk guard.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`; `fix: report limiting storage free space`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
