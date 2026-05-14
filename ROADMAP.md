@@ -25,17 +25,21 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
    - Reason: The downloader needs enough serving peers to hide request latency and keep wide fetch windows active.
    - Completion criteria: Long remote runs retain a large serving pool, keep lookahead filled, and do not regress peer retention compared with the best observed run.
 
-3. Replace the temporary checkpoint source.
-   - Reason: `--checkpoint-sync-url` still depends on an external checkpoint provider.
-   - Completion criteria: LogEx has its own recent-checkpoint source or a documented multi-source verification flow, with stale checkpoint rejection aligned to consensus weak-subjectivity rules.
+3. Replace the temporary checkpoint source and stale-checkpoint policy.
+   - Reason: `--checkpoint-sync-url` still depends on an external checkpoint provider, and weak-subjectivity safety depends on starting from a recent, correct checkpoint.
+   - Completion criteria: LogEx has its own recent-checkpoint source or a documented multi-source verification flow, rejects stale checkpoints according to consensus weak-subjectivity rules, and clearly reports when a fresh checkpointed resync is required.
 
-4. Complete release validation.
-   - Reason: Consensus Layer, Execution Layer, storage, query, and UI surfaces need shared evidence for what is verified and queryable.
-   - Completion criteria: End-to-end tests or smokes cover checkpoint bootstrap, live anchors, reverse Execution Layer headers/bodies/receipts, restart/resume, Merge boundary behavior, query coverage, limits, pagination, and dashboard auth behavior.
+4. Complete adversarial release validation.
+   - Reason: LogEx's trustless log-validity claim depends on correct verification and rejection behavior across Consensus Layer, Execution Layer, storage, query, and UI surfaces.
+   - Completion criteria: End-to-end tests or smokes cover checkpoint bootstrap, live anchors, reverse Execution Layer headers/bodies/receipts, invalid headers/bodies/receipts/receipt roots from peers, peer starvation/eclipsing liveness behavior, restart/resume, reorgs, Merge boundary and pre-Merge ancestry from a CL-authenticated pivot, query coverage, limits, pagination, and dashboard auth behavior.
 
-5. Harden non-HTTP query surfaces before public exposure.
-   - Reason: The new dashboard password protects HTTP dashboard/status/query/JSON-RPC/WebSocket routes, but gRPC is still a separate unauthenticated listener.
-   - Completion criteria: Either gRPC is bound/firewalled to trusted networks by default, gains equivalent authentication, or is explicitly disabled in deployment profiles that expose the HTTP dashboard.
+5. Harden exposed query and admin surfaces before public exposure.
+   - Reason: HTTP Basic auth protects dashboard/status/query/JSON-RPC/WebSocket routes but does not encrypt traffic, and gRPC remains a separate unauthenticated listener.
+   - Completion criteria: Public deployments bind sensitive listeners to trusted interfaces or require firewalling/TLS/SSH tunneling; gRPC is disabled, trusted-network-only, or authenticated equivalently; deployment docs make the exposure model explicit.
+
+6. Complete verification-critical security review.
+   - Reason: A trustless log-validity claim depends on correct implementation of CL anchor handling, EL ancestry validation, body/receipt verification, storage canonicality, reorg handling, and query bounds.
+   - Completion criteria: A documented security review or audit covers verification-critical code paths and threat model assumptions, and all critical/high findings are fixed or explicitly documented before a production-ready release.
 
 ## Design Decisions
 
@@ -57,6 +61,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
 - Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
 - The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
+- LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.
 
 ## Challenges and Resolutions
 
@@ -134,7 +139,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; pending symlink-volume guard commit.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
@@ -149,3 +154,4 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Relocated segment symlinks keep the current deployment running but still require manual rebalancing until a first-class multi-volume storage allocator exists.
 - The post-storage-expansion run is still warming after restart; the first sample is below the previous warmed throughput and should not be treated as final performance evidence.
 - Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.
+- Verification-critical security review is still required before calling the implementation production-secure.
