@@ -4,7 +4,7 @@ use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
 use std::collections::VecDeque;
 
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
-const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 1024;
+const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 2048;
 const HISTORICAL_EXTRACTION_PIPELINE_DEPTH: usize = 4;
 
 pub(super) struct HistoricalExtractedBatch {
@@ -469,16 +469,9 @@ mod tests {
 
     #[test]
     fn coalesces_fused_extraction_chunks_into_write_sized_batches() {
-        let chunks = vec![
-            extracted_chunk(128, 896),
-            extracted_chunk(128, 768),
-            extracted_chunk(128, 640),
-            extracted_chunk(128, 512),
-            extracted_chunk(128, 384),
-            extracted_chunk(128, 256),
-            extracted_chunk(128, 128),
-            extracted_chunk(128, 0),
-        ];
+        let chunks = (0..16)
+            .map(|index| extracted_chunk(128, (15 - index) * 128))
+            .collect();
 
         let write_chunks = coalesce_historical_write_chunks(chunks);
 

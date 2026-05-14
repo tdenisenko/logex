@@ -115,7 +115,7 @@ impl PeerManager {
         }
         let dial_budget = open_slots.clamp(1, MAX_PENDING_DIALS_PER_REFILL);
 
-        let mut candidates: Vec<_> = self
+        let candidates: Vec<_> = self
             .pending
             .values()
             .copied()
@@ -127,8 +127,7 @@ impl PeerManager {
                     && !self.recently_submitted(node.id, now)
             })
             .collect();
-        sort_dial_candidates_by_productivity(&mut candidates, &self.productive);
-        candidates.truncate(dial_budget);
+        let candidates = select_dial_candidates(candidates, &self.productive, dial_budget);
 
         if candidates.is_empty() {
             return;
@@ -687,6 +686,39 @@ fn sort_dial_candidates_by_productivity(
     candidates.sort_by_key(|candidate| productive_peer_priority(productive, candidate.id));
 }
 
+fn select_dial_candidates(
+    candidates: Vec<NodeRecord>,
+    productive: &VecDeque<NodeRecord>,
+    dial_budget: usize,
+) -> Vec<NodeRecord> {
+    if candidates.len() <= dial_budget {
+        return candidates;
+    }
+
+    let mut preferred = Vec::new();
+    let mut fresh = Vec::new();
+    for candidate in candidates {
+        if productive.iter().any(|peer| peer.id == candidate.id) {
+            preferred.push(candidate);
+        } else {
+            fresh.push(candidate);
+        }
+    }
+
+    sort_dial_candidates_by_productivity(&mut preferred, productive);
+    let preferred_budget = dial_budget.saturating_mul(2).div_ceil(3).max(1);
+    let mut selected = Vec::with_capacity(dial_budget);
+    let mut preferred = preferred.into_iter();
+    selected.extend(preferred.by_ref().take(preferred_budget.min(dial_budget)));
+    selected.extend(
+        fresh
+            .into_iter()
+            .take(dial_budget.saturating_sub(selected.len())),
+    );
+    selected.extend(preferred.take(dial_budget.saturating_sub(selected.len())));
+    selected
+}
+
 fn productive_peer_priority(productive: &VecDeque<NodeRecord>, peer_id: PeerId) -> usize {
     productive
         .iter()
@@ -727,5 +759,68 @@ mod tests {
             candidates.iter().map(|node| node.id).collect::<Vec<_>>(),
             vec![second.id, first.id, unranked.id]
         );
+    }
+
+    #[test]
+    fn dial_candidate_selection_keeps_room_for_fresh_peers() {
+        let productive = (0..6)
+            .map(|index| {
+                NodeRecord::new_with_ports(
+                    Ipv4Addr::LOCALHOST.into(),
+                    30303 + index,
+                    Some(30303 + index),
+                    PeerId::repeat_byte(index as u8),
+                )
+            })
+            .collect::<Vec<_>>();
+        let fresh = (6..9)
+            .map(|index| {
+                NodeRecord::new_with_ports(
+                    Ipv4Addr::LOCALHOST.into(),
+                    30303 + index,
+                    Some(30303 + index),
+                    PeerId::repeat_byte(index as u8),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected = select_dial_candidates(
+            productive
+                .iter()
+                .copied()
+                .chain(fresh.iter().copied())
+                .collect(),
+            &productive.iter().copied().collect(),
+            6,
+        );
+
+        assert_eq!(selected.len(), 6);
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|candidate| fresh.iter().any(|fresh| fresh.id == candidate.id))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn dial_candidate_selection_uses_full_budget_when_all_candidates_are_productive() {
+        let productive = (0..9)
+            .map(|index| {
+                NodeRecord::new_with_ports(
+                    Ipv4Addr::LOCALHOST.into(),
+                    30303 + index,
+                    Some(30303 + index),
+                    PeerId::repeat_byte(index as u8),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected = select_dial_candidates(
+            productive.to_vec(),
+            &productive.iter().copied().collect(),
+            6,
+        );
+
+        assert_eq!(selected.len(), 6);
     }
 }

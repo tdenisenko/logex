@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
@@ -769,9 +770,7 @@ impl NativeStorage {
     fn verify_integrity(&self) -> io::Result<()> {
         verify_recent_headers(&self.state)?;
 
-        for descriptor in &self.catalog.segments {
-            self.verify_segment_integrity(descriptor)?;
-        }
+        verify_segments_integrity_parallel(&self.paths, &self.catalog.segments)?;
 
         tracing::info!(
             segments = self.catalog.segments.len(),
@@ -780,115 +779,159 @@ impl NativeStorage {
         );
         Ok(())
     }
+}
 
-    fn verify_segment_integrity(&self, descriptor: &SegmentDescriptor) -> io::Result<()> {
-        let dir = self.paths.segment_dir(descriptor.id);
-        if !dir.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("segment {} directory is missing", descriptor.id),
-            ));
-        }
-
-        let reader = SegmentReader::open(&dir)?;
-        let row_count = reader.read_row_count()?;
-        if row_count != descriptor.row_count {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} row-count mismatch: descriptor={} storage={row_count}",
-                    descriptor.id, descriptor.row_count
-                ),
-            ));
-        }
-
-        if row_count == 0 {
-            if descriptor.min_block.is_some() || descriptor.max_block.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "segment {} is empty but still has block metadata",
-                        descriptor.id
-                    ),
-                ));
-            }
-            return Ok(());
-        }
-
-        let canonical_len = reader.read_canonical_len()?;
-        if canonical_len != row_count {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} canonical bitmap length mismatch: bitmap={canonical_len} rows={row_count}",
-                    descriptor.id
-                ),
-            ));
-        }
-
-        let last_row = u32::try_from(row_count - 1).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} exceeds supported per-segment row addressing",
-                    descriptor.id
-                ),
-            )
-        })?;
-        let boundary_blocks = reader.read_u64("block_number", Some(&[0, last_row]))?;
-        if boundary_blocks.len() != 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} failed to read boundary block numbers",
-                    descriptor.id
-                ),
-            ));
-        }
-
-        let Some(min_block) = descriptor.min_block else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} has rows but no minimum block metadata",
-                    descriptor.id,
-                ),
-            ));
-        };
-        let Some(max_block) = descriptor.max_block else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} has rows but no maximum block metadata",
-                    descriptor.id,
-                ),
-            ));
-        };
-
-        if min_block > max_block {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {} block metadata is inverted: min={min_block} max={max_block}",
-                    descriptor.id
-                ),
-            ));
-        }
-
-        for block_number in boundary_blocks {
-            if block_number < min_block || block_number > max_block {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "segment {} boundary block {block_number} is outside descriptor range [{min_block}, {max_block}]",
-                        descriptor.id
-                    ),
-                ));
-            }
-        }
-
-        Ok(())
+fn verify_segments_integrity_parallel(
+    paths: &StorageCatalogPaths,
+    descriptors: &[SegmentDescriptor],
+) -> io::Result<()> {
+    if descriptors.is_empty() {
+        return Ok(());
     }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(descriptors.len());
+    if worker_count <= 1 || descriptors.len() < 64 {
+        for descriptor in descriptors {
+            verify_segment_integrity(paths, descriptor)?;
+        }
+        return Ok(());
+    }
+
+    let chunk_size = descriptors.len().div_ceil(worker_count);
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for chunk in descriptors.chunks(chunk_size) {
+            handles.push(scope.spawn(move || -> io::Result<()> {
+                for descriptor in chunk {
+                    verify_segment_integrity(paths, descriptor)?;
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("segment integrity worker panicked"))??;
+        }
+        Ok(())
+    })
+}
+
+fn verify_segment_integrity(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> io::Result<()> {
+    let dir = paths.segment_dir(descriptor.id);
+    if !dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("segment {} directory is missing", descriptor.id),
+        ));
+    }
+
+    let reader = SegmentReader::open(&dir)?;
+    let row_count = reader.read_row_count()?;
+    if row_count != descriptor.row_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} row-count mismatch: descriptor={} storage={row_count}",
+                descriptor.id, descriptor.row_count
+            ),
+        ));
+    }
+
+    if row_count == 0 {
+        if descriptor.min_block.is_some() || descriptor.max_block.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {} is empty but still has block metadata",
+                    descriptor.id
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    let canonical_len = reader.read_canonical_len()?;
+    if canonical_len != row_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} canonical bitmap length mismatch: bitmap={canonical_len} rows={row_count}",
+                descriptor.id
+            ),
+        ));
+    }
+
+    let last_row = u32::try_from(row_count - 1).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} exceeds supported per-segment row addressing",
+                descriptor.id
+            ),
+        )
+    })?;
+    let boundary_blocks = reader.read_u64("block_number", Some(&[0, last_row]))?;
+    if boundary_blocks.len() != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} failed to read boundary block numbers",
+                descriptor.id
+            ),
+        ));
+    }
+
+    let Some(min_block) = descriptor.min_block else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} has rows but no minimum block metadata",
+                descriptor.id,
+            ),
+        ));
+    };
+    let Some(max_block) = descriptor.max_block else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} has rows but no maximum block metadata",
+                descriptor.id,
+            ),
+        ));
+    };
+
+    if min_block > max_block {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} block metadata is inverted: min={min_block} max={max_block}",
+                descriptor.id
+            ),
+        ));
+    }
+
+    for block_number in boundary_blocks {
+        if block_number < min_block || block_number > max_block {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {} boundary block {block_number} is outside descriptor range [{min_block}, {max_block}]",
+                    descriptor.id
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn load_manifest_descriptors(

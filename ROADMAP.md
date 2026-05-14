@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest warmed 4096-block/depth-3 historical run reached roughly 718 historical blocks/sec with an ETA near 5.1 hours. A later storage pass found and fixed reverse-order block-number compression amplification; newly compacted dense historical segments now store block-number pages in tens of KiB instead of multiple MiB.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest remote run is back under the six-hour target on the upgraded host, reaching roughly 586 historical blocks/sec and a 5.3-hour ETA with 11 serving peers. A storage pass also fixed reverse-order block-number compression amplification; newly compacted dense historical segments now store block-number pages in tens of KiB instead of multiple MiB.
 
 ## Completed Since Last Run
 
@@ -20,6 +20,10 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Sorted validated historical blocks into ascending block order before storage extraction so the columnar encoders receive locality-friendly rows without changing EL validation.
 - Added a signed-delta `block_number` storage codec for reverse-sync segments, reducing newly compacted dense segment `block_number.pages` from about 2.3-2.6 MiB to about 60-68 KiB per roughly 300k rows.
 - Added a fast block-number-only profile rewrite path and let active compaction migrate old compacted segments in small batches, so the current run can reclaim space without rewriting every column.
+- Coalesced historical writes into 2048-block units, reducing sealed segment/catalog churn while keeping low-memory runs on the smaller fetch windows.
+- Parallelized startup segment integrity verification with a bounded worker count so full safety checks remain enabled while large catalogs reach HTTP-ready state faster.
+- Tuned historical reverse-sync windows to use 2048-block batches from 8 serving peers and 4096-block batches from 12 serving peers on high-memory hosts.
+- Adjusted dial candidate selection so persisted productive peers remain preferred but fresh discovery gets part of each refill, avoiding stale-cache domination during peer warm-up.
 
 ## Remaining TODOs
 
@@ -53,7 +57,9 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Query responses keep a hard `10,000` row cap and default to `50` row pages.
 - Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
 - Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
-- Medium-peer historical reverse sync keeps four 2048-block body/receipt fetches queued. High-memory runs with enough connected and serving peers use 4096-block batches at depth three, which keeps a similar in-flight block footprint while reducing scheduling overhead. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
+- Medium-peer historical reverse sync keeps four 2048-block body/receipt fetches queued once at least 8 serving peers are available. High-memory runs with at least 12 connected/serving peers use 4096-block batches at depth three, which keeps a similar in-flight block footprint while reducing scheduling overhead. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
+- Peer dialing prefers known productive peers but reserves roughly one third of each refill for fresh discovery candidates, because persisted peer caches can become stale after restarts or host replacement.
+- Startup storage integrity verification remains full verification, but segment checks run across a bounded worker pool so large catalogs do not block HTTP readiness on one thread.
 - Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
 - Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
 - Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
@@ -108,6 +114,12 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Challenge: Dense historical segments were spending several MiB per compacted `block_number` column because reverse-order rows defeated the unsigned delta codec.
   - Resolution: Historical rows are now extracted in ascending block order, `block_number` compaction uses signed deltas, and active compaction can migrate old compacted block-number columns without rewriting every log column.
 
+- Challenge: Restart warm-up repeatedly stalled below the high-throughput peer threshold, leaving the downloader in 1024-block mode despite enough peers for more work.
+  - Resolution: Lowered medium/high historical window thresholds for high-memory hosts, kept low-memory guards intact, and reserved part of each dial refill for fresh discovery candidates. The current remote sample reached about 586 historical blocks/sec and a 5.3-hour ETA with 11 serving peers.
+
+- Challenge: Large data directories made startup availability sensitive to a single-threaded segment integrity scan.
+  - Resolution: Segment integrity verification now runs in a bounded worker pool while preserving the same row-count, canonical bitmap, and block-boundary checks.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, and dashboard sync display.
@@ -118,13 +130,15 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 - Removed the 16-block wide-peer body/receipt chunk cap after it forced extra request waves under the paired in-flight cap.
 - Replaced the old unsigned `block_number` compaction profile for new compactions with signed delta encoding; existing compacted segments remain readable through their manifest-declared codec.
 - Added a targeted legacy block-number profile rewrite path instead of using the existing full-row recompact path for this migration.
+- Inspected the latest dial selection changes and added tests for productive-peer ordering, fresh-candidate reservation, and full-budget use when all candidates are productive.
+- No new obsolete EL sync paths were found in the changed areas; the current write coalescing and threshold tuning replaced runtime constants rather than leaving alternate code paths.
 - Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy block number columns`; `perf: rewrite legacy columns during catchup`
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy block number columns`; `perf: rewrite legacy columns during catchup`; `perf: improve historical warmup throughput`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
