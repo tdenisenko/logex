@@ -261,8 +261,7 @@ pub(super) fn peer_refill_goal(
         return None;
     }
 
-    let active_target = active_refill_min_peers(max_peers);
-    if serving_peers < active_target && connected_peers < max_peers {
+    if serving_peers < MIN_ACTIVE_SYNC_PEERS && connected_peers < max_peers {
         return Some(active_refill_min_peers(max_peers));
     }
 
@@ -435,7 +434,8 @@ mod tests {
         assert_eq!(peer_refill_goal(50, 1, 50), None);
         assert_eq!(peer_refill_goal(10, 50, 50), Some(26));
         assert_eq!(peer_refill_goal(30, 50, 50), None);
-        assert_eq!(peer_refill_goal(48, 48, 100), Some(80));
+        assert_eq!(peer_refill_goal(48, 48, 100), Some(64));
+        assert_eq!(peer_refill_goal(52, 48, 100), None);
     }
 
     #[test]
