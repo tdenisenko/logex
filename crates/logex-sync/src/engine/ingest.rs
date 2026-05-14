@@ -24,7 +24,7 @@ pub(super) struct HistoricalExtractedChunk {
 pub(super) struct HistoricalBatchWriter {
     storage: Arc<RwLock<PartitionManager>>,
     subscriptions: Option<SubscriptionManager>,
-    write_buffer: Option<HistoricalExtractedChunk>,
+    write_buffer: Option<HistoricalWriteBuffer>,
     write_elapsed: Duration,
     floor: Option<ExecutionBlockMarker>,
     anchor: Option<ExecutionBlockMarker>,
@@ -40,6 +40,14 @@ struct HistoricalChunkWriteOutcome {
     write_elapsed: Duration,
 }
 
+struct HistoricalWriteBuffer {
+    chunks: Vec<HistoricalExtractedChunk>,
+    row_count: u64,
+    block_count: usize,
+    lowest_header: Header,
+    extraction_elapsed: Duration,
+}
+
 impl HistoricalExtractedChunk {
     fn merge(&mut self, mut other: Self) {
         self.rows.append(&mut other.rows);
@@ -49,6 +57,54 @@ impl HistoricalExtractedChunk {
             self.lowest_header = other.lowest_header;
         }
         self.extraction_elapsed += other.extraction_elapsed;
+    }
+}
+
+impl HistoricalWriteBuffer {
+    fn new(chunk: HistoricalExtractedChunk) -> Self {
+        Self {
+            row_count: chunk.row_count,
+            block_count: chunk.block_count,
+            lowest_header: chunk.lowest_header.clone(),
+            extraction_elapsed: chunk.extraction_elapsed,
+            chunks: vec![chunk],
+        }
+    }
+
+    fn push(&mut self, chunk: HistoricalExtractedChunk) {
+        self.row_count = self.row_count.saturating_add(chunk.row_count);
+        self.block_count = self.block_count.saturating_add(chunk.block_count);
+        if chunk.lowest_header.number() < self.lowest_header.number() {
+            self.lowest_header = chunk.lowest_header.clone();
+        }
+        self.extraction_elapsed += chunk.extraction_elapsed;
+        self.chunks.push(chunk);
+    }
+
+    fn is_ready(&self) -> bool {
+        historical_write_chunk_counts_are_ready(self.block_count, self.row_count)
+    }
+
+    fn into_chunk(mut self) -> HistoricalExtractedChunk {
+        if self.chunks.len() == 1 {
+            return self
+                .chunks
+                .pop()
+                .expect("single historical write chunk is present");
+        }
+
+        let mut rows = Vec::with_capacity(self.row_count.min(usize::MAX as u64) as usize);
+        for mut chunk in self.chunks {
+            rows.append(&mut chunk.rows);
+        }
+
+        HistoricalExtractedChunk {
+            rows,
+            row_count: self.row_count,
+            block_count: self.block_count,
+            lowest_header: self.lowest_header,
+            extraction_elapsed: self.extraction_elapsed,
+        }
     }
 }
 
@@ -84,14 +140,14 @@ impl HistoricalBatchWriter {
         }
 
         match self.write_buffer.as_mut() {
-            Some(buffer) => buffer.merge(chunk),
-            None => self.write_buffer = Some(chunk),
+            Some(buffer) => buffer.push(chunk),
+            None => self.write_buffer = Some(HistoricalWriteBuffer::new(chunk)),
         }
 
         if self
             .write_buffer
             .as_ref()
-            .is_some_and(historical_write_chunk_is_ready)
+            .is_some_and(|buffer| buffer.is_ready())
         {
             self.flush_buffer().await?;
         }
@@ -133,9 +189,10 @@ impl HistoricalBatchWriter {
     }
 
     async fn flush_buffer(&mut self) -> Result<()> {
-        let Some(chunk) = self.write_buffer.take() else {
+        let Some(buffer) = self.write_buffer.take() else {
             return Ok(());
         };
+        let chunk = buffer.into_chunk();
 
         let chunk_outcome = write_extracted_historical_chunk(
             Arc::clone(&self.storage),
@@ -438,8 +495,11 @@ fn coalesce_historical_write_chunks(
 }
 
 fn historical_write_chunk_is_ready(buffer: &HistoricalExtractedChunk) -> bool {
-    buffer.block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS
-        || buffer.row_count >= HISTORICAL_WRITE_CHUNK_ROWS
+    historical_write_chunk_counts_are_ready(buffer.block_count, buffer.row_count)
+}
+
+fn historical_write_chunk_counts_are_ready(block_count: usize, row_count: u64) -> bool {
+    block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS || row_count >= HISTORICAL_WRITE_CHUNK_ROWS
 }
 
 fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
