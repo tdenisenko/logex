@@ -736,7 +736,10 @@ mod tests {
         ];
 
         let encoded = encode_var_bytes_page(&values, CompressionCodec::AdaptiveBytes).unwrap();
-        assert_eq!(encoded.first().copied(), Some(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS));
+        assert_eq!(
+            encoded.first().copied(),
+            Some(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS)
+        );
         let decoded = decode_var_bytes_page(&encoded, CompressionCodec::AdaptiveBytes).unwrap();
         assert_eq!(decoded, values);
     }

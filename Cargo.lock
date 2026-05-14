@@ -5185,6 +5185,7 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
+ "libc",
  "logex-cl",
  "logex-index",
  "logex-server",

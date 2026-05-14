@@ -14,10 +14,12 @@ The latest stable direction is:
 
 ## Completed Since Last Run
 
-- Changed dashboard storage display so the main UI and advanced UI show only product-relevant storage metrics: storage used, writable data-disk free, and data directory.
+- Changed dashboard storage display so the UI shows only product-relevant storage metrics: storage used, main data-disk free space, and the data directory path.
 - Changed `/status.disk_free_bytes` to report the writable data directory filesystem rather than auxiliary mounted volume totals or limiting multi-volume headroom.
 - Kept hidden status diagnostics for operators, but removed multi-volume labels from the dashboard.
+- Removed the redundant advanced storage free-space row so the UI has one user-facing `Disk free` metric.
 - Optimized adaptive variable-byte page compression by using 32-bit offsets directly when the page fits, avoiding a redundant zstd pass over normal log data pages.
+- Added a Linux-only allocator trim under sustained historical-sync memory pressure to help return freed dense-batch arenas to the OS without changing sync correctness.
 - Deployed the compression/storage UI changes to the remote client and confirmed the service restarts gracefully with storage integrity passing.
 - Tested a deeper dense fetch pipeline; it increased RSS and worsened ETA, so it was reverted.
 
@@ -53,6 +55,7 @@ The latest stable direction is:
 - Active background compaction is best-effort during sync and should not compete with verified ingestion when memory or disk headroom is tight.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS or peer usefulness should be reverted.
+- Memory-pressure handling may ask glibc to trim free allocator arenas after dense historical batches; it is rate-limited and disabled on non-glibc targets.
 
 ## Challenges and Resolutions
 
@@ -68,9 +71,12 @@ The latest stable direction is:
 - Challenge: Increasing dense fetch depth looked like a possible way to hide fetch latency.
   - Resolution: The remote trial raised RSS to about 12 GiB and worsened ETA, so the change was reverted.
 
+- Challenge: Dense historical batches left high RSS after data was freed, which pushed the adaptive sync planner into low-memory mode.
+  - Resolution: Added a rate-limited allocator trim for Linux/glibc runs and confirmed it fires only under the low-memory threshold.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected storage metrics UI code and removed obsolete volume-label rendering and related CSS/JS.
+- Inspected storage metrics UI code and removed obsolete volume-label rendering, the redundant advanced disk-free row, and related JavaScript.
 - Inspected the adaptive byte-page encoder and removed the now-unneeded dual-compression path for normal pages.
 - Inspected the dense fetch-depth experiment after measurement and reverted it because it did not improve the run.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
@@ -79,7 +85,7 @@ The latest stable direction is:
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: none yet.
+- Commits made during this run: latest checkpoint commit `perf: trim allocator during dense historical sync`.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL performance and validation work remain incomplete.
 - Blockers: none known.

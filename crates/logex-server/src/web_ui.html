@@ -718,7 +718,6 @@
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
           <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
           <div class="debug-item"><span class="k">LogEx storage used</span><span class="v" id="debugStorageUsed">--</span></div>
-          <div class="debug-item"><span class="k">Data disk free</span><span class="v" id="debugStorageWriteFree">--</span></div>
           <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
           <div class="debug-item"><span class="k">Data directory</span><span class="v" id="debugStorageWritePath">--</span></div>
           <div class="debug-item"><span class="k">Raw segments pending first compression</span><span class="v" id="debugRawBacklog">--</span></div>
@@ -1027,12 +1026,12 @@ function updateStatus(data) {
     ? 'No verified local log range yet.'
     : fmt(query.stored_rows) + ' rows; latest query tag resolves to ' + blockWithAge(latestBlock, latestTime) + '.');
 
-  var storageWriteFree = data.storage_write_free_bytes != null ? data.storage_write_free_bytes : data.disk_free_bytes;
+  var diskFree = data.disk_free_bytes;
   var rawSegmentBacklog = numberOrNull(data.raw_log_segment_backlog);
   var profileRewriteBacklog = numberOrNull(data.storage_profile_rewrite_backlog);
   setText('storageUsed', fmtBytes(data.storage_used_bytes));
   setText('storageDetail', '');
-  setText('diskFree', fmtBytes(storageWriteFree));
+  setText('diskFree', fmtBytes(diskFree));
   setText('rawBacklogSummary', '');
 
   setText('debugConnectedPeers', fmt(connectedPeers));
@@ -1044,7 +1043,6 @@ function updateStatus(data) {
     : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
   setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
-  setText('debugStorageWriteFree', fmtBytes(storageWriteFree));
   setText('debugStorageWritePath', data.storage_write_path);
   setText('debugCpu', fmtPct(data.cpu_utilization_pct));
   setText('debugRawBacklog', fmt(rawSegmentBacklog));

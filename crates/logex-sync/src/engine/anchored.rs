@@ -48,6 +48,7 @@ const HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 12 * BYTES_PER_GI
 const HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 = 14 * BYTES_PER_GIB;
 const HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 24 * BYTES_PER_GIB;
 const HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 48 * BYTES_PER_GIB;
+const HISTORICAL_ALLOCATOR_TRIM_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct ConsensusReorg {
@@ -356,6 +357,30 @@ fn historical_available_memory_is_low(available_memory_bytes: Option<u64>) -> bo
 
 fn historical_available_memory_is_critical(available_memory_bytes: Option<u64>) -> bool {
     available_memory_bytes.is_some_and(|bytes| bytes < HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES)
+}
+
+fn historical_allocator_trim_is_due(
+    last_trimmed_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+    available_memory_bytes: Option<u64>,
+) -> bool {
+    historical_available_memory_is_low(available_memory_bytes)
+        && last_trimmed_at.is_none_or(|trimmed_at| {
+            now.duration_since(trimmed_at) >= HISTORICAL_ALLOCATOR_TRIM_INTERVAL
+        })
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_process_allocator() -> bool {
+    // SAFETY: glibc documents malloc_trim as process-global and thread-safe. It
+    // only asks the allocator to return free arenas to the OS; live allocations
+    // are not moved or invalidated.
+    unsafe { libc::malloc_trim(0) != 0 }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_process_allocator() -> bool {
+    false
 }
 
 fn historical_total_memory_bytes() -> Option<u64> {
@@ -1700,6 +1725,7 @@ impl SyncEngine {
             log_count,
             block_count,
         );
+        self.maybe_trim_historical_allocator();
         self.refresh_historical_status().await;
 
         tracing::debug!(
@@ -1732,6 +1758,26 @@ impl SyncEngine {
             "historical block batch verified and ingested"
         );
         Ok(true)
+    }
+
+    fn maybe_trim_historical_allocator(&mut self) {
+        let available_memory_bytes = historical_available_memory_bytes();
+        let now = std::time::Instant::now();
+        if !historical_allocator_trim_is_due(
+            self.last_historical_allocator_trim,
+            now,
+            available_memory_bytes,
+        ) {
+            return;
+        }
+
+        self.last_historical_allocator_trim = Some(now);
+        let trimmed = trim_process_allocator();
+        tracing::debug!(
+            available_memory_bytes,
+            trimmed,
+            "requested allocator trim after historical batch under memory pressure"
+        );
     }
 
     async fn ingest_historical_backfill_batch_sequential(
@@ -2302,6 +2348,32 @@ mod tests {
             update_historical_density_ewma(Some(second), 100, 0),
             Some(second)
         );
+    }
+
+    #[test]
+    fn allocator_trim_is_rate_limited_to_low_memory() {
+        let now = std::time::Instant::now();
+        assert!(!historical_allocator_trim_is_due(None, now, None));
+        assert!(!historical_allocator_trim_is_due(
+            None,
+            now,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
+        ));
+        assert!(historical_allocator_trim_is_due(
+            None,
+            now,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
+        assert!(!historical_allocator_trim_is_due(
+            Some(now),
+            now,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
+        assert!(historical_allocator_trim_is_due(
+            Some(now - HISTORICAL_ALLOCATOR_TRIM_INTERVAL),
+            now,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
     }
 
     #[test]

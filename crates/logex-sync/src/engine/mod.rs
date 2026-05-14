@@ -8,7 +8,7 @@ use reth_network_peers::{NodeRecord, PeerId};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -152,6 +152,7 @@ pub struct SyncEngine {
     historical_fetch_handles: HashMap<u64, JoinHandle<()>>,
     historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
     historical_rows_per_block_ewma: Option<f64>,
+    last_historical_allocator_trim: Option<Instant>,
     connected_once: bool,
     last_validated_header: Option<Header>,
     shutdown: watch::Receiver<bool>,
@@ -188,6 +189,7 @@ impl SyncEngine {
             historical_fetch_handles: HashMap::new(),
             historical_fetch_completed: BTreeMap::new(),
             historical_rows_per_block_ewma: None,
+            last_historical_allocator_trim: None,
             connected_once: false,
             last_validated_header: None,
             shutdown,
