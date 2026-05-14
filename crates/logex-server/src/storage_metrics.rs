@@ -1,9 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use serde::Deserialize;
 
 const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 
@@ -19,6 +21,7 @@ pub struct CachedStorageMetrics {
     refreshed_at: Option<Instant>,
     process_cpu_time: Option<Duration>,
     refresh_in_progress: bool,
+    size_cache: StorageSizeCache,
     metrics: StorageMetrics,
 }
 
@@ -42,26 +45,27 @@ pub async fn load_or_refresh(
     cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     data_dir: PathBuf,
 ) -> StorageMetrics {
-    let cached = {
+    let (cached_metrics, size_cache) = {
         let mut guard = cache.lock().await;
         if guard.is_fresh() || guard.refresh_in_progress {
             return guard.metrics();
         }
 
         guard.refresh_in_progress = true;
-        guard.metrics()
+        (guard.metrics(), guard.size_cache.clone())
     };
 
     tokio::spawn(async move {
-        let metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
-            .await
-            .unwrap_or_default();
+        let (metrics, size_cache) =
+            tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir, size_cache))
+                .await
+                .unwrap_or_default();
 
         let mut guard = cache.lock().await;
-        update_cached_metrics(&mut guard, metrics);
+        update_cached_metrics(&mut guard, metrics, size_cache);
     });
 
-    cached
+    cached_metrics
 }
 
 #[cfg(test)]
@@ -69,17 +73,20 @@ pub async fn refresh_for_test(
     cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     data_dir: PathBuf,
 ) -> StorageMetrics {
-    let metrics = tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir))
-        .await
-        .unwrap_or_default();
+    let size_cache = cache.lock().await.size_cache.clone();
+    let (metrics, size_cache) =
+        tokio::task::spawn_blocking(move || collect_storage_metrics(&data_dir, size_cache))
+            .await
+            .unwrap_or_default();
 
     let mut guard = cache.lock().await;
-    update_cached_metrics(&mut guard, metrics)
+    update_cached_metrics(&mut guard, metrics, size_cache)
 }
 
 fn update_cached_metrics(
     guard: &mut CachedStorageMetrics,
     mut metrics: StorageMetrics,
+    size_cache: StorageSizeCache,
 ) -> StorageMetrics {
     let now = Instant::now();
     let process_cpu_time = process_cpu_time();
@@ -95,6 +102,7 @@ fn update_cached_metrics(
         });
     guard.process_cpu_time = process_cpu_time;
     guard.refresh_in_progress = false;
+    guard.size_cache = size_cache;
     guard.update(metrics.clone());
     metrics
 }
@@ -114,12 +122,19 @@ pub async fn expire_for_test(cache: Arc<tokio::sync::Mutex<CachedStorageMetrics>
     }
 }
 
-fn collect_storage_metrics(data_dir: &Path) -> StorageMetrics {
-    StorageMetrics {
-        storage_used_bytes: dir_size_bytes(data_dir).ok(),
-        disk_free_bytes: free_space_bytes(data_dir).ok(),
-        cpu_utilization_pct: None,
-    }
+fn collect_storage_metrics(
+    data_dir: &Path,
+    mut size_cache: StorageSizeCache,
+) -> (StorageMetrics, StorageSizeCache) {
+    let storage_used_bytes = dir_size_bytes(data_dir, &mut size_cache).ok();
+    (
+        StorageMetrics {
+            storage_used_bytes,
+            disk_free_bytes: free_space_bytes(data_dir).ok(),
+            cpu_utilization_pct: None,
+        },
+        size_cache,
+    )
 }
 
 #[cfg(unix)]
@@ -146,55 +161,198 @@ fn process_cpu_time() -> Option<Duration> {
     None
 }
 
-fn dir_size_bytes(root: &Path) -> io::Result<u64> {
-    let mut total = 0_u64;
-    let mut visited_dirs = HashSet::new();
-    let mut visited_files = HashSet::new();
-    let mut stack = vec![root.to_path_buf()];
+#[derive(Clone, Debug, Default)]
+struct StorageSizeCache {
+    segment_dirs: HashMap<SizeCacheKey, CachedDirSize>,
+}
 
-    while let Some(path) = stack.pop() {
-        let metadata = match fs::metadata(&path) {
+#[derive(Clone, Debug)]
+struct CachedDirSize {
+    signature: SegmentDirSignature,
+    bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SegmentDirSignature {
+    dir_modified: Option<SystemTime>,
+    dir_len: u64,
+    manifest_modified: Option<SystemTime>,
+    manifest_len: u64,
+    manifest_id: Option<MetadataId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SizeCacheKey {
+    Metadata(MetadataId),
+    Path(PathBuf),
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogSizeSnapshot {
+    active_hot_segment: Option<u64>,
+}
+
+fn dir_size_bytes(root: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> {
+    let segments_dir = root.join("segments");
+    let (active_hot_segment, cache_segments) = match active_hot_segment_path(root) {
+        Ok(active_hot_segment) => (active_hot_segment, true),
+        Err(_) => (None, false),
+    };
+    let mut walk = DirSizeWalk {
+        segments_dir: &segments_dir,
+        active_hot_segment: active_hot_segment.as_deref(),
+        cache_segments,
+        seen_cached_segments: HashSet::new(),
+        visited_dirs: HashSet::new(),
+        visited_files: HashSet::new(),
+    };
+
+    let total = walk.size(root, cache)?;
+    cache
+        .segment_dirs
+        .retain(|key, _| walk.seen_cached_segments.contains(key));
+    Ok(total)
+}
+
+struct DirSizeWalk<'a> {
+    segments_dir: &'a Path,
+    active_hot_segment: Option<&'a Path>,
+    cache_segments: bool,
+    seen_cached_segments: HashSet<SizeCacheKey>,
+    visited_dirs: HashSet<MetadataId>,
+    visited_files: HashSet<MetadataId>,
+}
+
+impl DirSizeWalk<'_> {
+    fn size(&mut self, path: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> {
+        let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(error) => return Err(error),
         };
 
         if metadata.is_file() {
-            add_file_size(&mut total, &mut visited_files, &metadata);
-            continue;
+            return Ok(file_size_bytes(&mut self.visited_files, &metadata));
         }
 
         if !metadata.is_dir() {
-            continue;
+            return Ok(0);
         }
 
         if let Some(id) = metadata_id(&metadata)
-            && !visited_dirs.insert(id)
+            && !self.visited_dirs.insert(id)
         {
-            continue;
+            return Ok(0);
         }
 
+        let cacheable_segment = self
+            .cache_segments
+            .then(|| {
+                cacheable_segment_dir(path, self.segments_dir, self.active_hot_segment, &metadata)
+            })
+            .transpose()?
+            .flatten();
+        if let Some((key, signature)) = cacheable_segment.as_ref() {
+            self.seen_cached_segments.insert(key.clone());
+            if let Some(cached) = cache.segment_dirs.get(key)
+                && cached.signature == *signature
+            {
+                return Ok(cached.bytes);
+            }
+        }
+
+        let mut total = 0_u64;
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            stack.push(entry.path());
+            total = total.saturating_add(self.size(&entry.path(), cache)?);
         }
-    }
 
-    Ok(total)
+        if let Some((key, signature)) = cacheable_segment {
+            cache.segment_dirs.insert(
+                key,
+                CachedDirSize {
+                    signature,
+                    bytes: total,
+                },
+            );
+        }
+
+        Ok(total)
+    }
 }
 
-fn add_file_size(
-    total: &mut u64,
-    visited_files: &mut HashSet<MetadataId>,
+fn active_hot_segment_path(root: &Path) -> io::Result<Option<PathBuf>> {
+    let catalog_path = root.join("catalog.json");
+    let json = match fs::read(&catalog_path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let catalog: CatalogSizeSnapshot = serde_json::from_slice(&json).map_err(io::Error::other)?;
+    Ok(catalog
+        .active_hot_segment
+        .map(|id| root.join("segments").join(format!("s_{id:016}"))))
+}
+
+fn cacheable_segment_dir(
+    path: &Path,
+    segments_dir: &Path,
+    active_hot_segment: Option<&Path>,
     metadata: &fs::Metadata,
-) {
+) -> io::Result<Option<(SizeCacheKey, SegmentDirSignature)>> {
+    if path.parent() != Some(segments_dir)
+        || path.file_name().and_then(parse_segment_dir_name).is_none()
+        || active_hot_segment == Some(path)
+    {
+        return Ok(None);
+    }
+
+    let Some(signature) = segment_dir_signature(path, metadata)? else {
+        return Ok(None);
+    };
+
+    Ok(Some((size_cache_key(path, metadata), signature)))
+}
+
+fn parse_segment_dir_name(name: &std::ffi::OsStr) -> Option<u64> {
+    let name = name.to_str()?;
+    let id = name.strip_prefix("s_")?;
+    (id.len() == 16).then(|| id.parse::<u64>().ok())?
+}
+
+fn segment_dir_signature(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> io::Result<Option<SegmentDirSignature>> {
+    let manifest_metadata = match fs::metadata(path.join("segment.json")) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    Ok(Some(SegmentDirSignature {
+        dir_modified: metadata.modified().ok(),
+        dir_len: metadata.len(),
+        manifest_modified: manifest_metadata.modified().ok(),
+        manifest_len: manifest_metadata.len(),
+        manifest_id: metadata_id(&manifest_metadata),
+    }))
+}
+
+fn size_cache_key(path: &Path, metadata: &fs::Metadata) -> SizeCacheKey {
+    metadata_id(metadata)
+        .map(SizeCacheKey::Metadata)
+        .unwrap_or_else(|| SizeCacheKey::Path(path.to_path_buf()))
+}
+
+fn file_size_bytes(visited_files: &mut HashSet<MetadataId>, metadata: &fs::Metadata) -> u64 {
     if let Some(id) = metadata_id(metadata)
         && !visited_files.insert(id)
     {
-        return;
+        return 0;
     }
 
-    *total = total.saturating_add(metadata.len());
+    metadata.len()
 }
 
 #[cfg(unix)]
@@ -259,7 +417,8 @@ mod tests {
         top.write_all(&[0_u8; 7]).expect("write top");
         inner.write_all(&[0_u8; 11]).expect("write inner");
 
-        assert_eq!(dir_size_bytes(tmp.path()).expect("size"), 18);
+        let mut cache = StorageSizeCache::default();
+        assert_eq!(dir_size_bytes(tmp.path(), &mut cache).expect("size"), 18);
     }
 
     #[cfg(unix)]
@@ -274,10 +433,13 @@ mod tests {
 
         fs::write(tmp.path().join("root.bin"), [0_u8; 7]).expect("root file");
         fs::write(external.path().join("moved.bin"), [0_u8; 11]).expect("moved file");
-        symlink(external.path(), segments.join("s_0001")).expect("first symlink");
-        symlink(external.path(), segments.join("s_0001_alias")).expect("second symlink");
+        let first = segments.join("s_0000000000000001");
+        let second = segments.join("s_0000000000000002");
+        symlink(external.path(), first).expect("first symlink");
+        symlink(external.path(), second).expect("second symlink");
 
-        assert_eq!(dir_size_bytes(tmp.path()).expect("size"), 18);
+        let mut cache = StorageSizeCache::default();
+        assert_eq!(dir_size_bytes(tmp.path(), &mut cache).expect("size"), 18);
     }
 
     #[test]
@@ -285,10 +447,44 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(tmp.path().join("rows.bin"), [1_u8, 2, 3, 4]).expect("rows file");
 
-        let metrics = collect_storage_metrics(tmp.path());
+        let (metrics, _) = collect_storage_metrics(tmp.path(), StorageSizeCache::default());
         assert_eq!(metrics.storage_used_bytes, Some(4));
         #[cfg(unix)]
         assert!(metrics.disk_free_bytes.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn segment_size_cache_refreshes_active_hot_segment() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_active_hot_catalog(tmp.path(), 1);
+        let segment = create_segment(tmp.path(), 1, 4);
+        let mut cache = StorageSizeCache::default();
+
+        let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(segment.join("rows.bin"))
+            .expect("rows file")
+            .write_all(&[0_u8; 5])
+            .expect("append");
+
+        let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
+        assert_eq!(second, first + 5);
+    }
+
+    #[test]
+    fn segment_size_cache_refreshes_when_manifest_changes() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_active_hot_catalog(tmp.path(), 9);
+        let segment = create_segment(tmp.path(), 1, 4);
+        let mut cache = StorageSizeCache::default();
+
+        let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
+        fs::write(segment.join("compacted.bin"), [0_u8; 7]).expect("compacted file");
+        fs::write(segment.join("segment.json"), br#"{"generation":1}"#).expect("manifest");
+
+        let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
+        assert_eq!(second, first + 7);
     }
 
     #[tokio::test]
@@ -317,5 +513,21 @@ mod tests {
         let stale = load_or_refresh(Arc::clone(&cache), tmp.path().to_path_buf()).await;
         assert_eq!(stale.storage_used_bytes, Some(9));
         assert!(refresh_in_progress_for_test(cache).await);
+    }
+
+    fn write_active_hot_catalog(root: &Path, active_hot_segment: u64) {
+        fs::write(
+            root.join("catalog.json"),
+            format!(r#"{{"active_hot_segment":{active_hot_segment}}}"#),
+        )
+        .expect("catalog");
+    }
+
+    fn create_segment(root: &Path, segment_id: u64, rows_len: usize) -> PathBuf {
+        let segment = root.join("segments").join(format!("s_{segment_id:016}"));
+        fs::create_dir_all(&segment).expect("segment dir");
+        fs::write(segment.join("rows.bin"), vec![0_u8; rows_len]).expect("rows");
+        fs::write(segment.join("segment.json"), br#"{"generation":0}"#).expect("manifest");
+        segment
     }
 }
