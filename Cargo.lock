@@ -5092,6 +5092,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "clap",
+ "libc",
  "logex-cl",
  "logex-index",
  "logex-server",

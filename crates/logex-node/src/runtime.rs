@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,6 +29,8 @@ use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::resolve_checkpoint;
 
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
+const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
@@ -310,6 +313,26 @@ pub async fn run_sync(options: RunSyncOptions) {
                         Ok(())
                     }
                 }
+            },
+            low_disk = wait_for_low_disk_space(data_dir.clone()) => {
+                tracing::error!(
+                    path = %low_disk.path.display(),
+                    free_bytes = low_disk.free_bytes,
+                    min_free_bytes = low_disk.min_free_bytes,
+                    "disk space below safety threshold, stopping node gracefully"
+                );
+                mark_sync_stopped_for_low_disk(&state);
+                let _ = shutdown_tx.send(true);
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
+                            "sync engine did not stop within low-disk shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
             }
         }
     };
@@ -507,6 +530,82 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
+#[derive(Debug)]
+struct LowDiskSpace {
+    path: PathBuf,
+    free_bytes: u64,
+    min_free_bytes: u64,
+}
+
+async fn wait_for_low_disk_space(path: PathBuf) -> LowDiskSpace {
+    let mut interval = tokio::time::interval(LOW_DISK_SPACE_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        match free_space_bytes(&path) {
+            Ok(free_bytes) if disk_space_is_low(free_bytes, LOW_DISK_SPACE_MIN_FREE_BYTES) => {
+                return LowDiskSpace {
+                    path,
+                    free_bytes,
+                    min_free_bytes: LOW_DISK_SPACE_MIN_FREE_BYTES,
+                };
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to check data directory free space"
+                );
+            }
+        }
+    }
+}
+
+fn disk_space_is_low(free_bytes: u64, min_free_bytes: u64) -> bool {
+    free_bytes < min_free_bytes
+}
+
+fn mark_sync_stopped_for_low_disk(state: &AppState) {
+    let mut status = state
+        .sync_status
+        .lock()
+        .expect("sync status mutex poisoned");
+    status.syncing = false;
+    status.eta_seconds = None;
+    status.historical_eta_seconds = None;
+    status.node_state = logex_types::NodeState::Disconnected;
+}
+
+#[cfg(unix)]
+fn free_space_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL byte")
+    })?;
+
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let stat = unsafe { stat.assume_init() };
+    let free = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
+    Ok(free.min(u64::MAX as u128) as u64)
+}
+
+#[cfg(not(unix))]
+fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "free-space reporting is not implemented on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +622,11 @@ mod tests {
 
         assert_eq!(status.current_block, 83_714);
         assert_eq!(status.target_block, 0);
+    }
+
+    #[test]
+    fn disk_space_guard_trips_below_threshold() {
+        assert!(disk_space_is_low(9, 10));
+        assert!(!disk_space_is_low(10, 10));
     }
 }
