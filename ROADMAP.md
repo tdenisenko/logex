@@ -6,7 +6,7 @@ LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer 
 
 The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto the mounted `/mnt/logex-extra` volume through symlinks.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest remote run is back under the six-hour target on the upgraded host, reaching roughly 586 historical blocks/sec and a 5.3-hour ETA with 11 serving peers. A storage pass also fixed reverse-order block-number compression amplification; newly compacted dense historical segments now store block-number pages in tens of KiB instead of multiple MiB.
+Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt slowdown was memory/write pressure on the smaller host; the current limiter is body/receipt fetch tail latency plus dense-log validation/extraction/write cost. The latest remote run is back under the six-hour target on the upgraded host, reaching roughly 809 historical blocks/sec and a 3.8-hour ETA with 13 serving peers. A storage pass also fixed reverse-order block-number compression amplification; newly compacted dense historical segments now store block-number pages in tens of KiB instead of multiple MiB.
 
 ## Completed Since Last Run
 
@@ -115,7 +115,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
   - Resolution: Historical rows are now extracted in ascending block order, `block_number` compaction uses signed deltas, and active compaction can migrate old compacted block-number columns without rewriting every log column.
 
 - Challenge: Restart warm-up repeatedly stalled below the high-throughput peer threshold, leaving the downloader in 1024-block mode despite enough peers for more work.
-  - Resolution: Lowered medium/high historical window thresholds for high-memory hosts, kept low-memory guards intact, and reserved part of each dial refill for fresh discovery candidates. The current remote sample reached about 586 historical blocks/sec and a 5.3-hour ETA with 11 serving peers.
+  - Resolution: Lowered medium/high historical window thresholds for high-memory hosts, kept low-memory guards intact, and reserved part of each dial refill for fresh discovery candidates. The current remote sample reached about 809 historical blocks/sec and a 3.8-hour ETA with 13 serving peers.
 
 - Challenge: Large data directories made startup availability sensitive to a single-threaded segment integrity scan.
   - Resolution: Segment integrity verification now runs in a bounded worker pool while preserving the same row-count, canonical bitmap, and block-boundary checks.
@@ -138,7 +138,7 @@ Current remote testing is on the upgraded 8-vCPU/16GB host. The earlier abrupt s
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy block number columns`; `perf: rewrite legacy columns during catchup`; `perf: improve historical warmup throughput`.
+- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`.
 - Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
 - Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
 - Git/GitHub blockers: none known.
