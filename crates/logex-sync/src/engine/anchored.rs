@@ -15,9 +15,11 @@ const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
+const HISTORICAL_VALIDATION_LOG_WORK_WEIGHT: u64 = 4;
+const HISTORICAL_VALIDATION_TX_WORK_WEIGHT: u64 = 8;
 const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
-const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 3;
+const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH: usize = 8;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
@@ -86,36 +88,26 @@ async fn validate_historical_blocks_parallel(
     hashes: &[B256],
     blocks: Vec<SourcedBodyReceipts>,
 ) -> Result<std::result::Result<Vec<HistoricalValidatedBlock>, Box<HistoricalValidationFailure>>> {
-    let block_count = blocks.len();
+    let jobs = build_historical_validation_jobs(headers, hashes, blocks);
+    let block_count = jobs.len();
     let task_count = historical_validation_task_count(block_count);
-    let chunk_size = block_count.div_ceil(task_count);
+    let chunk_ranges = historical_validation_work_ranges(
+        jobs.iter().map(historical_validation_job_work),
+        task_count,
+    );
     let mut tasks = JoinSet::new();
-    let mut chunk = Vec::with_capacity(chunk_size);
+    let mut jobs = jobs.into_iter();
 
-    for (index, ((body_peer, body), (receipt_peer, receipts))) in blocks.into_iter().enumerate() {
-        let Some(header) = headers.get(index).cloned() else {
-            break;
-        };
-        let block_hash = hashes.get(index).copied().unwrap_or_default();
-
-        chunk.push(HistoricalValidationJob {
-            index,
-            header,
-            block_hash,
-            body_peer,
-            body,
-            receipt_peer,
-            receipts,
-        });
-
-        if chunk.len() >= chunk_size {
-            let task_chunk = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
-            tasks.spawn_blocking(move || validate_historical_block_chunk(task_chunk));
+    for range in chunk_ranges {
+        let mut chunk = Vec::with_capacity(range.len());
+        for _ in range {
+            if let Some(job) = jobs.next() {
+                chunk.push(job);
+            }
         }
-    }
-
-    if !chunk.is_empty() {
-        tasks.spawn_blocking(move || validate_historical_block_chunk(chunk));
+        if !chunk.is_empty() {
+            tasks.spawn_blocking(move || validate_historical_block_chunk(chunk));
+        }
     }
 
     let mut validated = Vec::with_capacity(block_count);
@@ -142,36 +134,26 @@ async fn validate_extract_and_write_historical_blocks_streaming(
         Box<HistoricalValidationFailure>,
     >,
 > {
-    let block_count = blocks.len();
+    let jobs = build_historical_validation_jobs(headers, hashes, blocks);
+    let block_count = jobs.len();
     let task_count = historical_validation_task_count(block_count);
-    let chunk_size = block_count.div_ceil(task_count);
+    let chunk_ranges = historical_validation_work_ranges(
+        jobs.iter().map(historical_validation_job_work),
+        task_count,
+    );
     let mut tasks = JoinSet::new();
-    let mut chunk = Vec::with_capacity(chunk_size);
+    let mut jobs = jobs.into_iter();
 
-    for (index, ((body_peer, body), (receipt_peer, receipts))) in blocks.into_iter().enumerate() {
-        let Some(header) = headers.get(index).cloned() else {
-            break;
-        };
-        let block_hash = hashes.get(index).copied().unwrap_or_default();
-
-        chunk.push(HistoricalValidationJob {
-            index,
-            header,
-            block_hash,
-            body_peer,
-            body,
-            receipt_peer,
-            receipts,
-        });
-
-        if chunk.len() >= chunk_size {
-            let task_chunk = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
-            tasks.spawn_blocking(move || validate_and_extract_historical_block_chunk(task_chunk));
+    for range in chunk_ranges {
+        let mut chunk = Vec::with_capacity(range.len());
+        for _ in range {
+            if let Some(job) = jobs.next() {
+                chunk.push(job);
+            }
         }
-    }
-
-    if !chunk.is_empty() {
-        tasks.spawn_blocking(move || validate_and_extract_historical_block_chunk(chunk));
+        if !chunk.is_empty() {
+            tasks.spawn_blocking(move || validate_and_extract_historical_block_chunk(chunk));
+        }
     }
 
     let mut pending_chunks = BTreeMap::new();
@@ -216,6 +198,99 @@ async fn validate_extract_and_write_historical_blocks_streaming(
         highest_block,
         validation_elapsed,
     )))
+}
+
+fn build_historical_validation_jobs(
+    headers: &[Header],
+    hashes: &[B256],
+    blocks: Vec<SourcedBodyReceipts>,
+) -> Vec<HistoricalValidationJob> {
+    blocks
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, ((body_peer, body), (receipt_peer, receipts)))| {
+            let header = headers.get(index)?.clone();
+            let block_hash = hashes.get(index).copied().unwrap_or_default();
+            Some(HistoricalValidationJob {
+                index,
+                header,
+                block_hash,
+                body_peer,
+                body,
+                receipt_peer,
+                receipts,
+            })
+        })
+        .collect()
+}
+
+fn historical_validation_job_work(job: &HistoricalValidationJob) -> u64 {
+    let tx_work = job.body.transaction_count() as u64 * HISTORICAL_VALIDATION_TX_WORK_WEIGHT;
+    let log_work = job
+        .receipts
+        .iter()
+        .map(|receipt| receipt.logs().len() as u64)
+        .sum::<u64>()
+        * HISTORICAL_VALIDATION_LOG_WORK_WEIGHT;
+    1 + tx_work + log_work
+}
+
+fn historical_validation_work_ranges(
+    work: impl IntoIterator<Item = u64>,
+    task_count: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let work = work.into_iter().collect::<Vec<_>>();
+    let block_count = work.len();
+    if block_count == 0 {
+        return Vec::new();
+    }
+
+    let task_count = task_count.clamp(1, block_count);
+    if task_count == 1 {
+        return std::iter::once(0..block_count).collect();
+    }
+
+    let total_work = work
+        .iter()
+        .copied()
+        .fold(0u64, |total, item| total.saturating_add(item.max(1)));
+    let target_work = total_work.div_ceil(task_count as u64).max(1);
+    let mut ranges = Vec::with_capacity(task_count);
+    let mut start = 0usize;
+    let mut chunk_work = 0u64;
+
+    for (index, item_work) in work.iter().copied().enumerate() {
+        let item_work = item_work.max(1);
+        let remaining_jobs = block_count - index;
+        let remaining_chunks = task_count.saturating_sub(ranges.len() + 1);
+        if index > start
+            && chunk_work.saturating_add(item_work) > target_work
+            && remaining_chunks > 0
+            && remaining_jobs > remaining_chunks
+        {
+            ranges.push(start..index);
+            start = index;
+            chunk_work = 0;
+        }
+
+        chunk_work = chunk_work.saturating_add(item_work);
+
+        let remaining_jobs_after = block_count - index - 1;
+        let remaining_chunks_after = task_count.saturating_sub(ranges.len() + 1);
+        if chunk_work >= target_work
+            && remaining_chunks_after > 0
+            && remaining_jobs_after >= remaining_chunks_after
+        {
+            ranges.push(start..index + 1);
+            start = index + 1;
+            chunk_work = 0;
+        }
+    }
+
+    if start < block_count {
+        ranges.push(start..block_count);
+    }
+    ranges
 }
 
 fn historical_validation_task_count(block_count: usize) -> usize {
@@ -2429,6 +2504,20 @@ mod tests {
             update_historical_density_ewma(Some(second), 100, 0),
             Some(second)
         );
+    }
+
+    #[test]
+    fn historical_validation_work_ranges_keep_contiguous_balanced_chunks() {
+        let ranges = historical_validation_work_ranges([100, 1, 1, 100, 1, 1], 4);
+
+        assert_eq!(ranges, vec![0..1, 1..3, 3..4, 4..6]);
+    }
+
+    #[test]
+    fn historical_validation_work_ranges_leave_room_for_remaining_tasks() {
+        let ranges = historical_validation_work_ranges([10, 10, 10], 8);
+
+        assert_eq!(ranges, vec![0..1, 1..2, 2..3]);
     }
 
     #[test]

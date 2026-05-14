@@ -9,6 +9,10 @@ use clap::Parser;
 use cli::{Cli, Command, Config, default_data_dir};
 use logex_storage::PartitionManagerConfig;
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() {
     let cli = Cli::parse();
 
