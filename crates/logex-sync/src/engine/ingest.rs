@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
 const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 2048;
 const HISTORICAL_WRITE_CHUNK_ROWS: u64 = 500_000;
-const HISTORICAL_EXTRACTION_PIPELINE_DEPTH: usize = 4;
+const HISTORICAL_EXTRACTION_PIPELINE_MIN_DEPTH: usize = 2;
+const HISTORICAL_EXTRACTION_PIPELINE_MAX_DEPTH: usize = 8;
 
 pub(super) struct HistoricalExtractedBatch {
     pub(super) chunks: Vec<HistoricalExtractedChunk>,
@@ -257,11 +258,20 @@ pub(super) async fn extract_validated_historical_blocks(
     let mut chunks = Vec::new();
 
     let mut block_chunks = blocks.into_iter();
-    let mut extraction_tasks = VecDeque::with_capacity(HISTORICAL_EXTRACTION_PIPELINE_DEPTH);
+    let extraction_pipeline_depth = historical_extraction_pipeline_depth();
+    let mut extraction_tasks = VecDeque::with_capacity(extraction_pipeline_depth);
     let mut write_buffer: Option<HistoricalExtractedChunk> = None;
-    fill_historical_extraction_pipeline(&mut block_chunks, &mut extraction_tasks);
+    fill_historical_extraction_pipeline(
+        &mut block_chunks,
+        &mut extraction_tasks,
+        extraction_pipeline_depth,
+    );
     while let Some(extraction_task) = extraction_tasks.pop_front() {
-        fill_historical_extraction_pipeline(&mut block_chunks, &mut extraction_tasks);
+        fill_historical_extraction_pipeline(
+            &mut block_chunks,
+            &mut extraction_tasks,
+            extraction_pipeline_depth,
+        );
         let extracted = extraction_task
             .await
             .map_err(|error| eyre::eyre!("historical extraction worker failed: {error}"))??;
@@ -305,13 +315,24 @@ pub(super) async fn write_extracted_historical_batch(
 fn fill_historical_extraction_pipeline(
     blocks: &mut std::vec::IntoIter<HistoricalValidatedBlock>,
     extraction_tasks: &mut VecDeque<tokio::task::JoinHandle<Result<HistoricalExtractedChunk>>>,
+    pipeline_depth: usize,
 ) {
-    while extraction_tasks.len() < HISTORICAL_EXTRACTION_PIPELINE_DEPTH {
+    while extraction_tasks.len() < pipeline_depth {
         let Some(task) = next_historical_extract_task(blocks) else {
             break;
         };
         extraction_tasks.push_back(task);
     }
+}
+
+fn historical_extraction_pipeline_depth() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(HISTORICAL_EXTRACTION_PIPELINE_MIN_DEPTH)
+        .clamp(
+            HISTORICAL_EXTRACTION_PIPELINE_MIN_DEPTH,
+            HISTORICAL_EXTRACTION_PIPELINE_MAX_DEPTH,
+        )
 }
 
 fn next_historical_extract_task(

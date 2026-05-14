@@ -19,7 +19,8 @@ use super::catalog::{
 };
 use super::segment::{
     append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
-    persist_segment_manifest, segment_uses_current_compaction_profile,
+    persist_segment_manifest, persist_segment_manifest_with_columns,
+    segment_uses_current_compaction_profile, write_compacted_rows,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -299,9 +300,9 @@ impl NativeStorage {
             if segment_dir.exists() {
                 fs::remove_dir_all(&segment_dir)?;
             }
-            append_rows(&segment_dir, 0, chunk)?;
+            let columns = write_compacted_rows(&segment_dir, chunk)?;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
-            persist_segment_manifest(&self.paths, &descriptor)?;
+            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
             self.catalog.segments.push(descriptor);
             self.persist_catalog()?;
         }
@@ -1186,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn native_storage_writes_historical_batches_as_raw_sealed_segments() {
+    fn native_storage_writes_historical_batches_as_compacted_sealed_segments() {
         let tmp = TempDir::new().unwrap();
         let rows = make_rows(25, 100);
         let mut storage = NativeStorage::open(NativeStorageConfig {
@@ -1208,8 +1209,8 @@ mod tests {
         assert_eq!(storage.total_rows(), 25);
 
         let first_segment = storage.segment_path(sealed[0].id);
-        assert!(first_segment.join("address.col").exists());
-        assert!(!first_segment.join("columns/address.pages").exists());
+        assert!(!first_segment.join("address.col").exists());
+        assert!(first_segment.join("columns/address.pages").exists());
 
         let reader = SegmentReader::open(&first_segment).unwrap();
         assert_eq!(reader.read_log_rows(None).unwrap(), rows[..10].to_vec());
@@ -1217,20 +1218,6 @@ mod tests {
         storage
             .record_sync_head(10_000, B256::repeat_byte(0xAA), 999)
             .unwrap();
-        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 3);
-        let last_segment = storage.segment_path(sealed[2].id);
-        let recent_plan = storage.recent_raw_segment_compaction_plan(1).unwrap();
-        assert_eq!(recent_plan.len(), 1);
-        assert_eq!(recent_plan.compact().unwrap(), 1);
-        assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 2);
-        assert!(first_segment.join("address.col").exists());
-        assert!(!first_segment.join("columns/address.pages").exists());
-        assert!(!last_segment.join("address.col").exists());
-        assert!(last_segment.join("columns/address.pages").exists());
-
-        let raw_plan = storage.raw_segment_compaction_plan(2).unwrap();
-        assert_eq!(raw_plan.len(), 2);
-        assert_eq!(raw_plan.compact().unwrap(), 2);
         assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
         assert!(!first_segment.join("address.col").exists());
         assert!(first_segment.join("columns/address.pages").exists());

@@ -10,9 +10,9 @@ use serde::Deserialize;
     about = "LogEx — standalone Ethereum light node for fast event log queries"
 )]
 pub struct Cli {
-    /// Path to the LogEx data directory.
-    #[arg(long, default_value = "./logex-data", global = true)]
-    pub data_dir: PathBuf,
+    /// Path to the LogEx data directory. Defaults to the OS application data directory.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub data_dir: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", global = true)]
@@ -36,6 +36,58 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+pub fn default_data_dir() -> PathBuf {
+    platform_data_dir().join(platform_app_dir_name())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_data_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_data_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn platform_app_dir_name() -> &'static str {
+    "LogEx"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_app_dir_name() -> &'static str {
+    "logex"
 }
 
 #[derive(Subcommand, Debug)]

@@ -143,10 +143,7 @@ fn collect_storage_metrics(
         .unwrap_or_else(|_| data_dir.to_path_buf());
     let storage_write_free_bytes = free_space_bytes(&storage_write_path).ok();
     let storage_free_volumes = storage_free_volumes(data_dir);
-    let disk_free_bytes = storage_free_volumes
-        .iter()
-        .map(|volume| volume.free_bytes)
-        .min();
+    let disk_free_bytes = storage_write_free_bytes;
     let storage_limiting_path = storage_free_volumes
         .iter()
         .min_by_key(|volume| volume.free_bytes)

@@ -6,7 +6,7 @@ mod runtime;
 
 use clap::Parser;
 
-use cli::{Cli, Command, Config};
+use cli::{Cli, Command, Config, default_data_dir};
 use logex_storage::PartitionManagerConfig;
 
 fn main() {
@@ -34,7 +34,9 @@ fn main() {
         )
         .init();
 
-    let data_dir = file_config.data_dir.unwrap_or(cli.data_dir);
+    let data_dir = file_config
+        .data_dir
+        .unwrap_or_else(|| cli.data_dir.unwrap_or_else(default_data_dir));
     let partition_target_rows = file_config
         .partition_target_rows
         .unwrap_or(cli.partition_target_rows);

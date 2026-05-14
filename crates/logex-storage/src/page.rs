@@ -468,15 +468,14 @@ pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Res
 }
 
 fn encode_adaptive_var_bytes_page(values: &[Bytes]) -> io::Result<Vec<u8>> {
-    let plain_u64 = encode_var_bytes_raw_u64(values);
-    let compressed_u64 = zstd_compress_level(&plain_u64, ZSTD_STORAGE_LEVEL)?;
-
     let total_len = values
         .iter()
         .try_fold(0u64, |acc, value| acc.checked_add(value.len() as u64))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bytes page is too large"))?;
 
     if total_len > u32::MAX as u64 {
+        let plain_u64 = encode_var_bytes_raw_u64(values);
+        let compressed_u64 = zstd_compress_level(&plain_u64, ZSTD_STORAGE_LEVEL)?;
         let mut out = Vec::with_capacity(compressed_u64.len() + 1);
         out.push(ADAPTIVE_BYTES_ZSTD_U64_OFFSETS);
         out.extend_from_slice(&compressed_u64);
@@ -485,15 +484,9 @@ fn encode_adaptive_var_bytes_page(values: &[Bytes]) -> io::Result<Vec<u8>> {
 
     let plain_u32 = encode_var_bytes_raw_u32(values);
     let compressed_u32 = zstd_compress_level(&plain_u32, ZSTD_STORAGE_LEVEL)?;
-    let (tag, payload) = if compressed_u32.len() < compressed_u64.len() {
-        (ADAPTIVE_BYTES_ZSTD_U32_OFFSETS, compressed_u32.as_slice())
-    } else {
-        (ADAPTIVE_BYTES_ZSTD_U64_OFFSETS, compressed_u64.as_slice())
-    };
-
-    let mut out = Vec::with_capacity(payload.len() + 1);
-    out.push(tag);
-    out.extend_from_slice(payload);
+    let mut out = Vec::with_capacity(compressed_u32.len() + 1);
+    out.push(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS);
+    out.extend_from_slice(&compressed_u32);
     Ok(out)
 }
 
@@ -743,6 +736,7 @@ mod tests {
         ];
 
         let encoded = encode_var_bytes_page(&values, CompressionCodec::AdaptiveBytes).unwrap();
+        assert_eq!(encoded.first().copied(), Some(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS));
         let decoded = decode_var_bytes_page(&encoded, CompressionCodec::AdaptiveBytes).unwrap();
         assert_eq!(decoded, values);
     }

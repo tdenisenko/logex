@@ -2,212 +2,93 @@
 
 ## Current Status
 
-LogEx boots from a recent weak-subjectivity checkpoint, follows Consensus Layer head/finality over native P2P, and uses authenticated execution anchors as the pivot for Execution Layer validation. Execution Layer P2P can follow head, walk historical execution data backward from the pivot, verify headers/bodies/receipt roots without executing the EVM, and index queryable logs while the stored range expands toward genesis.
+LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, and log blooms without executing the EVM, and queryable log coverage expands as verified segments are stored.
 
-The active task branch is `feature/el-reverse-sync` / draft PR #76. The dashboard cleanup from PR #77 has been merged into this branch. The remote performance run is using one active data directory with older segment directories relocated onto mounted extra volumes through symlinks.
+Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-Current remote testing is on the upgraded 8-vCPU/16GB host. Peer retention has reached high enough levels on warmed runs that the current limiter is body/receipt fetch latency and useful serving-peer ramp, not local disk writes. The latest run resumed past a slow body/receipt gap, used 5000-block historical batches once enough serving peers were available, and stayed above the six-hour target pace. Active-sync compaction now runs raw-only, recent-first smoothing passes, and dashboard storage metrics refresh asynchronously with segment-size caching.
+The latest stable direction is:
+- Peer retention is no longer the primary limiter once the pool warms.
+- Disk writes are improved by direct historical compaction and faster adaptive byte-page compression.
+- Remaining performance work is mostly body/receipt fetch overlap, useful serving-peer ramp, receipt-root validation, and dense log extraction/storage CPU.
+- The dashboard should present normal single-disk semantics: main `Disk free` means the filesystem that receives new LogEx data. Extra mounted test volumes are operational details, not user-facing product metrics.
 
 ## Completed Since Last Run
 
-- Formatted and mounted the new 100GB remote volume at `/mnt/logex-extra/extra2`, then moved older sealed segment directories onto it and replaced them with symlinks so the active data directory could continue running.
-- Rebalanced about 8 GiB of relocated segments from `/mnt/logex-extra/extra2` to `/mnt/logex-extra` so both extra filesystems stay above the 10 GiB safety floor.
-- Added a runtime low-disk guard that polls the data-dir filesystem plus relocated segment symlink target filesystems and triggers the existing graceful shutdown path when any monitored filesystem drops below 10 GiB free.
-- Deployed the low-disk guard to the remote host and restarted the performance run on the fixed HTTP port `18683`.
-- Investigated the CPU/block-rate spike during the remote run and traced the drop to local write stalls, not peer loss.
-- Reduced active-sync background compaction pressure by delaying profile rewrites while raw sealed segments still need first-time compaction.
-- Smoothed active-sync maintenance further by limiting raw compaction to smaller per-pass batches and reserving catch-up bursts for larger raw backlogs.
-- Changed dashboard storage metrics to return cached values immediately and refresh the expensive filesystem scan in a single background task at a lower cadence, preventing `/status` polling from blocking the UI or repeatedly walking the large catalog.
-- Added segment-aware storage-size caching so old sealed segments are not recursively rescanned unless their manifest changes; the active hot segment and new segments are still measured exactly.
-- Fixed shutdown polling so SIGINT/SIGTERM remains visible after the first async watcher observes it, preventing historical sync from continuing after graceful shutdown starts.
-- Changed the dashboard disk-free status metric to report the limiting filesystem across the data directory and relocated segment symlink targets, matching the low-disk guard.
-- Split storage metrics into main write-volume free space, limiting safety headroom, total free space across LogEx volumes, and per-volume advanced metrics. The main dashboard now keeps storage text terse and shows the free space on the volume currently receiving new data.
-- Reduced active-sync compaction interference by compacting recent raw segments first, refreshing raw/profile backlog counts once per minute during active sync, and avoiding full catalog scans on every 10-second compaction tick.
-- Lowered the high-memory historical fetch window threshold to 8 serving peers so the upgraded host can use 5000-block batches earlier in peer ramp. The remote run later exceeded 1300 historical blocks/sec after restart.
-- Added a hard body/receipt plan timeout so one slow or gapped wide-window fetch cannot make historical sync appear stuck indefinitely.
-- Added a last-progress timestamp for historical sync and made `/status` decay historical blocks/sec and ETA when no new historical batch completes.
-- Widened sparse historical body/receipt chunks while preserving the gas-based dense-range cap, and added a row-count flush threshold so dense log ranges do not build oversized in-memory write buffers.
+- Changed dashboard storage display so the main UI and advanced UI show only product-relevant storage metrics: storage used, writable data-disk free, and data directory.
+- Changed `/status.disk_free_bytes` to report the writable data directory filesystem rather than auxiliary mounted volume totals or limiting multi-volume headroom.
+- Kept hidden status diagnostics for operators, but removed multi-volume labels from the dashboard.
+- Optimized adaptive variable-byte page compression by using 32-bit offsets directly when the page fits, avoiding a redundant zstd pass over normal log data pages.
+- Deployed the compression/storage UI changes to the remote client and confirmed the service restarts gracefully with storage integrity passing.
+- Tested a deeper dense fetch pipeline; it increased RSS and worsened ETA, so it was reverted.
 
 ## Remaining TODOs
 
-1. Reduce Execution Layer reverse-sync ETA below the production target.
-   - Reason: The latest warmed remote sample reached the six-hour target pace, but it still needs longer-run and fresh-run confirmation.
-   - Completion criteria: A fresh mainnet-like run sustains at least the six-hour target pace on adequate hardware without low-memory fallback, storage exhaustion, or peer-pool collapse, or a documented architecture decision replaces full P2P receipt backfill with another trustless strategy.
+1. Finish EL historical sync performance work.
+   - Reason: Production sync needs predictable full-history completion on adequate hardware.
+   - Completion criteria: Fresh remote runs sustain the target pace without peer collapse, OOM risk, low-disk stalls, or repeated request gaps.
 
-2. Stabilize Execution Layer peer ramp and body/receipt throughput.
-   - Reason: The downloader needs enough serving peers to hide request latency and keep wide fetch windows active.
-   - Completion criteria: Long remote runs retain a large serving pool, keep lookahead filled, and do not regress peer retention compared with the best observed run.
+2. Stabilize serving-peer ramp and body/receipt throughput.
+   - Reason: Connected peers are only useful if enough can serve bodies and receipts fast enough to keep lookahead filled.
+   - Completion criteria: Warm runs consistently keep a large serving pool, fetch gaps are bounded, and ETA remains stable instead of oscillating after restarts.
 
-3. Replace the temporary checkpoint source and stale-checkpoint policy.
-   - Reason: `--checkpoint-sync-url` still depends on an external checkpoint provider, and weak-subjectivity safety depends on starting from a recent, correct checkpoint.
-   - Completion criteria: LogEx has its own recent-checkpoint source or a documented multi-source verification flow, rejects stale checkpoints according to consensus weak-subjectivity rules, and clearly reports when a fresh checkpointed resync is required.
+3. Confirm full pre-Merge and genesis-range behavior.
+   - Reason: EL validation target is genesis; CL only authenticates the post-Merge pivot and live head.
+   - Completion criteria: Reverse EL sync validates ancestry, bodies, receipts, logs, query coverage, and restart/resume across Merge and pre-Merge ranges.
 
-4. Complete adversarial release validation.
-   - Reason: LogEx's trustless log-validity claim depends on correct verification and rejection behavior across Consensus Layer, Execution Layer, storage, query, and UI surfaces.
-   - Completion criteria: End-to-end tests or smokes cover checkpoint bootstrap, live anchors, reverse Execution Layer headers/bodies/receipts, invalid headers/bodies/receipts/receipt roots from peers, peer starvation/eclipsing liveness behavior, restart/resume, reorgs, Merge boundary and pre-Merge ancestry from a CL-authenticated pivot, query coverage, limits, pagination, and dashboard auth behavior.
+4. Replace the temporary checkpoint source and stale-checkpoint policy.
+   - Reason: Weak-subjectivity safety requires a recent checkpoint and clear stale-checkpoint rejection.
+   - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
 
-5. Harden exposed query and admin surfaces before public exposure.
-   - Reason: HTTP Basic auth protects dashboard/status/query/JSON-RPC/WebSocket routes but does not encrypt traffic, and gRPC remains a separate unauthenticated listener.
-   - Completion criteria: Public deployments bind sensitive listeners to trusted interfaces or require firewalling/TLS/SSH tunneling; gRPC is disabled, trusted-network-only, or authenticated equivalently; deployment docs make the exposure model explicit.
-
-6. Complete verification-critical security review.
-   - Reason: A trustless log-validity claim depends on correct implementation of CL anchor handling, EL ancestry validation, body/receipt verification, storage canonicality, reorg handling, and query bounds.
-   - Completion criteria: A documented security review or audit covers verification-critical code paths and threat model assumptions, and all critical/high findings are fixed or explicitly documented before a production-ready release.
+5. Complete release validation and hardening.
+   - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, and shutdown behavior.
+   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and exposed listener safety.
 
 ## Design Decisions
 
-- Consensus Layer sync is forward-only from a recent checkpoint; Execution Layer historical sync is responsible for walking execution data back toward genesis.
-- Logs are valid only inside the verified contiguous stored range. Unsynced historical gaps remain outside query coverage.
-- The dashboard keeps the query tool on the main page because querying verified logs is a primary product workflow.
-- Performance charts use Chart.js rather than custom SVG path generation.
-- Dashboard authentication uses HTTP Basic auth as a lightweight local/server operator control. It should be paired with localhost binding, firewalling, SSH tunneling, or TLS termination when exposed outside a trusted machine.
-- Query responses keep a hard `10,000` row cap and default to `50` row pages.
-- Dashboard query pagination is client-side over the loaded capped result set, so Next/Previous does not issue additional query requests.
-- Storage usage metrics follow relocated segment-directory symlinks because the active deployment may span more than one mounted filesystem.
-- Status storage metrics keep the limiting free-space headroom across the active data directory and relocated segment filesystems for the low-disk guard. The main dashboard shows the active write-volume free space, while advanced metrics show limiting headroom, total free space, paths, and per-volume values.
-- Historical reverse sync scales fetch width by serving-peer count and available memory. Low-peer runs stay on 1024-block batches, medium-peer runs queue 2048-block batches, and high-memory runs with at least 8 serving peers use 5000-block batches at depth three. Available-memory guards reduce both depth and window size before the process risks OOM. An eight-deep trial was rejected because it raised RSS to about 10 GiB without a meaningful throughput gain.
-- Peer dialing prefers known productive peers but reserves roughly one third of each refill for fresh discovery candidates, because persisted peer caches can become stale after restarts or host replacement.
-- Startup storage integrity verification remains full verification, but segment checks run across a bounded worker pool so large catalogs do not block HTTP readiness on one thread.
-- Startup integrity checks verify canonical bitmap length from the bitmap header and file size instead of rereading every canonical row bit. Full canonical bitmap reads remain available for query/reorg paths.
-- Cached Consensus Layer beacon blocks maintain a parent-child index because the forward-only CL path repeatedly walks checkpoint-to-head lineage.
-- Receipt-root validation keeps the existing trust model but uses the assembly Keccak backend where supported, because hashing is on the critical path for every verified receipt trie.
-- Consensus history range progress tracks the highest cached forward slot directly instead of constructing a temporary chain vector.
-- Active-sync compaction is treated as best-effort under memory pressure. Verified ingestion remains the priority, and compaction catches up when available memory recovers.
-- During active historical sync, background compaction favors raw segment compaction and defers profile-only rewrites while raw backlog exists. Raw compaction protects disk usage; profile migration is an optimization that can catch up after ingestion pressure drops.
-- Active historical sync compacts recent raw segments first and refreshes full raw/profile backlog counts once per minute, because walking every sealed segment manifest on each compaction tick can compete with dense historical writes.
-- Dashboard storage metrics are eventually consistent: `/status` returns the last cached storage sample and starts one background refresh when the one-minute sample expires. Segment-size accounting caches sealed segment directory sizes by filesystem identity and manifest metadata, while always rescanning the active hot segment and newly discovered segment directories.
-- Historical throughput shown by `/status` is an effective rate, not just the last completed batch EWMA. It starts decaying after 10 seconds without a completed historical batch so the dashboard does not show stale progress during peer/request stalls.
-- Shutdown checks read the current watch value instead of the unread-change flag, because several async wait paths can consume the change notification before later engine loops poll for shutdown.
-- Historical `block_number` columns use signed delta encoding because reverse sync can naturally produce descending or mixed block-number deltas before rows are normalized for storage. Active compaction can rewrite only the legacy block-number column while preserving the rest of the segment, which keeps the migration crash-safe and much cheaper than full segment rewrites.
-- The node treats low data-dir or relocated-segment free space as a controlled shutdown condition instead of allowing storage writes to retry into `ENOSPC`. The guard uses the same engine/network shutdown path as SIGINT/SIGTERM so verified in-flight writes can drain before process exit.
-- LogEx does not re-run historical PoW fork choice from genesis. A CL-authenticated post-Merge execution header commits to one historical ancestry through parent hashes, so historical validation verifies header linkage, body commitments, and receipt roots against that ancestry.
-- Historical body/receipt chunking now uses gas, not only block count, as the safety bound: sparse old ranges can use larger chunks to reduce request waves, while dense ranges remain bounded by the receipt gas target.
-- Historical ingest flushes on either block count or row count so recent log-heavy ranges bound memory and write stalls without shrinking sparse old-range batches.
+- CL sync is forward-only from a recent checkpoint. EL historical sync walks backward from the CL-authenticated pivot to genesis.
+- Logs are valid only inside the verified contiguous stored range.
+- Historical EL validation verifies parent-hash ancestry, body commitments, receipt roots, cumulative gas, and logs bloom against each header.
+- Query responses keep a hard `10,000` row cap and dashboard pagination defaults to `50` rows.
+- Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
+- Active background compaction is best-effort during sync and should not compete with verified ingestion when memory or disk headroom is tight.
+- Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
+- Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS or peer usefulness should be reverted.
 
 ## Challenges and Resolutions
 
-- Challenge: The dashboard had too many competing metrics and made Execution Layer/log coverage hard to interpret.
-  - Resolution: The main view now shows one Execution Layer progress bar, Consensus Layer status, log range, storage, performance chart, and the query panel.
+- Challenge: Older runs produced hundreds of raw segments pending compression.
+  - Resolution: Historical batches now write compacted sealed segments directly. Remaining raw backlog on the remote is legacy cleanup, not new runaway growth.
 
-- Challenge: The query engine could be abused if the HTTP server URL is reachable by untrusted users.
-  - Resolution: Added optional HTTP Basic auth for HTTP dashboard, status, query, JSON-RPC, and WebSocket endpoints while keeping `/health` public for liveness checks.
+- Challenge: Dense log ranges made writes and dashboard responsiveness unstable.
+  - Resolution: Storage metrics are cached asynchronously, historical writes flush by row count, and byte-page compression now avoids a redundant zstd pass.
 
-- Challenge: The remote root filesystem was close to full while the active data directory still needed to be preserved for performance testing.
-  - Resolution: Mounted the additional volume, moved older sealed segments onto it, fixed symlink-aware catalog repair and storage metrics, and reduced compacted selected-row reads so startup does not scan entire column files unnecessarily.
+- Challenge: Extra test volumes made dashboard free-space semantics confusing.
+  - Resolution: Main UI now reports writable data-disk free space only; extra volume details were removed from the UI.
 
-- Challenge: Historical sync still had visible wait time between body/receipt fetches and local processing.
-  - Resolution: Raised medium-peer lookahead to four queued fetches after comparing remote batch logs; the run remains CPU-bound rather than peer- or IO-bound.
-
-- Challenge: Restarting with billions of stored rows spent too long rereading canonical bitmaps during integrity checks.
-  - Resolution: Integrity checks now verify canonical bitmap length without materializing the full bitmap, reducing remote HTTP-ready time from about 100 seconds to 58 seconds on the active data directory.
-
-- Challenge: Perf samples still showed Consensus Layer lineage selection scanning the full cached block set.
-  - Resolution: Added a child index keyed by parent root so forward-chain walking only inspects direct children.
-
-- Challenge: After storage and lineage optimizations, remote perf samples showed receipt-root Keccak hashing as the dominant CPU cost.
-  - Resolution: Enabled Alloy's `asm-keccak` feature and validated the sync crate plus full clippy before remote measurement.
-
-- Challenge: Perf samples still showed Consensus Layer range readiness spending CPU on temporary lineage vectors.
-  - Resolution: Reworked forward progress selection to walk cached children without allocating a chain.
-
-- Challenge: Warm remote runs still remain above the sub-6-hour target after peer retention and pipeline overlap improvements.
-  - Resolution: Profiling now points to receipt-trie hashing, log extraction/storage, and 8GB memory pressure as the remaining limit on the current host; IO delay is not material.
-
-- Challenge: A later remote run dropped from hundreds of blocks/sec to about 43 blocks/sec despite 50 connected peers and 39 serving peers.
-  - Resolution: Bounded status, log, and `pidstat` samples showed the stalled batches were dominated by storage/write waits and memory pressure, not peer retention. The remote client was stopped cleanly for a CPU/RAM upgrade.
-
-- Challenge: The upgraded host had enough CPU/RAM headroom but still showed ETA swings when lookahead expanded too early or peer service was thin.
-  - Resolution: Historical lookahead now depends on total memory, available memory, and serving-peer count. The branch keeps conservative windows for low-peer or low-memory runs and only enables deeper queues on the upgraded host class.
-
-- Challenge: A trial dial retry cooldown added complexity without a clear peer-retention gain.
-  - Resolution: The cooldown was removed before committing; the branch keeps the previously proven peer connection policy.
-
-- Challenge: Body/receipt batches were over-counting safe parallelism because each scheduled range can issue both a body request and a receipt request.
-  - Resolution: The paired pipeline now halves the chunk window derived from request concurrency, reducing timeout pressure while retaining overlap.
-
-- Challenge: The 2048-block/depth-6 high-memory path stabilized near 500-550 historical blocks/sec, still above the six-hour target.
-  - Resolution: Switched the high-memory path to 4096-block batches at depth three and kept 32-block body/receipt chunks so a full 2048-block prefix can fit within the paired request cap. The warmed remote run reached about 718 historical blocks/sec with stable memory headroom.
-
-- Challenge: Dense historical segments were spending several MiB per compacted `block_number` column because reverse-order rows defeated the unsigned delta codec.
-  - Resolution: Historical rows are now extracted in ascending block order, `block_number` compaction uses signed deltas, and active compaction can migrate old compacted block-number columns without rewriting every log column.
-
-- Challenge: Restart warm-up repeatedly stalled below the high-throughput peer threshold, leaving the downloader in 1024-block mode despite enough peers for more work.
-  - Resolution: Lowered medium/high historical window thresholds for high-memory hosts, kept low-memory guards intact, and reserved part of each dial refill for fresh discovery candidates. The current remote sample reached about 809 historical blocks/sec and a 3.8-hour ETA with 13 serving peers.
-
-- Challenge: Large data directories made startup availability sensitive to a single-threaded segment integrity scan.
-  - Resolution: Segment integrity verification now runs in a bounded worker pool while preserving the same row-count, canonical bitmap, and block-boundary checks.
-
-- Challenge: The remote root filesystem reached 100% usage and the client could not continue writing safely.
-  - Resolution: Mounted the new volume, relocated old sealed segment directories onto it, rebalanced the extra volumes above the safety floor, deployed a symlink-aware low-disk shutdown guard, and restarted the client after confirming free space had recovered.
-
-- Challenge: A later run briefly dropped block/sec despite 100+ connected peers and 80+ serving peers.
-  - Resolution: `pidstat`, `iostat`, status, and batch logs showed root-volume write stalls during dense historical writes and background compaction. Active-sync compaction now skips profile rewrites until raw compaction backlog clears and waits longer before using the raw catch-up limit.
-
-- Challenge: Block/sec ramped up, then dropped sharply while CPU spiked and the dashboard became intermittently unresponsive.
-  - Resolution: Remote logs showed the drops lining up with local maintenance, especially raw compaction overlapping dense writes, and `/status` could block on full data-dir storage scans. Active-sync raw compaction now uses smaller smoothing passes, and storage metrics refresh is nonblocking, single-flight, lower-cadence, and segment-cache aware.
-
-- Challenge: A remote SIGINT logged graceful shutdown but historical backfill kept completing batches.
-  - Resolution: Shutdown polling no longer depends on `watch::Receiver::has_changed()`, which becomes false after another wait path observes the signal. Historical prefetch cancellation also checks the sticky shutdown value before falling back to sequential fetch.
-
-- Challenge: The dashboard free-space metric could overstate safety on multi-volume runs by reporting only the root data-dir filesystem.
-  - Resolution: Status storage metrics now probe the data directory, `segments/`, and symlinked segment target directories, then report the lowest free-space value.
-
-- Challenge: The main dashboard "free space" value was confusing on multi-volume runs because older segment volumes are mostly read/maintenance targets while new segments are written to the main data directory.
-  - Resolution: `/status` now exposes write-volume free space, limiting headroom, total LogEx volume free space, and per-volume values. The main UI shows the write-volume free space with minimal text, and advanced metrics show the detailed safety/volume breakdown.
-
-- Challenge: Even a one-segment active compaction pass still caused periodic write stalls because the loop refreshed raw/profile backlog counts by walking every segment manifest every 10 seconds.
-  - Resolution: Active sync now compacts recent raw segments first and only refreshes full backlog counts once per minute. Remote batch logs stopped showing the repeated second-scale write stalls after this change.
-
-- Challenge: After storage stalls were removed, the downloader was underusing the upgraded host while it waited for enough serving peers to enter the larger fetch-window tier.
-  - Resolution: High-memory historical sync now uses 5000-block batches once 8 serving peers are available. The remote run exceeded 1300 historical blocks/sec after restart.
-
-- Challenge: A 5000-block remote run appeared stuck at block 898608 while the dashboard kept showing the last high historical blocks/sec value.
-  - Resolution: Added a body/receipt plan timeout so wide windows can reset around slow request gaps, and made `/status` decay historical throughput after stale progress. The remote run resumed past the block and the dashboard now reports `0.0` historical bps after restart until fresh batches complete.
-
-- Challenge: Sparse pre-genesis-era ranges were still paying the request-wave overhead of 32-block body/receipt chunks, while dense recent ranges need bounded local write batches.
-  - Resolution: Increased the chunk block cap to 128 under the existing gas target and added row-count-triggered historical write flushing.
+- Challenge: Increasing dense fetch depth looked like a possible way to hide fetch latency.
+  - Resolution: The remote trial raised RSS to about 12 GiB and worsened ETA, so the change was reverted.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the EL peer manager, historical lookahead scheduler, node shutdown path, background compaction loop, storage metrics, and dashboard sync display.
-- Removed the experimental peer dial cooldown after remote testing did not show a clear benefit.
-- Reverted the eight-deep high-memory lookahead trial after remote RSS and throughput samples showed the extra memory was not justified.
-- Kept the memory-aware lookahead, compaction guards, paired request accounting, and bounded chunk hedging because they directly address observed slowdown/OOM or timeout risks.
-- Reverted an outbound-heavy peer split trial because it under-filled the peer pool compared with the established split.
-- Removed the 16-block wide-peer body/receipt chunk cap after it forced extra request waves under the paired in-flight cap.
-- Replaced the old unsigned `block_number` compaction profile for new compactions with signed delta encoding; existing compacted segments remain readable through their manifest-declared codec.
-- Added a targeted legacy block-number profile rewrite path instead of using the existing full-row recompact path for this migration.
-- Inspected the latest dial selection changes and added tests for productive-peer ordering, fresh-candidate reservation, and full-budget use when all candidates are productive.
-- No new obsolete EL sync paths were found in the changed areas; the current write coalescing and threshold tuning replaced runtime constants rather than leaving alternate code paths.
-- Local `/private/tmp/geth-src` and `/private/tmp/nethermind-src` currently contain directory skeletons without source files, so peer-policy comparison used the vendored Reth networking source available in Cargo checkouts.
-- No obsolete low-disk loop or retry code was found in the node runtime; the new guard was added at the top-level runtime select so existing shutdown code remains the single stop path.
-- Extended the low-disk scan to discover relocated segment symlink targets instead of leaving the emergency multi-volume layout unmonitored.
-- Inspected the background compaction loop after the write-stall investigation; removed the active-sync profile rewrite catch-up path because it competes with historical ingest and can safely run after raw compaction pressure clears.
-- Inspected the status storage-metrics path and active-sync compaction loop after the spike/drop report; no experimental code paths remained, but the blocking status refresh and oversized active raw compaction pass were replaced. The follow-up storage metric cache avoids recursively reading unchanged sealed segment directories.
-- Inspected the shutdown and historical prefetch paths after the remote stop hang; no duplicate shutdown path was added, and the existing graceful stop path now uses a sticky shutdown signal.
-- Inspected dashboard storage metric accounting after adding sealed-segment caching; no obsolete metric path remained, but disk-free reporting was aligned with the existing symlink-aware low-disk guard.
-- Inspected the storage metric UI labels after the multi-volume confusion report; the main dashboard no longer duplicates advanced storage explanations, and the detailed headroom/volume labels remain in the advanced metrics grid.
-- Inspected the active-sync compaction loop after write stalls persisted with one-segment compaction; replaced per-tick full backlog scans with slower refreshes and recent-first raw plans rather than leaving the older scan-heavy path in use during active sync.
-- Inspected historical progress reporting after the stale-rate issue; kept the existing batch EWMA for completed work and added status-time decay rather than duplicating progress counters.
-- Inspected the historical request chunker and ingest writer while adding density-aware tuning; no obsolete alternate chunking or writer path remained.
+- Inspected storage metrics UI code and removed obsolete volume-label rendering and related CSS/JS.
+- Inspected the adaptive byte-page encoder and removed the now-unneeded dual-compression path for normal pages.
+- Inspected the dense fetch-depth experiment after measurement and reverted it because it did not improve the run.
+- No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
-- New branch created this run: none; continuing the existing Execution Layer reverse-sync branch.
-- Commits made during this run: `perf: tune historical body receipt windows`; `perf: compress historical block numbers`; `perf: migrate legacy columns during catchup`; `perf: improve historical warmup throughput`; `docs: record latest historical sync run`; `fix: stop sync gracefully on low disk`; `fix: monitor relocated segment disk space`; `docs: clarify production security todos`; `perf: throttle active sync compaction`; `perf: smooth active sync maintenance`; `perf: cache sealed segment sizes`; `fix: keep shutdown signal sticky`; `fix: report limiting storage free space`; pending local commit for density-aware historical chunking and write flushing.
-- Pull request status: draft PR #76 remains open for the Execution Layer production-readiness work.
-- Merge status: not ready to merge; Execution Layer throughput and full-history validation remain incomplete.
-- Git/GitHub blockers: none known.
+- New branch created this run: none; continuing the EL reverse-sync PR branch.
+- Commits made during this run: none yet.
+- Pull request status: draft PR #76 remains open.
+- Merge status: not ready; EL performance and validation work remain incomplete.
+- Blockers: none known.
 
 ## Known Issues or Risks
 
-- HTTP Basic auth does not encrypt traffic. Use it behind localhost, a firewall, an SSH tunnel, or a TLS-terminating reverse proxy.
-- gRPC remains unauthenticated and should not be exposed to untrusted networks until it is separately hardened or disabled.
-- The parent Execution Layer performance branch is still above the long-term sync ETA target on the current observed runs.
-- The 8-vCPU/16GB remote host has headroom, but throughput is still sensitive to useful body/receipt peer supply and dense-log local processing.
-- Symlinked segment directories are a deployment compatibility path, not a replacement for a first-class multi-volume storage allocator.
-- Relocated segment symlinks keep the current deployment running but still require manual rebalancing until a first-class multi-volume storage allocator exists.
-- The current remote run has reached the six-hour target pace after the maintenance smoothing and 5000-block threshold change, but a fresh run still needs to confirm the pace from scratch.
-- Restart startup still scans all segment manifests and compacted block-number page indexes; this is improved but not yet a first-class large-catalog index.
-- Verification-critical security review is still required before calling the implementation production-secure.
+- The remote run is still warming after the latest restart, so post-change ETA must be judged after serving peers recover.
+- Full sync performance is still sensitive to body/receipt serving peers and dense receipt/log processing.
+- Extra server volumes are a test-environment workaround and not a product storage allocator.
+- HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
+- gRPC exposure still needs a clear auth/bind/disable policy before public deployment.
+- Verification-critical security review is still required before a production-ready release.

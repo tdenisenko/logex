@@ -13,8 +13,8 @@ use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
-const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 8;
-const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 32;
+const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 32;
+const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
 const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 3;
@@ -25,12 +25,19 @@ const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
+const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 2_048;
+const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
+const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
+const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
+const HISTORICAL_DENSE_ROWS_PER_BLOCK: f64 = 500.0;
+const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
+const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const BYTES_PER_KIB: u64 = 1024;
@@ -288,6 +295,42 @@ fn historical_fetch_window_blocks_for_serving_peers(
     } else {
         HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS
     }
+}
+
+fn historical_density_fetch_pipeline_depth_cap(rows_per_block: Option<f64>) -> Option<usize> {
+    let rows_per_block = rows_per_block?;
+    if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
+        Some(HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH)
+    } else if rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK {
+        Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
+    } else {
+        None
+    }
+}
+
+fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u64> {
+    let rows_per_block = rows_per_block?;
+    if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
+        Some(HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS)
+    } else if rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK {
+        Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
+    } else {
+        None
+    }
+}
+
+fn update_historical_density_ewma(current: Option<f64>, rows: u64, blocks: usize) -> Option<f64> {
+    if blocks == 0 {
+        return current;
+    }
+    let sample = rows as f64 / blocks as f64;
+    Some(match current {
+        Some(current) => {
+            (current * (1.0 - HISTORICAL_DENSITY_EWMA_WEIGHT))
+                + (sample * HISTORICAL_DENSITY_EWMA_WEIGHT)
+        }
+        None => sample,
+    })
 }
 
 fn historical_allows_high_memory_pipeline(total_memory_bytes: Option<u64>) -> bool {
@@ -1190,11 +1233,14 @@ impl SyncEngine {
     }
 
     fn historical_fetch_window_blocks(&self) -> u64 {
-        historical_fetch_window_blocks_for_serving_peers(
+        let base_window = historical_fetch_window_blocks_for_serving_peers(
             self.peers.serving_peer_count(),
             historical_total_memory_bytes(),
             historical_available_memory_bytes(),
-        )
+        );
+        historical_density_fetch_window_cap(self.historical_rows_per_block_ewma)
+            .map(|cap| base_window.min(cap))
+            .unwrap_or(base_window)
     }
 
     fn spawn_historical_fetch_plan(&mut self, plan: HistoricalFetchPlan) {
@@ -1228,11 +1274,16 @@ impl SyncEngine {
         }
 
         let available_memory_bytes = historical_available_memory_bytes();
-        let pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
+        let base_pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
             self.peers.serving_peer_count(),
             historical_total_memory_bytes(),
             available_memory_bytes,
         );
+        let density_pipeline_cap =
+            historical_density_fetch_pipeline_depth_cap(self.historical_rows_per_block_ewma);
+        let pipeline_depth = density_pipeline_cap
+            .map(|cap| base_pipeline_depth.min(cap))
+            .unwrap_or(base_pipeline_depth);
         if historical_available_memory_is_critical(available_memory_bytes)
             && self.pending_historical_fetch_count() > pipeline_depth
         {
@@ -1241,6 +1292,20 @@ impl SyncEngine {
                 pending_fetches = self.pending_historical_fetch_count(),
                 pipeline_depth,
                 "resetting historical fetch lookahead under memory pressure"
+            );
+            self.reset_historical_fetch_pipeline();
+            self.historical_fetch_expected_child = Some(child_header.clone());
+            self.historical_fetch_planned_child = Some(child_header.clone());
+        }
+        if density_pipeline_cap.is_some()
+            && !historical_available_memory_is_low(available_memory_bytes)
+            && self.pending_historical_fetch_count() > pipeline_depth
+        {
+            tracing::debug!(
+                rows_per_block_ewma = self.historical_rows_per_block_ewma,
+                pending_fetches = self.pending_historical_fetch_count(),
+                pipeline_depth,
+                "resetting historical fetch lookahead for dense log range"
             );
             self.reset_historical_fetch_pipeline();
             self.historical_fetch_expected_child = Some(child_header.clone());
@@ -1630,6 +1695,11 @@ impl SyncEngine {
         let extraction_elapsed = written.outcome.extraction_elapsed;
         let write_elapsed = written.outcome.write_elapsed;
         let log_count = self.record_historical_ingest_outcome(written.outcome);
+        self.historical_rows_per_block_ewma = update_historical_density_ewma(
+            self.historical_rows_per_block_ewma,
+            log_count,
+            block_count,
+        );
         self.refresh_historical_status().await;
 
         tracing::debug!(
@@ -1642,6 +1712,7 @@ impl SyncEngine {
             prefetched_next = queued_next_fetches > 0,
             queued_next_fetches,
             fetch_pipeline_depth = self.pending_historical_fetch_count(),
+            rows_per_block_ewma = self.historical_rows_per_block_ewma,
             header_ms = header_elapsed.as_millis(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),
             validation_ms = validation_elapsed.as_millis(),
@@ -1851,6 +1922,11 @@ impl SyncEngine {
             )
             .await?;
             let log_count = self.record_historical_ingest_outcome(outcome);
+            self.historical_rows_per_block_ewma = update_historical_density_ewma(
+                self.historical_rows_per_block_ewma,
+                log_count,
+                block_count,
+            );
             progressed = true;
 
             tracing::trace!(
@@ -2184,6 +2260,47 @@ mod tests {
         assert_eq!(
             historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, critical_available,),
             1
+        );
+    }
+
+    #[test]
+    fn historical_density_caps_dense_fetch_lookahead() {
+        assert_eq!(historical_density_fetch_window_cap(None), None);
+        assert_eq!(historical_density_fetch_pipeline_depth_cap(None), None);
+        assert_eq!(historical_density_fetch_window_cap(Some(100.0)), None);
+        assert_eq!(
+            historical_density_fetch_pipeline_depth_cap(Some(100.0)),
+            None
+        );
+        assert_eq!(
+            historical_density_fetch_window_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
+        );
+        assert_eq!(
+            historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
+            Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+        assert_eq!(
+            historical_density_fetch_window_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
+            Some(HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS)
+        );
+        assert_eq!(
+            historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
+            Some(HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+    }
+
+    #[test]
+    fn historical_density_ewma_tracks_recent_batches() {
+        let first = update_historical_density_ewma(None, 1000, 10).unwrap();
+        assert_eq!(first, 100.0);
+
+        let second = update_historical_density_ewma(Some(first), 9000, 10).unwrap();
+        assert_eq!(second, 500.0);
+
+        assert_eq!(
+            update_historical_density_ewma(Some(second), 100, 0),
+            Some(second)
         );
     }
 
