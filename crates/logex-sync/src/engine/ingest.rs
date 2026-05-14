@@ -6,6 +6,8 @@ use std::collections::VecDeque;
 const HISTORICAL_EXTRACT_CHUNK_BLOCKS: usize = 256;
 const HISTORICAL_WRITE_CHUNK_BLOCKS: usize = 2048;
 const HISTORICAL_WRITE_CHUNK_ROWS: u64 = 500_000;
+const HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_ROWS: u64 = 1_000_000;
+const HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_AVAILABLE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 const HISTORICAL_EXTRACTION_PIPELINE_MIN_DEPTH: usize = 2;
 const HISTORICAL_EXTRACTION_PIPELINE_MAX_DEPTH: usize = 8;
 
@@ -499,7 +501,44 @@ fn historical_write_chunk_is_ready(buffer: &HistoricalExtractedChunk) -> bool {
 }
 
 fn historical_write_chunk_counts_are_ready(block_count: usize, row_count: u64) -> bool {
-    block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS || row_count >= HISTORICAL_WRITE_CHUNK_ROWS
+    block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS || row_count >= historical_write_chunk_row_limit()
+}
+
+fn historical_write_chunk_row_limit() -> u64 {
+    historical_write_chunk_row_limit_for_available_memory(historical_available_memory_bytes())
+}
+
+fn historical_write_chunk_row_limit_for_available_memory(
+    available_memory_bytes: Option<u64>,
+) -> u64 {
+    if available_memory_bytes
+        .is_some_and(|bytes| bytes >= HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_AVAILABLE_BYTES)
+    {
+        HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_ROWS
+    } else {
+        HISTORICAL_WRITE_CHUNK_ROWS
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn historical_available_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        let Some(rest) = line.strip_prefix("MemAvailable:") else {
+            continue;
+        };
+        let kib = rest
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())?;
+        return kib.checked_mul(1024);
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn historical_available_memory_bytes() -> Option<u64> {
+    None
 }
 
 fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
@@ -601,5 +640,25 @@ mod tests {
         assert_eq!(write_chunks[0].row_count, 550_000);
         assert_eq!(write_chunks[0].lowest_header.number(), 772);
         assert_eq!(write_chunks[1].block_count, 128);
+    }
+
+    #[test]
+    fn write_chunk_row_limit_scales_only_with_healthy_available_memory() {
+        assert_eq!(
+            historical_write_chunk_row_limit_for_available_memory(Some(
+                HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_AVAILABLE_BYTES
+            )),
+            HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_ROWS
+        );
+        assert_eq!(
+            historical_write_chunk_row_limit_for_available_memory(Some(
+                HISTORICAL_WRITE_CHUNK_HIGH_MEMORY_AVAILABLE_BYTES - 1
+            )),
+            HISTORICAL_WRITE_CHUNK_ROWS
+        );
+        assert_eq!(
+            historical_write_chunk_row_limit_for_available_memory(None),
+            HISTORICAL_WRITE_CHUNK_ROWS
+        );
     }
 }
