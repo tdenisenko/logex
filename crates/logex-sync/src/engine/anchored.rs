@@ -29,6 +29,8 @@ const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
+const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 2_500_000.0;
+const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
@@ -416,6 +418,30 @@ fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u6
     } else {
         None
     }
+}
+
+fn historical_density_fetch_window_boost(
+    serving_peers: usize,
+    total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
+    rows_per_block: Option<f64>,
+) -> Option<u64> {
+    if serving_peers < HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS
+        || !historical_allows_sparse_pipeline(total_memory_bytes)
+        || historical_available_memory_is_low(available_memory_bytes)
+    {
+        return None;
+    }
+
+    let rows_per_block = rows_per_block?;
+    if !(0.0..HISTORICAL_DENSE_ROWS_PER_BLOCK).contains(&rows_per_block) {
+        return None;
+    }
+
+    let window = (HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS / rows_per_block)
+        .floor()
+        .max(HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS as f64) as u64;
+    Some(window.min(HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS))
 }
 
 fn update_historical_density_ewma(current: Option<f64>, rows: u64, blocks: usize) -> Option<f64> {
@@ -1380,14 +1406,25 @@ impl SyncEngine {
     }
 
     fn historical_fetch_window_blocks(&self) -> u64 {
+        let total_memory_bytes = historical_total_memory_bytes();
+        let available_memory_bytes = historical_available_memory_bytes();
         let base_window = historical_fetch_window_blocks_for_serving_peers(
             self.peers.serving_peer_count(),
-            historical_total_memory_bytes(),
-            historical_available_memory_bytes(),
+            total_memory_bytes,
+            available_memory_bytes,
         );
-        historical_density_fetch_window_cap(self.historical_rows_per_block_ewma)
-            .map(|cap| base_window.min(cap))
-            .unwrap_or(base_window)
+        let capped_window =
+            historical_density_fetch_window_cap(self.historical_rows_per_block_ewma)
+                .map(|cap| base_window.min(cap))
+                .unwrap_or(base_window);
+        historical_density_fetch_window_boost(
+            self.peers.serving_peer_count(),
+            total_memory_bytes,
+            available_memory_bytes,
+            self.historical_rows_per_block_ewma,
+        )
+        .map(|boost| capped_window.max(boost))
+        .unwrap_or(capped_window)
     }
 
     fn spawn_historical_fetch_plan(&mut self, plan: HistoricalFetchPlan) {
@@ -2185,11 +2222,8 @@ impl SyncEngine {
             write_elapsed: Duration::ZERO,
         };
         self.record_historical_ingest_outcome(outcome);
-        self.historical_rows_per_block_ewma = update_historical_density_ewma(
-            self.historical_rows_per_block_ewma,
-            0,
-            headers.len(),
-        );
+        self.historical_rows_per_block_ewma =
+            update_historical_density_ewma(self.historical_rows_per_block_ewma, 0, headers.len());
         self.note_serving_peer(header_peer, newly_serving_peers);
 
         tracing::debug!(
@@ -2362,11 +2396,15 @@ mod tests {
 
         let mut with_receipts = empty.clone();
         with_receipts.receipts_root = B256::repeat_byte(0x22);
-        assert!(!historical_header_has_empty_body_and_receipts(&with_receipts));
+        assert!(!historical_header_has_empty_body_and_receipts(
+            &with_receipts
+        ));
 
         let mut with_withdrawals = empty;
         with_withdrawals.withdrawals_root = Some(B256::repeat_byte(0x33));
-        assert!(!historical_header_has_empty_body_and_receipts(&with_withdrawals));
+        assert!(!historical_header_has_empty_body_and_receipts(
+            &with_withdrawals
+        ));
     }
 
     #[test]
@@ -2564,6 +2602,59 @@ mod tests {
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+    }
+
+    #[test]
+    fn historical_medium_density_can_expand_fetch_window() {
+        let high_memory = Some(HISTORICAL_SPARSE_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
+        let healthy_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES);
+        let low_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1);
+
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(250.0),
+            ),
+            Some(10_000)
+        );
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(400.0),
+            ),
+            Some(6_250)
+        );
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS - 1,
+                high_memory,
+                healthy_available,
+                Some(250.0),
+            ),
+            None
+        );
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                low_available,
+                Some(250.0),
+            ),
+            None
+        );
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
+            ),
+            None
         );
     }
 
