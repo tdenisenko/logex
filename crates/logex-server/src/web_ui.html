@@ -495,6 +495,81 @@
     font-size: var(--font-small);
   }
 
+  .query-builder-body {
+    display: grid;
+    gap: 14px;
+  }
+
+  .builder-controls {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .builder-control {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .builder-control span {
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .builder-control input, .builder-control select {
+    min-height: 42px;
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 12px;
+    outline: none;
+    color: var(--text);
+    background: #070a0e;
+    font-size: var(--font-body);
+  }
+
+  .builder-control input:focus, .builder-control select:focus {
+    border-color: var(--query);
+    box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
+  }
+
+  .builder-fields {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .field-toggle {
+    min-height: 36px;
+    padding: 0 10px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    color: var(--soft);
+    background: rgba(21, 27, 36, .78);
+    font-size: var(--font-small);
+  }
+
+  .field-toggle.active {
+    border-color: rgba(178, 140, 255, .75);
+    color: var(--text);
+    background: rgba(178, 140, 255, .18);
+  }
+
+  .builder-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .builder-status {
+    color: var(--muted);
+    font-size: var(--font-body);
+  }
+
   .history-table-wrap {
     max-height: 320px;
     overflow-y: auto;
@@ -737,7 +812,7 @@
       justify-content: flex-start;
     }
 
-    .debug-grid, .mini-grid {
+    .debug-grid, .mini-grid, .builder-controls, .builder-fields {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -752,7 +827,7 @@
       flex-direction: column;
     }
 
-    .debug-grid, .mini-grid, .charts-grid {
+    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields {
       grid-template-columns: 1fr;
     }
   }
@@ -873,6 +948,37 @@
     </div>
   </details>
 
+  <details class="foldout query-builder" data-foldout-key="query-builder" open>
+    <summary>Query Builder</summary>
+    <div class="foldout-body query-builder-body">
+      <div class="builder-controls">
+        <label class="builder-control">
+          <span>From block</span>
+          <input type="number" id="builderFromBlock" min="0" step="1" inputmode="numeric">
+        </label>
+        <label class="builder-control">
+          <span>To block</span>
+          <input type="number" id="builderToBlock" min="0" step="1" inputmode="numeric">
+        </label>
+        <label class="builder-control">
+          <span>Token</span>
+          <select id="builderToken"></select>
+        </label>
+        <label class="builder-control">
+          <span>Event</span>
+          <select id="builderEvent">
+            <option value="transfer">Transfer</option>
+          </select>
+        </label>
+      </div>
+      <div class="builder-fields" id="builderFields"></div>
+      <div class="builder-actions">
+        <span class="builder-status" id="builderStatus">Transfer logs from verified local blocks.</span>
+        <button type="button" class="primary" id="generateQueryBtn" onclick="generateBuilderQuery()">Generate SQL</button>
+      </div>
+    </div>
+  </details>
+
   <details class="foldout query-foldout" data-foldout-key="query-logs">
     <summary>Query Logs</summary>
     <div class="foldout-body query-body">
@@ -947,6 +1053,70 @@ var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
 var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
 var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
 var QUERY_HISTORY_LIMIT = 50;
+var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+var LOG_FIELDS = [
+  'block_number',
+  'block_hash',
+  'timestamp',
+  'tx_hash',
+  'tx_index',
+  'log_index',
+  'address',
+  'topic0',
+  'topic1',
+  'topic2',
+  'topic3',
+  'topics',
+  'data',
+  'data_len',
+  'source'
+];
+var DEFAULT_BUILDER_FIELDS = [
+  'block_number',
+  'tx_hash',
+  'address',
+  'topic1',
+  'topic2',
+  'data',
+  'log_index'
+];
+// Ethereum-platform tokens from CoinGecko market-cap order, refreshed May 2026.
+var ERC20_TOKENS = [
+  { symbol: 'USDT', name: 'Tether', address: '0xdac17f958d2ee523a2206206994597c13d831ec7' },
+  { symbol: 'BNB', name: 'BNB', address: '0xb8c77482e45f1f44de1745f52c74426c631bdd52' },
+  { symbol: 'USDC', name: 'USDC', address: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' },
+  { symbol: 'WBT', name: 'WhiteBIT Coin', address: '0x925206b8a707096ed26ae47c84747fe0bb734f59' },
+  { symbol: 'USDS', name: 'USDS', address: '0xdc035d45d973e3ec169d2276ddab16f1e407384f' },
+  { symbol: 'LEO', name: 'LEO Token', address: '0x2af5d2ad76741191d15dfe7bf6ac92d4bd912ca3' },
+  { symbol: 'LINK', name: 'Chainlink', address: '0x514910771af9ca656af840dff83e8264ecf986ca' },
+  { symbol: 'TON', name: 'Toncoin', address: '0x582d872a1b094fc48f5de31d3b73f2d9be47def1' },
+  { symbol: 'USD1', name: 'USD1', address: '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d' },
+  { symbol: 'DAI', name: 'Dai', address: '0x6b175474e89094c44da98b954eedeac495271d0f' },
+  { symbol: 'USDE', name: 'Ethena USDe', address: '0x4c9edd5852cd905f086c759e8383e09bff1e68b3' },
+  { symbol: 'SHIB', name: 'Shiba Inu', address: '0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce' },
+  { symbol: 'PYUSD', name: 'PayPal USD', address: '0x6c3ea9036406852006290770bedfcaba0e23a0e8' },
+  { symbol: 'CRO', name: 'Cronos', address: '0xa0b73e1ff0b80914ab6fe0444e65848c4c34450b' },
+  { symbol: 'USDG', name: 'Global Dollar', address: '0xe343167631d89b6ffc58b88d6b7fb0228795491d' },
+  { symbol: 'USYC', name: 'Circle USYC', address: '0x136471a34f6ef19fe571effc1ca711fdb8e49f2b' },
+  { symbol: 'XAUT', name: 'Tether Gold', address: '0x68749665ff8d2d112fa859aa293f07a622782f38' },
+  { symbol: 'BUIDL', name: 'BlackRock USD Institutional Digital Liquidity Fund', address: '0x7712c34205737192402172409a8f7ccef8aa2aec' },
+  { symbol: 'UNI', name: 'Uniswap', address: '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984' },
+  { symbol: 'DOT', name: 'Polkadot', address: '0x8d010bf9c26881788b4e6bf5fd1bdc358c8f90b8' },
+  { symbol: 'MNT', name: 'Mantle', address: '0x3c3a81e81dc49a522a592e7622a7e711c06bf354' },
+  { symbol: 'PAXG', name: 'PAX Gold', address: '0x45804880de22913dafe09f4980848ece6ecbaf78' },
+  { symbol: 'WLFI', name: 'World Liberty Financial', address: '0xda5e1988097297dcdc1f90d4dfe7909e847cbef6' },
+  { symbol: 'USDY', name: 'Ondo US Dollar Yield', address: '0x96f6ef951840721adbf46ac996b59e0235cb985c' },
+  { symbol: 'OKB', name: 'OKB', address: '0x75231f58b43240c9718dd58b4967c5114342a86c' },
+  { symbol: 'USDF', name: 'Falcon USD', address: '0xfa2b947eec368f42195f24f36d2af29f7c24cec2' },
+  { symbol: 'HTX', name: 'HTX DAO', address: '0x61ec85ab89377db65762e234c946b5c25a56e99e' },
+  { symbol: 'ONDO', name: 'Ondo', address: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3' },
+  { symbol: 'SKY', name: 'Sky', address: '0x56072c95faa701256059aa122697b133aded9279' },
+  { symbol: 'PEPE', name: 'Pepe', address: '0x6982508145454ce325ddbe47a25d4ec3d2311933' }
+];
+var ERC20_TOKEN_BY_ADDRESS = ERC20_TOKENS.reduce(function(map, token) {
+  map[token.address.toLowerCase()] = token;
+  return map;
+}, {});
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
@@ -955,6 +1125,7 @@ var queryHistory = loadQueryHistory();
 var queryStartedAtMs = null;
 var queryTimerInterval = null;
 var copyToastTimeout = null;
+var queryBuilderTouched = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -1137,6 +1308,10 @@ function blockWithAge(block, timestamp) {
   return fmt(block) + (age ? ' (' + age + ')' : '');
 }
 
+function sqlString(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
 function buildDefaultQuery(fromBlock, toBlock) {
   if (fromBlock == null || toBlock == null) return null;
   var to = Math.max(0, Math.round(toBlock));
@@ -1157,6 +1332,130 @@ function updateDefaultQuery(fromBlock, toBlock) {
   byId('sql').value = sql;
   defaultQueryApplied = true;
   saveQuerySql(sql);
+}
+
+function normalizeAddress(value) {
+  var text = String(value || '').trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(text)) return null;
+  return text.toLowerCase();
+}
+
+function tokenDisplayName(token) {
+  return token.name === token.symbol ? token.symbol : token.name + ' (' + token.symbol + ')';
+}
+
+function tokenForCellValue(value) {
+  var address = normalizeAddress(value);
+  return address ? ERC20_TOKEN_BY_ADDRESS[address] || null : null;
+}
+
+function displayCellValue(column, value) {
+  var raw = formatCell(value);
+  var token = tokenForCellValue(raw);
+  if (token) return tokenDisplayName(token);
+  return raw;
+}
+
+function renderQueryBuilder() {
+  var tokenSelect = byId('builderToken');
+  var fields = byId('builderFields');
+  if (!tokenSelect || !fields) return;
+
+  tokenSelect.innerHTML = '<option value="">Any ERC20 token</option>' + ERC20_TOKENS.map(function(token) {
+    return '<option value="' + escapeHtml(token.address) + '">' + escapeHtml(tokenDisplayName(token)) + '</option>';
+  }).join('');
+
+  fields.innerHTML = LOG_FIELDS.map(function(field) {
+    var selected = DEFAULT_BUILDER_FIELDS.indexOf(field) !== -1;
+    return '<button type="button" class="field-toggle' + (selected ? ' active' : '') + '" data-builder-field="' + escapeHtml(field) + '" aria-pressed="' + (selected ? 'true' : 'false') + '">' + escapeHtml(field) + '</button>';
+  }).join('');
+}
+
+function setBuilderStatus(message, isError) {
+  var status = byId('builderStatus');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = isError ? '#ffd3d3' : '';
+}
+
+function parseBuilderBlock(id) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  var number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error('Block range values must be non-negative whole numbers.');
+  }
+  return number;
+}
+
+function selectedBuilderFields() {
+  return Array.prototype.map.call(document.querySelectorAll('[data-builder-field].active'), function(button) {
+    return button.getAttribute('data-builder-field');
+  }).filter(function(field) {
+    return LOG_FIELDS.indexOf(field) !== -1;
+  });
+}
+
+function buildQueryFromBuilder() {
+  var selectedFields = selectedBuilderFields();
+  if (!selectedFields.length) throw new Error('Select at least one field.');
+
+  var fromBlock = parseBuilderBlock('builderFromBlock');
+  var toBlock = parseBuilderBlock('builderToBlock');
+  if (fromBlock != null && toBlock != null && fromBlock > toBlock) {
+    throw new Error('From block must be less than or equal to to block.');
+  }
+
+  var conditions = ['topic0 = ' + sqlString(TRANSFER_TOPIC0)];
+  var tokenAddress = normalizeAddress(byId('builderToken').value);
+  if (tokenAddress) conditions.push('address = ' + sqlString(tokenAddress));
+  if (fromBlock != null && toBlock != null) {
+    conditions.push('block_number BETWEEN ' + fromBlock + ' AND ' + toBlock);
+  } else if (fromBlock != null) {
+    conditions.push('block_number >= ' + fromBlock);
+  } else if (toBlock != null) {
+    conditions.push('block_number <= ' + toBlock);
+  }
+
+  return [
+    'SELECT ' + selectedFields.join(', '),
+    'FROM logs',
+    'WHERE ' + conditions.join('\n  AND '),
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC',
+    'LIMIT ' + MAX_QUERY_LIMIT
+  ].join('\n');
+}
+
+function generateBuilderQuery() {
+  try {
+    var sql = buildQueryFromBuilder();
+    byId('sql').value = sql;
+    querySqlTouched = true;
+    saveQuerySql(sql);
+    var queryFoldout = document.querySelector('details[data-foldout-key="query-logs"]');
+    if (queryFoldout) queryFoldout.open = true;
+    setBuilderStatus('SQL generated.');
+    byId('sql').focus();
+  } catch (err) {
+    setBuilderStatus(err.message || 'Could not generate SQL.', true);
+  }
+}
+
+function markQueryBuilderTouched() {
+  queryBuilderTouched = true;
+}
+
+function maybeApplyBuilderRange(fromBlock, toBlock) {
+  var fromInput = byId('builderFromBlock');
+  var toInput = byId('builderToBlock');
+  if (!fromInput || !toInput || queryBuilderTouched) return;
+  if (toBlock == null) return;
+  fromInput.value = String(toBlock);
+  toInput.value = String(toBlock);
+  if (fromBlock != null) {
+    fromInput.placeholder = String(fromBlock);
+  }
+  toInput.placeholder = String(toBlock);
 }
 
 function shortHash(value) {
@@ -1340,6 +1639,7 @@ function updateStatus(data) {
   setText('debugSegments', fmt(data.sealed_partitions));
   setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
   updateDefaultQuery(storedLogFrom == null ? queryFrom : storedLogFrom, storedLogTo == null ? queryTo : storedLogTo);
+  maybeApplyBuilderRange(storedLogFrom == null ? queryFrom : storedLogFrom, storedLogTo == null ? queryTo : storedLogTo);
 
   addPerfSample({
     ts: Date.now(),
@@ -1648,8 +1948,9 @@ function renderTable(rows, emptyMessage) {
   }).join('') + '</tr>';
   tbody.innerHTML = rows.map(function(row) {
     return '<tr>' + keys.map(function(key) {
-      var text = formatCell(row[key]);
-      return '<td class="copy-cell" tabindex="0" title="Click to copy" data-copy-value="' + escapeHtml(text) + '">' + escapeHtml(text) + '</td>';
+      var rawText = formatCell(row[key]);
+      var displayText = displayCellValue(key, row[key]);
+      return '<td class="copy-cell" tabindex="0" title="Click to copy raw field text" data-copy-value="' + escapeHtml(rawText) + '">' + escapeHtml(displayText) + '</td>';
     }).join('') + '</tr>';
   }).join('');
   empty.style.display = 'none';
@@ -2070,6 +2371,19 @@ byId('sql').addEventListener('input', function() {
   saveQuerySql(byId('sql').value);
 });
 
+byId('builderFields').addEventListener('click', function(event) {
+  var button = event.target.closest('[data-builder-field]');
+  if (!button) return;
+  button.classList.toggle('active');
+  button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
+  markQueryBuilderTouched();
+});
+
+['builderFromBlock', 'builderToBlock', 'builderToken', 'builderEvent'].forEach(function(id) {
+  byId(id).addEventListener('input', markQueryBuilderTouched);
+  byId(id).addEventListener('change', markQueryBuilderTouched);
+});
+
 byId('queryHistoryTable').addEventListener('click', function(event) {
   var actionButton = event.target.closest('[data-history-action]');
   if (actionButton) {
@@ -2097,6 +2411,7 @@ byId('resultsTable').addEventListener('keydown', function(event) {
   copyResultCell(cell);
 });
 
+renderQueryBuilder();
 initFoldouts();
 initQuerySql();
 renderQueryHistory();

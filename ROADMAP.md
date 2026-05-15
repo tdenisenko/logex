@@ -19,7 +19,9 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Persisted the SQL editor text across page refreshes and made generated defaults apply only once from the latest stored log block.
 - Fixed empty log matches so queries return a clear empty result instead of exposing a DataFusion zero-partition planning error.
 - Polished query history display by renaming rows to result, widening that column, moving result detail into the expanded row, left-aligning actions, and adding copy feedback for result cells.
-- Documented query-engine, query-builder, performance, and coverage work as explicit TODOs for this branch.
+- Added the dashboard query builder with field toggles, block range inputs, a Transfer event default, and a top ERC20 token selector that generates SQL into the Query Logs editor.
+- Added display-only token names for known ERC20 contract addresses in query results while preserving raw values for copy and CSV export.
+- Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
 
@@ -39,11 +41,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
    - Reason: LogEx should feel close to a PostgreSQL-style analytical query surface while staying scoped to verified Ethereum logs.
    - Completion criteria: A broad TDD query suite covers projections, aliases, filters, block ranges, address/topic predicates, ordering, limit/offset caps, aggregates, grouping, distinct values, null handling, invalid SQL, unsupported tables, and deterministic error messages.
 
-5. Add the dashboard query builder.
-   - Reason: Non-SQL users need a deterministic way to build common log queries without guessing field names or event predicates.
-   - Completion criteria: The UI exposes togglable `logs` fields, block range inputs, and a common ERC20 token selector that generates deterministic SQL and fills the Query Logs editor without executing automatically.
-
-6. Measure and improve query performance on realistic segment access patterns.
+5. Measure and improve query performance on realistic segment access patterns.
    - Reason: Complex queries may touch many compressed segments and expose decompression, scanning, or indexing bottlenecks that small unit fixtures cannot reveal.
    - Completion criteria: Synthetic integration tests cover sparse and dense block ranges, and an optional active benchmark against a full synced data directory records query time, scanned rows/segments, and regressions worth optimizing.
 
@@ -63,6 +61,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Dashboard section expansion state is stored in browser `localStorage` because it is a per-browser display preference, not node state.
 - Query history is stored only in browser `localStorage`; it is user convenience state and must not be written to the node data directory.
 - ERC20 token names in the query builder should map to contract addresses, not event topics. The ERC20 `Transfer` topic0 is shared across tokens, while the log `address` identifies the token contract.
+- Token-name substitution in query results is display-only; copy and CSV export keep the raw query values.
 - Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions
@@ -94,15 +93,18 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: DataFusion rejected sorted queries when the log filter matched no storage segments because the lazy memory plan had zero partitions.
   - Resolution: Added an explicit empty batch generator so empty matches have a valid single-partition plan and return normal empty results.
 
+- Challenge: The token selector needs a current but deterministic top-token list without making the dashboard depend on a live market-data API.
+  - Resolution: Generated a static Ethereum-platform token dictionary from CoinGecko market-cap order and used it only as dashboard metadata.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. No obsolete query UI code was found during this polish pass.
+- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Removed no code; the builder is an additive UI over the existing query endpoint.
 
 ## Git Workflow
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, and query history polish.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, and query builder work.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.
