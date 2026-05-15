@@ -866,14 +866,18 @@ impl SyncEngine {
                 self.config.max_peers,
             ) {
                 self.refresh_connectivity_state();
-                if cancelable(
-                    &mut self.shutdown,
-                    self.peers.fill_peers(min_peers, self.config.max_peers),
-                )
-                .await
-                .is_none()
-                {
-                    return self.finish_shutdown();
+                if self.peers.serving_peer_count() < MIN_ACTIVE_SYNC_PEERS {
+                    if cancelable(
+                        &mut self.shutdown,
+                        self.peers.fill_peers(min_peers, self.config.max_peers),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        return self.finish_shutdown();
+                    }
+                } else {
+                    self.peers.drain_events_now();
                 }
                 self.refresh_connectivity_state();
             }

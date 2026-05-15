@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The remote run is validating EL reverse sync toward genesis with the improved pipeline. Fresh-run dense samples reached roughly 520k historical logs/sec on the dashboard and about 575k-725k logs/sec inside completed batches, depending on log density. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The two extra remote volumes are mounted and reserved for a symlink-only emergency storage workaround if root free space gets low.
+The remote run is validating EL reverse sync toward genesis with the improved pipeline. After the peer-refill hot-loop fix, warmed dense-range samples reached roughly 500k historical logs/sec on the dashboard, with a 2.3-hour remaining ETA and serving peers still warming. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The two extra remote volumes are mounted and reserved for a symlink-only emergency storage workaround if root free space gets low.
 
 ## Completed Since Last Run
 
@@ -17,7 +17,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
   - Historical row buffers are flattened once per storage flush instead of repeatedly appended into a growing batch vector.
   - High-memory historical write chunks scale to 1m rows when Linux reports healthy available memory.
   - Historical body/receipt planning reuses already-validated header hashes instead of hashing headers again.
-  - Peer refill no longer blocks each historical batch while the client already has enough serving peers to make progress.
+  - Peer refill no longer blocks each historical batch while the client already has enough serving peers to make progress; event draining still submits pending dials.
   - High-memory historical fetch lookahead depth increased to 5 after the blocking refill fix made the retry beneficial.
 - Kept the dense historical fetch window at 5,000 blocks after live samples improved dense-range throughput.
 - Raised the medium-dense fetch lookahead cap to 4 while keeping very-dense ranges capped at 3 to avoid unnecessary memory pressure.
@@ -77,7 +77,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
   - Resolution: Linux/glibc node builds now use jemalloc, which removed allocator churn from the measured hot path and reduced RSS in remote samples.
 
 - Challenge: Historical batches were spending wall-clock time waiting for peer refill toward 80 serving peers even while enough peers were already serving data.
-  - Resolution: Changed refill policy so the hot loop only blocks on peer fill below the minimum serving floor. Warmed status improved to roughly 410k-455k logs/sec and CPU utilization rose near the current host limit.
+  - Resolution: Changed refill policy so the hot loop only blocks on peer fill below the minimum serving floor. Warmed remote status improved to roughly 500k logs/sec and batch intervals moved closer to local processing time.
 
 - Challenge: The remote host may still need more effective storage than the root volume during fresh dense-range runs.
   - Resolution: Mounted the extra volumes and reserved them for moving immutable sealed segments behind symlinks if root free space falls near the safety threshold.
@@ -103,7 +103,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, and `b9623de`. A new checkpoint commit is pending for the latest accepted measurement changes.
+- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, and `ffcee7f`. A new checkpoint commit is pending for the latest peer-refill hot-loop fix.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.

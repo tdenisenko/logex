@@ -81,7 +81,7 @@ impl PeerManager {
         queued
     }
 
-    pub(super) fn drain_events_now(&mut self) {
+    pub(crate) fn drain_events_now(&mut self) {
         while let Some(event) = self.network_events.next().now_or_never().flatten() {
             self.handle_network_event(event);
         }
