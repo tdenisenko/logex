@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding roughly 70+ peers, zero raw compression backlog, and about 500k historical logs/sec in the current range, with ETA fluctuating by block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
+The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 500k-560k historical logs/sec in the current range, with ETA fluctuating by block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
 
 ## Completed Since Last Run
 
@@ -14,6 +14,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Profiled the current hot path and confirmed the dominant remaining cost is receipt/body validation, not peer count, disk I/O, or raw-segment compression.
 - Switched storage dictionary compression from the standard randomized hasher to `FxHashMap` for per-segment address/topic dictionary building.
 - Aligned the paired body/receipt pipeline return cap with the 10,000-block medium/sparse historical fetch window so widened sparse windows are actually consumed.
+- Deployed the widened sparse-window return cap to the remote run; the first post-warm sample improved to about 560k logs/sec and roughly 2.05h ETA with peer warm-up still in progress.
 - Validated the storage and sync changes with `cargo fmt --check`, `cargo test -p logex-storage --lib`, `cargo clippy -p logex-storage --all-targets -- -D warnings`, `cargo test -p logex-sync --lib`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 
 ## Remaining TODOs
