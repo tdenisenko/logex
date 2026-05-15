@@ -5168,6 +5168,7 @@ dependencies = [
  "crc32fast",
  "logex-types",
  "lz4_flex 0.11.6",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",

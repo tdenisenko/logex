@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::io;
+
+use rustc_hash::FxHashMap;
 
 /// Compression codec identifier stored in column file headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,8 @@ impl Codec {
 
 pub fn dict_encode(values: &[&[u8]], item_size: usize) -> Vec<u8> {
     let mut dict: Vec<&[u8]> = Vec::new();
-    let mut index_map: HashMap<&[u8], u32> = HashMap::with_capacity(values.len());
+    let mut index_map: FxHashMap<&[u8], u32> =
+        FxHashMap::with_capacity_and_hasher(values.len(), Default::default());
     let mut indices: Vec<u32> = Vec::with_capacity(values.len());
 
     for &val in values {
@@ -65,7 +67,8 @@ pub fn dict_encode_raw(raw_values: &[u8], item_size: usize) -> Vec<u8> {
 
     let row_count = raw_values.len() / item_size;
     let mut dict: Vec<&[u8]> = Vec::new();
-    let mut index_map: HashMap<&[u8], u32> = HashMap::with_capacity(row_count);
+    let mut index_map: FxHashMap<&[u8], u32> =
+        FxHashMap::with_capacity_and_hasher(row_count, Default::default());
     let mut indices: Vec<u32> = Vec::with_capacity(row_count);
 
     for val in raw_values.chunks_exact(item_size) {

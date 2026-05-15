@@ -6,42 +6,20 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The remote run is validating EL reverse sync toward genesis with the improved pipeline. It has crossed the Merge boundary and is continuing through pre-Merge history. Warmed samples have held strong peer retention, zero raw compression backlog, and have reached roughly 500k-800k historical logs/sec depending on block density and peer warm-up. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The current fresh run writes to the root data directory; the two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low.
+The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding roughly 70+ peers, zero raw compression backlog, and about 500k historical logs/sec in the current range, with ETA fluctuating by block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
 
 ## Completed Since Last Run
 
-- Deployed and kept the EL performance changes that improved measured logs/sec:
-  - Linux/glibc builds use jemalloc for the node runtime.
-  - Dense historical validation/extraction work is split by estimated transaction/log work instead of only block count.
-  - Sparse low-log-density ranges can use deeper fetch lookahead when peers and memory are healthy.
-  - Historical row buffers are flattened once per storage flush instead of repeatedly appended into a growing batch vector.
-  - High-memory historical write chunks scale to 1m rows when Linux reports healthy available memory.
-  - Historical body/receipt planning reuses already-validated header hashes instead of hashing headers again.
-  - Peer refill no longer blocks each historical batch while the client already has enough serving peers to make progress; event draining still submits pending dials.
-- All-empty historical header chunks can advance the verified floor without body/receipt P2P requests when every body/receipt commitment is the canonical empty root.
-- High-memory historical fetch lookahead depth increased to 5 after the blocking refill fix made the retry beneficial.
-- Added a density-aware fetch-window expansion for healthy-memory medium/sparse ranges so lower-log-density pre-Merge ranges can amortize per-batch overhead without raising dense-range memory pressure.
-- Suppressed noisy default `discv5` warning logs at the normal `info` filter, demoted non-actionable peer/session response-channel churn to debug, and removed CL peer-sort base58 formatting from hot tie-breakers.
-- Added a bounded receipt-bloom cache for eth/69 and eth/70 receipt responses, avoiding repeated bloom Keccak for common log addresses/topics while preserving receipt-root and logs-bloom verification. The cache uses `FxHashMap` because it is local, bounded, and not exposed to adversarial lookup semantics.
-- Kept the dense historical fetch window at 5,000 blocks after live samples improved dense-range throughput.
-- Raised the medium-dense fetch lookahead cap to 4 while keeping very-dense ranges capped at 3 to avoid unnecessary memory pressure.
-- Reduced normal CL light-client log churn and skipped stale finality/optimistic updates before expensive verification.
-- Persisted the storage catalog once per historical batch instead of after every sealed segment; segment manifests still allow crash recovery.
-- Moved 4,000 immutable sealed segment directories on the remote host to the two extra mounted volumes and left symlinks at the original data-dir paths.
-- Reverted the higher body/receipt request cap and 50/50 outbound split experiments after they reduced throughput or peer warm-up.
-- Rejected and reverted the 64-task validation fanout and depth-6 high-memory lookahead experiments after live logs/sec did not improve.
-- Verified a completed full historical sync on the previous run, confirmed live head tracking, then started a fresh run on `root@165.22.64.42`.
-- Added historical logs/sec tracking to sync status and dashboard metrics.
-- Changed historical ETA to prefer estimated remaining logs divided by logs/sec, using the known total of `6,780,563,686` logs through block `25,093,066` and `733` logs/block above that reference point.
-- Changed the dashboard’s main rate and performance chart to logs/sec while keeping block/sec in advanced metrics.
-- Fixed a flaky storage-metrics test that assumed filesystem free-space probes are byte-identical during a test run.
-- Validated the latest sync changes with `cargo test -p logex-sync --lib` and `cargo clippy -p logex-sync --all-targets -- -D warnings`. Earlier dashboard/status changes were validated with `cargo test -p logex-server --lib` and the combined node/sync/server clippy command.
+- Sampled the live remote client after the latest EL performance deploy. Peer retention, live head tracking, compression backlog, and active-disk headroom remain healthy.
+- Profiled the current hot path and confirmed the dominant remaining cost is receipt/body validation, not peer count, disk I/O, or raw-segment compression.
+- Switched storage dictionary compression from the standard randomized hasher to `FxHashMap` for per-segment address/topic dictionary building.
+- Validated the storage change with `cargo fmt --check`, `cargo test -p logex-storage --lib`, and `cargo clippy -p logex-storage --all-targets -- -D warnings`.
 
 ## Remaining TODOs
 
 1. Finish EL historical sync production validation.
    - Reason: EL validation target is genesis, including pre-Merge blocks.
-   - Completion criteria: The remote run reaches genesis, continues live head tracking, and restart/resume remains correct across the post-Merge, Merge, pre-Merge, and genesis ranges.
+   - Completion criteria: The remote run reaches genesis, continues live head tracking, and restart/resume remains correct across post-Merge, Merge, pre-Merge, and genesis ranges.
 
 2. Continue performance work only where measurements show meaningful upside.
    - Reason: The target is a predictable full-history sync near 2 hours on adequate hardware without destabilizing memory, disk, or peer behavior.
@@ -52,8 +30,8 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
    - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
 
 4. Complete release validation and hardening.
-   - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, and shutdown behavior.
-   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and exposed listener safety.
+   - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, graceful shutdown, and exposed listener safety.
+   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and public deployment safety.
 
 ## Design Decisions
 
@@ -66,70 +44,41 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.
-- Peer refill should not block the historical hot loop once minimum useful serving capacity exists; peer discovery and dialing continue through the normal event-drain path.
 
 ## Challenges and Resolutions
 
 - Challenge: Block/sec made ETA misleading because older blocks are much less log-dense than recent blocks.
   - Resolution: Added logs/sec tracking and a log-count based ETA estimate.
 
-- Challenge: A higher body/receipt request cap appeared useful but collapsed throughput during the live run.
-  - Resolution: Reverted it to the known-good cap and kept the service on the stable path.
+- Challenge: Dense historical validation spent avoidable CPU rebuilding repeated receipt-bloom components.
+  - Resolution: Added a bounded receipt-bloom cache for eth/69 and eth/70 responses while preserving receipt-root and logs-bloom verification.
 
-- Challenge: Dense batches spent avoidable time in task scheduling and allocation.
-  - Resolution: Validation/extraction jobs are now grouped by estimated work, reducing fragmentation without changing cryptographic verification.
+- Challenge: Lower-log-density pre-Merge ranges make per-batch overhead more visible.
+  - Resolution: Historical fetch windows now adapt to peer count, memory, and observed log density.
 
-- Challenge: Dense historical batches left high RSS after data was freed.
-  - Resolution: Linux/glibc node builds now use jemalloc, which removed allocator churn from the measured hot path and reduced RSS in remote samples.
-
-- Challenge: Historical batches were spending wall-clock time waiting for peer refill toward 80 serving peers even while enough peers were already serving data.
-  - Resolution: Changed refill policy so the hot loop only blocks on peer fill below the minimum serving floor. Warmed remote status improved to roughly 500k logs/sec and batch intervals moved closer to local processing time.
-
-- Challenge: Very old empty blocks would still require body/receipt P2P work even when their header roots already prove empty bodies and receipts.
-  - Resolution: Added a guarded sequential path that advances the historical floor for all-empty header chunks without body/receipt requests.
-
-- Challenge: The remote host needed more effective storage than the root volume during the fresh dense-range run.
-  - Resolution: Stopped the client cleanly, moved immutable sealed segment ranges behind symlinks onto both extra volumes, then restarted successfully from the same data directory.
-
-- Challenge: After crossing Merge, lower-log-density blocks made per-batch overhead more visible.
-  - Resolution: Added a guarded density-aware fetch-window boost for medium/sparse ranges. Initial pre-Merge remote samples improved block throughput without increasing backlog or RSS.
-
-- Challenge: Profiling showed avoidable CPU in peer-id formatting and receipt-bloom reconstruction.
-  - Resolution: Normal info logs now filter noisy discovery warnings, routine peer/session churn is debug-level, CL peer sorting uses `PeerId` ordering instead of base58 strings, and receipt bloom reconstruction caches repeated address/topic bitsets per response chunk.
-
-- Challenge: A storage-metrics test compared two live filesystem free-space probes exactly.
-  - Resolution: The test now allows a small tolerance while preserving the same semantic checks.
-
-- Challenge: CL gossip/RPC light-client updates were creating avoidable info-level log volume and duplicate verification work.
-  - Resolution: Routine success/error logs are now debug-level, and stale finality/optimistic updates are ignored after decode and before signature verification.
+- Challenge: Profiling after the latest deploy still showed small standard-hasher overhead in storage dictionary compression.
+  - Resolution: Switched the hot per-segment dictionary maps to `FxHashMap`.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Removed/reverted the higher body/receipt request-cap experiment because it hurt the remote run.
-- Removed/reverted the 50/50 outbound split experiment because it warmed fewer useful peers than the existing split.
-- Removed/reverted the 64-task validation fanout and depth-6 high-memory lookahead experiments because live logs/sec did not improve.
-- Removed the now-unused header-based body/receipt planning helper after switching historical planning to reuse validated header hashes.
-- Deduplicated historical peer-note collection so repeated peer IDs from the same batch are not carried through the ingest path.
-- Inspected the status/dashboard performance path and versioned the browser performance sample key so old block/sec samples are not reused as logs/sec samples.
-- Inspected storage-metrics tests after validation failure and removed the brittle exact free-space comparison.
-- Removed two accidentally copied files from the remote checkout root after a bad rsync target and redeployed using relative paths.
-- Inspected the local geth/nethermind reference directories, but the available worktrees had been cleaned down to empty directory skeletons and were not useful for this pass.
-- No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
+- Rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
+- Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead.
+- Remaining cleanup risk is limited to future profiling discoveries; current changed paths are active in the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, `9f62d2f`, `3a4815c`, `8cde903`, and `perf: reduce receipt bloom and peer logging overhead`.
+- Commits made during this run: pending local commit for storage dictionary hashing and roadmap cleanup.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
 
 ## Known Issues or Risks
 
-- The latest deployed build still needs to run through genesis on the remote server, then a fresh run should measure the dense recent ranges again with the kept changes.
-- The log-count ETA uses a reference total and recent-block average above block `25,093,066`; it is better than block/sec ETA but still an estimate until exact persisted rows approach the target range.
-- Full sync performance is still sensitive to body/receipt response latency and dense receipt/log processing.
+- The latest deployed build still needs to run through genesis on the remote server, then a fresh run should measure dense recent ranges again.
+- The log-count ETA uses a reference total and recent-block average above block `25,093,066`; it is better than block/sec ETA but still an estimate.
+- Full sync performance is now mostly sensitive to receipt verification CPU and body/receipt response latency.
 - Extra server volumes are a test-environment workaround and not a product storage allocator.
 - HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
 - gRPC exposure still needs a clear auth/bind/disable policy before public deployment.
