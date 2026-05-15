@@ -7,6 +7,7 @@ use logex_types::{
 };
 
 const HISTORICAL_RATE_EWMA_WEIGHT: f64 = 0.35;
+const LIVE_LOG_RATE_EWMA_WEIGHT: f64 = 0.35;
 
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
@@ -14,6 +15,8 @@ pub struct ProgressTracker {
     start: Instant,
     blocks_processed: u64,
     logs_ingested: u64,
+    live_log_rate_at: Instant,
+    live_recent_logs_per_sec: f64,
     /// Block number when we last logged progress.
     last_log_block: u64,
     /// Timestamp of the last terminal progress line.
@@ -34,6 +37,8 @@ impl ProgressTracker {
             start: Instant::now(),
             blocks_processed: 0,
             logs_ingested: 0,
+            live_log_rate_at: Instant::now(),
+            live_recent_logs_per_sec: 0.0,
             last_log_block: 0,
             last_log_at: Instant::now(),
             historical_blocks_processed: 0,
@@ -137,6 +142,17 @@ impl ProgressTracker {
         self.blocks_processed += 1;
         self.logs_ingested += log_count;
 
+        let now = Instant::now();
+        let live_interval = now.duration_since(self.live_log_rate_at).as_secs_f64();
+        self.live_log_rate_at = now;
+        let recent_lps = if live_interval > 0.0 {
+            log_count as f64 / live_interval
+        } else {
+            0.0
+        };
+        let live_lps = smoothed_live_log_rate(self.live_recent_logs_per_sec, recent_lps);
+        self.live_recent_logs_per_sec = live_lps;
+
         let elapsed = self.start.elapsed().as_secs_f64();
         let bps = if elapsed > 0.0 {
             self.blocks_processed as f64 / elapsed
@@ -151,6 +167,8 @@ impl ProgressTracker {
         status.current_block = block_number;
         status.blocks_per_sec = bps;
         status.blocks_per_minute = bpm;
+        status.logs_per_sec = live_lps;
+        status.logs_rate_updated_at_unix_ms = Some(unix_time_millis());
         status.logs_ingested = self.logs_ingested;
 
         if bps > 0.0 && status.target_block > block_number {
@@ -175,6 +193,7 @@ impl ProgressTracker {
                 total_logs = self.logs_ingested,
                 blocks_per_sec = format!("{bps:.2}"),
                 blocks_per_minute = format!("{bpm:.1}"),
+                logs_per_sec = format!("{live_lps:.2}"),
                 eta_seconds = status.eta_seconds.map(|eta| eta.round() as u64),
                 "sync progress"
             );
@@ -324,6 +343,14 @@ fn smoothed_historical_rate(previous: f64, recent: f64) -> f64 {
     (previous * (1.0 - HISTORICAL_RATE_EWMA_WEIGHT)) + (recent * HISTORICAL_RATE_EWMA_WEIGHT)
 }
 
+fn smoothed_live_log_rate(previous: f64, recent: f64) -> f64 {
+    if previous <= 0.0 {
+        return recent.max(0.0);
+    }
+
+    (previous * (1.0 - LIVE_LOG_RATE_EWMA_WEIGHT)) + (recent.max(0.0) * LIVE_LOG_RATE_EWMA_WEIGHT)
+}
+
 fn unix_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -389,6 +416,14 @@ mod tests {
         let smoothed = smoothed_historical_rate(100.0, 200.0);
         assert!(smoothed > 100.0);
         assert!(smoothed < 200.0);
+    }
+
+    #[test]
+    fn live_log_rate_smoothing_decays_on_empty_blocks() {
+        assert_eq!(smoothed_live_log_rate(0.0, 128.0), 128.0);
+        let decayed = smoothed_live_log_rate(100.0, 0.0);
+        assert!(decayed > 0.0);
+        assert!(decayed < 100.0);
     }
 
     #[test]

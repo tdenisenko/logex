@@ -177,6 +177,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let historical_anchor = historical_anchor.or(sync.historical_execution_anchor);
     let historical_incomplete =
         historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
+    let logs_per_sec =
+        effective_historical_rate(sync.logs_per_sec, sync.logs_rate_updated_at_unix_ms);
     let historical_blocks_per_sec = if historical_incomplete {
         effective_historical_rate(
             sync.historical_blocks_per_sec,
@@ -225,6 +227,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "target_block": sync.target_block,
         "blocks_per_sec": sync.blocks_per_sec,
         "blocks_per_minute": sync.blocks_per_minute,
+        "logs_per_sec": logs_per_sec,
+        "logs_rate_updated_at_unix_ms": sync.logs_rate_updated_at_unix_ms,
         "logs_ingested": sync.logs_ingested,
         "total_rows": total_rows,
         "sealed_partitions": sealed_partitions,
@@ -905,6 +909,8 @@ mod tests {
                 target_block: 500,
                 blocks_per_sec: 2.0,
                 blocks_per_minute: 120.0,
+                logs_per_sec: 7.5,
+                logs_rate_updated_at_unix_ms: Some(unix_time_millis()),
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
                 historical_execution_floor: None,
@@ -1109,6 +1115,7 @@ mod tests {
             logex_types::EXECUTION_TERMINAL_POW_BLOCK
         );
         assert_eq!(status["blocks_per_minute"], 120.0);
+        assert_eq!(status["logs_per_sec"], 7.5);
         assert_eq!(status["logs_ingested"], 42);
         assert_eq!(status["node_state"], "reconnecting");
         assert_eq!(status["canonical_top_block"], 500);

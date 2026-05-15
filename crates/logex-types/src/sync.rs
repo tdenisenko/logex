@@ -237,6 +237,11 @@ pub struct SyncStatus {
     pub blocks_per_sec: f64,
     /// Average sync throughput expressed in blocks per minute.
     pub blocks_per_minute: f64,
+    /// Recent live log ingestion throughput from forward sync blocks.
+    pub logs_per_sec: f64,
+    /// Wall-clock time when live log throughput last advanced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs_rate_updated_at_unix_ms: Option<u64>,
     /// Total logs ingested since the node started.
     pub logs_ingested: u64,
     /// Estimated seconds remaining to reach target.

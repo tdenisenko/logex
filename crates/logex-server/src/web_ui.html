@@ -672,7 +672,7 @@
     <div class="section-head">
       <div>
         <h2>Sync Performance</h2>
-        <p>Historical sync rate, serving peers, and process CPU utilization over the selected window.</p>
+        <p>Execution log rate, serving peers, and process CPU utilization over the selected window.</p>
       </div>
       <div class="range-buttons" aria-label="Chart range">
         <button type="button" class="active" data-hours="1" onclick="setChartWindow(1)">1 hour</button>
@@ -714,8 +714,8 @@
           <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
-          <div class="debug-item"><span class="k">Historical log rate</span><span class="v" id="debugLogRate">--</span></div>
-          <div class="debug-item"><span class="k">Historical block rate</span><span class="v" id="debugBlockRate">--</span></div>
+          <div class="debug-item"><span class="k">Log rate</span><span class="v" id="debugLogRate">--</span></div>
+          <div class="debug-item"><span class="k">Block rate</span><span class="v" id="debugBlockRate">--</span></div>
           <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
@@ -908,15 +908,17 @@ function fmtCompletionTime(seconds) {
   var now = new Date();
   var time = date.toLocaleTimeString(undefined, {
     hour: '2-digit',
-    minute: '2-digit'
+    minute: '2-digit',
+    hourCycle: 'h23'
   });
-  if (date.toDateString() === now.toDateString()) return time + ' local';
+  if (date.toDateString() === now.toDateString()) return time;
   return date.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
-    minute: '2-digit'
-  }) + ' local';
+    minute: '2-digit',
+    hourCycle: 'h23'
+  });
 }
 
 function fmtEtaWithCompletion(seconds) {
@@ -1017,25 +1019,36 @@ function updateStatus(data) {
   var floorTime = historicalFloor && historicalFloor.timestamp != null ? numberOrNull(historicalFloor.timestamp) : null;
   var anchorBlockNumber = historicalAnchor && historicalAnchor.block_number != null ? numberOrNull(historicalAnchor.block_number) : null;
   var anchorTimeValue = historicalAnchor && historicalAnchor.timestamp != null ? numberOrNull(historicalAnchor.timestamp) : null;
-  var targetBlock = numberOrNull(data.historical_target_block);
-  if (targetBlock == null) targetBlock = 0;
-  var total = anchorBlockNumber == null ? 0 : Math.max(0, anchorBlockNumber - targetBlock);
-  var remaining = floorBlock == null ? null : Math.max(0, floorBlock - targetBlock);
-  var done = remaining == null ? 0 : Math.max(0, total - remaining);
-  var pct = total <= 0 ? (floorBlock === targetBlock ? 100 : 0) : done / total * 100;
-  var active = pct < 100 && String(state).toLowerCase() !== 'synced';
   var queryFrom = numberOrNull(query.verified_from_block);
   var queryTo = numberOrNull(query.verified_to_block);
   var latestBlock = numberOrNull(query.latest_block) || numberOrNull(data.head_block) || numberOrNull(data.target_block);
   var latestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
+  var historicalTargetBlock = numberOrNull(data.historical_target_block);
+  if (historicalTargetBlock == null) historicalTargetBlock = 0;
+  var historicalComplete = floorBlock != null && floorBlock <= historicalTargetBlock;
+  var liveCurrentBlock = numberOrNull(data.current_block);
+  var liveTargetBlock = numberOrNull(data.target_block) || latestBlock;
+  var liveRemaining = liveCurrentBlock == null || liveTargetBlock == null ? null : Math.max(0, liveTargetBlock - liveCurrentBlock);
+  var historicalTotal = anchorBlockNumber == null ? 0 : Math.max(0, anchorBlockNumber - historicalTargetBlock);
+  var historicalRemaining = floorBlock == null ? null : Math.max(0, floorBlock - historicalTargetBlock);
+  var historicalDone = historicalRemaining == null ? 0 : Math.max(0, historicalTotal - historicalRemaining);
+  var livePct = numberOrNull(data.progress_pct);
+  var pct = historicalComplete
+    ? (livePct == null ? (liveRemaining === 0 ? 100 : 0) : livePct)
+    : (historicalTotal <= 0 ? (floorBlock === historicalTargetBlock ? 100 : 0) : historicalDone / historicalTotal * 100);
+  var active = (historicalComplete ? liveRemaining > 0 : pct < 100) && String(state).toLowerCase() !== 'synced';
   var finalizedBlock = anchorBlock(data.finalized_execution_head);
   var finalizedTime = anchorTime(data.finalized_execution_head);
   var optimisticBlock = anchorBlock(data.optimistic_execution_head);
   var optimisticTime = anchorTime(data.optimistic_execution_head);
   var materializedBlock = anchorBlock(data.materialized_execution_ceiling);
   var materializedTime = anchorTime(data.materialized_execution_ceiling);
-  var blockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
-  var logRate = numberOrNull(data.historical_logs_per_sec) || 0;
+  var historicalBlockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
+  var liveBlockRate = numberOrNull(data.blocks_per_sec) || 0;
+  var blockRate = historicalComplete ? liveBlockRate : historicalBlockRate;
+  var historicalLogRate = numberOrNull(data.historical_logs_per_sec) || 0;
+  var liveLogRate = numberOrNull(data.logs_per_sec) || 0;
+  var logRate = historicalComplete ? liveLogRate : historicalLogRate;
   var normalizedCpu = numberOrNull(data.cpu_utilization_pct);
   var rawCpu = numberOrNull(data.cpu_utilization_raw_pct);
   var cpuCores = numberOrNull(data.cpu_logical_cores);
@@ -1050,16 +1063,24 @@ function updateStatus(data) {
   refreshLastUpdated();
 
   setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 2) + '%' : '--');
-  setText('executionSummary', floorBlock == null
-    ? 'Waiting for the first verified historical Execution Layer block.'
-    : fmtBlocks(remaining) + ' remaining to genesis.');
-  setText('executionStart', anchorBlockNumber == null ? 'Pivot --' : 'Pivot ' + blockWithAge(anchorBlockNumber, anchorTimeValue));
-  setText('executionEnd', 'Genesis block ' + fmt(targetBlock));
+  setText('executionSummary', historicalComplete
+    ? (liveRemaining == null ? 'Waiting for the latest Execution Layer block.' : fmtBlocks(liveRemaining) + ' remaining to latest block.')
+    : (floorBlock == null
+      ? 'Waiting for the first verified historical Execution Layer block.'
+      : fmtBlocks(historicalRemaining) + ' remaining to genesis.'));
+  setText('executionStart', historicalComplete
+    ? (liveCurrentBlock == null ? 'Synced block --' : 'Synced ' + blockWithAge(liveCurrentBlock, liveCurrentBlock === latestBlock ? latestTime : null))
+    : (anchorBlockNumber == null ? 'Pivot --' : 'Pivot ' + blockWithAge(anchorBlockNumber, anchorTimeValue)));
+  setText('executionEnd', historicalComplete
+    ? (liveTargetBlock == null ? 'Latest block --' : 'Latest ' + blockWithAge(liveTargetBlock, latestTime))
+    : 'Genesis block ' + fmt(historicalTargetBlock));
   setWidth('executionBar', pct);
   setExecutionBarState(active, false);
-  setText('executionRemaining', remaining == null ? '--' : fmtBlocks(remaining));
+  setText('executionRemaining', historicalComplete
+    ? (liveRemaining == null ? '--' : fmtBlocks(liveRemaining))
+    : (historicalRemaining == null ? '--' : fmtBlocks(historicalRemaining)));
   setText('executionRate', fmtLogRate(logRate));
-  setText('executionEta', fmtEtaWithCompletion(data.historical_eta_seconds));
+  setText('executionEta', historicalComplete ? 'Synced' : fmtEtaWithCompletion(data.historical_eta_seconds));
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
