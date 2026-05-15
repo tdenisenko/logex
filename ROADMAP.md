@@ -103,7 +103,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, and `ffcee7f`. A new checkpoint commit is pending for the latest peer-refill hot-loop fix.
+- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, and `9f62d2f`.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
