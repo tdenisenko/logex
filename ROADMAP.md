@@ -4,9 +4,9 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active branch: `feature/el-reverse-sync` / PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The current remote run is approaching the Merge boundary and continues validating history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec depending on block/log density and test-machine disk activity. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
+The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
@@ -21,23 +21,17 @@ The current remote run is approaching the Merge boundary and continues validatin
 - Fixed the GitHub test failure in historical ingest coalescing by making the row-limit test deterministic across different CI runner memory sizes.
 - Reverted the uncommitted depth-6 fetch-pipeline trial after warmed samples failed to beat the known depth-5 baseline.
 - Relocated 6,000 sealed remote segment directories onto the mounted test volumes and replaced them with symlinks, restoring root write headroom without touching the active hot segment.
+- Completed the remote EL historical sync to genesis, confirmed live head tracking continued, and verified restart/resume after completion.
+- Added a local fresh-run monitor script and runbook under `/private/tmp` for future destructive benchmark runs that wipe the remote data directory, prepare extra volumes, monitor sync to genesis, and write a report.
 - Validated the branch with the CI commands `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`; targeted server checks also covered the new CPU metric and ETA display data path.
 
 ## Remaining TODOs
 
-1. Finish EL historical sync production validation.
-   - Reason: EL validation target is genesis, including pre-Merge blocks.
-   - Completion criteria: The remote run reaches genesis, continues live head tracking, and restart/resume remains correct across post-Merge, Merge, pre-Merge, and genesis ranges.
-
-2. Continue performance work only where measurements show meaningful upside.
-   - Reason: The target is a predictable full-history sync near 2 hours on adequate hardware without destabilizing memory, disk, or peer behavior.
-   - Completion criteria: Fresh-run logs/sec ETA approaches the 2-hour target after warm-up, serving-peer collapse does not recur, and any new optimization is kept only if it improves measured logs/sec or stability.
-
-3. Replace the temporary checkpoint source and stale-checkpoint policy.
+1. Replace the temporary checkpoint source and stale-checkpoint policy.
    - Reason: Weak-subjectivity safety requires a recent checkpoint and clear stale-checkpoint rejection.
    - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
 
-4. Complete release validation and hardening.
+2. Complete release validation and hardening.
    - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, graceful shutdown, and exposed listener safety.
    - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and public deployment safety.
 
@@ -74,26 +68,28 @@ The current remote run is approaching the Merge boundary and continues validatin
 - Challenge: The historical ingest coalescing test depended on the host's available memory, so GitHub's higher-memory runner used a larger row threshold than the local machine.
   - Resolution: Added an explicit row-limit coalescing helper for deterministic unit coverage while leaving the production memory-adaptive limit intact.
 
+- Challenge: The full-history run needed more disk headroom than the primary remote volume alone could provide.
+  - Resolution: Kept the product UI/data-dir model single-disk oriented and used a test-machine-only sealed-segment symlink relocation for extra mounted volumes.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
+- Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was found in this pass.
 - Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead including the uncommitted depth-6 fetch-pipeline trial.
-- Remaining cleanup risk is limited to future profiling discoveries; current changed paths are active in the remote run.
+- Remaining cleanup risk is limited to future profiling discoveries; current changed paths were exercised by the completed remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, `72c6b74`, `4c8ab5f`, plus this roadmap update.
-- Pull request status: draft PR #76 remains open.
-- Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
+- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, `72c6b74`, `4c8ab5f`, `d4ca40f`, plus this roadmap update.
+- Pull request status: PR #76 is ready to merge after this final roadmap update is pushed and checks pass.
+- Merge status: pending final push/checks.
 - Blockers: none known.
 
 ## Known Issues or Risks
 
-- The latest deployed build still needs to run through genesis on the remote server, then a fresh run should measure dense recent ranges again.
 - The log-count ETA uses a reference total and recent-block average above block `25,093,066`; it is better than block/sec ETA but still an estimate.
-- Full sync performance is now mostly sensitive to receipt verification CPU and body/receipt response latency.
+- Full sync performance is now mostly sensitive to receipt verification CPU and body/receipt response latency. Further optimization should be handled in a new focused PR only if fresh-run measurements show a meaningful regression or clear upside.
 - Extra server volumes are a test-environment workaround and not a product storage allocator.
 - HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
 - gRPC exposure still needs a clear auth/bind/disable policy before public deployment.
