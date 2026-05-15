@@ -19,6 +19,8 @@ pub struct StorageMetrics {
     pub storage_free_volumes: Vec<StorageVolumeMetrics>,
     pub storage_limiting_path: Option<String>,
     pub cpu_utilization_pct: Option<f64>,
+    pub cpu_utilization_raw_pct: Option<f64>,
+    pub cpu_logical_cores: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -101,7 +103,7 @@ fn update_cached_metrics(
 ) -> StorageMetrics {
     let now = Instant::now();
     let process_cpu_time = process_cpu_time();
-    metrics.cpu_utilization_pct = guard
+    let cpu_raw_pct = guard
         .refreshed_at
         .zip(guard.process_cpu_time)
         .zip(process_cpu_time)
@@ -111,6 +113,10 @@ fn update_cached_metrics(
             (elapsed.as_secs_f64() > 0.0)
                 .then_some(cpu_delta.as_secs_f64() / elapsed.as_secs_f64() * 100.0)
         });
+    metrics.cpu_utilization_raw_pct = cpu_raw_pct;
+    metrics.cpu_logical_cores = logical_cpu_count();
+    metrics.cpu_utilization_pct =
+        normalized_cpu_utilization_pct(cpu_raw_pct, metrics.cpu_logical_cores);
     guard.process_cpu_time = process_cpu_time;
     guard.refresh_in_progress = false;
     guard.size_cache = size_cache;
@@ -164,9 +170,24 @@ fn collect_storage_metrics(
             storage_free_volumes,
             storage_limiting_path,
             cpu_utilization_pct: None,
+            cpu_utilization_raw_pct: None,
+            cpu_logical_cores: logical_cpu_count(),
         },
         size_cache,
     )
+}
+
+fn normalized_cpu_utilization_pct(
+    raw_pct: Option<f64>,
+    logical_cores: Option<usize>,
+) -> Option<f64> {
+    let raw_pct = raw_pct?;
+    let logical_cores = logical_cores?.max(1) as f64;
+    Some(raw_pct / logical_cores)
+}
+
+fn logical_cpu_count() -> Option<usize> {
+    std::thread::available_parallelism().ok().map(usize::from)
 }
 
 #[cfg(unix)]
@@ -607,6 +628,24 @@ mod tests {
             assert_eq!(metrics.storage_limiting_path, metrics.storage_write_path);
             assert!(volume_free.abs_diff(disk_free) <= FREE_SPACE_TEST_TOLERANCE_BYTES);
         }
+    }
+
+    #[test]
+    fn cpu_utilization_is_normalized_by_logical_core_capacity() {
+        assert_eq!(
+            normalized_cpu_utilization_pct(Some(800.0), Some(8)),
+            Some(100.0)
+        );
+        assert_eq!(
+            normalized_cpu_utilization_pct(Some(400.0), Some(8)),
+            Some(50.0)
+        );
+        assert_eq!(
+            normalized_cpu_utilization_pct(Some(880.0), Some(8)),
+            Some(110.0)
+        );
+        assert_eq!(normalized_cpu_utilization_pct(None, Some(8)), None);
+        assert_eq!(normalized_cpu_utilization_pct(Some(100.0), None), None);
     }
 
     #[test]

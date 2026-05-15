@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 500k-560k historical logs/sec in the current range, with ETA fluctuating by block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
+The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 430k-560k historical logs/sec depending on block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
 
 ## Completed Since Last Run
 
@@ -15,7 +15,9 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Switched storage dictionary compression from the standard randomized hasher to `FxHashMap` for per-segment address/topic dictionary building.
 - Aligned the paired body/receipt pipeline return cap with the 10,000-block medium/sparse historical fetch window so widened sparse windows are actually consumed.
 - Deployed the widened sparse-window return cap to the remote run; the first post-warm sample improved to about 560k logs/sec and roughly 2.05h ETA with peer warm-up still in progress.
-- Validated the storage and sync changes with `cargo fmt --check`, `cargo test -p logex-storage --lib`, `cargo clippy -p logex-storage --all-targets -- -D warnings`, `cargo test -p logex-sync --lib`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Normalized dashboard CPU utilization by logical core capacity while keeping raw process CPU in advanced status data.
+- Added local completion time beside the historical sync time remaining.
+- Validated the branch with the CI commands `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`; targeted server checks also covered the new CPU metric and ETA display data path.
 
 ## Remaining TODOs
 
@@ -42,6 +44,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Historical EL validation verifies parent-hash ancestry, body commitments, receipt roots, cumulative gas, and logs bloom against each header.
 - Historical chunks whose headers prove empty transaction, receipt, ommer, and withdrawal roots can be ingested header-only because the empty body and receipt tries are uniquely determined by those roots.
 - Historical ETA is log-based when log-rate data is available; block/sec remains an advanced diagnostic because block density varies heavily across history.
+- Dashboard CPU is shown as capacity utilization across logical CPUs; raw multi-core process CPU remains available in advanced status data.
 - Query responses keep a hard `10,000` row cap and dashboard pagination defaults to `50` rows.
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
@@ -63,7 +66,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 
 ## Dead Code and Obsolescence Cleanup
 
-- Rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
+- Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
 - Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead.
 - Remaining cleanup risk is limited to future profiling discoveries; current changed paths are active in the remote run.
 
@@ -71,7 +74,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: pending local commit for storage dictionary hashing and roadmap cleanup.
+- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`; a local dashboard metrics commit is pending validation.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.

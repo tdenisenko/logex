@@ -250,6 +250,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "storage_free_volumes": storage_metrics.storage_free_volumes,
         "storage_limiting_path": storage_metrics.storage_limiting_path,
         "cpu_utilization_pct": storage_metrics.cpu_utilization_pct,
+        "cpu_utilization_raw_pct": storage_metrics.cpu_utilization_raw_pct,
+        "cpu_logical_cores": storage_metrics.cpu_logical_cores,
         "eta_seconds": sync.eta_seconds,
         "historical_execution_floor": historical_floor,
         "historical_execution_anchor": historical_anchor,

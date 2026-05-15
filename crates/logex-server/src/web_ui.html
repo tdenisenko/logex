@@ -777,7 +777,7 @@ var queryWasCapped = false;
 var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
-var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v2.samples';
+var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
@@ -900,6 +900,32 @@ function fmtEta(seconds) {
   return minutes + 'm';
 }
 
+function fmtCompletionTime(seconds) {
+  var value = numberOrNull(seconds);
+  if (value === null || value <= 0) return null;
+  var date = new Date(Date.now() + value * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+  var now = new Date();
+  var time = date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+  if (date.toDateString() === now.toDateString()) return time + ' local';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }) + ' local';
+}
+
+function fmtEtaWithCompletion(seconds) {
+  var remaining = fmtEta(seconds);
+  if (remaining === '--') return remaining;
+  var completion = fmtCompletionTime(seconds);
+  return completion ? remaining + ' · ' + completion : remaining;
+}
+
 function fmtAgo(timestamp) {
   var value = numberOrNull(timestamp);
   if (value === null || value <= 0) return null;
@@ -1010,6 +1036,9 @@ function updateStatus(data) {
   var materializedTime = anchorTime(data.materialized_execution_ceiling);
   var blockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
   var logRate = numberOrNull(data.historical_logs_per_sec) || 0;
+  var normalizedCpu = numberOrNull(data.cpu_utilization_pct);
+  var rawCpu = numberOrNull(data.cpu_utilization_raw_pct);
+  var cpuCores = numberOrNull(data.cpu_logical_cores);
   var servingPeers = numberOrNull(data.serving_peers) || 0;
   var connectedPeers = numberOrNull(data.connected_peers) || 0;
   var pendingPeers = numberOrNull(data.pending_peers) || 0;
@@ -1030,7 +1059,7 @@ function updateStatus(data) {
   setExecutionBarState(active, false);
   setText('executionRemaining', remaining == null ? '--' : fmtBlocks(remaining));
   setText('executionRate', fmtLogRate(logRate));
-  setText('executionEta', fmtEta(data.historical_eta_seconds));
+  setText('executionEta', fmtEtaWithCompletion(data.historical_eta_seconds));
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
@@ -1072,7 +1101,11 @@ function updateStatus(data) {
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
   setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
   setText('debugStorageWritePath', data.storage_write_path);
-  setText('debugCpu', fmtPct(data.cpu_utilization_pct));
+  var cpuDetail = '';
+  if (rawCpu != null && cpuCores != null) {
+    cpuDetail = ' (' + fmtPct(rawCpu) + ' raw, ' + fmt(cpuCores) + ' cores)';
+  }
+  setText('debugCpu', normalizedCpu == null ? '--' : fmtPct(normalizedCpu) + cpuDetail);
   setText('debugRawBacklog', fmt(rawSegmentBacklog));
   setText('debugProfileBacklog', fmt(profileRewriteBacklog));
   setText('debugHistoricalFloor', blockWithAge(floorBlock, floorTime));
@@ -1091,7 +1124,7 @@ function updateStatus(data) {
     peers: servingPeers,
     rate: logRate,
     blockRate: blockRate,
-    cpu: numberOrNull(data.cpu_utilization_pct)
+    cpu: normalizedCpu
   });
   renderChart();
 }
