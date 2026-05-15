@@ -382,7 +382,7 @@
     font-size: var(--font-small);
   }
 
-  details.advanced {
+  details.foldout {
     border: 1px solid var(--line);
     border-radius: 8px;
     background: rgba(16, 21, 28, .90);
@@ -390,7 +390,7 @@
     margin-bottom: 16px;
   }
 
-  details.advanced > summary {
+  details.foldout > summary {
     cursor: pointer;
     padding: 16px 18px;
     color: var(--text);
@@ -399,21 +399,21 @@
     font-size: var(--font-title);
   }
 
-  details.advanced > summary::-webkit-details-marker {
+  details.foldout > summary::-webkit-details-marker {
     display: none;
   }
 
-  details.advanced > summary::after {
+  details.foldout > summary::after {
     content: "+";
     float: right;
     color: var(--muted);
   }
 
-  details.advanced[open] > summary::after {
+  details.foldout[open] > summary::after {
     content: "-";
   }
 
-  .advanced-body {
+  .foldout-body {
     border-top: 1px solid var(--line);
     padding: 18px;
     display: grid;
@@ -631,7 +631,7 @@
   <header class="topbar">
     <div class="brand">
       <h1>LogEx</h1>
-      <p>Ethereum log verification and sync status</p>
+      <p>Metrics Dashboard and Log Query</p>
     </div>
     <div class="status-strip">
       <span class="pill state-syncing" id="nodeBadge"><span class="dot"></span><strong id="nodeState">Starting</strong></span>
@@ -643,7 +643,7 @@
     <div class="panel execution-card">
       <div class="card-main">
         <div>
-          <p class="card-label">Execution Layer sync</p>
+          <p class="card-label">Historical Sync</p>
           <div class="headline" id="executionPercent">--</div>
         </div>
         <div class="subline" id="executionSummary">Waiting for historical sync.</div>
@@ -668,41 +668,44 @@
     </div>
   </section>
 
-  <section class="panel chart-panel">
-    <div class="section-head">
-      <div>
-        <h2>Sync Performance</h2>
-        <p>Execution log rate, serving peers, and process CPU utilization over the selected window.</p>
+  <details class="foldout chart-panel">
+    <summary>Sync Performance</summary>
+    <div class="foldout-body">
+      <div class="section-head">
+        <div>
+          <h2>Sync Performance</h2>
+          <p>Execution log rate, serving peers, and process CPU utilization over the selected window.</p>
+        </div>
+        <div class="range-buttons" aria-label="Chart range">
+          <button type="button" class="active" data-hours="1" onclick="setChartWindow(1)">1 hour</button>
+          <button type="button" data-hours="6" onclick="setChartWindow(6)">6 hours</button>
+          <button type="button" data-hours="12" onclick="setChartWindow(12)">12 hours</button>
+        </div>
       </div>
-      <div class="range-buttons" aria-label="Chart range">
-        <button type="button" class="active" data-hours="1" onclick="setChartWindow(1)">1 hour</button>
-        <button type="button" data-hours="6" onclick="setChartWindow(6)">6 hours</button>
-        <button type="button" data-hours="12" onclick="setChartWindow(12)">12 hours</button>
+      <div class="charts-grid">
+        <div class="chart-card">
+          <div class="chart-title"><strong>Logs/sec</strong><span id="rateLegend">--</span></div>
+          <div class="chart-canvas-wrap"><canvas id="blocksChart" aria-label="Historical logs per second chart"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title"><strong>Peers</strong><span id="peerLegend">--</span></div>
+          <div class="chart-canvas-wrap"><canvas id="peersChart" aria-label="Serving peers chart"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title"><strong>CPU</strong><span id="cpuLegend">--</span></div>
+          <div class="chart-canvas-wrap"><canvas id="cpuChart" aria-label="Process CPU utilization chart"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-unavailable" id="chartUnavailable">Chart library unavailable. Performance samples are still being collected.</div>
+      <div class="chart-meta">
+        <span id="chartWindowLabel">Last 1 hour</span>
       </div>
     </div>
-    <div class="charts-grid">
-      <div class="chart-card">
-        <div class="chart-title"><strong>Logs/sec</strong><span id="rateLegend">--</span></div>
-        <div class="chart-canvas-wrap"><canvas id="blocksChart" aria-label="Historical logs per second chart"></canvas></div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title"><strong>Peers</strong><span id="peerLegend">--</span></div>
-        <div class="chart-canvas-wrap"><canvas id="peersChart" aria-label="Serving peers chart"></canvas></div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title"><strong>CPU</strong><span id="cpuLegend">--</span></div>
-        <div class="chart-canvas-wrap"><canvas id="cpuChart" aria-label="Process CPU utilization chart"></canvas></div>
-      </div>
-    </div>
-    <div class="chart-unavailable" id="chartUnavailable">Chart library unavailable. Performance samples are still being collected.</div>
-    <div class="chart-meta">
-      <span id="chartWindowLabel">Last 1 hour</span>
-    </div>
-  </section>
+  </details>
 
-  <details class="advanced">
+  <details class="foldout advanced">
     <summary>Advanced metrics</summary>
-    <div class="advanced-body">
+    <div class="foldout-body">
       <section>
         <div class="section-head">
           <div>
@@ -1061,8 +1064,15 @@ function updateStatus(data) {
   var consensusPeers = numberOrNull(consensusNetwork.connected_peer_sessions);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
 
-  setPill('nodeBadge', stateLabel, stateClass(state));
-  setText('nodeState', stateLabel);
+  var displayState = state;
+  var displayStateLabel = stateLabel;
+  if (historicalComplete && liveRemaining != null && liveRemaining < 3) {
+    displayState = 'synced';
+    displayStateLabel = 'Synced';
+  }
+
+  setPill('nodeBadge', displayStateLabel, stateClass(displayState));
+  setText('nodeState', displayStateLabel);
   refreshLastUpdated();
 
   setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 2) + '%' : '--');
@@ -1083,7 +1093,7 @@ function updateStatus(data) {
     ? (liveRemaining == null ? '--' : fmtBlocks(liveRemaining))
     : (historicalRemaining == null ? '--' : fmtBlocks(historicalRemaining)));
   setText('executionRate', fmtLogRate(logRate));
-  setText('executionEta', historicalComplete ? 'Synced' : fmtEtaWithCompletion(data.historical_eta_seconds));
+  setText('executionEta', historicalComplete ? 'Historical sync complete' : fmtEtaWithCompletion(data.historical_eta_seconds));
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
