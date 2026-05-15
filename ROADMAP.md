@@ -4,26 +4,16 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active branch: `feature/el-reverse-sync` / PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active branch: `fix/dashboard-synced-live-metrics`. PR #76 was merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
 The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
-- Sampled the live remote client after the latest EL performance deploy. Peer retention, live head tracking, compression backlog, and active-disk headroom remain healthy.
-- Profiled the current hot path and confirmed the dominant remaining cost is receipt/body validation, not peer count, disk I/O, or raw-segment compression.
-- Switched storage dictionary compression from the standard randomized hasher to `FxHashMap` for per-segment address/topic dictionary building.
-- Aligned the paired body/receipt pipeline return cap with the 10,000-block medium/sparse historical fetch window so widened sparse windows are actually consumed.
-- Deployed the widened sparse-window return cap to the remote run; the first post-warm sample improved to about 560k logs/sec and roughly 2.05h ETA with peer warm-up still in progress.
-- Normalized dashboard CPU utilization by logical core capacity while keeping raw process CPU in advanced status data.
-- Added local completion time beside the historical sync time remaining.
-- Added a sparse-range receipt validation fast path for empty receipt sets, avoiding generic trie construction while still enforcing gas, empty receipt root, and zero logs bloom.
-- Fixed the GitHub test failure in historical ingest coalescing by making the row-limit test deterministic across different CI runner memory sizes.
-- Reverted the uncommitted depth-6 fetch-pipeline trial after warmed samples failed to beat the known depth-5 baseline.
-- Relocated 6,000 sealed remote segment directories onto the mounted test volumes and replaced them with symlinks, restoring root write headroom without touching the active hot segment.
-- Completed the remote EL historical sync to genesis, confirmed live head tracking continued, and verified restart/resume after completion.
-- Added a local fresh-run monitor script and runbook under `/private/tmp` for future destructive benchmark runs that wipe the remote data directory, prepare extra volumes, monitor sync to genesis, and write a report.
-- Validated the branch with the CI commands `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`; targeted server checks also covered the new CPU metric and ETA display data path.
+- Started the post-merge dashboard follow-up on `fix/dashboard-synced-live-metrics`.
+- Added live `logs_per_sec` status data for new blocks after historical sync has reached genesis.
+- Updated the execution sync card so completed historical sync shows live remaining blocks to head, live logs/sec, and `Synced` in the estimate field while keeping the bar full and idle.
+- Removed the `local` suffix from completion-time estimates and switched those times to 24-hour formatting.
 
 ## Remaining TODOs
 
@@ -42,6 +32,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Historical EL validation verifies parent-hash ancestry, body commitments, receipt roots, cumulative gas, and logs bloom against each header.
 - Historical chunks whose headers prove empty transaction, receipt, ommer, and withdrawal roots can be ingested header-only because the empty body and receipt tries are uniquely determined by those roots.
 - Historical ETA is log-based when log-rate data is available; block/sec remains an advanced diagnostic because block density varies heavily across history.
+- After EL history reaches genesis, the main dashboard switches from historical reverse-sync metrics to live head-gap metrics.
 - Dashboard CPU is shown as capacity utilization across logical CPUs; raw multi-core process CPU remains available in advanced status data.
 - Query responses keep a hard `10,000` row cap and dashboard pagination defaults to `50` rows.
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
@@ -73,17 +64,15 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 ## Dead Code and Obsolescence Cleanup
 
-- Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was found in this pass.
-- Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead including the uncommitted depth-6 fetch-pipeline trial.
-- Remaining cleanup risk is limited to future profiling discoveries; current changed paths were exercised by the completed remote run.
+- Inspected the dashboard update path, status endpoint serialization, and progress tracker. No obsolete UI metric path was safe to remove beyond relabeling the historical-only advanced rate labels to generic rate labels.
 
 ## Git Workflow
 
-- Current branch: `feature/el-reverse-sync`
-- New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, `72c6b74`, `4c8ab5f`, `d4ca40f`, plus this roadmap update.
-- Pull request status: PR #76 is ready to merge after this final roadmap update is pushed and checks pass.
-- Merge status: pending final push/checks.
+- Current branch: `fix/dashboard-synced-live-metrics`
+- New branch created this run: `fix/dashboard-synced-live-metrics` from `origin/master`.
+- Commits made during this run: `2fa719d`, `de82200`, plus this follow-up adjustment.
+- Pull request status: pending validation and push.
+- Merge status: pending.
 - Blockers: none known.
 
 ## Known Issues or Risks
