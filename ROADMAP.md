@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The current remote run has crossed the Merge boundary and is validating pre-Merge history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 430k-560k historical logs/sec depending on block/log density. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low; this is not product storage behavior.
+The current remote run is approaching the Merge boundary and continues validating history toward genesis. Warmed samples are holding strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec depending on block/log density and test-machine disk activity. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
@@ -19,6 +19,8 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Added local completion time beside the historical sync time remaining.
 - Added a sparse-range receipt validation fast path for empty receipt sets, avoiding generic trie construction while still enforcing gas, empty receipt root, and zero logs bloom.
 - Fixed the GitHub test failure in historical ingest coalescing by making the row-limit test deterministic across different CI runner memory sizes.
+- Reverted the uncommitted depth-6 fetch-pipeline trial after warmed samples failed to beat the known depth-5 baseline.
+- Relocated 6,000 sealed remote segment directories onto the mounted test volumes and replaced them with symlinks, restoring root write headroom without touching the active hot segment.
 - Validated the branch with the CI commands `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`; targeted server checks also covered the new CPU metric and ETA display data path.
 
 ## Remaining TODOs
@@ -75,14 +77,14 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 ## Dead Code and Obsolescence Cleanup
 
 - Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
-- Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead.
+- Previous reverted experiments remain out of the branch: higher body/receipt request caps, 50/50 outbound split, 64-task validation fanout, and overly deep high-memory lookahead including the uncommitted depth-6 fetch-pipeline trial.
 - Remaining cleanup risk is limited to future profiling discoveries; current changed paths are active in the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, plus the GitHub CI test-determinism fix in the latest commit.
+- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, `72c6b74`, `4c8ab5f`, plus this roadmap update.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
