@@ -665,7 +665,8 @@ mod tests {
             extracted_chunk_with_rows(128, 1, 644),
         ];
 
-        let write_chunks = coalesce_historical_write_chunks(chunks);
+        let write_chunks =
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
 
         assert_eq!(write_chunks.len(), 2);
         assert_eq!(write_chunks[0].block_count, 256);
