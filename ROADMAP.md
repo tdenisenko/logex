@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The remote run is validating EL reverse sync toward genesis with the improved pipeline. After the peer-refill hot-loop fix, warmed dense-range samples reached roughly 500k historical logs/sec on the dashboard, with a 2.3-hour remaining ETA and serving peers still warming. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The two extra remote volumes are mounted and reserved for a symlink-only emergency storage workaround if root free space gets low.
+The remote run is validating EL reverse sync toward genesis with the improved pipeline. After the peer-refill hot-loop fix, warmed dense-range samples reached roughly 500k historical logs/sec on the dashboard. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The two extra remote volumes now hold symlinked immutable sealed segments so the root volume has enough write headroom for the rest of the run.
 
 ## Completed Since Last Run
 
@@ -24,6 +24,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Raised the medium-dense fetch lookahead cap to 4 while keeping very-dense ranges capped at 3 to avoid unnecessary memory pressure.
 - Reduced normal CL light-client log churn and skipped stale finality/optimistic updates before expensive verification.
 - Persisted the storage catalog once per historical batch instead of after every sealed segment; segment manifests still allow crash recovery.
+- Moved 4,000 immutable sealed segment directories on the remote host to the two extra mounted volumes and left symlinks at the original data-dir paths.
 - Reverted the higher body/receipt request cap and 50/50 outbound split experiments after they reduced throughput or peer warm-up.
 - Rejected and reverted the 64-task validation fanout and depth-6 high-memory lookahead experiments after live logs/sec did not improve.
 - Verified a completed full historical sync on the previous run, confirmed live head tracking, then started a fresh run on `root@165.22.64.42`.
@@ -84,8 +85,8 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Challenge: Very old empty blocks would still require body/receipt P2P work even when their header roots already prove empty bodies and receipts.
   - Resolution: Added a guarded sequential path that advances the historical floor for all-empty header chunks without body/receipt requests.
 
-- Challenge: The remote host may still need more effective storage than the root volume during fresh dense-range runs.
-  - Resolution: Mounted the extra volumes and reserved them for moving immutable sealed segments behind symlinks if root free space falls near the safety threshold.
+- Challenge: The remote host needed more effective storage than the root volume during the fresh dense-range run.
+  - Resolution: Stopped the client cleanly, moved immutable sealed segment ranges behind symlinks onto both extra volumes, then restarted successfully from the same data directory.
 
 - Challenge: A storage-metrics test compared two live filesystem free-space probes exactly.
   - Resolution: The test now allows a small tolerance while preserving the same semantic checks.
@@ -102,13 +103,14 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Deduplicated historical peer-note collection so repeated peer IDs from the same batch are not carried through the ingest path.
 - Inspected the status/dashboard performance path and versioned the browser performance sample key so old block/sec samples are not reused as logs/sec samples.
 - Inspected storage-metrics tests after validation failure and removed the brittle exact free-space comparison.
+- Removed the local rebuilt `target/debug` artifacts to recover workspace disk space; later validation rebuilt the artifacts needed for checks.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, and `9f62d2f`.
+- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, `9f62d2f`, `3a4815c`, and `8cde903`.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
