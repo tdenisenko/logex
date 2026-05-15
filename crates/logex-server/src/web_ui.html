@@ -125,36 +125,9 @@
     50% { opacity: .48; transform: scale(.82); }
   }
 
-  .panel, .query-panel {
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: rgba(16, 21, 28, .90);
-    box-shadow: 0 18px 54px rgba(0, 0, 0, .22);
-    padding: 20px;
-  }
-
-  .overview {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 16px;
-    align-items: stretch;
-    margin-bottom: 16px;
-  }
-
   .execution-card {
-    grid-column: 1 / -1;
     min-height: 190px;
-    display: grid;
     gap: 14px;
-  }
-
-  .card-label {
-    margin: 0 0 4px;
-    color: var(--muted);
-    font-size: var(--font-label);
-    line-height: 1.2;
-    text-transform: uppercase;
-    letter-spacing: .06em;
   }
 
   .card-main {
@@ -457,7 +430,7 @@
     grid-column: 1 / -1;
   }
 
-  .query-panel {
+  .query-body {
     display: grid;
     gap: 12px;
   }
@@ -620,7 +593,7 @@
       flex-direction: column;
     }
 
-    .overview, .debug-grid, .mini-grid, .charts-grid {
+    .debug-grid, .mini-grid, .charts-grid {
       grid-template-columns: 1fr;
     }
   }
@@ -639,11 +612,11 @@
     </div>
   </header>
 
-  <section class="overview">
-    <div class="panel execution-card">
+  <details class="foldout historical-sync" data-foldout-key="historical-sync" open>
+    <summary>Historical Sync</summary>
+    <div class="foldout-body execution-card">
       <div class="card-main">
         <div>
-          <p class="card-label">Historical Sync</p>
           <div class="headline" id="executionPercent">--</div>
         </div>
         <div class="subline" id="executionSummary">Waiting for historical sync.</div>
@@ -666,9 +639,9 @@
         <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary"></span></div>
       </div>
     </div>
-  </section>
+  </details>
 
-  <details class="foldout chart-panel">
+  <details class="foldout chart-panel" data-foldout-key="sync-performance">
     <summary>Sync Performance</summary>
     <div class="foldout-body">
       <div class="section-head">
@@ -703,7 +676,7 @@
     </div>
   </details>
 
-  <details class="foldout advanced">
+  <details class="foldout advanced" data-foldout-key="advanced-metrics">
     <summary>Advanced metrics</summary>
     <div class="foldout-body">
       <section>
@@ -741,32 +714,34 @@
     </div>
   </details>
 
-  <section class="panel query-panel">
-    <div class="section-head">
-      <div>
-        <h2>Query Logs</h2>
-        <p id="queryScope">Queries scan the verified local range.</p>
+  <details class="foldout query-foldout" data-foldout-key="query-logs">
+    <summary>Query Logs</summary>
+    <div class="foldout-body query-body">
+      <div class="section-head">
+        <div>
+          <p id="queryScope">Queries scan the verified local range.</p>
+        </div>
+        <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
       </div>
-      <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
-    </div>
-    <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
-    <div class="query-actions">
-      <span id="resultCount">No query results yet.</span>
-      <div class="button-row">
-        <button type="button" class="secondary" id="exportBtn" onclick="exportQueryResults()" disabled>Export CSV</button>
-        <button type="button" class="secondary" id="prevPageBtn" onclick="runQueryPage(-1)" disabled>Previous</button>
-        <button type="button" class="secondary" id="nextPageBtn" onclick="runQueryPage(1)" disabled>Next</button>
+      <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
+      <div class="query-actions">
+        <span id="resultCount">No query results yet.</span>
+        <div class="button-row">
+          <button type="button" class="secondary" id="exportBtn" onclick="exportQueryResults()" disabled>Export CSV</button>
+          <button type="button" class="secondary" id="prevPageBtn" onclick="runQueryPage(-1)" disabled>Previous</button>
+          <button type="button" class="secondary" id="nextPageBtn" onclick="runQueryPage(1)" disabled>Next</button>
+        </div>
       </div>
+      <div class="table-wrap">
+        <table id="resultsTable" style="display:none">
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="empty-state" id="emptyState">No query results yet.</div>
+      </div>
+      <div class="error" id="queryError"></div>
     </div>
-    <div class="table-wrap">
-      <table id="resultsTable" style="display:none">
-        <thead id="thead"></thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <div class="empty-state" id="emptyState">No query results yet.</div>
-    </div>
-    <div class="error" id="queryError"></div>
-  </section>
+  </details>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
@@ -780,6 +755,7 @@ var queryWasCapped = false;
 var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
+var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
@@ -1204,6 +1180,39 @@ function savePerfSamples() {
   } catch (_) {}
 }
 
+function loadFoldoutState() {
+  try {
+    var parsed = JSON.parse(localStorage.getItem(FOLDOUT_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveFoldoutState(state) {
+  try {
+    localStorage.setItem(FOLDOUT_STORAGE_KEY, JSON.stringify(state));
+  } catch (_) {}
+}
+
+function initFoldouts() {
+  var state = loadFoldoutState();
+  Array.prototype.forEach.call(document.querySelectorAll('details[data-foldout-key]'), function(details) {
+    var key = details.getAttribute('data-foldout-key');
+    if (!key) return;
+    if (Object.prototype.hasOwnProperty.call(state, key)) {
+      details.open = state[key] === true;
+    }
+    details.addEventListener('toggle', function() {
+      state[key] = details.open;
+      saveFoldoutState(state);
+      if (key === 'sync-performance' && details.open) {
+        requestAnimationFrame(renderChart);
+      }
+    });
+  });
+}
+
 function addPerfSample(sample) {
   var newest = perfSamples.length ? perfSamples[perfSamples.length - 1] : null;
   if (newest && sample.ts - newest.ts < 1500) return;
@@ -1570,6 +1579,7 @@ byId('sql').addEventListener('input', function() {
   querySqlTouched = true;
 });
 
+initFoldouts();
 fetchStatus();
 renderChart();
 setInterval(fetchStatus, 2000);

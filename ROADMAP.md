@@ -4,16 +4,15 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active branch: `master`. PRs #76, #78, and #79 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active development branch for this run: `fix/dashboard-persisted-foldouts`. PRs #76, #78, and #79 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
 The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
-- Started the dashboard copy/state follow-up on `fix/dashboard-synced-copy`.
-- Updated dashboard copy for the product header, historical sync title, and completed-history estimate wording.
-- Made the top status badge display `Synced` when historical sync is complete and the live head gap is under 3 blocks.
-- Made the Sync Performance charts section collapsed by default using the same expandable pattern as advanced metrics.
+- Made Historical Sync, Sync Performance, Advanced metrics, and Query Logs use the same expandable dashboard section pattern.
+- Kept Historical Sync expanded by default and Query Logs, Sync Performance, and Advanced metrics collapsed by default.
+- Added browser-local persistence so each section remembers its expanded or collapsed state.
 
 ## Remaining TODOs
 
@@ -38,6 +37,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.
+- Dashboard section expansion state is stored in browser `localStorage` because it is a per-browser display preference, not node state.
 
 ## Challenges and Resolutions
 
@@ -64,15 +64,15 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard update path, status endpoint serialization, and progress tracker. No obsolete UI metric path was safe to remove beyond relabeling the historical-only advanced rate labels to generic rate labels.
+- Inspected the dashboard section markup and styles. Removed obsolete `overview`, `panel`, `query-panel`, and `card-label` CSS after the historical and query areas moved into foldout sections.
 
 ## Git Workflow
 
-- Current branch: `master`
-- New branch created this run: `fix/dashboard-synced-copy` from `origin/master`.
-- Commits made during this run: `ba453b2` on `fix/dashboard-synced-copy`; merged as `f09d4d2`.
-- Pull request status: PR #79 was created and passed CI.
-- Merge status: PR #79 was squash-merged.
+- Current branch: `fix/dashboard-persisted-foldouts`
+- New branch created this run: `fix/dashboard-persisted-foldouts` from `origin/master`.
+- Commits made during this run: dashboard foldout persistence changes.
+- Pull request status: created after local validation.
+- Merge status: handled after CI passes.
 - Blockers: none known.
 
 ## Known Issues or Risks
