@@ -22,7 +22,7 @@ const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
-const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 5000;
+const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 4;
@@ -3305,11 +3305,12 @@ mod tests {
     #[test]
     fn body_receipt_return_blocks_scales_dense_prefix_and_caps_sparse_windows() {
         let dense = vec![30_000_000; 4096];
-        let sparse = vec![0; 6000];
+        let sparse = vec![0; 12_000];
 
         assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
         assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 4096);
-        assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 5000);
+        assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 6000);
+        assert_eq!(body_receipt_return_blocks(12_000, Some(&sparse)), 10_000);
         assert_eq!(body_receipt_return_blocks(4096, None), 1024);
     }
 
@@ -3317,7 +3318,7 @@ mod tests {
     fn body_receipt_min_accepted_prefix_rejects_tiny_dense_progress() {
         assert_eq!(body_receipt_min_accepted_prefix(128), 128);
         assert_eq!(body_receipt_min_accepted_prefix(1024), 384);
-        assert_eq!(body_receipt_min_accepted_prefix(5000), 384);
+        assert_eq!(body_receipt_min_accepted_prefix(10_000), 384);
     }
 
     #[test]

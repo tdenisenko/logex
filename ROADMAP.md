@@ -13,7 +13,8 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Sampled the live remote client after the latest EL performance deploy. Peer retention, live head tracking, compression backlog, and active-disk headroom remain healthy.
 - Profiled the current hot path and confirmed the dominant remaining cost is receipt/body validation, not peer count, disk I/O, or raw-segment compression.
 - Switched storage dictionary compression from the standard randomized hasher to `FxHashMap` for per-segment address/topic dictionary building.
-- Validated the storage change with `cargo fmt --check`, `cargo test -p logex-storage --lib`, and `cargo clippy -p logex-storage --all-targets -- -D warnings`.
+- Aligned the paired body/receipt pipeline return cap with the 10,000-block medium/sparse historical fetch window so widened sparse windows are actually consumed.
+- Validated the storage and sync changes with `cargo fmt --check`, `cargo test -p logex-storage --lib`, `cargo clippy -p logex-storage --all-targets -- -D warnings`, `cargo test -p logex-sync --lib`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 
 ## Remaining TODOs
 
@@ -54,7 +55,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
   - Resolution: Added a bounded receipt-bloom cache for eth/69 and eth/70 responses while preserving receipt-root and logs-bloom verification.
 
 - Challenge: Lower-log-density pre-Merge ranges make per-batch overhead more visible.
-  - Resolution: Historical fetch windows now adapt to peer count, memory, and observed log density.
+  - Resolution: Historical fetch windows now adapt to peer count, memory, and observed log density, and the body/receipt pipeline can return the widened sparse-window range.
 
 - Challenge: Profiling after the latest deploy still showed small standard-hasher overhead in storage dictionary compression.
   - Resolution: Switched the hot per-segment dictionary maps to `FxHashMap`.
