@@ -6,20 +6,27 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The latest remote build is sustaining the improved EL reverse-sync pipeline. After restart warm-up, `/status` reported roughly 735 historical blocks/sec, 269k logs/sec, a log-based historical ETA near 3 hours, and zero raw log segment backlog. Peer retention is currently good enough for the observed pace; the remaining limiter is the combined fetch/process pipeline around body/receipt latency, receipt-root validation, log extraction, and compacted storage writes.
+The remote run is validating EL reverse sync toward genesis with the improved pipeline. The best warmed samples after the refill and lookahead fixes reached roughly 410k-455k historical logs/sec with zero raw log segment backlog. CPU can now reach about 6.8-6.9 cores on the 8 vCPU test host, so the remaining limiter is split between body/receipt availability and local receipt-root hashing/log materialization. Root disk pressure was relieved by moving immutable sealed segment directories to the two mounted test volumes and symlinking them back into the main segment tree; this is an operational hack for the remote host, not product behavior.
 
 ## Completed Since Last Run
 
-- Deployed the kept EL performance changes to the remote client:
+- Deployed and kept the EL performance changes that improved measured logs/sec:
   - Linux/glibc builds use jemalloc for the node runtime.
   - Dense historical validation/extraction work is split by estimated transaction/log work instead of only block count.
   - Sparse low-log-density ranges can use deeper fetch lookahead when peers and memory are healthy.
-- Reverted the higher body/receipt request cap experiment after it reduced throughput.
+  - Historical row buffers are flattened once per storage flush instead of repeatedly appended into a growing batch vector.
+  - High-memory historical write chunks scale to 1m rows when Linux reports healthy available memory.
+  - Historical body/receipt planning reuses already-validated header hashes instead of hashing headers again.
+  - Peer refill no longer blocks each historical batch while the client already has enough serving peers to make progress.
+  - High-memory historical fetch lookahead depth increased to 5 after the blocking refill fix made the retry beneficial.
+- Reverted the higher body/receipt request cap and 50/50 outbound split experiments after they reduced throughput or peer warm-up.
+- Moved about 150 GiB of sealed segment directories to `/mnt/logex-extra` and `/mnt/logex-extra2` on the remote test host, with same-name symlinks from `/var/lib/logex/mainnet/segments`.
+- Deduplicated historical peer notes in the branch to avoid recording the same serving peer once per block; this is committed but intentionally not deployed until the next restart/fresh run.
 - Added historical logs/sec tracking to sync status and dashboard metrics.
 - Changed historical ETA to prefer estimated remaining logs divided by logs/sec, using the known total of `6,780,563,686` logs through block `25,093,066` and `733` logs/block above that reference point.
 - Changed the dashboard’s main rate and performance chart to logs/sec while keeping block/sec in advanced metrics.
 - Fixed a flaky storage-metrics test that assumed filesystem free-space probes are byte-identical during a test run.
-- Validated with `cargo test -p logex-server --lib`, `cargo test -p logex-sync --lib`, and `cargo clippy -p logex-node -p logex-sync -p logex-server --all-targets -- -D warnings`.
+- Validated the latest sync changes with `cargo test -p logex-sync --lib` and `cargo clippy -p logex-sync --all-targets -- -D warnings`. Earlier dashboard/status changes were validated with `cargo test -p logex-server --lib` and the combined node/sync/server clippy command.
 
 ## Remaining TODOs
 
@@ -28,8 +35,8 @@ The latest remote build is sustaining the improved EL reverse-sync pipeline. Aft
    - Completion criteria: The remote run reaches genesis, continues live head tracking, and restart/resume remains correct across the post-Merge, Merge, pre-Merge, and genesis ranges.
 
 2. Continue performance work only where measurements show meaningful upside.
-   - Reason: The target is a predictable full-history sync under 6 hours on adequate hardware without destabilizing memory, disk, or peer behavior.
-   - Completion criteria: Logs/sec ETA stays below target after warm-up, serving-peer collapse does not recur, and any new optimization is kept only if it improves measured logs/sec or stability.
+   - Reason: The target is a predictable full-history sync near 2 hours on adequate hardware without destabilizing memory, disk, or peer behavior.
+   - Completion criteria: Fresh-run logs/sec ETA approaches the 2-hour target after warm-up, serving-peer collapse does not recur, and any new optimization is kept only if it improves measured logs/sec or stability.
 
 3. Replace the temporary checkpoint source and stale-checkpoint policy.
    - Reason: Weak-subjectivity safety requires a recent checkpoint and clear stale-checkpoint rejection.
@@ -49,6 +56,7 @@ The latest remote build is sustaining the improved EL reverse-sync pipeline. Aft
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.
+- Peer refill should not block the historical hot loop once minimum useful serving capacity exists; peer discovery and dialing continue through the normal event-drain path.
 
 ## Challenges and Resolutions
 
@@ -64,12 +72,21 @@ The latest remote build is sustaining the improved EL reverse-sync pipeline. Aft
 - Challenge: Dense historical batches left high RSS after data was freed.
   - Resolution: Linux/glibc node builds now use jemalloc, which removed allocator churn from the measured hot path and reduced RSS in remote samples.
 
+- Challenge: Historical batches were spending wall-clock time waiting for peer refill toward 80 serving peers even while enough peers were already serving data.
+  - Resolution: Changed refill policy so the hot loop only blocks on peer fill below the minimum serving floor. Warmed status improved to roughly 410k-455k logs/sec and CPU utilization rose near the current host limit.
+
+- Challenge: Root storage was projected to run out before the remote historical run reached genesis.
+  - Resolution: Stopped the service, moved immutable sealed segment directories onto the two mounted 100 GiB volumes, symlinked them back, and restarted cleanly.
+
 - Challenge: A storage-metrics test compared two live filesystem free-space probes exactly.
   - Resolution: The test now allows a small tolerance while preserving the same semantic checks.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Removed/reverted the higher body/receipt request-cap experiment because it hurt the remote run.
+- Removed/reverted the 50/50 outbound split experiment because it warmed fewer useful peers than the existing split.
+- Removed the now-unused header-based body/receipt planning helper after switching historical planning to reuse validated header hashes.
+- Deduplicated historical peer-note collection so repeated peer IDs from the same batch are not carried through the ingest path.
 - Inspected the status/dashboard performance path and versioned the browser performance sample key so old block/sec samples are not reused as logs/sec samples.
 - Inspected storage-metrics tests after validation failure and removed the brittle exact free-space comparison.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
@@ -78,14 +95,15 @@ The latest remote build is sustaining the improved EL reverse-sync pipeline. Aft
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `perf: trim allocator during dense historical sync`; `perf: relax dense historical window cap`; `perf: reduce dense validation task fragmentation`; `perf: boost sparse historical lookahead`; pending checkpoint for log-based ETA/dashboard status.
+- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, and `b9623de`.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
 
 ## Known Issues or Risks
 
-- The latest deployed build still needs to run through Merge, pre-Merge, and genesis on the remote server.
+- The latest deployed build still needs to run through genesis on the remote server, then a fresh run should measure the dense recent ranges again with the kept changes.
+- Commit `b9623de` is pushed but not yet deployed on the remote host to avoid another restart during the current run.
 - The log-count ETA uses a reference total and recent-block average above block `25,093,066`; it is better than block/sec ETA but still an estimate until exact persisted rows approach the target range.
 - Full sync performance is still sensitive to body/receipt response latency and dense receipt/log processing.
 - Extra server volumes are a test-environment workaround and not a product storage allocator.
