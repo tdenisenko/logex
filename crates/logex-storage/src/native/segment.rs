@@ -3,15 +3,18 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::thread;
 
+use alloy_primitives::{Address, B256};
 use logex_types::LogRow;
 
-use crate::column::ColumnFile;
+use crate::column::{ColumnFile, NullBitmap};
 use crate::page::{
     PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
     encode_var_bytes_page, write_page_index,
 };
 use crate::reader::ColumnReader;
+use crate::segment_reader::SegmentReader;
 
 use super::catalog::{
     ColumnDescriptor, CompressionCodec, IndexDescriptor, IndexKind, SegmentDescriptor, SegmentKind,
@@ -19,6 +22,7 @@ use super::catalog::{
 };
 
 const DEFAULT_PAGE_ROWS: u32 = 16_384;
+const RECOMPACTED_COLUMNS_DIR: &str = "columns_profile_v2";
 
 pub(crate) fn append_rows(
     segment_dir: &Path,
@@ -32,6 +36,142 @@ pub(crate) fn append_rows(
     }
 }
 
+pub(crate) fn write_compacted_rows(
+    segment_dir: &Path,
+    rows: &[LogRow],
+) -> std::io::Result<Vec<ColumnDescriptor>> {
+    fs::create_dir_all(segment_dir)?;
+    fs::create_dir_all(segment_dir.join("columns"))?;
+    ColumnFile::write_canonical_bitmap(segment_dir, rows.len() as u64)?;
+
+    thread::scope(|scope| {
+        let address =
+            scope.spawn(|| compact_address_values(segment_dir, rows.iter().map(|row| row.address)));
+        let block_number = scope.spawn(|| {
+            compact_u64_values(
+                segment_dir,
+                "block_number",
+                CompressionCodec::DeltaZigZag,
+                rows.iter().map(|row| row.block_number),
+            )
+        });
+        let block_hash = scope.spawn(|| {
+            compact_b256_values(
+                segment_dir,
+                "block_hash",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.block_hash),
+            )
+        });
+        let timestamp = scope.spawn(|| {
+            compact_u64_values(
+                segment_dir,
+                "timestamp",
+                CompressionCodec::DeltaOfDelta,
+                rows.iter().map(|row| row.timestamp),
+            )
+        });
+        let tx_hash = scope.spawn(|| {
+            compact_b256_values(
+                segment_dir,
+                "tx_hash",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.tx_hash),
+            )
+        });
+        let tx_index = scope.spawn(|| {
+            compact_u32_values(
+                segment_dir,
+                "tx_index",
+                CompressionCodec::Zstd,
+                rows.iter().map(|row| row.tx_index),
+            )
+        });
+        let log_index = scope.spawn(|| {
+            compact_u32_values(
+                segment_dir,
+                "log_index",
+                CompressionCodec::Zstd,
+                rows.iter().map(|row| row.log_index),
+            )
+        });
+        let data_len = scope.spawn(|| {
+            compact_u32_values(
+                segment_dir,
+                "data_len",
+                CompressionCodec::Zstd,
+                rows.iter().map(|row| row.data_len),
+            )
+        });
+        let source = scope.spawn(|| {
+            compact_u8_values(
+                segment_dir,
+                "source",
+                CompressionCodec::Dictionary,
+                rows.iter().map(|row| row.source as u8),
+            )
+        });
+        let topic0 = scope.spawn(|| {
+            compact_nullable_b256_values(
+                segment_dir,
+                "topic0",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.topic0),
+            )
+        });
+        let topic1 = scope.spawn(|| {
+            compact_nullable_b256_values(
+                segment_dir,
+                "topic1",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.topic1),
+            )
+        });
+        let topic2 = scope.spawn(|| {
+            compact_nullable_b256_values(
+                segment_dir,
+                "topic2",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.topic2),
+            )
+        });
+        let topic3 = scope.spawn(|| {
+            compact_nullable_b256_values(
+                segment_dir,
+                "topic3",
+                CompressionCodec::AdaptiveFixed,
+                rows.iter().map(|row| row.topic3),
+            )
+        });
+        let data = scope.spawn(|| compact_data_values(segment_dir, rows));
+
+        Ok(vec![
+            join_column_worker(address)?,
+            join_column_worker(block_number)?,
+            join_column_worker(block_hash)?,
+            join_column_worker(timestamp)?,
+            join_column_worker(tx_hash)?,
+            join_column_worker(tx_index)?,
+            join_column_worker(log_index)?,
+            join_column_worker(data_len)?,
+            join_column_worker(source)?,
+            join_column_worker(topic0)?,
+            join_column_worker(topic1)?,
+            join_column_worker(topic2)?,
+            join_column_worker(topic3)?,
+            join_column_worker(data)?,
+        ])
+    })
+}
+
+fn join_column_worker(
+    handle: thread::ScopedJoinHandle<'_, std::io::Result<ColumnDescriptor>>,
+) -> std::io::Result<ColumnDescriptor> {
+    handle
+        .join()
+        .map_err(|_| std::io::Error::other("compacted column worker panicked"))?
+}
+
 pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows: &[LogRow]) {
     if rows.is_empty() {
         return;
@@ -39,6 +179,32 @@ pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows:
 
     let min_block = rows.iter().map(|row| row.block_number).min().unwrap_or(0);
     let max_block = rows.iter().map(|row| row.block_number).max().unwrap_or(0);
+
+    descriptor.min_block = Some(
+        descriptor
+            .min_block
+            .map(|current| current.min(min_block))
+            .unwrap_or(min_block),
+    );
+    descriptor.max_block = Some(
+        descriptor
+            .max_block
+            .map(|current| current.max(max_block))
+            .unwrap_or(max_block),
+    );
+    descriptor.row_count += rows.len() as u64;
+}
+
+pub(crate) fn apply_ordered_rows_to_descriptor(
+    descriptor: &mut SegmentDescriptor,
+    rows: &[LogRow],
+) {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return;
+    };
+
+    let min_block = first.block_number.min(last.block_number);
+    let max_block = first.block_number.max(last.block_number);
 
     descriptor.min_block = Some(
         descriptor
@@ -86,7 +252,7 @@ pub(crate) fn persist_segment_manifest_with_columns(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+    let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
     fs::write(&tmp, json)?;
     fs::rename(tmp, path)?;
     Ok(())
@@ -100,8 +266,12 @@ pub(crate) fn compact_segment(
         return persist_segment_manifest(paths, descriptor);
     }
 
-    if segment_is_compacted(paths, descriptor.id)? {
+    if segment_uses_current_compaction_profile(paths, descriptor.id)? {
         return persist_segment_manifest(paths, descriptor);
+    }
+
+    if segment_is_compacted(paths, descriptor.id)? {
+        return recompact_segment(paths, descriptor);
     }
 
     let segment_dir = paths.segment_dir(descriptor.id);
@@ -109,19 +279,19 @@ pub(crate) fn compact_segment(
 
     let columns = vec![
         compact_address_column(&segment_dir)?,
-        compact_u64_column(&segment_dir, "block_number", CompressionCodec::Delta)?,
-        compact_b256_column(&segment_dir, "block_hash", CompressionCodec::None)?,
+        compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)?,
+        compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)?,
         compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)?,
-        compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::None)?,
+        compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)?,
         compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd)?,
         compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd)?,
         compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd)?,
         compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary)?,
-        compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::Dictionary)?,
-        compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::Zstd)?,
-        compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::Zstd)?,
-        compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::Zstd)?,
-        compact_data_column(&segment_dir, CompressionCodec::Lz4)?,
+        compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::AdaptiveFixed)?,
+        compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::AdaptiveFixed)?,
+        compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::AdaptiveFixed)?,
+        compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::AdaptiveFixed)?,
+        compact_data_column(&segment_dir, CompressionCodec::AdaptiveBytes)?,
     ];
 
     persist_segment_manifest_with_columns(paths, descriptor, columns)?;
@@ -136,7 +306,122 @@ pub(crate) fn compact_segment(
     Ok(())
 }
 
-fn segment_is_compacted(paths: &StorageCatalogPaths, segment_id: u64) -> std::io::Result<bool> {
+fn recompact_segment(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<()> {
+    if recompact_block_number_profile(paths, descriptor)? {
+        return Ok(());
+    }
+
+    let segment_dir = paths.segment_dir(descriptor.id);
+    let tmp_dir = segment_dir.join(".recompact_tmp");
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)?;
+    }
+
+    let rows = SegmentReader::open(&segment_dir)?.read_log_rows(None)?;
+    let mut columns = write_compacted_rows(&tmp_dir, &rows)?;
+    let target_columns = segment_dir.join(RECOMPACTED_COLUMNS_DIR);
+    if target_columns.exists() {
+        fs::remove_dir_all(&target_columns)?;
+    }
+    fs::rename(tmp_dir.join("columns"), &target_columns)?;
+    rewrite_column_dir(&mut columns, RECOMPACTED_COLUMNS_DIR);
+
+    persist_segment_manifest_with_columns(paths, descriptor, columns)?;
+
+    remove_superseded_column_dirs(&segment_dir, RECOMPACTED_COLUMNS_DIR)?;
+    if tmp_dir.exists() {
+        fs::remove_dir_all(tmp_dir)?;
+    }
+
+    tracing::info!(
+        segment_id = descriptor.id,
+        row_count = descriptor.row_count,
+        "recompacted sealed storage segment"
+    );
+
+    Ok(())
+}
+
+fn recompact_block_number_profile(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<bool> {
+    let Some(mut columns) = existing_columns(paths, descriptor.id)? else {
+        return Ok(false);
+    };
+    let Some(block_column_index) = block_number_only_profile_mismatch(&columns) else {
+        return Ok(false);
+    };
+
+    let segment_dir = paths.segment_dir(descriptor.id);
+    let tmp_dir = segment_dir.join(".block_number_recompact_tmp");
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)?;
+    }
+    fs::create_dir_all(tmp_dir.join("columns"))?;
+
+    let values = SegmentReader::open(&segment_dir)?.read_u64("block_number", None)?;
+    let mut block_number_column = compact_u64_values(
+        &tmp_dir,
+        "block_number",
+        CompressionCodec::DeltaZigZag,
+        values,
+    )?;
+    let target_dir_name = "columns_block_number_v2";
+    let target_dir = segment_dir.join(target_dir_name);
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir)?;
+    }
+    fs::rename(tmp_dir.join("columns"), &target_dir)?;
+    rewrite_column_path_descriptor(&mut block_number_column, target_dir_name);
+
+    let old_column = std::mem::replace(&mut columns[block_column_index], block_number_column);
+    persist_segment_manifest_with_columns(paths, descriptor, columns)?;
+    remove_column_files(&segment_dir, &old_column)?;
+    if tmp_dir.exists() {
+        fs::remove_dir_all(tmp_dir)?;
+    }
+
+    tracing::info!(
+        segment_id = descriptor.id,
+        row_count = descriptor.row_count,
+        "recompressed block_number column with signed deltas"
+    );
+
+    Ok(true)
+}
+
+fn block_number_only_profile_mismatch(columns: &[ColumnDescriptor]) -> Option<usize> {
+    if columns.len() != current_column_profile().len() {
+        return None;
+    }
+
+    let mut block_column_index = None;
+    for (name, codec) in current_column_profile() {
+        let (index, column) = columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name == *name && column.page_index_path.is_some())?;
+        if *name == "block_number" {
+            if column.codec != CompressionCodec::Delta {
+                return None;
+            }
+            block_column_index = Some(index);
+        } else if column.codec != *codec {
+            return None;
+        }
+    }
+
+    block_column_index
+}
+
+pub(crate) fn segment_is_compacted(
+    paths: &StorageCatalogPaths,
+    segment_id: u64,
+) -> std::io::Result<bool> {
     Ok(existing_columns(paths, segment_id)?
         .map(|columns| {
             columns
@@ -144,6 +429,43 @@ fn segment_is_compacted(paths: &StorageCatalogPaths, segment_id: u64) -> std::io
                 .all(|column| column.page_index_path.is_some())
         })
         .unwrap_or(false))
+}
+
+pub(crate) fn segment_uses_current_compaction_profile(
+    paths: &StorageCatalogPaths,
+    segment_id: u64,
+) -> std::io::Result<bool> {
+    Ok(existing_columns(paths, segment_id)?
+        .map(|columns| columns_match_current_profile(&columns))
+        .unwrap_or(false))
+}
+
+fn columns_match_current_profile(columns: &[ColumnDescriptor]) -> bool {
+    columns.len() == current_column_profile().len()
+        && current_column_profile().iter().all(|(name, codec)| {
+            columns.iter().any(|column| {
+                column.name == *name && column.codec == *codec && column.page_index_path.is_some()
+            })
+        })
+}
+
+fn current_column_profile() -> &'static [(&'static str, CompressionCodec)] {
+    &[
+        ("address", CompressionCodec::AdaptiveFixed),
+        ("block_number", CompressionCodec::DeltaZigZag),
+        ("block_hash", CompressionCodec::AdaptiveFixed),
+        ("timestamp", CompressionCodec::DeltaOfDelta),
+        ("tx_hash", CompressionCodec::AdaptiveFixed),
+        ("tx_index", CompressionCodec::Zstd),
+        ("log_index", CompressionCodec::Zstd),
+        ("data_len", CompressionCodec::Zstd),
+        ("source", CompressionCodec::Dictionary),
+        ("topic0", CompressionCodec::AdaptiveFixed),
+        ("topic1", CompressionCodec::AdaptiveFixed),
+        ("topic2", CompressionCodec::AdaptiveFixed),
+        ("topic3", CompressionCodec::AdaptiveFixed),
+        ("data", CompressionCodec::AdaptiveBytes),
+    ]
 }
 
 fn existing_columns(
@@ -210,6 +532,14 @@ fn nullable_column(base_name: &str) -> ColumnDescriptor {
 
 fn compact_address_column(segment_dir: &Path) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_address(segment_dir, None)?;
+    compact_address_values(segment_dir, values)
+}
+
+fn compact_address_values(
+    segment_dir: &Path,
+    values: impl IntoIterator<Item = Address>,
+) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = values.into_iter().collect();
     let mut raw = Vec::with_capacity(values.len() * 20);
     for value in values {
         raw.extend_from_slice(value.as_slice());
@@ -217,24 +547,25 @@ fn compact_address_column(segment_dir: &Path) -> std::io::Result<ColumnDescripto
     write_fixed_width_pages(
         segment_dir,
         "address",
-        CompressionCodec::Dictionary,
+        CompressionCodec::AdaptiveFixed,
         raw.len() / 20,
         |range| {
             encode_fixed_width_page(
                 &raw[range.start * 20..range.end * 20],
                 20,
-                CompressionCodec::Dictionary,
+                CompressionCodec::AdaptiveFixed,
             )
         },
     )
 }
 
-fn compact_b256_column(
+fn compact_b256_values(
     segment_dir: &Path,
     name: &str,
     codec: CompressionCodec,
+    values: impl IntoIterator<Item = B256>,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_b256(segment_dir, &format!("{name}.col"), None)?;
+    let values: Vec<_> = values.into_iter().collect();
     let mut raw = Vec::with_capacity(values.len() * 32);
     for value in values {
         raw.extend_from_slice(value.as_slice());
@@ -244,17 +575,43 @@ fn compact_b256_column(
     })
 }
 
+fn compact_b256_column(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+) -> std::io::Result<ColumnDescriptor> {
+    let values = ColumnReader::read_b256(segment_dir, &format!("{name}.col"), None)?;
+    compact_b256_values(segment_dir, name, codec, values)
+}
+
 fn compact_nullable_b256_column(
     segment_dir: &Path,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_nullable_b256(segment_dir, name, None)?;
+    compact_nullable_b256_values(segment_dir, name, codec, values)
+}
+
+fn compact_nullable_b256_values(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+    values: impl IntoIterator<Item = Option<B256>>,
+) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = values.into_iter().collect();
     let mut raw = Vec::with_capacity(values.len() * 32);
+    let mut nulls = NullBitmap::new();
     for value in values {
         match value {
-            Some(value) => raw.extend_from_slice(value.as_slice()),
-            None => raw.extend_from_slice(&[0u8; 32]),
+            Some(value) => {
+                nulls.push(true);
+                raw.extend_from_slice(value.as_slice());
+            }
+            None => {
+                nulls.push(false);
+                raw.extend_from_slice(&[0u8; 32]);
+            }
         }
     }
 
@@ -264,10 +621,10 @@ fn compact_nullable_b256_column(
         })?;
 
     let null_rel = format!("columns/{name}.null");
-    fs::copy(
-        segment_dir.join(format!("{name}.null")),
-        segment_dir.join(&null_rel),
-    )?;
+    let null_file = File::create(segment_dir.join(&null_rel))?;
+    let mut null_writer = BufWriter::new(null_file);
+    nulls.write_to(&mut null_writer)?;
+    null_writer.flush()?;
     descriptor.null_bitmap_path = Some(null_rel);
     Ok(descriptor)
 }
@@ -278,6 +635,16 @@ fn compact_u64_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u64(segment_dir, &format!("{name}.col"), None)?;
+    compact_u64_values(segment_dir, name, codec, values)
+}
+
+fn compact_u64_values(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+    values: impl IntoIterator<Item = u64>,
+) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = values.into_iter().collect();
     write_typed_pages(segment_dir, name, codec, &values, |slice| {
         encode_u64_page(slice, codec)
     })
@@ -289,6 +656,16 @@ fn compact_u32_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u32(segment_dir, &format!("{name}.col"), None)?;
+    compact_u32_values(segment_dir, name, codec, values)
+}
+
+fn compact_u32_values(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+    values: impl IntoIterator<Item = u32>,
+) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = values.into_iter().collect();
     write_typed_pages(segment_dir, name, codec, &values, |slice| {
         encode_u32_page(slice, codec)
     })
@@ -300,6 +677,16 @@ fn compact_u8_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let values = ColumnReader::read_u8(segment_dir, &format!("{name}.col"), None)?;
+    compact_u8_values(segment_dir, name, codec, values)
+}
+
+fn compact_u8_values(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+    values: impl IntoIterator<Item = u8>,
+) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = values.into_iter().collect();
     write_typed_pages(segment_dir, name, codec, &values, |slice| {
         encode_u8_page(slice, codec)
     })
@@ -313,6 +700,41 @@ fn compact_data_column(
     write_typed_pages(segment_dir, "data", codec, &values, |slice| {
         encode_var_bytes_page(slice, codec)
     })
+}
+
+fn compact_data_values(segment_dir: &Path, rows: &[LogRow]) -> std::io::Result<ColumnDescriptor> {
+    let values: Vec<_> = rows.iter().map(|row| row.data.clone()).collect();
+    write_typed_pages(
+        segment_dir,
+        "data",
+        CompressionCodec::AdaptiveBytes,
+        &values,
+        |slice| encode_var_bytes_page(slice, CompressionCodec::AdaptiveBytes),
+    )
+}
+
+fn rewrite_column_dir(columns: &mut [ColumnDescriptor], dir_name: &str) {
+    for column in columns {
+        rewrite_column_path_descriptor(column, dir_name);
+    }
+}
+
+fn rewrite_column_path_descriptor(column: &mut ColumnDescriptor, dir_name: &str) {
+    column.data_path = rewrite_column_path(&column.data_path, dir_name);
+    column.null_bitmap_path = column
+        .null_bitmap_path
+        .as_ref()
+        .map(|path| rewrite_column_path(path, dir_name));
+    column.page_index_path = column
+        .page_index_path
+        .as_ref()
+        .map(|path| rewrite_column_path(path, dir_name));
+}
+
+fn rewrite_column_path(path: &str, dir_name: &str) -> String {
+    path.strip_prefix("columns/")
+        .map(|suffix| format!("{dir_name}/{suffix}"))
+        .unwrap_or_else(|| path.to_owned())
 }
 
 fn write_fixed_width_pages<F>(
@@ -429,6 +851,43 @@ fn remove_raw_hot_files(segment_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn remove_superseded_column_dirs(segment_dir: &Path, active_dir: &str) -> std::io::Result<()> {
+    for entry in fs::read_dir(segment_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("columns") && name != active_dir {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn remove_column_files(segment_dir: &Path, column: &ColumnDescriptor) -> std::io::Result<()> {
+    remove_file_if_exists(segment_dir.join(&column.data_path))?;
+    if let Some(path) = &column.null_bitmap_path {
+        remove_file_if_exists(segment_dir.join(path))?;
+    }
+    if let Some(path) = &column.page_index_path {
+        remove_file_if_exists(segment_dir.join(path))?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: PathBuf) -> std::io::Result<()> {
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> {
     let index_dir = segment_dir.join("indexes");
     if !index_dir.exists() {
@@ -460,4 +919,99 @@ fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> 
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::bytes;
+    use logex_types::Source;
+    use tempfile::TempDir;
+
+    fn descending_rows() -> Vec<LogRow> {
+        (0..8192)
+            .map(|index| {
+                let block_number = 2_000u64 - (index / 8) as u64;
+                LogRow {
+                    block_number,
+                    block_hash: B256::repeat_byte((block_number % 251) as u8),
+                    timestamp: 1_700_000_000 - (index / 8) as u64 * 12,
+                    tx_hash: B256::repeat_byte((index % 251) as u8),
+                    tx_index: (index % 4) as u32,
+                    log_index: index as u32,
+                    address: Address::repeat_byte((index % 17) as u8),
+                    topic0: Some(B256::repeat_byte(0xdd)),
+                    topic1: None,
+                    topic2: None,
+                    topic3: None,
+                    data: bytes!("cafe"),
+                    data_len: 2,
+                    source: Source::Receipt,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recompact_segment_rewrites_only_legacy_block_number_profile() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
+        paths.ensure_base_dirs().unwrap();
+        let descriptor = SegmentDescriptor {
+            id: 7,
+            generation: 0,
+            kind: SegmentKind::Sealed,
+            relative_path: PathBuf::from("segments").join("s_0000000000000007"),
+            manifest_relative_path: PathBuf::from("segments")
+                .join("s_0000000000000007")
+                .join("segment.json"),
+            min_block: Some(0),
+            max_block: Some(2_000),
+            row_count: 8192,
+        };
+        let segment_dir = paths.segment_dir(descriptor.id);
+        let rows = descending_rows();
+        let mut columns = write_compacted_rows(&segment_dir, &rows).unwrap();
+        let legacy_block_number = compact_u64_values(
+            &segment_dir,
+            "block_number",
+            CompressionCodec::Delta,
+            rows.iter().map(|row| row.block_number),
+        )
+        .unwrap();
+        let block_number_index = columns
+            .iter()
+            .position(|column| column.name == "block_number")
+            .unwrap();
+        columns[block_number_index] = legacy_block_number.clone();
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+
+        let old_size = fs::metadata(segment_dir.join(&legacy_block_number.data_path))
+            .unwrap()
+            .len();
+        compact_segment(&paths, &descriptor).unwrap();
+
+        let columns = existing_columns(&paths, descriptor.id).unwrap().unwrap();
+        let block_number = columns
+            .iter()
+            .find(|column| column.name == "block_number")
+            .unwrap();
+        assert_eq!(block_number.codec, CompressionCodec::DeltaZigZag);
+        let new_size = fs::metadata(segment_dir.join(&block_number.data_path))
+            .unwrap()
+            .len();
+        assert!(
+            new_size.saturating_mul(10) < old_size,
+            "old_size={old_size} new_size={new_size}"
+        );
+
+        let reread = SegmentReader::open(&segment_dir)
+            .unwrap()
+            .read_u64("block_number", None)
+            .unwrap();
+        assert_eq!(
+            reread,
+            rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
+        );
+    }
 }

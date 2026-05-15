@@ -1,16 +1,21 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use alloy_primitives::U256;
 use logex_cl::{
-    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, spawn_consensus_network,
+    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC,
+    spawn_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
 use logex_sync::p2p::{
-    peer_manager::PeerManager,
+    peer_manager::{PeerManager, PeerManagerConfig},
     persistence::{
         discovery_secret_path, known_peers_path, load_known_peers, load_or_create_secret_key,
         persist_known_peers,
@@ -18,10 +23,15 @@ use logex_sync::p2p::{
 };
 use logex_types::SyncStatus;
 use reth_chainspec::{EthChainSpec, MAINNET};
+use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
 
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::resolve_checkpoint;
+
+const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
+const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
@@ -32,9 +42,12 @@ pub struct RunSyncOptions {
     pub discovery_port: u16,
     pub p2p_port: u16,
     pub max_peers: usize,
+    pub nat: String,
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
+    pub dashboard_enabled: bool,
+    pub dashboard_password: Option<String>,
 }
 
 pub async fn run_sync(options: RunSyncOptions) {
@@ -47,10 +60,20 @@ pub async fn run_sync(options: RunSyncOptions) {
         discovery_port,
         p2p_port,
         max_peers,
+        nat,
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
+        dashboard_enabled,
+        dashboard_password,
     } = options;
+    let nat = match nat.parse::<NatResolver>() {
+        Ok(nat) => nat,
+        Err(error) => {
+            tracing::error!(%error, "invalid EL NAT resolver");
+            std::process::exit(1);
+        }
+    };
 
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
@@ -131,10 +154,18 @@ pub async fn run_sync(options: RunSyncOptions) {
     }
 
     let storage_anchors = storage.chain_anchors();
+    let historical_floor = storage.historical_floor();
+    let historical_anchor = storage.historical_anchor();
     let state = Arc::new(AppState::new(
         storage,
         Some(SubscriptionManager::new()),
-        initial_sync_status(resume_block, &storage_anchors, consensus.as_deref()),
+        initial_sync_status(
+            resume_block,
+            &storage_anchors,
+            historical_floor,
+            historical_anchor,
+            consensus.as_deref(),
+        ),
     ));
 
     let known_peers = match load_known_peers(&known_peers_file) {
@@ -200,7 +231,13 @@ pub async fn run_sync(options: RunSyncOptions) {
     let http_shutdown = shutdown_rx.clone();
     let http_handle = tokio::spawn(async move {
         tracing::info!(%http_addr, "HTTP server starting");
-        if let Err(e) = logex_server::serve(http_state, http_addr, http_shutdown).await {
+        let http_config = logex_server::HttpServerConfig {
+            dashboard_enabled,
+            dashboard_password,
+        };
+        if let Err(e) =
+            logex_server::serve_with_config(http_state, http_addr, http_shutdown, http_config).await
+        {
             tracing::error!(error = %e, "HTTP server error");
         }
     });
@@ -225,16 +262,17 @@ pub async fn run_sync(options: RunSyncOptions) {
         "query endpoints ready"
     );
 
-    let our_head = startup_network_head(sync_head);
-    let peers = match PeerManager::new(
+    let our_head = startup_network_head(sync_head, consensus.as_deref());
+    let peers = match PeerManager::new(PeerManagerConfig {
         secret_key,
-        p2p_port,
+        listener_port: p2p_port,
         discovery_port,
         max_peers,
+        nat_resolver: nat,
         our_head,
         known_peers,
-        known_peers_file.clone(),
-    )
+        known_peers_path: known_peers_file.clone(),
+    })
     .await
     {
         Ok(peers) => peers,
@@ -266,7 +304,36 @@ pub async fn run_sync(options: RunSyncOptions) {
             signal = wait_for_shutdown_signal() => {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
                 let _ = shutdown_tx.send(true);
-                engine_run.await
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
+                            "sync engine did not stop within shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
+            },
+            low_disk = wait_for_low_disk_space(data_dir.clone()) => {
+                tracing::error!(
+                    path = %low_disk.path.display(),
+                    free_bytes = low_disk.free_bytes,
+                    min_free_bytes = low_disk.min_free_bytes,
+                    "disk space below safety threshold, stopping node gracefully"
+                );
+                mark_sync_stopped_for_low_disk(&state);
+                let _ = shutdown_tx.send(true);
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
+                            "sync engine did not stop within low-disk shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
             }
         }
     };
@@ -306,11 +373,16 @@ pub async fn run_sync(options: RunSyncOptions) {
 fn initial_sync_status(
     resume_block: u64,
     storage_anchors: &logex_types::ChainAnchors,
+    historical_floor: Option<logex_types::ExecutionBlockMarker>,
+    historical_anchor: Option<logex_types::ExecutionBlockMarker>,
     consensus: Option<&ConsensusStore>,
 ) -> SyncStatus {
     let mut status = SyncStatus {
         current_block: resume_block,
         target_block: 0,
+        historical_execution_floor: historical_floor,
+        historical_execution_anchor: historical_anchor,
+        historical_target_block: logex_sync::EXECUTION_HISTORY_TARGET_BLOCK,
         ..Default::default()
     };
     status.indexed_execution_head = storage_anchors.indexed_head;
@@ -334,35 +406,89 @@ fn initial_sync_status(
     status
 }
 
-fn startup_network_head(sync_head: Option<SyncHead>) -> Head {
+fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&ConsensusStore>) -> Head {
     match sync_head {
-        Some(head) if head.block_number == 0 || head.timestamp > 0 => Head {
-            number: head.block_number,
-            hash: head.block_hash,
-            timestamp: if head.block_number == 0 {
+        Some(head) if head.block_number == 0 || head.timestamp > 0 => network_head(
+            head.block_number,
+            head.block_hash,
+            if head.block_number == 0 {
                 MAINNET.genesis().timestamp
             } else {
                 head.timestamp
             },
-            ..Default::default()
-        },
+        ),
         Some(head) => {
             tracing::warn!(
                 block_number = head.block_number,
-                "sync metadata is missing the block timestamp, starting network status from genesis until a new verified block updates it"
+                "sync metadata is missing the block timestamp, starting execution network status from consensus until a new verified block updates it"
             );
-            genesis_network_head()
+            consensus
+                .and_then(|consensus| consensus.anchor_coverage().ceiling)
+                .map(consensus_anchor_network_head)
+                .or_else(|| consensus.map(consensus_checkpoint_network_head))
+                .unwrap_or_else(genesis_network_head)
         }
-        None => genesis_network_head(),
+        None => consensus
+            .and_then(|consensus| consensus.anchor_coverage().ceiling)
+            .map(consensus_anchor_network_head)
+            .or_else(|| consensus.map(consensus_checkpoint_network_head))
+            .unwrap_or_else(genesis_network_head),
     }
 }
 
+fn consensus_anchor_network_head(anchor: logex_types::ExecutionAnchor) -> Head {
+    network_head(
+        anchor.block_number,
+        anchor.block_hash,
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .genesis_time
+            .saturating_add(anchor.beacon_slot.saturating_mul(12)),
+    )
+}
+
+fn consensus_checkpoint_network_head(consensus: &ConsensusStore) -> Head {
+    let timestamp = consensus
+        .checkpoint()
+        .beacon_slot
+        .map(consensus_slot_timestamp)
+        .unwrap_or_else(current_unix_timestamp);
+    network_head(0, MAINNET.genesis_hash(), timestamp)
+}
+
+fn consensus_slot_timestamp(slot: u64) -> u64 {
+    MAINNET_CONSENSUS_CHAIN_SPEC
+        .genesis_time
+        .saturating_add(slot.saturating_mul(12))
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(MAINNET_CONSENSUS_CHAIN_SPEC.genesis_time)
+}
+
 fn genesis_network_head() -> Head {
+    network_head(0, MAINNET.genesis_hash(), MAINNET.genesis().timestamp)
+}
+
+fn network_head(number: u64, hash: alloy_primitives::B256, timestamp: u64) -> Head {
     Head {
-        number: 0,
-        hash: MAINNET.genesis_hash(),
-        timestamp: MAINNET.genesis().timestamp,
-        ..Default::default()
+        number,
+        hash,
+        timestamp,
+        difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            U256::ZERO
+        },
+        total_difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            MAINNET
+                .final_paris_total_difficulty()
+                .unwrap_or(MAINNET.genesis().difficulty)
+        },
     }
 }
 
@@ -405,15 +531,165 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
+#[derive(Debug)]
+struct LowDiskSpace {
+    path: PathBuf,
+    free_bytes: u64,
+    min_free_bytes: u64,
+}
+
+async fn wait_for_low_disk_space(path: PathBuf) -> LowDiskSpace {
+    let mut interval = tokio::time::interval(LOW_DISK_SPACE_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        for probe_path in disk_space_probe_paths(&path) {
+            match free_space_bytes(&probe_path) {
+                Ok(free_bytes) if disk_space_is_low(free_bytes, LOW_DISK_SPACE_MIN_FREE_BYTES) => {
+                    return LowDiskSpace {
+                        path: probe_path,
+                        free_bytes,
+                        min_free_bytes: LOW_DISK_SPACE_MIN_FREE_BYTES,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %probe_path.display(),
+                        %error,
+                        "failed to check data directory free space"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn disk_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut probes = BTreeSet::new();
+    insert_disk_space_probe_path(&mut probes, data_dir.to_path_buf());
+
+    let segments_dir = data_dir.join("segments");
+    insert_disk_space_probe_path(&mut probes, segments_dir.clone());
+
+    if let Ok(entries) = std::fs::read_dir(&segments_dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_symlink() {
+                continue;
+            }
+
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let target = if target.is_absolute() {
+                target
+            } else {
+                segments_dir.join(target)
+            };
+            let probe = target.parent().map(Path::to_path_buf).unwrap_or(target);
+            insert_disk_space_probe_path(&mut probes, probe);
+        }
+    }
+
+    probes.into_iter().collect()
+}
+
+fn insert_disk_space_probe_path(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
+    let path = path.canonicalize().unwrap_or(path);
+    probes.insert(path);
+}
+
+fn disk_space_is_low(free_bytes: u64, min_free_bytes: u64) -> bool {
+    free_bytes < min_free_bytes
+}
+
+fn mark_sync_stopped_for_low_disk(state: &AppState) {
+    let mut status = state
+        .sync_status
+        .lock()
+        .expect("sync status mutex poisoned");
+    status.syncing = false;
+    status.eta_seconds = None;
+    status.historical_eta_seconds = None;
+    status.node_state = logex_types::NodeState::Disconnected;
+}
+
+#[cfg(unix)]
+fn free_space_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL byte")
+    })?;
+
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let stat = unsafe { stat.assume_init() };
+    let free = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
+    Ok(free.min(u64::MAX as u128) as u64)
+}
+
+#[cfg(not(unix))]
+fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "free-space reporting is not implemented on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn initial_sync_status_does_not_treat_resume_block_as_network_target() {
-        let status = initial_sync_status(83_714, &logex_types::ChainAnchors::default(), None);
+        let status = initial_sync_status(
+            83_714,
+            &logex_types::ChainAnchors::default(),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(status.current_block, 83_714);
         assert_eq!(status.target_block, 0);
+    }
+
+    #[test]
+    fn disk_space_guard_trips_below_threshold() {
+        assert!(disk_space_is_low(9, 10));
+        assert!(!disk_space_is_low(10, 10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_space_probe_paths_include_segment_symlink_targets() {
+        let base =
+            std::env::temp_dir().join(format!("logex-node-disk-probes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data_dir = base.join("data");
+        let segments_dir = data_dir.join("segments");
+        let extra_segments_dir = base.join("extra").join("segments");
+        let target_segment = extra_segments_dir.join("s_1");
+        std::fs::create_dir_all(&segments_dir).unwrap();
+        std::fs::create_dir_all(&target_segment).unwrap();
+        std::os::unix::fs::symlink(&target_segment, segments_dir.join("s_1")).unwrap();
+
+        let probes = disk_space_probe_paths(&data_dir);
+
+        assert!(probes.contains(&data_dir.canonicalize().unwrap()));
+        assert!(probes.contains(&segments_dir.canonicalize().unwrap()));
+        assert!(probes.contains(&extra_segments_dir.canonicalize().unwrap()));
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

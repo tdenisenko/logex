@@ -1,7 +1,12 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use logex_types::{ChainAnchors, NodeState, SyncStatus, WeakSubjectivityCheckpoint};
+use logex_types::{
+    ChainAnchors, ExecutionBlockMarker, ExecutionNetworkStatus, NodeState, SyncStatus,
+    WeakSubjectivityCheckpoint,
+};
+
+const HISTORICAL_RATE_EWMA_WEIGHT: f64 = 0.35;
 
 /// Tracks sync progress and updates the shared SyncStatus.
 pub struct ProgressTracker {
@@ -13,6 +18,13 @@ pub struct ProgressTracker {
     last_log_block: u64,
     /// Timestamp of the last terminal progress line.
     last_log_at: Instant,
+    historical_blocks_processed: u64,
+    historical_logs_ingested: u64,
+    historical_rate_at: Instant,
+    historical_recent_blocks_per_sec: f64,
+    historical_recent_logs_per_sec: f64,
+    last_historical_log_block: u64,
+    last_historical_log_at: Instant,
 }
 
 impl ProgressTracker {
@@ -24,6 +36,13 @@ impl ProgressTracker {
             logs_ingested: 0,
             last_log_block: 0,
             last_log_at: Instant::now(),
+            historical_blocks_processed: 0,
+            historical_logs_ingested: 0,
+            historical_rate_at: Instant::now(),
+            historical_recent_blocks_per_sec: 0.0,
+            historical_recent_logs_per_sec: 0.0,
+            last_historical_log_block: u64::MAX,
+            last_historical_log_at: Instant::now(),
         }
     }
 
@@ -76,8 +95,20 @@ impl ProgressTracker {
     ) {
         let mut status = self.status.lock().unwrap();
         let previous_state = status.node_state;
+        let historical_incomplete = status
+            .historical_execution_floor
+            .is_some_and(|floor| floor.block_number > status.historical_target_block);
+        let node_state = if historical_incomplete
+            && matches!(
+                node_state,
+                NodeState::Synced | NodeState::WaitingForConsensus
+            ) {
+            NodeState::Syncing
+        } else {
+            node_state
+        };
         status.node_state = node_state;
-        status.syncing = node_state == NodeState::Syncing;
+        status.syncing = node_state == NodeState::Syncing || historical_incomplete;
         status.connected_peers = connected_peers;
         status.serving_peers = serving_peers;
         status.pending_peers = pending_peers;
@@ -94,6 +125,11 @@ impl ProgressTracker {
                 "node state changed"
             );
         }
+    }
+
+    pub fn update_execution_network_state(&self, execution_network: ExecutionNetworkStatus) {
+        let mut status = self.status.lock().unwrap();
+        status.execution_network = Some(execution_network);
     }
 
     /// Record that a block has been ingested.
@@ -145,6 +181,89 @@ impl ProgressTracker {
         }
     }
 
+    pub fn initialize_historical_state(
+        &self,
+        floor: Option<ExecutionBlockMarker>,
+        anchor: Option<ExecutionBlockMarker>,
+        target_block: u64,
+    ) {
+        let mut status = self.status.lock().unwrap();
+        status.historical_execution_floor = floor;
+        status.historical_execution_anchor = anchor;
+        status.historical_target_block = target_block;
+        status.historical_eta_seconds = historical_eta(
+            status.historical_execution_floor,
+            status.historical_target_block,
+            status.historical_blocks_per_sec,
+        );
+    }
+
+    pub fn record_historical_blocks(
+        &mut self,
+        floor: ExecutionBlockMarker,
+        anchor: Option<ExecutionBlockMarker>,
+        target_block: u64,
+        block_count: u64,
+        log_count: u64,
+    ) {
+        if block_count == 0 {
+            return;
+        }
+
+        self.historical_blocks_processed += block_count;
+        self.historical_logs_ingested += log_count;
+        self.logs_ingested += log_count;
+
+        let now = Instant::now();
+        let interval = now.duration_since(self.historical_rate_at).as_secs_f64();
+        self.historical_rate_at = now;
+        let recent_bps = if interval > 0.0 {
+            block_count as f64 / interval
+        } else {
+            0.0
+        };
+        let bps = smoothed_historical_rate(self.historical_recent_blocks_per_sec, recent_bps);
+        self.historical_recent_blocks_per_sec = bps;
+        let recent_lps = if interval > 0.0 {
+            log_count as f64 / interval
+        } else {
+            0.0
+        };
+        let lps = smoothed_historical_rate(self.historical_recent_logs_per_sec, recent_lps);
+        self.historical_recent_logs_per_sec = lps;
+
+        let mut status = self.status.lock().unwrap();
+        status.node_state = NodeState::Syncing;
+        status.syncing = true;
+        status.historical_execution_floor = Some(floor);
+        status.historical_execution_anchor = anchor.or(status.historical_execution_anchor);
+        status.historical_target_block = target_block;
+        status.historical_blocks_per_sec = bps;
+        status.historical_logs_per_sec = lps;
+        status.historical_rate_updated_at_unix_ms = Some(unix_time_millis());
+        status.historical_eta_seconds = historical_eta(Some(floor), target_block, bps);
+        status.logs_ingested = self.logs_ingested;
+
+        let should_log = floor.block_number / 1000 < self.last_historical_log_block / 1000
+            || self.last_historical_log_at.elapsed().as_secs() >= 15;
+        if should_log {
+            self.last_historical_log_block = floor.block_number;
+            self.last_historical_log_at = Instant::now();
+            tracing::info!(
+                historical_floor = floor.block_number,
+                historical_target = target_block,
+                remaining_blocks = floor.block_number.saturating_sub(target_block),
+                total_historical_blocks = self.historical_blocks_processed,
+                total_historical_logs = self.historical_logs_ingested,
+                historical_blocks_per_sec = format!("{bps:.2}"),
+                historical_logs_per_sec = format!("{lps:.2}"),
+                historical_eta_seconds =
+                    status.historical_eta_seconds.map(|eta| eta.round() as u64),
+                "historical reverse sync progress"
+            );
+        }
+    }
+
     pub fn rewind_to(&self, block_number: u64) {
         let mut status = self.status.lock().unwrap();
         status.current_block = block_number;
@@ -161,6 +280,15 @@ impl ProgressTracker {
         status.syncing = false;
         status.target_block = status.current_block;
         status.eta_seconds = None;
+        if status
+            .historical_execution_floor
+            .is_none_or(|floor| floor.block_number <= status.historical_target_block)
+        {
+            status.historical_blocks_per_sec = 0.0;
+            status.historical_logs_per_sec = 0.0;
+            status.historical_rate_updated_at_unix_ms = None;
+            status.historical_eta_seconds = None;
+        }
     }
 
     pub fn blocks_processed(&self) -> u64 {
@@ -170,6 +298,37 @@ impl ProgressTracker {
     pub fn logs_ingested(&self) -> u64 {
         self.logs_ingested
     }
+}
+
+fn historical_eta(
+    floor: Option<ExecutionBlockMarker>,
+    target_block: u64,
+    blocks_per_sec: f64,
+) -> Option<f64> {
+    let floor = floor?;
+    if blocks_per_sec <= 0.0 || floor.block_number <= target_block {
+        return None;
+    }
+
+    Some((floor.block_number - target_block) as f64 / blocks_per_sec)
+}
+
+fn smoothed_historical_rate(previous: f64, recent: f64) -> f64 {
+    if recent <= 0.0 {
+        return previous.max(0.0);
+    }
+    if previous <= 0.0 {
+        return recent;
+    }
+
+    (previous * (1.0 - HISTORICAL_RATE_EWMA_WEIGHT)) + (recent * HISTORICAL_RATE_EWMA_WEIGHT)
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -201,6 +360,35 @@ mod tests {
         let status = status.lock().unwrap().clone();
         assert!(!status.syncing);
         assert_eq!(status.node_state, NodeState::Connecting);
+    }
+
+    #[test]
+    fn historical_backfill_keeps_runtime_syncing_state_visible() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            historical_execution_floor: Some(ExecutionBlockMarker {
+                block_number: 10,
+                block_hash: B256::repeat_byte(0x10),
+                timestamp: 100,
+            }),
+            historical_target_block: 0,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Synced, 8, 8, 64);
+
+        let status = status.lock().unwrap().clone();
+        assert!(status.syncing);
+        assert_eq!(status.node_state, NodeState::Syncing);
+    }
+
+    #[test]
+    fn historical_rate_smoothing_uses_recent_progress() {
+        assert_eq!(smoothed_historical_rate(0.0, 128.0), 128.0);
+        assert_eq!(smoothed_historical_rate(100.0, 0.0), 100.0);
+        let smoothed = smoothed_historical_rate(100.0, 200.0);
+        assert!(smoothed > 100.0);
+        assert!(smoothed < 200.0);
     }
 
     #[test]

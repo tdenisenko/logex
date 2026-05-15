@@ -10,13 +10,14 @@ repository = "https://github.com/tdenisenko/logex"
 
 [workspace.dependencies]
 # Ethereum primitives
-alloy-primitives = "1.5"
+alloy-primitives = { version = "1.5", features = ["asm-keccak"] }
 alloy-consensus = "1.8"
 alloy-rpc-types = "1.8"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rustc-hash = "2"
 
 # Error handling
 thiserror = "2"
@@ -50,6 +51,7 @@ prost = "0.13"
 # Reth networking (lightweight, no EVM dependency)
 reth-eth-wire = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-discv4 = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-dns-discovery = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-network = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3", features = ["secp256k1"] }
 reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
@@ -59,6 +61,7 @@ reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth.git", ta
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-db-models = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-consensus-common = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 
 # Internal crates

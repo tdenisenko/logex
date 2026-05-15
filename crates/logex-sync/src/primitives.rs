@@ -4,11 +4,15 @@ use alloy_consensus::{
 };
 use alloy_eips::Typed2718;
 use alloy_eips::eip2718::Eip2718Result;
-use alloy_primitives::{Bloom, Log};
+use alloy_primitives::{Address, B256, Bloom, Log};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_eth_wire::BasicNetworkPrimitives;
 use reth_ethereum_primitives::{Block, BlockBody, PooledTransactionVariant, TransactionSigned};
 use reth_primitives_traits::{InMemorySize, NodePrimitives};
+use rustc_hash::FxHashMap;
+
+const RECEIPT_BLOOM_ADDRESS_CACHE_LIMIT: usize = 4_096;
+const RECEIPT_BLOOM_TOPIC_CACHE_LIMIT: usize = 8_192;
 
 /// LogEx's internal primitive set keeps Ethereum block/transaction types but
 /// uses a receipt representation that can decode both pre- and post-Byzantium
@@ -41,31 +45,114 @@ pub struct LogexReceipt {
     pub logs: Vec<Log>,
 }
 
-impl LogexReceipt {
-    fn rlp_encoded_fields_length(&self) -> usize {
-        self.status.length() + self.cumulative_gas_used.length() + self.logs.length()
+#[derive(Debug, Default)]
+pub(crate) struct ReceiptBloomCache {
+    address_blooms: FxHashMap<Address, Bloom>,
+    topic_blooms: FxHashMap<B256, Bloom>,
+}
+
+impl ReceiptBloomCache {
+    pub(crate) fn receipt_bloom(&mut self, receipt: &LogexReceipt) -> Bloom {
+        let mut bloom = Bloom::ZERO;
+        for log in &receipt.logs {
+            let address_bloom = self.address_bloom(log.address);
+            bloom.accrue_bloom(&address_bloom);
+            for topic in log.topics() {
+                let topic_bloom = self.topic_bloom(*topic);
+                bloom.accrue_bloom(&topic_bloom);
+            }
+        }
+        bloom
     }
 
-    fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
+    fn address_bloom(&mut self, address: Address) -> Bloom {
+        if let Some(bloom) = self.address_blooms.get(&address) {
+            return *bloom;
+        }
+
+        let bloom = bloom_for_bytes(address.as_slice());
+        if self.address_blooms.len() < RECEIPT_BLOOM_ADDRESS_CACHE_LIMIT {
+            self.address_blooms.insert(address, bloom);
+        }
+        bloom
+    }
+
+    fn topic_bloom(&mut self, topic: B256) -> Bloom {
+        if let Some(bloom) = self.topic_blooms.get(&topic) {
+            return *bloom;
+        }
+
+        let bloom = bloom_for_bytes(topic.as_slice());
+        if self.topic_blooms.len() < RECEIPT_BLOOM_TOPIC_CACHE_LIMIT {
+            self.topic_blooms.insert(topic, bloom);
+        }
+        bloom
+    }
+
+    #[cfg(test)]
+    fn cached_entries(&self) -> (usize, usize) {
+        (self.address_blooms.len(), self.topic_blooms.len())
+    }
+}
+
+pub(crate) fn logex_receipt_batches_with_cached_blooms(
+    receipts: Vec<Vec<LogexReceipt>>,
+    cache: &mut ReceiptBloomCache,
+) -> Vec<Vec<ReceiptWithBloom<LogexReceipt>>> {
+    receipts
+        .into_iter()
+        .map(|block_receipts| {
+            block_receipts
+                .into_iter()
+                .map(|receipt| {
+                    let logs_bloom = cache.receipt_bloom(&receipt);
+                    ReceiptWithBloom {
+                        receipt,
+                        logs_bloom,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn bloom_for_bytes(bytes: &[u8]) -> Bloom {
+    let mut bloom = Bloom::ZERO;
+    bloom.m3_2048(bytes);
+    bloom
+}
+
+impl LogexReceipt {
+    fn network_encoded_fields_length(&self) -> usize {
+        self.tx_type.ty().length()
+            + self.status.length()
+            + self.cumulative_gas_used.length()
+            + self.logs.length()
+    }
+
+    fn network_encode_fields(&self, out: &mut dyn BufMut) {
+        self.tx_type.ty().encode(out);
         self.status.encode(out);
         self.cumulative_gas_used.encode(out);
         self.logs.encode(out);
     }
 
-    fn rlp_header(&self) -> Header {
+    fn network_header(&self) -> Header {
         Header {
             list: true,
-            payload_length: self.rlp_encoded_fields_length(),
+            payload_length: self.network_encoded_fields_length(),
         }
     }
 
-    fn rlp_decode_inner(buf: &mut &[u8], tx_type: TxType) -> alloy_rlp::Result<Self> {
+    fn network_decode_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
             return Err(alloy_rlp::Error::UnexpectedString);
         }
 
         let remaining = buf.len();
+        let tx_type = TxType::try_from(u8::decode(buf)?)
+            .map_err(|_| alloy_rlp::Error::Custom("invalid receipt tx type"))?;
         let status = Decodable::decode(buf)?;
         let cumulative_gas_used = Decodable::decode(buf)?;
         let logs = Decodable::decode(buf)?;
@@ -132,18 +219,6 @@ impl LogexReceipt {
             logs_bloom,
         })
     }
-
-    fn eip2718_encoded_length(&self) -> usize {
-        !self.tx_type.is_legacy() as usize + self.rlp_header().length_with_payload()
-    }
-
-    fn eip2718_encode(&self, out: &mut dyn BufMut) {
-        if !self.tx_type.is_legacy() {
-            out.put_u8(self.tx_type.ty());
-        }
-        self.rlp_header().encode(out);
-        self.rlp_encode_fields(out);
-    }
 }
 
 impl TxReceipt for LogexReceipt {
@@ -191,53 +266,18 @@ impl InMemorySize for LogexReceipt {
 
 impl Encodable for LogexReceipt {
     fn encode(&self, out: &mut dyn BufMut) {
-        if self.tx_type.is_legacy() {
-            self.rlp_header().encode(out);
-            self.rlp_encode_fields(out);
-            return;
-        }
-
-        Header {
-            list: false,
-            payload_length: self.eip2718_encoded_length(),
-        }
-        .encode(out);
-        self.eip2718_encode(out);
+        self.network_header().encode(out);
+        self.network_encode_fields(out);
     }
 
     fn length(&self) -> usize {
-        if self.tx_type.is_legacy() {
-            return self.rlp_header().length_with_payload();
-        }
-
-        Header {
-            list: false,
-            payload_length: self.eip2718_encoded_length(),
-        }
-        .length()
-            + self.eip2718_encoded_length()
+        self.network_header().length_with_payload()
     }
 }
 
 impl Decodable for LogexReceipt {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let header_buf = &mut &**buf;
-        let header = Header::decode(header_buf)?;
-
-        if header.list {
-            return Self::rlp_decode_inner(buf, TxType::Legacy);
-        }
-
-        *buf = *header_buf;
-        let remaining = buf.len();
-        let tx_type = TxType::decode(buf)?;
-        let this = Self::rlp_decode_inner(buf, tx_type)?;
-
-        if buf.len() + header.payload_length != remaining {
-            return Err(alloy_rlp::Error::UnexpectedLength);
-        }
-
-        Ok(this)
+        Self::network_decode_inner(buf)
     }
 }
 
@@ -330,6 +370,23 @@ mod tests {
     }
 
     #[test]
+    fn cached_receipt_bloom_matches_alloy_bloom() {
+        let receipt = LogexReceipt {
+            tx_type: TxType::Eip1559,
+            status: Eip658Value::success(),
+            cumulative_gas_used: 42_000,
+            logs: vec![test_log(), test_log()],
+        };
+        let mut cache = ReceiptBloomCache::default();
+
+        let cached = cache.receipt_bloom(&receipt);
+        let expected = alloy_primitives::logs_bloom(receipt.logs.iter());
+
+        assert_eq!(cached, expected);
+        assert_eq!(cache.cached_entries(), (1, 1));
+    }
+
+    #[test]
     fn no_bloom_roundtrip_preserves_post_state() {
         let receipt = LogexReceipt {
             tx_type: TxType::Legacy,
@@ -343,6 +400,30 @@ mod tests {
 
         assert_eq!(decoded, receipt);
         assert!(decoded.status.is_post_state());
+    }
+
+    #[test]
+    fn no_bloom_decode_accepts_eth69_network_shape() {
+        let mut encoded = Vec::new();
+        Header {
+            list: true,
+            payload_length: 0u8.length()
+                + Eip658Value::success().length()
+                + 21_000u64.length()
+                + Vec::<Log>::new().length(),
+        }
+        .encode(&mut encoded);
+        0u8.encode(&mut encoded);
+        Eip658Value::success().encode(&mut encoded);
+        21_000u64.encode(&mut encoded);
+        Vec::<Log>::new().encode(&mut encoded);
+
+        let decoded = LogexReceipt::decode(&mut encoded.as_slice()).expect("receipt decodes");
+
+        assert_eq!(decoded.tx_type, TxType::Legacy);
+        assert!(decoded.status());
+        assert_eq!(decoded.cumulative_gas_used, 21_000);
+        assert!(decoded.logs.is_empty());
     }
 
     #[test]

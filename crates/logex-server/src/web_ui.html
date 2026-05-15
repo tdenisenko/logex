@@ -80,7 +80,7 @@
     line-height: 1.5;
   }
 
-  .node-strip {
+  .status-strip, .node-strip {
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -125,252 +125,122 @@
     50% { opacity: .48; transform: scale(.82); }
   }
 
-  .hero-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-
-  .hero-panel, .panel, .query-panel {
+  .panel, .query-panel {
     border: 1px solid var(--line);
     border-radius: 8px;
     background: rgba(16, 21, 28, .90);
     box-shadow: 0 18px 54px rgba(0, 0, 0, .22);
+    padding: 20px;
   }
 
-  .hero-panel {
-    min-height: 0;
-    padding: 14px 16px;
+  .overview {
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr) minmax(220px, .35fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
-    align-items: center;
-  }
-
-  .panel-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
+    align-items: stretch;
     margin-bottom: 16px;
   }
 
-  .panel-title h2, .panel-title h3 {
-    margin: 0;
-    font-size: var(--font-title);
-    line-height: 1.15;
-    letter-spacing: 0;
+  .execution-card {
+    grid-column: 1 / -1;
+    min-height: 190px;
+    display: grid;
+    gap: 14px;
   }
 
-  .panel-title .sub {
-    margin-top: 5px;
-    color: var(--muted);
-    font-size: var(--font-small);
-    line-height: 1.35;
-  }
-
-  .big-number {
-    display: block;
-    margin-top: 5px;
-    color: var(--text);
-    font-size: var(--font-body);
-    line-height: 1.1;
-    font-weight: 760;
-    letter-spacing: 0;
-    word-break: break-word;
-  }
-
-  .big-label {
+  .card-label {
+    margin: 0 0 4px;
     color: var(--muted);
     font-size: var(--font-label);
+    line-height: 1.2;
     text-transform: uppercase;
     letter-spacing: .06em;
   }
 
-  .bar {
-    height: 10px;
-    overflow: hidden;
-    border: 1px solid var(--line-strong);
-    border-radius: 999px;
-    background: #070a0e;
-  }
-
-  .bar > span {
-    display: block;
-    height: 100%;
-    width: 0%;
-    border-radius: inherit;
-    transition: width .35s ease;
-  }
-
-  .bar-cl > span { background: linear-gradient(90deg, var(--cl), var(--finalized)); }
-  .bar-el > span { background: linear-gradient(90deg, var(--el), #9fc7ff); }
-  .bar-index > span { background: linear-gradient(90deg, var(--index), #ffd987); }
-  .bar-query > span { background: linear-gradient(90deg, var(--query), #d0bbff); }
-
-  .graph-panel {
-    margin-bottom: 18px;
-  }
-
-  .graph-wrap {
-    display: grid;
+  .card-main {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 12px;
   }
 
-  .graph-row {
-    display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
-    gap: 18px;
-    align-items: center;
-    padding: 15px 16px;
-    border: 1px solid rgba(53, 70, 90, .72);
-    border-left-width: 4px;
-    border-radius: 8px;
-    background: rgba(21, 27, 36, .56);
+  .headline {
+    font-size: var(--font-brand);
+    line-height: 1.1;
+    font-weight: 760;
+    letter-spacing: 0;
   }
 
-  .graph-row-label {
-    min-width: 0;
-  }
-
-  .graph-row-label strong {
-    display: block;
-    font-size: var(--font-title);
-    line-height: 1.2;
-  }
-
-  .graph-row-label span {
-    display: block;
-    margin-top: 3px;
+  .subline {
     color: var(--muted);
-    font-size: var(--font-small);
-    line-height: 1.25;
-  }
-
-  .graph-row-value {
-    margin-top: 10px;
-    color: var(--muted);
+    line-height: 1.45;
     font-size: var(--font-body);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
   }
 
-  .graph-bar {
-    min-width: 0;
+  .bar-wrap {
     display: grid;
-    gap: 7px;
+    gap: 8px;
   }
 
-  .graph-limits {
+  .bar-limits {
     display: flex;
     justify-content: space-between;
     gap: 16px;
     color: var(--muted);
     font-size: var(--font-small);
-    line-height: 1.3;
   }
 
-  .graph-limits span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .graph-limits span:last-child {
-    text-align: right;
-  }
-
-  .graph-current {
-    color: var(--soft);
-    font-size: var(--font-small);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-  }
-
-  .graph-track {
+  .segmented-bar {
     position: relative;
     height: 18px;
     overflow: hidden;
     border: 1px solid var(--line-strong);
     border-radius: 999px;
-    background: #070a0e;
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 1px, transparent 1px 12px),
+      #070a0e;
   }
 
-  .graph-fill {
+  .segmented-bar > span {
     position: absolute;
-    top: 0;
-    left: 0;
-    height: 100%;
+    inset: 0 auto 0 0;
     width: 0%;
-    border-radius: 999px;
-    transition: left .35s ease, width .35s ease;
+    transition: width .45s ease;
+    border-radius: inherit;
+    background:
+      linear-gradient(90deg, rgba(255,255,255,.00), rgba(255,255,255,.28), rgba(255,255,255,.00)),
+      linear-gradient(90deg, #2fbd82, #48d6b8, #7df0cf);
+    background-size: 120px 100%, 100% 100%;
   }
 
-  .graph-fill.live {
-    background: linear-gradient(90deg, var(--cl), var(--finalized));
+  .segmented-bar.active > span {
+    animation: greenSweep 1.7s linear infinite;
   }
 
-  .graph-fill.el {
-    left: 0;
-    background: linear-gradient(90deg, var(--el), #9fc7ff);
+  .segmented-bar.offline {
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 1px, transparent 1px 12px),
+      #171b21;
   }
 
-  .graph-fill.index {
-    left: 0;
-    background: linear-gradient(90deg, var(--index), #ffd987);
+  .segmented-bar.offline > span {
+    animation: none;
+    background: #66717d;
+    background-size: auto;
   }
 
-  .graph-fill.query {
-    background: linear-gradient(90deg, var(--query), #d0bbff);
+  @keyframes greenSweep {
+    from { background-position: -120px 0, 0 0; }
+    to { background-position: 120px 0, 0 0; }
   }
 
-  .graph-dot {
-    position: absolute;
-    top: 50%;
-    left: 0%;
-    width: 12px;
-    height: 12px;
-    border: 2px solid #070a0e;
-    border-radius: 50%;
-    background: var(--text);
-    transform: translate(-50%, -50%);
-    box-shadow: 0 0 0 2px rgba(238, 244, 248, .24);
-    transition: left .35s ease;
-  }
-
-  .graph-dot.live { background: var(--cl); }
-  .graph-dot.el { background: var(--el); }
-  .graph-dot.index { background: var(--index); }
-  .graph-dot.query { background: var(--query); }
-
-  .graph-row.live { border-left-color: var(--cl); }
-  .graph-row.el { border-left-color: var(--el); }
-  .graph-row.index { border-left-color: var(--index); }
-  .graph-row.query { border-left-color: var(--query); }
-
-  .dashboard-grid {
+  .mini-grid {
     display: grid;
-    grid-template-columns: 1fr;
-    gap: 16px;
-    align-items: start;
-  }
-
-  .stack {
-    display: grid;
-    gap: 16px;
-  }
-
-  .panel, .query-panel {
-    padding: 20px;
-  }
-
-  .metric-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
   }
 
-  .metric {
+  .mini {
     min-width: 0;
     padding: 14px;
     border: 1px solid rgba(53, 70, 90, .72);
@@ -378,8 +248,11 @@
     background: rgba(21, 27, 36, .78);
   }
 
-  .metric .k {
+  .mini span {
     display: block;
+  }
+
+  .mini .k {
     color: var(--muted);
     font-size: var(--font-label);
     line-height: 1.2;
@@ -387,165 +260,206 @@
     letter-spacing: .06em;
   }
 
-  .metric .v {
-    display: block;
-    min-height: 18px;
+  .mini .v {
     margin-top: 6px;
     color: var(--text);
     font-size: var(--font-body);
     line-height: 1.2;
     font-weight: 720;
-    overflow-wrap: break-word;
   }
 
-  .metric .note {
-    display: block;
-    margin-top: 4px;
+  .mini .note {
+    margin-top: 6px;
     color: var(--muted);
     font-size: var(--font-small);
     line-height: 1.35;
-    overflow-wrap: break-word;
   }
 
-  .metric.cl { border-color: rgba(72, 214, 184, .34); }
-  .metric.el { border-color: rgba(106, 167, 255, .34); }
-  .metric.index { border-color: rgba(242, 184, 75, .34); }
-  .metric.query { border-color: rgba(178, 140, 255, .34); }
-
-  .marker-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
+  .chart-panel {
+    margin-bottom: 16px;
   }
 
-  .marker {
-    min-width: 0;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 10px;
-    align-items: start;
-    padding: 13px;
-    border: 1px solid rgba(53, 70, 90, .72);
-    border-radius: 7px;
-    background: rgba(21, 27, 36, .68);
+  .section-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
   }
 
-  .marker .swatch {
-    width: 12px;
-    height: 44px;
+  .section-head h2 {
+    margin: 0;
+    font-size: var(--font-title);
+    line-height: 1.15;
+    letter-spacing: 0;
+  }
+
+  .section-head p {
+    margin: 5px 0 0;
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.35;
+  }
+
+  .range-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .range-buttons button {
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
     border-radius: 999px;
-    background: var(--muted);
-  }
-
-  .marker.cl .swatch { background: var(--cl); }
-  .marker.el .swatch { background: var(--el); }
-  .marker.finalized .swatch { background: var(--finalized); }
-  .marker.index .swatch { background: var(--index); }
-  .marker.query .swatch { background: var(--query); }
-  .marker.neutral .swatch { background: var(--muted); }
-
-  .marker .name {
-    display: block;
-    color: var(--muted);
-    font-size: var(--font-label);
-    line-height: 1.2;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-
-  .marker .value {
-    display: block;
-    margin-top: 5px;
-    color: var(--text);
+    background: rgba(21, 27, 36, .78);
+    color: var(--soft);
     font-size: var(--font-small);
-    line-height: 1.2;
     font-weight: 720;
-    overflow-wrap: anywhere;
   }
 
-  .marker .detail {
-    display: block;
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: var(--font-small);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
+  .range-buttons button.active {
+    border-color: rgba(72, 214, 184, .45);
+    color: #07100d;
+    background: var(--cl);
   }
 
-  .lane-list {
+  .charts-grid {
     display: grid;
-    gap: 14px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
   }
 
-  .lane {
+  .chart-card {
+    min-width: 0;
     padding: 14px;
     border: 1px solid rgba(53, 70, 90, .72);
     border-radius: 7px;
     background: rgba(21, 27, 36, .62);
   }
 
-  .lane-head {
+  .chart-title {
     display: flex;
-    align-items: baseline;
     justify-content: space-between;
-    gap: 14px;
+    gap: 12px;
+    align-items: baseline;
     margin-bottom: 10px;
   }
 
-  .lane-head strong {
-    font-size: var(--font-body);
+  .chart-title strong {
+    font-size: var(--font-title);
+    line-height: 1.2;
   }
 
-  .lane-head span {
+  .chart-title span {
     color: var(--muted);
-    font-size: var(--font-body);
+    font-size: var(--font-small);
     text-align: right;
   }
 
-  .range-row {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
+  .chart-canvas-wrap {
+    position: relative;
+    height: 220px;
+  }
+
+  .chart-unavailable {
+    display: none;
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid rgba(240, 162, 74, .35);
+    border-radius: 8px;
+    color: #ffe6bd;
+    background: rgba(240, 162, 74, .10);
+    font-size: var(--font-body);
+  }
+
+  .chart-meta {
+    display: flex;
+    justify-content: flex-end;
+    gap: 14px;
+    color: var(--muted);
     margin-top: 10px;
+    font-size: var(--font-small);
   }
 
-  .range-item {
+  details.advanced {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(16, 21, 28, .90);
+    box-shadow: 0 18px 54px rgba(0, 0, 0, .22);
+    margin-bottom: 16px;
+  }
+
+  details.advanced > summary {
+    cursor: pointer;
+    padding: 16px 18px;
+    color: var(--text);
+    font-weight: 700;
+    list-style: none;
+    font-size: var(--font-title);
+  }
+
+  details.advanced > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  details.advanced > summary::after {
+    content: "+";
+    float: right;
+    color: var(--muted);
+  }
+
+  details.advanced[open] > summary::after {
+    content: "-";
+  }
+
+  .advanced-body {
+    border-top: 1px solid var(--line);
+    padding: 18px;
+    display: grid;
+    gap: 18px;
+  }
+
+  .debug-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .debug-item {
     min-width: 0;
+    padding: 14px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 7px;
+    background: rgba(21, 27, 36, .78);
   }
 
-  .range-item .label {
+  .debug-item .k {
     display: block;
     color: var(--muted);
     font-size: var(--font-label);
+    line-height: 1.2;
     text-transform: uppercase;
     letter-spacing: .06em;
   }
 
-  .range-item .value {
+  .debug-item .v {
     display: block;
-    margin-top: 3px;
-    color: var(--soft);
+    margin-top: 6px;
+    color: var(--text);
     font-size: var(--font-body);
-    font-weight: 680;
+    line-height: 1.2;
+    font-weight: 720;
     overflow-wrap: anywhere;
   }
 
-  .network-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 16px;
+  .debug-item.full {
+    grid-column: 1 / -1;
   }
 
   .query-panel {
     display: grid;
     gap: 12px;
-  }
-
-  .query-head {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 16px;
-    align-items: start;
   }
 
   textarea {
@@ -568,16 +482,19 @@
     box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
   }
 
-  textarea::placeholder {
-    color: #657180;
-  }
-
   .query-actions {
     display: flex;
-    flex-wrap: wrap;
     gap: 10px;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font-size: var(--font-body);
+  }
+
+  .button-row {
+    display: flex;
+    gap: 8px;
   }
 
   button {
@@ -601,24 +518,15 @@
     cursor: not-allowed;
   }
 
-  .query-meta {
-    color: var(--muted);
-    font-size: var(--font-body);
-    line-height: 1.45;
+  button.secondary {
+    color: var(--soft);
+    background: var(--surface-3);
+    border: 1px solid var(--line-strong);
   }
 
-  .error-msg {
-    display: none;
-    padding: 12px 14px;
-    border: 1px solid rgba(255, 107, 107, .35);
-    border-radius: 8px;
-    color: #ffd3d3;
-    background: rgba(255, 107, 107, .10);
-    font-size: var(--font-body);
-  }
-
-  .results-wrap {
+  .table-wrap {
     min-height: 220px;
+    max-height: 460px;
     overflow: auto;
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -628,27 +536,30 @@
   table {
     width: 100%;
     border-collapse: collapse;
+    min-width: 920px;
     font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
     font-size: var(--font-body);
+  }
+
+  th, td {
+    padding: 9px 12px;
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
   }
 
   th {
     position: sticky;
     top: 0;
     z-index: 1;
-    padding: 10px 12px;
     border-bottom: 1px solid var(--line-strong);
     color: var(--muted);
     background: #10151c;
-    text-align: left;
-    white-space: nowrap;
   }
 
   td {
-    padding: 9px 12px;
     border-bottom: 1px solid rgba(38, 50, 65, .55);
     color: var(--soft);
-    white-space: nowrap;
   }
 
   tr:hover td {
@@ -665,25 +576,37 @@
     text-align: center;
   }
 
-  footer {
-    padding: 20px 0 4px;
-    color: var(--muted);
-    font-size: var(--font-small);
-    text-align: center;
+  .error {
+    display: none;
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 107, 107, .36);
+    border-radius: 8px;
+    background: rgba(255, 107, 107, .08);
+    color: #ffd3d3;
+    font-size: var(--font-body);
+    line-height: 1.4;
+  }
+
+  .error.visible {
+    display: block;
   }
 
   @media (max-width: 1180px) {
-    .topbar, .dashboard-grid, .network-grid {
+    .charts-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .topbar {
       grid-template-columns: 1fr;
     }
 
-    .node-strip {
+    .status-strip, .node-strip {
       justify-content: flex-start;
     }
 
-    .hero-panel {
-      grid-template-columns: 1fr;
-      align-items: stretch;
+    .debug-grid, .mini-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 
@@ -692,16 +615,13 @@
       padding: 18px;
     }
 
-    .brand h1 {
-      font-size: var(--font-brand);
+    .topbar, .section-head, .card-main {
+      align-items: flex-start;
+      flex-direction: column;
     }
 
-    .metric-grid, .marker-grid, .range-row, .query-head, .graph-row {
+    .overview, .debug-grid, .mini-grid, .charts-grid {
       grid-template-columns: 1fr;
-    }
-
-    .hero-panel, .panel, .query-panel {
-      padding: 16px;
     }
   }
 </style>
@@ -711,435 +631,310 @@
   <header class="topbar">
     <div class="brand">
       <h1>LogEx</h1>
-      <p>Canonical Ethereum log sync dashboard</p>
+      <p>Ethereum log verification and sync status</p>
     </div>
-    <div class="node-strip">
+    <div class="status-strip">
       <span class="pill state-syncing" id="nodeBadge"><span class="dot"></span><strong id="nodeState">Starting</strong></span>
-      <span class="pill">HTTP <strong id="httpState">/status</strong></span>
       <span class="pill">Updated <strong id="lastUpdated">--</strong></span>
     </div>
   </header>
 
-  <section class="panel graph-panel">
-    <div class="panel-title">
-      <div>
-        <h2>Sync Progress Graph</h2>
-        <div class="sub">CL forward anchors, EL validation, indexing, and queryable block ranges</div>
+  <section class="overview">
+    <div class="panel execution-card">
+      <div class="card-main">
+        <div>
+          <p class="card-label">Execution Layer sync</p>
+          <div class="headline" id="executionPercent">--</div>
+        </div>
+        <div class="subline" id="executionSummary">Waiting for historical sync.</div>
       </div>
-    </div>
-    <div class="graph-wrap">
-      <div class="graph-row live">
-        <div class="graph-row-label">
-          <strong>CL live path</strong>
-          <span>checkpoint to target block</span>
-          <div class="graph-row-value" id="graphLiveValue">--</div>
+      <div class="bar-wrap">
+        <div class="bar-limits">
+          <span id="executionStart">Pivot --</span>
+          <span id="executionEnd">Genesis block 0</span>
         </div>
-        <div class="graph-bar">
-          <div class="graph-limits"><span id="liveStartLimit">Start --</span><span id="liveEndLimit">Target --</span></div>
-          <div class="graph-track">
-            <span class="graph-fill live" id="graphLiveFill"></span>
-            <span class="graph-dot live" id="graphLiveDot"></span>
-          </div>
-          <div class="graph-current" id="liveCurrentLabel">Current --</div>
-        </div>
+        <div class="segmented-bar active" id="executionBarShell"><span id="executionBar"></span></div>
       </div>
-      <div class="graph-row el">
-        <div class="graph-row-label">
-          <strong>EL validation</strong>
-          <span>execution cursor to peer tip</span>
-          <div class="graph-row-value" id="graphElValue">--</div>
-        </div>
-        <div class="graph-bar">
-          <div class="graph-limits"><span id="elStartLimit">Start --</span><span id="elEndLimit">Target --</span></div>
-          <div class="graph-track">
-            <span class="graph-fill el" id="graphElFill"></span>
-            <span class="graph-dot el" id="graphElDot"></span>
-          </div>
-          <div class="graph-current" id="elCurrentLabel">Current --</div>
-        </div>
-      </div>
-      <div class="graph-row index">
-        <div class="graph-row-label">
-          <strong>Indexing</strong>
-          <span>stored logs to canonical top</span>
-          <div class="graph-row-value" id="graphIndexValue">--</div>
-        </div>
-        <div class="graph-bar">
-          <div class="graph-limits"><span id="indexStartLimit">Start --</span><span id="indexEndLimit">Target --</span></div>
-          <div class="graph-track">
-            <span class="graph-fill index" id="graphIndexFill"></span>
-            <span class="graph-dot index" id="graphIndexDot"></span>
-          </div>
-          <div class="graph-current" id="indexCurrentLabel">Current --</div>
-        </div>
-      </div>
-      <div class="graph-row query">
-        <div class="graph-row-label">
-          <strong>Queryable logs</strong>
-          <span>block range covered by local rows</span>
-          <div class="graph-row-value" id="graphQueryValue">--</div>
-        </div>
-        <div class="graph-bar">
-          <div class="graph-limits"><span id="queryStartLimit">Start --</span><span id="queryEndLimit">Target --</span></div>
-          <div class="graph-track">
-            <span class="graph-fill query" id="graphQueryFill"></span>
-            <span class="graph-dot query" id="graphQueryStartDot"></span>
-            <span class="graph-dot query" id="graphQueryEndDot"></span>
-          </div>
-          <div class="graph-current" id="queryCurrentLabel">Current --</div>
-        </div>
+      <div class="mini-grid">
+        <div class="mini"><span class="k">Remaining</span><span class="v" id="executionRemaining">--</span></div>
+        <div class="mini"><span class="k">Logs/sec</span><span class="v" id="executionRate">--</span></div>
+        <div class="mini"><span class="k">Estimate</span><span class="v" id="executionEta">--</span></div>
+        <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
+        <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
+        <div class="mini"><span class="k">Log block range</span><span class="v" id="logRange">--</span><span class="note" id="logRangeDetail">Verified local logs available for queries.</span></div>
+        <div class="mini"><span class="k">Storage used</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail"></span></div>
+        <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary"></span></div>
       </div>
     </div>
   </section>
 
-  <section class="hero-grid">
-    <div class="hero-panel">
+  <section class="panel chart-panel">
+    <div class="section-head">
       <div>
-        <span class="big-label">Consensus Layer P2P</span>
-        <strong class="big-number" id="heroClState">--</strong>
+        <h2>Sync Performance</h2>
+        <p>Historical sync rate, serving peers, and process CPU utilization over the selected window.</p>
       </div>
-      <div class="bar bar-cl"><span id="heroClBar"></span></div>
-      <div class="query-meta" id="heroClMeta">--</div>
+      <div class="range-buttons" aria-label="Chart range">
+        <button type="button" class="active" data-hours="1" onclick="setChartWindow(1)">1 hour</button>
+        <button type="button" data-hours="6" onclick="setChartWindow(6)">6 hours</button>
+        <button type="button" data-hours="12" onclick="setChartWindow(12)">12 hours</button>
+      </div>
     </div>
-    <div class="hero-panel">
-      <div>
-        <span class="big-label">Execution Layer P2P</span>
-        <strong class="big-number" id="heroElState">--</strong>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title"><strong>Logs/sec</strong><span id="rateLegend">--</span></div>
+        <div class="chart-canvas-wrap"><canvas id="blocksChart" aria-label="Historical logs per second chart"></canvas></div>
       </div>
-      <div class="bar bar-el"><span id="heroElBar"></span></div>
-      <div class="query-meta" id="heroElMeta">--</div>
+      <div class="chart-card">
+        <div class="chart-title"><strong>Peers</strong><span id="peerLegend">--</span></div>
+        <div class="chart-canvas-wrap"><canvas id="peersChart" aria-label="Serving peers chart"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><strong>CPU</strong><span id="cpuLegend">--</span></div>
+        <div class="chart-canvas-wrap"><canvas id="cpuChart" aria-label="Process CPU utilization chart"></canvas></div>
+      </div>
     </div>
-    <div class="hero-panel">
-      <div>
-        <span class="big-label">Indexed Query Coverage</span>
-        <strong class="big-number" id="heroQueryRange">--</strong>
-      </div>
-      <div class="bar bar-query"><span id="heroQueryBar"></span></div>
-      <div class="query-meta" id="heroQueryMeta">--</div>
+    <div class="chart-unavailable" id="chartUnavailable">Chart library unavailable. Performance samples are still being collected.</div>
+    <div class="chart-meta">
+      <span id="chartWindowLabel">Last 1 hour</span>
     </div>
   </section>
 
-  <main class="dashboard-grid">
-    <div class="stack">
-      <section class="network-grid">
-        <div class="panel">
-          <div class="panel-title">
-            <div>
-              <h2>CL P2P Network</h2>
-              <div class="sub">Native beacon light-client and forward anchor peers</div>
-            </div>
-            <span class="pill" id="clBadge"><span class="dot"></span><strong id="clBadgeText">--</strong></span>
-          </div>
-          <div class="metric-grid">
-            <div class="metric cl"><span class="k">Connected</span><span class="v" id="clConnected">--</span><span class="note">libp2p sessions</span></div>
-            <div class="metric cl"><span class="k">Discovered</span><span class="v" id="clDiscovered">--</span><span class="note">ENRs this run</span></div>
-            <div class="metric cl"><span class="k">Status RPC</span><span class="v" id="clStatusPeers">--</span><span class="note">answered status</span></div>
-            <div class="metric cl"><span class="k">In Flight</span><span class="v" id="clInflight">--</span><span class="note" id="clInflightNote">pending RPCs</span></div>
-            <div class="metric cl"><span class="k">Bootstrap</span><span class="v" id="clBootstrapPeers">--</span><span class="note">serving peers</span></div>
-            <div class="metric cl"><span class="k">Updates</span><span class="v" id="clUpdatePeers">--</span><span class="note">range/finality/optimistic</span></div>
-            <div class="metric cl"><span class="k">Beacon Blocks</span><span class="v" id="clBlockPeers">--</span><span class="note">range/root peers</span></div>
-            <div class="metric cl"><span class="k">Peer Pool</span><span class="v" id="clPeerPool">--</span><span class="note">preferred/cooldown/ignored</span></div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-title">
-            <div>
-              <h2>EL P2P Network</h2>
-              <div class="sub">Execution peers used for headers, bodies, receipts, and logs</div>
-            </div>
-            <span class="pill" id="elBadge"><span class="dot"></span><strong id="elBadgeText">--</strong></span>
-          </div>
-          <div class="metric-grid">
-            <div class="metric el"><span class="k">Connected</span><span class="v" id="elConnected">--</span><span class="note">devp2p peers</span></div>
-            <div class="metric el"><span class="k">Serving</span><span class="v" id="elServing">--</span><span class="note">validated data peers</span></div>
-            <div class="metric el"><span class="k">Candidates</span><span class="v" id="elCandidates">--</span><span class="note">waiting to dial</span></div>
-            <div class="metric el"><span class="k">Network Tip</span><span class="v" id="elTip">--</span><span class="note">peer-advertised block</span></div>
-            <div class="metric el"><span class="k">EL Cursor</span><span class="v" id="elCursor">--</span><span class="note">validated block</span></div>
-            <div class="metric el"><span class="k">EL Lag</span><span class="v" id="elLag">--</span><span class="note">blocks remaining</span></div>
-            <div class="metric el"><span class="k">Rate</span><span class="v" id="elRate">--</span><span class="note">blocks/sec</span></div>
-            <div class="metric el"><span class="k">ETA</span><span class="v" id="elEta">--</span><span class="note">to known tip</span></div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title">
+  <details class="advanced">
+    <summary>Advanced metrics</summary>
+    <div class="advanced-body">
+      <section>
+        <div class="section-head">
           <div>
-            <h2>Consensus Markers</h2>
-            <div class="sub">Execution block markers derived from the forward CL light-client view</div>
+            <h2>Network And Verification Details</h2>
+            <p>Operational details for debugging peer quality, checkpoints, and storage compaction.</p>
           </div>
         </div>
-        <div class="marker-grid">
-          <div class="marker cl"><span class="swatch"></span><span><span class="name">Checkpoint</span><span class="value" id="markerCheckpoint">--</span><span class="detail" id="markerCheckpointDetail">--</span></span></div>
-          <div class="marker finalized"><span class="swatch"></span><span><span class="name">Finalized Block</span><span class="value" id="markerFinalized">--</span><span class="detail" id="markerFinalizedDetail">--</span></span></div>
-          <div class="marker el"><span class="swatch"></span><span><span class="name">Optimistic Block</span><span class="value" id="markerOptimistic">--</span><span class="detail" id="markerOptimisticDetail">--</span></span></div>
-          <div class="marker cl"><span class="swatch"></span><span><span class="name">Highest Verified Block</span><span class="value" id="markerMaterializedTip">--</span><span class="detail" id="markerMaterializedTipDetail">--</span></span></div>
-          <div class="marker index"><span class="swatch"></span><span><span class="name">Indexed Block</span><span class="value" id="markerIndexed">--</span><span class="detail" id="markerIndexedDetail">--</span></span></div>
-          <div class="marker query"><span class="swatch"></span><span><span class="name">Query Logs</span><span class="value" id="markerQuery">--</span><span class="detail" id="markerQueryDetail">--</span></span></div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title">
-          <div>
-            <h2>Sync Coverage</h2>
-            <div class="sub">Separate progress for CL live tracking, EL validation, and indexed logs</div>
-          </div>
-        </div>
-        <div class="lane-list">
-          <div class="lane">
-            <div class="lane-head"><strong>CL live path</strong><span id="liveLaneSummary">--</span></div>
-            <div class="bar bar-cl"><span id="liveLaneBar"></span></div>
-            <div class="range-row">
-              <span class="range-item"><span class="label">From</span><span class="value" id="liveLaneFrom">--</span></span>
-              <span class="range-item"><span class="label">Verified Tip</span><span class="value" id="liveLaneDone">--</span></span>
-              <span class="range-item"><span class="label">Target</span><span class="value" id="liveLaneTarget">--</span></span>
-            </div>
-          </div>
-          <div class="lane">
-            <div class="lane-head"><strong>EL validated sync</strong><span id="elLaneSummary">--</span></div>
-            <div class="bar bar-el"><span id="elLaneBar"></span></div>
-            <div class="range-row">
-              <span class="range-item"><span class="label">Cursor</span><span class="value" id="elLaneCursor">--</span></span>
-              <span class="range-item"><span class="label">Tip</span><span class="value" id="elLaneTip">--</span></span>
-              <span class="range-item"><span class="label">Remaining</span><span class="value" id="elLaneRemaining">--</span></span>
-            </div>
-          </div>
-          <div class="lane">
-            <div class="lane-head"><strong>Log query coverage</strong><span id="queryLaneSummary">--</span></div>
-            <div class="bar bar-query"><span id="queryLaneBar"></span></div>
-            <div class="range-row">
-              <span class="range-item"><span class="label">Stored From</span><span class="value" id="queryLaneFrom">--</span></span>
-              <span class="range-item"><span class="label">Stored To</span><span class="value" id="queryLaneTo">--</span></span>
-              <span class="range-item"><span class="label">Block Tag: latest</span><span class="value" id="queryLaneLatest">--</span></span>
-            </div>
-          </div>
+        <div class="debug-grid">
+          <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
+          <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
+          <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
+          <div class="debug-item"><span class="k">Historical log rate</span><span class="v" id="debugLogRate">--</span></div>
+          <div class="debug-item"><span class="k">Historical block rate</span><span class="v" id="debugBlockRate">--</span></div>
+          <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
+          <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
+          <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
+          <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
+          <div class="debug-item"><span class="k">LogEx storage used</span><span class="v" id="debugStorageUsed">--</span></div>
+          <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
+          <div class="debug-item"><span class="k">Data directory</span><span class="v" id="debugStorageWritePath">--</span></div>
+          <div class="debug-item"><span class="k">Raw segments pending first compression</span><span class="v" id="debugRawBacklog">--</span></div>
+          <div class="debug-item"><span class="k">Profile rewrites pending</span><span class="v" id="debugProfileBacklog">--</span></div>
+          <div class="debug-item"><span class="k">Lowest verified block</span><span class="v" id="debugHistoricalFloor">--</span></div>
+          <div class="debug-item"><span class="k">Historical pivot block</span><span class="v" id="debugHistoricalAnchor">--</span></div>
+          <div class="debug-item"><span class="k">Latest execution block</span><span class="v" id="debugLatestBlock">--</span></div>
+          <div class="debug-item"><span class="k">Finalized execution block</span><span class="v" id="debugFinalizedBlock">--</span></div>
+          <div class="debug-item"><span class="k">Checkpoint</span><span class="v" id="debugCheckpoint">--</span></div>
+          <div class="debug-item"><span class="k">Consensus peers</span><span class="v" id="debugConsensusPeers">--</span></div>
+          <div class="debug-item"><span class="k">Stored rows</span><span class="v" id="debugStoredRows">--</span></div>
+          <div class="debug-item"><span class="k">Segments</span><span class="v" id="debugSegments">--</span></div>
         </div>
       </section>
     </div>
+  </details>
 
-    <div class="stack">
-      <section class="panel">
-        <div class="panel-title">
-          <div>
-            <h2>Index And Storage</h2>
-            <div class="sub">Local rows and disk usage available to query surfaces</div>
-          </div>
-        </div>
-        <div class="metric-grid">
-          <div class="metric index"><span class="k">Indexed Block</span><span class="v" id="idxHead">--</span><span class="note">highest indexed block</span></div>
-          <div class="metric index"><span class="k">Index Lag</span><span class="v" id="idxLag">--</span><span class="note">to canonical top</span></div>
-          <div class="metric query"><span class="k">Stored Logs</span><span class="v" id="storedRows">--</span><span class="note">local rows</span></div>
-          <div class="metric query"><span class="k">This Run</span><span class="v" id="sessionRows">--</span><span class="note">ingested logs</span></div>
-          <div class="metric"><span class="k">Segments</span><span class="v" id="segments">--</span><span class="note">sealed partitions</span></div>
-          <div class="metric"><span class="k">Storage Used</span><span class="v" id="storageUsed">--</span><span class="note">data directory</span></div>
-          <div class="metric"><span class="k">Disk Free</span><span class="v" id="diskFree">--</span><span class="note">filesystem</span></div>
-          <div class="metric finalized"><span class="k">Finality Gap</span><span class="v" id="finalityGap">--</span><span class="note">top to finalized</span></div>
-        </div>
-      </section>
-
-      <section class="query-panel">
-        <div class="query-head">
-          <div class="panel-title">
-            <div>
-              <h2>Log Query</h2>
-              <div class="sub" id="queryScope">--</div>
-            </div>
-          </div>
-          <button id="runBtn" onclick="runQuery()">Run Query</button>
-        </div>
-        <textarea id="sql" placeholder="SELECT * FROM logs WHERE topic0 = event'Transfer(address,address,uint256)' LIMIT 10" spellcheck="false"></textarea>
-        <div class="query-actions">
-          <span class="query-meta" id="resultCount">--</span>
-          <span class="query-meta" id="queryScanScope">--</span>
-        </div>
-        <div class="error-msg" id="errorMsg"></div>
-        <div class="results-wrap" id="resultsWrap">
-          <div class="empty-state" id="emptyState">No query results yet.</div>
-          <table id="resultsTable" style="display:none">
-            <thead id="thead"></thead>
-            <tbody id="tbody"></tbody>
-          </table>
-        </div>
-      </section>
+  <section class="panel query-panel">
+    <div class="section-head">
+      <div>
+        <h2>Query Logs</h2>
+        <p id="queryScope">Queries scan the verified local range.</p>
+      </div>
+      <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
     </div>
-  </main>
-
-  <footer>
-    JSON-RPC POST / | REST POST /query | WebSocket /ws
-  </footer>
+    <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
+    <div class="query-actions">
+      <span id="resultCount">No query results yet.</span>
+      <div class="button-row">
+        <button type="button" class="secondary" id="exportBtn" onclick="exportQueryResults()" disabled>Export CSV</button>
+        <button type="button" class="secondary" id="prevPageBtn" onclick="runQueryPage(-1)" disabled>Previous</button>
+        <button type="button" class="secondary" id="nextPageBtn" onclick="runQueryPage(1)" disabled>Next</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="resultsTable" style="display:none">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty-state" id="emptyState">No query results yet.</div>
+    </div>
+    <div class="error" id="queryError"></div>
+  </section>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
 <script>
-var COLUMNS = ['block_number', 'tx_hash', 'address', 'topics', 'data_len', 'log_index'];
-var MAINNET_GENESIS_TIME_SECONDS = 1606824023;
-var SECONDS_PER_SLOT = 12;
-var latestStatus = null;
+var QUERY_PAGE_SIZE = 50;
+var MAX_QUERY_LIMIT = 10000;
+var queryOffset = 0;
+var queryRows = [];
+var queryColumns = [];
+var queryWasCapped = false;
+var queryScannedRows = null;
 var lastStatusTimestamp = null;
+var chartHours = 1;
+var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
+var perfSamples = loadPerfSamples();
+var performanceCharts = {};
+var querySqlTouched = false;
 
 function byId(id) {
   return document.getElementById(id);
 }
 
 function setText(id, value) {
-  byId(id).textContent = value == null || value === '' ? '--' : String(value);
+  var el = byId(id);
+  if (el) el.textContent = value == null || value === '' ? '--' : String(value);
 }
 
 function setWidth(id, pct) {
-  var safe = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
-  byId(id).style.width = safe.toFixed(1) + '%';
+  var el = byId(id);
+  if (el) el.style.width = clamp(pct, 0, 100).toFixed(2) + '%';
 }
 
-function setLeft(id, pct) {
-  var safe = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
-  byId(id).style.left = safe.toFixed(1) + '%';
+function setExecutionBarState(active, offline) {
+  var shell = byId('executionBarShell');
+  if (!shell) return;
+  shell.classList.toggle('offline', !!offline);
+  shell.classList.toggle('active', !!active && !offline);
 }
 
-function setSegment(id, left, width) {
-  var safeLeft = Number.isFinite(left) ? Math.max(0, Math.min(100, left)) : 0;
-  var safeWidth = Number.isFinite(width) ? Math.max(0, Math.min(100 - safeLeft, width)) : 0;
-  var element = byId(id);
-  element.style.left = safeLeft.toFixed(1) + '%';
-  element.style.width = safeWidth.toFixed(1) + '%';
+function showQueryError(message) {
+  var error = byId('queryError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.classList.toggle('visible', !!message);
+}
+
+function clamp(value, min, max) {
+  value = Number(value);
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
 }
 
 function numberOrNull(value) {
-  if (value == null) return null;
+  if (value === null || value === undefined || value === '') return null;
   var number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
 function fmt(value) {
   var number = numberOrNull(value);
-  if (number == null) return '--';
-  return number.toLocaleString();
+  if (number === null) return '--';
+  return Math.round(number).toLocaleString();
 }
 
-function fmtBlocks(value) {
+function fmtDecimal(value, digits) {
   var number = numberOrNull(value);
-  if (number == null) return '-- blocks';
-  return fmt(number) + (number === 1 ? ' block' : ' blocks');
+  if (number === null) return '--';
+  return number.toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits
+  });
 }
 
 function fmtRate(value) {
   var number = numberOrNull(value);
-  if (number == null) return '--';
-  return number.toFixed(2);
+  if (number === null || number <= 0) return '--';
+  return fmtDecimal(number, number >= 100 ? 0 : 1) + '/s';
 }
 
-function fmtBytes(bytes) {
-  var value = numberOrNull(bytes);
-  if (value == null || value < 0) return '--';
-  var units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  var unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
+function fmtLogMagnitude(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  if (number >= 1000000) return fmtDecimal(number / 1000000, number >= 10000000 ? 0 : 1) + 'm';
+  if (number >= 1000) return fmtDecimal(number / 1000, number >= 100000 ? 0 : 1) + 'k';
+  return fmt(number);
+}
+
+function fmtLogRate(value) {
+  var number = numberOrNull(value);
+  if (number === null || number <= 0) return '--';
+  return fmtLogMagnitude(number) + ' logs/s';
+}
+
+function fmtLogCount(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  return fmtLogMagnitude(number) + ' logs';
+}
+
+function fmtPct(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  return fmtDecimal(number, number >= 100 ? 0 : 1) + '%';
+}
+
+function fmtBlocks(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  return fmt(number) + ' blocks';
+}
+
+function fmtBytes(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var index = 0;
+  while (number >= 1024 && index < units.length - 1) {
+    number /= 1024;
+    index += 1;
   }
-  var digits = unit === 0 ? 0 : (value >= 100 ? 0 : (value >= 10 ? 1 : 2));
-  return value.toFixed(digits) + ' ' + units[unit];
-}
-
-function fmtTimestamp(seconds) {
-  var value = numberOrNull(seconds);
-  if (value == null || value <= 0) return '--';
-  var elapsed = Math.floor((Date.now() / 1000) - value);
-  if (elapsed < 10) return 'Now';
-  var units = [
-    { seconds: 86400, singular: 'day', plural: 'days' },
-    { seconds: 3600, singular: 'hour', plural: 'hours' },
-    { seconds: 60, singular: 'min', plural: 'mins' },
-    { seconds: 1, singular: 'sec', plural: 'secs' }
-  ];
-  for (var i = 0; i < units.length; i += 1) {
-    var unit = units[i];
-    if (elapsed >= unit.seconds) {
-      var amount = Math.floor(elapsed / unit.seconds);
-      return amount + ' ' + (amount === 1 ? unit.singular : unit.plural) + ' ago';
-    }
-  }
-  return 'Now';
-}
-
-function refreshLastUpdated() {
-  setText('lastUpdated', fmtTimestamp(lastStatusTimestamp));
-}
-
-function slotTimestamp(slot) {
-  var value = numberOrNull(slot);
-  if (value == null) return null;
-  return MAINNET_GENESIS_TIME_SECONDS + (value * SECONDS_PER_SLOT);
-}
-
-function headerTimestamp(header) {
-  return header && header.beacon_slot != null ? slotTimestamp(header.beacon_slot) : null;
-}
-
-function anchorTimestamp(anchor) {
-  if (!anchor) return null;
-  if (anchor.timestamp != null) return numberOrNull(anchor.timestamp);
-  return slotTimestamp(anchorSlot(anchor));
-}
-
-function blockWithTimestamp(block, timestamp) {
-  var label = fmt(block);
-  var time = fmtTimestamp(timestamp);
-  return time === '--' ? label : label + ' - ' + time;
-}
-
-function detailParts(parts) {
-  return parts.filter(function(part) {
-    return part && part !== '--';
-  }).join(' - ');
+  return fmtDecimal(number, number >= 10 || index === 0 ? 0 : 1) + ' ' + units[index];
 }
 
 function fmtEta(seconds) {
   var value = numberOrNull(seconds);
-  if (value == null || value <= 0) return '--';
-  var h = Math.floor(value / 3600);
-  var m = Math.floor((value % 3600) / 60);
-  var s = Math.floor(value % 60);
-  if (h > 0) return h + 'h ' + m + 'm';
-  if (m > 0) return m + 'm ' + s + 's';
-  return s + 's';
+  if (value === null || value <= 0) return '--';
+  var days = Math.floor(value / 86400);
+  value %= 86400;
+  var hours = Math.floor(value / 3600);
+  value %= 3600;
+  var minutes = Math.floor(value / 60);
+  if (days > 0) return days + 'd ' + hours + 'h';
+  if (hours > 0) return hours + 'h ' + minutes + 'm';
+  return minutes + 'm';
 }
 
-function shortHash(value) {
-  if (!value) return '--';
-  var hash = String(value);
-  if (hash.length <= 18) return hash;
-  return hash.slice(0, 10) + '...' + hash.slice(-6);
+function fmtCompletionTime(seconds) {
+  var value = numberOrNull(seconds);
+  if (value === null || value <= 0) return null;
+  var date = new Date(Date.now() + value * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+  var now = new Date();
+  var time = date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+  if (date.toDateString() === now.toDateString()) return time + ' local';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }) + ' local';
 }
 
-function escapeHtml(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+function fmtEtaWithCompletion(seconds) {
+  var remaining = fmtEta(seconds);
+  if (remaining === '--') return remaining;
+  var completion = fmtCompletionTime(seconds);
+  return completion ? remaining + ' · ' + completion : remaining;
 }
 
-function anchorBlock(anchor) {
-  return anchor && anchor.block_number != null ? numberOrNull(anchor.block_number) : null;
-}
-
-function anchorSlot(anchor) {
-  return anchor && anchor.beacon_slot != null ? numberOrNull(anchor.beacon_slot) : null;
-}
-
-function executionBlockFromHeader(header) {
-  return header && header.execution ? numberOrNull(header.execution.block_number) : null;
-}
-
-function checkpointExecutionBlock(lightClient) {
-  return executionBlockFromHeader(lightClient && lightClient.bootstrap && lightClient.bootstrap.header);
-}
-
-function ratio(done, total) {
-  if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return 0;
-  return Math.max(0, Math.min(100, (done / total) * 100));
+function fmtAgo(timestamp) {
+  var value = numberOrNull(timestamp);
+  if (value === null || value <= 0) return null;
+  var delta = Math.max(0, Math.floor(Date.now() / 1000 - value));
+  if (delta < 10) return 'Now';
+  if (delta < 60) return delta + 's ago';
+  if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
+  if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
+  return Math.floor(delta / 86400) + 'd ago';
 }
 
 function blockRange(from, to) {
@@ -1147,329 +942,602 @@ function blockRange(from, to) {
   return fmt(from) + ' - ' + fmt(to);
 }
 
-function setPill(id, label, stateClass) {
-  var el = byId(id);
-  el.className = 'pill ' + stateClass;
-  var strong = el.querySelector('strong');
-  if (strong) strong.textContent = label;
+function blockWithAge(block, timestamp) {
+  if (block == null) return '--';
+  var age = fmtAgo(timestamp);
+  return fmt(block) + (age ? ' (' + age + ')' : '');
 }
 
-function nodeStateClass(state) {
-  switch (state) {
+function buildDefaultQuery(fromBlock, toBlock) {
+  if (fromBlock == null || toBlock == null) return null;
+  var to = Math.max(0, Math.round(toBlock));
+  var floor = Math.max(0, Math.round(fromBlock));
+  if (floor > to) return null;
+  return [
+    'SELECT block_number, tx_hash, address, topic0, data_len, log_index',
+    'FROM logs',
+    'WHERE block_number = ' + to,
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC'
+  ].join('\n');
+}
+
+function updateDefaultQuery(fromBlock, toBlock) {
+  if (querySqlTouched) return;
+  var sql = buildDefaultQuery(fromBlock, toBlock);
+  if (!sql) return;
+  byId('sql').value = sql;
+}
+
+function shortHash(value) {
+  if (!value) return '--';
+  value = String(value);
+  return value.length > 14 ? value.slice(0, 8) + '...' + value.slice(-6) : value;
+}
+
+function anchorBlock(anchor) {
+  return anchor && anchor.block_number != null ? numberOrNull(anchor.block_number) : null;
+}
+
+function anchorTime(anchor) {
+  return anchor && anchor.timestamp != null ? numberOrNull(anchor.timestamp) : null;
+}
+
+function stateClass(state) {
+  switch (String(state || '').toLowerCase()) {
     case 'synced': return 'state-synced';
     case 'syncing': return 'state-syncing';
+    case 'tracking': return 'state-tracking';
+    case 'waitingforconsensus':
     case 'waiting_for_consensus': return 'state-waiting';
     case 'discovering': return 'state-discovering';
     case 'connecting': return 'state-connecting';
-    case 'reconnecting': return 'state-syncing';
     case 'disconnected': return 'state-disconnected';
-    default: return 'state-connecting';
+    default: return 'state-waiting';
   }
+}
+
+function setPill(id, label, className) {
+  var pill = byId(id);
+  if (!pill) return;
+  pill.className = 'pill ' + className;
+  var strong = pill.querySelector('strong');
+  if (strong) strong.textContent = label;
 }
 
 function updateStatus(data) {
-  latestStatus = data;
   lastStatusTimestamp = Date.now() / 1000;
-  var nodeState = data.node_state || 'starting';
-  var nodeLabel = data.node_state_label || nodeState;
-  var clNetwork = data.consensus_network || {};
-  var clLight = data.consensus_light_client || {};
   var query = data.query_coverage || {};
-  var current = numberOrNull(data.current_block) || 0;
-  var target = numberOrNull(data.target_block) || 0;
-  var canonicalTop = numberOrNull(data.canonical_top_block) || target || 0;
-  var checkpointHeader = clLight && clLight.bootstrap && clLight.bootstrap.header;
-  var checkpointBlock = checkpointExecutionBlock(clLight);
+  var consensusNetwork = data.consensus_network || {};
+  var executionNetwork = data.execution_network || {};
+  var stateLabel = data.node_state_label || data.node_state || 'Starting';
+  var state = data.node_state || 'starting';
+  var historicalFloor = data.historical_execution_floor || null;
+  var historicalAnchor = data.historical_execution_anchor || null;
+  var floorBlock = historicalFloor && historicalFloor.block_number != null ? numberOrNull(historicalFloor.block_number) : null;
+  var floorTime = historicalFloor && historicalFloor.timestamp != null ? numberOrNull(historicalFloor.timestamp) : null;
+  var anchorBlockNumber = historicalAnchor && historicalAnchor.block_number != null ? numberOrNull(historicalAnchor.block_number) : null;
+  var anchorTimeValue = historicalAnchor && historicalAnchor.timestamp != null ? numberOrNull(historicalAnchor.timestamp) : null;
+  var targetBlock = numberOrNull(data.historical_target_block);
+  if (targetBlock == null) targetBlock = 0;
+  var total = anchorBlockNumber == null ? 0 : Math.max(0, anchorBlockNumber - targetBlock);
+  var remaining = floorBlock == null ? null : Math.max(0, floorBlock - targetBlock);
+  var done = remaining == null ? 0 : Math.max(0, total - remaining);
+  var pct = total <= 0 ? (floorBlock === targetBlock ? 100 : 0) : done / total * 100;
+  var active = pct < 100 && String(state).toLowerCase() !== 'synced';
+  var queryFrom = numberOrNull(query.verified_from_block);
+  var queryTo = numberOrNull(query.verified_to_block);
+  var latestBlock = numberOrNull(query.latest_block) || numberOrNull(data.head_block) || numberOrNull(data.target_block);
+  var latestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
+  var finalizedBlock = anchorBlock(data.finalized_execution_head);
+  var finalizedTime = anchorTime(data.finalized_execution_head);
+  var optimisticBlock = anchorBlock(data.optimistic_execution_head);
+  var optimisticTime = anchorTime(data.optimistic_execution_head);
+  var materializedBlock = anchorBlock(data.materialized_execution_ceiling);
+  var materializedTime = anchorTime(data.materialized_execution_ceiling);
+  var blockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
+  var logRate = numberOrNull(data.historical_logs_per_sec) || 0;
+  var normalizedCpu = numberOrNull(data.cpu_utilization_pct);
+  var rawCpu = numberOrNull(data.cpu_utilization_raw_pct);
+  var cpuCores = numberOrNull(data.cpu_logical_cores);
+  var servingPeers = numberOrNull(data.serving_peers) || 0;
+  var connectedPeers = numberOrNull(data.connected_peers) || 0;
+  var pendingPeers = numberOrNull(data.pending_peers) || 0;
+  var consensusPeers = numberOrNull(consensusNetwork.connected_peer_sessions);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
-  var checkpointTime = headerTimestamp(checkpointHeader) || slotTimestamp(checkpointSlot);
-  var materializedTip = anchorBlock(data.materialized_execution_ceiling);
-  var materializedTipTime = anchorTimestamp(data.materialized_execution_ceiling);
-  var optimistic = anchorBlock(data.optimistic_execution_head);
-  var optimisticTime = anchorTimestamp(data.optimistic_execution_head);
-  var finalized = anchorBlock(data.finalized_execution_head);
-  var finalizedTime = anchorTimestamp(data.finalized_execution_head);
-  var indexedAnchor = anchorBlock(data.indexed_execution_head);
-  var indexedAnchorTime = anchorTimestamp(data.indexed_execution_head);
-  var indexedHead = numberOrNull(data.indexed_head_block) || indexedAnchor;
-  var queryFrom = numberOrNull(query.stored_log_from_block);
-  var queryTo = numberOrNull(query.stored_log_to_block);
-  var queryLatest = numberOrNull(query.latest_block);
-  var queryLatestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
-  var hasConsensus = !!data.checkpoint_root;
-  var latestKnown = canonicalTop || optimistic || target || current || null;
-  var latestKnownTime = null;
-  if (latestKnown != null && optimistic != null && latestKnown === optimistic) {
-    latestKnownTime = optimisticTime;
-  } else if (latestKnown != null && queryLatest != null && latestKnown === queryLatest) {
-    latestKnownTime = queryLatestTime;
-  }
 
-  var liveDone = checkpointBlock != null && materializedTip != null
-    ? Math.max(0, materializedTip - checkpointBlock)
-    : 0;
-  var liveTotal = checkpointBlock != null && latestKnown != null
-    ? Math.max(0, latestKnown - checkpointBlock)
-    : 0;
-  var livePct = ratio(liveDone, liveTotal);
-  var liveRemaining = latestKnown != null && materializedTip != null
-    ? Math.max(0, latestKnown - materializedTip)
-    : null;
-  var liveRemainingText = liveRemaining == null ? 'Waiting for highest verified block' : fmtBlocks(liveRemaining) + ' remaining before CL verification reaches target block';
-  var elPct = target > 0 ? ratio(current, target) : 0;
-  var queryPct = queryLatest != null && queryTo != null ? ratio(queryTo, queryLatest) : 0;
-  var queryRange = blockRange(queryFrom, queryTo);
-  var indexPct = latestKnown != null && indexedHead != null ? ratio(indexedHead, latestKnown) : 0;
-  var queryScale = latestKnown || queryLatest || target || queryTo || 0;
-  var queryStartPct = queryScale > 0 && queryFrom != null ? ratio(queryFrom, queryScale) : 0;
-  var queryEndPct = queryScale > 0 && queryTo != null ? ratio(queryTo, queryScale) : queryStartPct;
-
-  var clState = !hasConsensus
-    ? 'Not configured'
-    : checkpointBlock == null
-      ? 'Bootstrapping'
-      : liveTotal > 0 && livePct >= 99
-        ? 'Tracking head'
-        : 'Materializing';
-  var clStateClass = !hasConsensus ? 'state-empty' : checkpointBlock == null ? 'state-bootstrapping' : livePct >= 99 ? 'state-tracking' : 'state-materializing';
-  var elLag = target > 0 ? Math.max(0, target - current) : null;
-  var elState = nodeLabel;
-  var queryState = queryFrom != null && queryTo != null ? 'Queryable' : 'No rows';
-
-  setPill('nodeBadge', nodeLabel, nodeStateClass(nodeState));
-  setText('nodeState', nodeLabel);
+  setPill('nodeBadge', stateLabel, stateClass(state));
+  setText('nodeState', stateLabel);
   refreshLastUpdated();
 
-  setText('heroClState', clState);
-  setText('heroElState', elState);
-  setText('heroQueryRange', queryRange);
-  setWidth('heroClBar', livePct);
-  setWidth('heroElBar', elPct);
-  setWidth('heroQueryBar', queryPct);
-  setText('heroClMeta', checkpointBlock == null ? 'Checkpoint ' + shortHash(data.checkpoint_root) : liveRemainingText);
-  setText('heroElMeta', target > 0 ? fmt(elLag) + ' blocks behind peer tip ' + fmt(target) : 'Awaiting peer tip');
-  setText('heroQueryMeta', queryFrom != null ? fmt(query.stored_rows) + ' rows available; block tag latest resolves to ' + blockWithTimestamp(queryLatest, queryLatestTime) : 'No local log rows are queryable yet');
+  setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 2) + '%' : '--');
+  setText('executionSummary', floorBlock == null
+    ? 'Waiting for the first verified historical Execution Layer block.'
+    : fmtBlocks(remaining) + ' remaining to genesis.');
+  setText('executionStart', anchorBlockNumber == null ? 'Pivot --' : 'Pivot ' + blockWithAge(anchorBlockNumber, anchorTimeValue));
+  setText('executionEnd', 'Genesis block ' + fmt(targetBlock));
+  setWidth('executionBar', pct);
+  setExecutionBarState(active, false);
+  setText('executionRemaining', remaining == null ? '--' : fmtBlocks(remaining));
+  setText('executionRate', fmtLogRate(logRate));
+  setText('executionEta', fmtEtaWithCompletion(data.historical_eta_seconds));
+  setText('executionPeers', fmt(servingPeers));
 
-  setWidth('graphLiveFill', livePct);
-  setLeft('graphLiveDot', livePct);
-  setWidth('graphElFill', elPct);
-  setLeft('graphElDot', elPct);
-  setWidth('graphIndexFill', indexPct);
-  setLeft('graphIndexDot', indexPct);
-  setSegment('graphQueryFill', queryStartPct, Math.max(0, queryEndPct - queryStartPct));
-  setLeft('graphQueryStartDot', queryStartPct);
-  setLeft('graphQueryEndDot', queryEndPct);
-  setText('graphLiveValue', checkpointBlock == null ? 'Waiting for checkpoint' : liveRemainingText);
-  setText('graphElValue', target > 0 ? fmt(current) + ' of ' + fmt(target) + ' blocks validated' : 'Awaiting peer tip');
-  setText('graphIndexValue', indexedHead == null ? 'Log indexing has not started' : fmt(indexedHead) + ' indexed; target block ' + fmt(latestKnown));
-  setText('graphQueryValue', queryFrom == null ? 'No local log rows' : queryRange);
-  setText('liveStartLimit', checkpointBlock == null ? 'Start --' : 'Start checkpoint ' + blockWithTimestamp(checkpointBlock, checkpointTime));
-  setText('liveEndLimit', latestKnown == null ? 'Target --' : 'Target block ' + blockWithTimestamp(latestKnown, latestKnownTime));
-  setText('liveCurrentLabel', materializedTip == null ? 'Highest verified block --' : 'Highest verified block ' + blockWithTimestamp(materializedTip, materializedTipTime));
-  setText('elStartLimit', 'Start block 0');
-  setText('elEndLimit', target > 0 ? 'Target peer tip ' + fmt(target) : 'Target peer tip --');
-  setText('elCurrentLabel', 'Current validated cursor ' + fmt(current));
-  setText('indexStartLimit', 'Start block 0');
-  setText('indexEndLimit', latestKnown == null ? 'Target canonical block --' : 'Target canonical block ' + blockWithTimestamp(latestKnown, latestKnownTime));
-  setText('indexCurrentLabel', indexedHead == null ? 'Current indexed block --' : 'Current indexed block ' + blockWithTimestamp(indexedHead, indexedAnchorTime));
-  setText('queryStartLimit', queryFrom == null ? 'Stored from --' : 'Stored from ' + fmt(queryFrom));
-  setText('queryEndLimit', queryTo == null ? 'Stored to --' : 'Stored to ' + fmt(queryTo));
-  setText('queryCurrentLabel', queryFrom == null ? 'No queryable local range yet' : 'Queryable local range ' + queryRange);
-
-  setPill('clBadge', clState, clStateClass);
-  setPill('elBadge', nodeLabel, nodeStateClass(nodeState));
-  setText('clBadgeText', clState);
-  setText('elBadgeText', nodeLabel);
-  var pendingForwardRanges = numberOrNull(clNetwork.pending_forward_beacon_blocks_by_range_requests);
-  var pendingAnchorRanges = pendingForwardRanges == null
-    ? 'anchor ranges ' + fmt(clNetwork.pending_beacon_blocks_by_range_requests)
-    : 'anchor ranges ' + fmt(pendingForwardRanges);
-
-  setText('clConnected', fmt(clNetwork.connected_peer_sessions));
-  setText('clDiscovered', fmt(clNetwork.discovered_peers));
-  setText('clStatusPeers', fmt(clNetwork.status_peers));
-  setText('clInflight', fmt(clNetwork.pending_rpc_requests));
-  setText('clInflightNote', 'pending RPCs; ' + pendingAnchorRanges);
-  setText('clBootstrapPeers', fmt(clNetwork.bootstrap_peers));
-  setText('clUpdatePeers', fmt((numberOrNull(clNetwork.updates_by_range_peers) || 0) + (numberOrNull(clNetwork.finality_update_peers) || 0) + (numberOrNull(clNetwork.optimistic_update_peers) || 0)));
-  setText('clBlockPeers', fmt((numberOrNull(clNetwork.beacon_blocks_by_range_peers) || 0) + (numberOrNull(clNetwork.beacon_blocks_by_root_peers) || 0)));
-  setText('clPeerPool', fmt(clNetwork.preferred_peers) + ' / ' + fmt(clNetwork.cooldown_peers) + ' / ' + fmt(clNetwork.ignored_peers));
-
-  setText('elConnected', fmt(data.connected_peers));
-  setText('elServing', fmt(data.serving_peers));
-  setText('elCandidates', fmt(data.pending_peers));
-  setText('elTip', target > 0 ? fmt(target) : '--');
-  setText('elCursor', fmt(current));
-  setText('elLag', elLag == null ? '--' : fmt(elLag));
-  setText('elRate', fmtRate(data.blocks_per_sec));
-  setText('elEta', fmtEta(data.eta_seconds));
-
-  setText('markerCheckpoint', checkpointBlock == null ? '--' : fmt(checkpointBlock));
-  setText('markerCheckpointDetail', data.checkpoint_root ? detailParts(['slot ' + fmt(checkpointSlot), fmtTimestamp(checkpointTime), 'root ' + shortHash(data.checkpoint_root)]) : 'no checkpoint loaded');
-  setText('markerFinalized', fmt(finalized));
-  setText('markerFinalizedDetail', detailParts(['slot ' + fmt(anchorSlot(data.finalized_execution_head)), fmtTimestamp(finalizedTime)]));
-  setText('markerOptimistic', fmt(optimistic));
-  setText('markerOptimisticDetail', detailParts(['slot ' + fmt(anchorSlot(data.optimistic_execution_head)), fmtTimestamp(optimisticTime)]));
-  setText('markerMaterializedTip', fmt(materializedTip));
-  setText('markerMaterializedTipDetail', detailParts(['slot ' + fmt(anchorSlot(data.materialized_execution_ceiling)), fmtTimestamp(materializedTipTime), fmt(data.materialized_execution_anchor_count) + ' anchors']));
-  setText('markerIndexed', fmt(indexedHead));
-  setText('markerIndexedDetail', detailParts([indexedAnchorTime == null ? null : fmtTimestamp(indexedAnchorTime), 'lag ' + fmt(data.index_lag_blocks) + ' blocks']));
-  setText('markerQuery', queryRange);
-  setText('markerQueryDetail', queryFrom == null ? 'no local rows' : fmt(query.stored_rows) + ' rows');
-
-  setText('liveLaneSummary', liveRemaining == null ? 'waiting for live target' : livePct.toFixed(1) + '% complete; ' + liveRemainingText);
-  setWidth('liveLaneBar', livePct);
-  setText('liveLaneFrom', fmt(checkpointBlock));
-  setText('liveLaneDone', fmt(materializedTip));
-  setText('liveLaneTarget', fmt(latestKnown));
-
-  setText('elLaneSummary', target > 0 ? elPct.toFixed(1) + '% to peer tip' : 'awaiting tip');
-  setWidth('elLaneBar', elPct);
-  setText('elLaneCursor', fmt(current));
-  setText('elLaneTip', target > 0 ? fmt(target) : '--');
-  setText('elLaneRemaining', elLag == null ? '--' : fmt(elLag));
-
-  setText('queryLaneSummary', queryFrom == null ? 'no local rows' : queryPct.toFixed(1) + '% of block tag latest');
-  setWidth('queryLaneBar', queryPct);
-  setText('queryLaneFrom', fmt(queryFrom));
-  setText('queryLaneTo', fmt(queryTo));
-  setText('queryLaneLatest', blockWithTimestamp(queryLatest, queryLatestTime));
-
-  setText('idxHead', fmt(indexedHead));
-  setText('idxLag', fmt(data.index_lag_blocks));
-  setText('storedRows', fmt(data.total_rows));
-  setText('sessionRows', fmt(data.logs_ingested));
-  setText('segments', fmt(data.sealed_partitions));
-  setText('storageUsed', fmtBytes(data.storage_used_bytes));
-  setText('diskFree', fmtBytes(data.disk_free_bytes));
-  setText('finalityGap', fmt(data.finality_lag_blocks));
-
-  setText('queryScope', queryFrom == null ? 'No stored log rows yet.' : 'Queries scan local stored logs across blocks ' + queryRange + '.');
-  setText('queryScanScope', queryFrom == null ? 'Scan scope: empty local log store' : 'Scan scope: ' + queryRange + '; block tag latest = ' + blockWithTimestamp(queryLatest, queryLatestTime));
-  if (byId('resultCount').textContent === '--') {
-    setText('resultCount', queryState);
+  var consensusStatus = 'Waiting';
+  if (materializedBlock != null && latestBlock != null && materializedBlock >= latestBlock) {
+    consensusStatus = 'Tracking head';
+  } else if (materializedBlock != null) {
+    consensusStatus = 'Syncing';
+  } else if (data.checkpoint_root) {
+    consensusStatus = 'Bootstrapping';
   }
+  setText('consensusStatus', consensusStatus);
+  setText('consensusDetail', materializedBlock == null
+    ? 'Checkpoint ' + shortHash(data.checkpoint_root)
+    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
+
+  setText('logRange', blockRange(queryFrom, queryTo));
+  setText('logRangeDetail', queryFrom == null
+    ? 'No verified local log range yet.'
+    : fmt(query.stored_rows) + ' rows; latest query tag resolves to ' + blockWithAge(latestBlock, latestTime) + '.');
+
+  var diskFree = data.disk_free_bytes;
+  var rawSegmentBacklog = numberOrNull(data.raw_log_segment_backlog);
+  var profileRewriteBacklog = numberOrNull(data.storage_profile_rewrite_backlog);
+  setText('storageUsed', fmtBytes(data.storage_used_bytes));
+  setText('storageDetail', '');
+  setText('diskFree', fmtBytes(diskFree));
+  setText('rawBacklogSummary', '');
+
+  setText('debugConnectedPeers', fmt(connectedPeers));
+  setText('debugServingPeers', fmt(servingPeers));
+  setText('debugPeerCandidates', fmt(numberOrNull(executionNetwork.queued_candidates) == null ? pendingPeers : executionNetwork.queued_candidates));
+  setText('debugLogRate', fmtLogRate(logRate));
+  setText('debugBlockRate', fmtRate(blockRate));
+  setText('debugRemainingLogs', fmtLogCount(data.historical_remaining_logs_estimate));
+  setText('debugConsensusStatus', consensusStatus);
+  setText('debugConsensusDetail', materializedBlock == null
+    ? 'Checkpoint ' + shortHash(data.checkpoint_root)
+    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
+  setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
+  setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
+  setText('debugStorageWritePath', data.storage_write_path);
+  var cpuDetail = '';
+  if (rawCpu != null && cpuCores != null) {
+    cpuDetail = ' (' + fmtPct(rawCpu) + ' raw, ' + fmt(cpuCores) + ' cores)';
+  }
+  setText('debugCpu', normalizedCpu == null ? '--' : fmtPct(normalizedCpu) + cpuDetail);
+  setText('debugRawBacklog', fmt(rawSegmentBacklog));
+  setText('debugProfileBacklog', fmt(profileRewriteBacklog));
+  setText('debugHistoricalFloor', blockWithAge(floorBlock, floorTime));
+  setText('debugHistoricalAnchor', blockWithAge(anchorBlockNumber, anchorTimeValue));
+  setText('debugLatestBlock', blockWithAge(optimisticBlock || latestBlock, optimisticTime || latestTime));
+  setText('debugFinalizedBlock', blockWithAge(finalizedBlock, finalizedTime));
+  setText('debugCheckpoint', data.checkpoint_root ? 'slot ' + fmt(checkpointSlot) + '; ' + shortHash(data.checkpoint_root) : '--');
+  setText('debugConsensusPeers', consensusPeers == null ? '--' : fmt(consensusPeers));
+  setText('debugStoredRows', fmt(data.total_rows));
+  setText('debugSegments', fmt(data.sealed_partitions));
+  setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
+  updateDefaultQuery(queryFrom, queryTo);
+
+  addPerfSample({
+    ts: Date.now(),
+    peers: servingPeers,
+    rate: logRate,
+    blockRate: blockRate,
+    cpu: normalizedCpu
+  });
+  renderChart();
+}
+
+function refreshLastUpdated() {
+  if (!lastStatusTimestamp) {
+    setText('lastUpdated', '--');
+    return;
+  }
+  setText('lastUpdated', fmtAgo(lastStatusTimestamp));
 }
 
 function fetchStatus() {
-  fetch('/status')
-    .then(function(response) { return response.json(); })
+  fetch('/status', { credentials: 'same-origin' })
+    .then(function(response) {
+      if (!response.ok) throw new Error('status ' + response.status);
+      return response.json();
+    })
     .then(updateStatus)
     .catch(function() {
       setPill('nodeBadge', 'Status offline', 'state-disconnected');
       setText('nodeState', 'Status offline');
+      setExecutionBarState(false, true);
       refreshLastUpdated();
     });
 }
 
-function renderTable(rows) {
-  var thead = byId('thead');
-  var tbody = byId('tbody');
+function loadPerfSamples() {
+  try {
+    var parsed = JSON.parse(localStorage.getItem(PERF_SAMPLE_STORAGE_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(function(sample) {
+      return sample && Number.isFinite(Number(sample.ts));
+    });
+  } catch (_) {
+    return [];
+  }
+}
+
+function savePerfSamples() {
+  try {
+    localStorage.setItem(PERF_SAMPLE_STORAGE_KEY, JSON.stringify(perfSamples));
+  } catch (_) {}
+}
+
+function addPerfSample(sample) {
+  var newest = perfSamples.length ? perfSamples[perfSamples.length - 1] : null;
+  if (newest && sample.ts - newest.ts < 1500) return;
+  var cutoff = Date.now() - 12 * 3600 * 1000;
+  perfSamples.push({
+    ts: sample.ts,
+    peers: Math.max(0, Number(sample.peers) || 0),
+    rate: Math.max(0, Number(sample.rate) || 0),
+    blockRate: Math.max(0, Number(sample.blockRate) || 0),
+    cpu: sample.cpu == null ? null : Math.max(0, Number(sample.cpu) || 0)
+  });
+  perfSamples = perfSamples.filter(function(item) { return item.ts >= cutoff; });
+  savePerfSamples();
+}
+
+function setChartWindow(hours) {
+  chartHours = hours;
+  Array.prototype.forEach.call(document.querySelectorAll('.range-buttons button'), function(button) {
+    button.classList.toggle('active', Number(button.getAttribute('data-hours')) === hours);
+  });
+  renderChart();
+}
+
+function renderChart() {
+  var now = Date.now();
+  var windowMinutes = chartHours * 60;
+  var start = now - windowMinutes * 60 * 1000;
+  var samples = downsampleSamples(perfSamples.filter(function(sample) { return sample.ts >= start; }), 720);
+  setText('chartWindowLabel', 'Last ' + chartHours + (chartHours === 1 ? ' hour' : ' hours'));
+
+  if (!window.Chart) {
+    byId('chartUnavailable').style.display = 'block';
+    return;
+  }
+
+  byId('chartUnavailable').style.display = 'none';
+  ensureCharts();
+  updateChart('blocks', samples, start, now, 'rate', 'Logs/sec', '#48d6b8', function(value) {
+    return fmtLogRate(value);
+  });
+  updateChart('peers', samples, start, now, 'peers', 'Serving peers', '#6aa7ff', function(value) {
+    return fmtDecimal(value, 0);
+  });
+  updateChart('cpu', samples, start, now, 'cpu', 'CPU utilization (%)', '#f2b84b', function(value) {
+    return fmtPct(value);
+  });
+
+  var latest = samples.length ? samples[samples.length - 1] : null;
+  setText('rateLegend', latest ? fmtLogRate(latest.rate) : '--');
+  setText('peerLegend', latest ? fmt(latest.peers) : '--');
+  setText('cpuLegend', latest ? fmtPct(latest.cpu) : '--');
+}
+
+function downsampleSamples(samples, maxPoints) {
+  if (samples.length <= maxPoints) return samples;
+  var step = Math.ceil(samples.length / maxPoints);
+  var result = samples.filter(function(_, index) { return index % step === 0; });
+  var latest = samples[samples.length - 1];
+  if (result[result.length - 1] !== latest) result.push(latest);
+  return result;
+}
+
+function ensureCharts() {
+  if (performanceCharts.blocks) return;
+  performanceCharts.blocks = createLineChart('blocksChart', 'Logs/sec', '#48d6b8');
+  performanceCharts.peers = createLineChart('peersChart', 'Serving peers', '#6aa7ff');
+  performanceCharts.cpu = createLineChart('cpuChart', 'CPU utilization (%)', '#f2b84b');
+}
+
+function createLineChart(canvasId, yTitle, color) {
+  return new Chart(byId(canvasId), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: yTitle,
+        data: [],
+        borderColor: color,
+        backgroundColor: color + '22',
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        tension: 0.28,
+        spanGaps: true
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      normalized: true,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function(items) {
+              if (!items.length) return '';
+              return formatChartTime(items[0].parsed.x);
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          min: 0,
+          max: Date.now(),
+          title: { display: true, text: 'Time' },
+          ticks: {
+            color: '#91a0ad',
+            maxRotation: 0,
+            callback: function(value) { return formatChartTime(value); }
+          },
+          grid: { color: 'rgba(53, 70, 90, .35)' }
+        },
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: yTitle },
+          ticks: { color: '#91a0ad' },
+          grid: { color: 'rgba(53, 70, 90, .35)' }
+        }
+      }
+    }
+  });
+}
+
+function chartTickIntervalMs() {
+  return (chartHours <= 1 ? 15 : 30) * 60 * 1000;
+}
+
+function roundedChartTicks(startMs, endMs) {
+  var interval = chartTickIntervalMs();
+  var first = Math.ceil(startMs / interval) * interval;
+  var ticks = [];
+  for (var timestamp = first; timestamp <= endMs; timestamp += interval) {
+    ticks.push(timestamp);
+  }
+  return ticks;
+}
+
+function formatChartTime(value) {
+  var date = new Date(Number(value));
+  if (!Number.isFinite(date.getTime())) return '';
+  return date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+}
+
+function updateChart(chartId, samples, startMs, endMs, key, yTitle, color, formatter) {
+  var chart = performanceCharts[chartId];
+  var points = samples.map(function(sample) {
+    var value = numberOrNull(sample[key]);
+    return {
+      x: sample.ts,
+      y: value == null ? null : value
+    };
+  });
+  chart.data.labels = [];
+  chart.data.datasets[0].label = yTitle;
+  chart.data.datasets[0].borderColor = color;
+  chart.data.datasets[0].backgroundColor = color + '22';
+  chart.data.datasets[0].data = points;
+  chart.options.scales.x.min = startMs;
+  chart.options.scales.x.max = endMs;
+  chart.options.scales.x.afterBuildTicks = function(axis) {
+    axis.ticks = roundedChartTicks(startMs, endMs).map(function(value) { return { value: value }; });
+  };
+  chart.options.scales.y.title.text = yTitle;
+  chart.options.scales.y.ticks.callback = function(value) {
+    return formatter(value);
+  };
+  chart.options.plugins.tooltip.callbacks.label = function(context) {
+    var value = context.parsed.y;
+    return yTitle + ': ' + (value == null ? '--' : formatter(value));
+  };
+  chart.update('none');
+}
+
+function renderTable(rows, emptyMessage) {
   var table = byId('resultsTable');
   var empty = byId('emptyState');
-
+  var thead = byId('thead');
+  var tbody = byId('tbody');
   if (!rows || rows.length === 0) {
     table.style.display = 'none';
     empty.style.display = 'flex';
-    empty.textContent = 'Query returned no rows.';
+    empty.textContent = emptyMessage || 'Query returned no rows.';
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
     return;
   }
 
   var keys = Object.keys(rows[0]);
-  if (keys.length === 0) {
-    table.style.display = 'none';
-    empty.style.display = 'flex';
-    empty.textContent = 'Query returned rows with no projected columns.';
+  thead.innerHTML = '<tr>' + keys.map(function(key) {
+    return '<th>' + escapeHtml(key) + '</th>';
+  }).join('') + '</tr>';
+  tbody.innerHTML = rows.map(function(row) {
+    return '<tr>' + keys.map(function(key) {
+      return '<td>' + escapeHtml(formatCell(row[key])) + '</td>';
+    }).join('') + '</tr>';
+  }).join('');
+  empty.style.display = 'none';
+  table.style.display = 'table';
+}
+
+function formatCell(value) {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function csvCell(value) {
+  var text = formatCell(value);
+  if (/[",\n\r]/.test(text)) {
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+  return text;
+}
+
+function queryPageRows() {
+  return queryRows.slice(queryOffset, queryOffset + QUERY_PAGE_SIZE);
+}
+
+function updateQueryButtons() {
+  byId('prevPageBtn').disabled = queryOffset === 0;
+  byId('nextPageBtn').disabled = queryOffset + QUERY_PAGE_SIZE >= queryRows.length;
+  byId('exportBtn').disabled = queryRows.length === 0;
+}
+
+function renderQueryPage() {
+  if (queryRows.length === 0) {
+    renderTable([], 'Query returned no rows.');
+    setText('resultCount', '0 rows returned; ' + fmt(queryScannedRows) + ' rows scanned.');
+    updateQueryButtons();
     return;
   }
 
-  var cols = COLUMNS.filter(function(column) { return keys.indexOf(column) !== -1; });
-  keys.forEach(function(key) {
-    if (cols.indexOf(key) === -1) cols.push(key);
-  });
+  queryOffset = clamp(queryOffset, 0, Math.max(0, queryRows.length - 1));
+  queryOffset = Math.floor(queryOffset / QUERY_PAGE_SIZE) * QUERY_PAGE_SIZE;
+  renderTable(queryPageRows());
 
-  thead.innerHTML = '<tr>' + cols.map(function(column) {
-    return '<th>' + escapeHtml(column) + '</th>';
-  }).join('') + '</tr>';
+  var start = queryOffset + 1;
+  var end = Math.min(queryOffset + QUERY_PAGE_SIZE, queryRows.length);
+  var cap = queryWasCapped ? '; capped at ' + fmt(MAX_QUERY_LIMIT) + ' rows' : '';
+  setText('resultCount',
+    fmt(queryRows.length) + ' rows loaded' + cap + '; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
+  updateQueryButtons();
+}
 
-  tbody.innerHTML = rows.map(function(row) {
-    return '<tr>' + cols.map(function(column) {
-      var value = row[column];
-      var rendered = value;
-      var title = '';
-      if (column === 'tx_hash' || column === 'block_hash' || column === 'address') {
-        title = value || '';
-        rendered = shortHash(value);
-      } else if (column === 'block_number' || typeof value === 'number') {
-        rendered = fmt(value);
-      } else if (column === 'topics' && Array.isArray(value)) {
-        rendered = value.length;
-        title = value.join(', ');
-      } else if (typeof value === 'string' && value.length > 42) {
-        title = value;
-        rendered = value.slice(0, 42) + '...';
-      }
-      return '<td title="' + escapeHtml(title) + '">' + escapeHtml(rendered == null ? '' : rendered) + '</td>';
-    }).join('') + '</tr>';
-  }).join('');
-
-  empty.style.display = 'none';
-  table.style.display = '';
+function runQueryPage(direction) {
+  if (direction < 0) {
+    queryOffset = Math.max(0, queryOffset - QUERY_PAGE_SIZE);
+  } else {
+    queryOffset = Math.min(Math.max(0, queryRows.length - 1), queryOffset + QUERY_PAGE_SIZE);
+  }
+  renderQueryPage();
 }
 
 function runQuery() {
   var sql = byId('sql').value.trim();
-  if (!sql) return;
+  queryOffset = 0;
+  queryRows = [];
+  queryColumns = [];
+  queryWasCapped = false;
+  queryScannedRows = null;
+  updateQueryButtons();
+  showQueryError('');
+  if (!sql) {
+    showQueryError('Enter a SQL query.');
+    return;
+  }
 
-  var btn = byId('runBtn');
-  var errEl = byId('errorMsg');
-  var countEl = byId('resultCount');
-
-  btn.disabled = true;
-  btn.textContent = 'Running';
-  errEl.style.display = 'none';
-  countEl.textContent = 'Running query...';
-
+  byId('runBtn').disabled = true;
+  setText('resultCount', 'Running query...');
+  renderTable([], 'Running query...');
   fetch('/query', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql: sql })
+    body: JSON.stringify({ sql: sql, limit: MAX_QUERY_LIMIT, offset: 0 })
   })
     .then(function(response) {
-      return response.json().then(function(body) {
-        return { ok: response.ok, data: body };
+      return response.text().then(function(text) {
+        var data = {};
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (_) {
+            data = { error: text };
+          }
+        }
+        return { ok: response.ok, status: response.status, data: data };
       });
     })
     .then(function(result) {
-      if (!result.ok || result.data.error) {
-        errEl.textContent = result.data.error || result.data.message || 'Unknown query error';
-        errEl.style.display = 'block';
-        renderTable([]);
-        return;
+      if (!result.ok) {
+        throw new Error(result.data.error || result.data.message || 'Query failed with HTTP ' + result.status + '.');
       }
-      var rows = result.data.rows || [];
-      countEl.textContent = fmt(rows.length) + ' rows returned; ' + fmt(result.data.total_scanned) + ' rows scanned';
-      renderTable(rows);
+      queryRows = Array.isArray(result.data.rows) ? result.data.rows : [];
+      queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
+      queryWasCapped = result.data.next_offset != null || queryRows.length >= MAX_QUERY_LIMIT;
+      queryScannedRows = result.data.total_scanned;
+      renderQueryPage();
     })
-    .catch(function(error) {
-      errEl.textContent = 'Request failed: ' + error.message;
-      errEl.style.display = 'block';
-      renderTable([]);
+    .catch(function(err) {
+      showQueryError(err.message || 'Query failed.');
+      setText('resultCount', 'Query failed.');
+      queryRows = [];
+      queryColumns = [];
+      queryWasCapped = false;
+      queryScannedRows = null;
+      updateQueryButtons();
+      renderTable([], 'Query failed.');
     })
     .finally(function() {
-      btn.disabled = false;
-      btn.textContent = 'Run Query';
+      byId('runBtn').disabled = false;
     });
 }
 
+function exportQueryResults() {
+  if (!queryRows.length) {
+    showQueryError('Run a query before exporting results.');
+    return;
+  }
+
+  var columns = queryColumns.length ? queryColumns : Object.keys(queryRows[0]);
+  var csv = [
+    columns.map(csvCell).join(',')
+  ].concat(queryRows.map(function(row) {
+    return columns.map(function(column) { return csvCell(row[column]); }).join(',');
+  })).join('\n');
+
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('a');
+  link.href = url;
+  link.download = 'logex-query-results-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 byId('sql').addEventListener('keydown', function(event) {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault();
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     runQuery();
   }
 });
 
+byId('sql').addEventListener('input', function() {
+  querySqlTouched = true;
+});
+
 fetchStatus();
-refreshLastUpdated();
+renderChart();
 setInterval(fetchStatus, 2000);
 setInterval(refreshLastUpdated, 1000);
 </script>

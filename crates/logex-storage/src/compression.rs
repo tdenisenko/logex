@@ -1,5 +1,7 @@
 use std::io;
 
+use rustc_hash::FxHashMap;
+
 /// Compression codec identifier stored in column file headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -39,24 +41,52 @@ impl Codec {
 // ---------------------------------------------------------------------------
 
 pub fn dict_encode(values: &[&[u8]], item_size: usize) -> Vec<u8> {
-    // Build dictionary
-    let mut dict: Vec<Vec<u8>> = Vec::new();
-    let mut index_map: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
+    let mut dict: Vec<&[u8]> = Vec::new();
+    let mut index_map: FxHashMap<&[u8], u32> =
+        FxHashMap::with_capacity_and_hasher(values.len(), Default::default());
     let mut indices: Vec<u32> = Vec::with_capacity(values.len());
 
-    for val in values {
-        let key = val.to_vec();
-        let idx = if let Some(&existing) = index_map.get(&key) {
+    for &val in values {
+        let idx = if let Some(&existing) = index_map.get(val) {
             existing
         } else {
             let idx = dict.len() as u32;
-            index_map.insert(key.clone(), idx);
-            dict.push(key);
+            index_map.insert(val, idx);
+            dict.push(val);
             idx
         };
         indices.push(idx);
     }
 
+    encode_dictionary_parts(&dict, item_size, &indices)
+}
+
+pub fn dict_encode_raw(raw_values: &[u8], item_size: usize) -> Vec<u8> {
+    debug_assert!(item_size > 0);
+    debug_assert!(raw_values.len().is_multiple_of(item_size));
+
+    let row_count = raw_values.len() / item_size;
+    let mut dict: Vec<&[u8]> = Vec::new();
+    let mut index_map: FxHashMap<&[u8], u32> =
+        FxHashMap::with_capacity_and_hasher(row_count, Default::default());
+    let mut indices: Vec<u32> = Vec::with_capacity(row_count);
+
+    for val in raw_values.chunks_exact(item_size) {
+        let idx = if let Some(&existing) = index_map.get(val) {
+            existing
+        } else {
+            let idx = dict.len() as u32;
+            index_map.insert(val, idx);
+            dict.push(val);
+            idx
+        };
+        indices.push(idx);
+    }
+
+    encode_dictionary_parts(&dict, item_size, &indices)
+}
+
+fn encode_dictionary_parts(dict: &[&[u8]], item_size: usize, indices: &[u32]) -> Vec<u8> {
     let dict_size = dict.len() as u32;
     let bits_needed = if dict_size <= 1 {
         1
@@ -64,19 +94,18 @@ pub fn dict_encode(values: &[&[u8]], item_size: usize) -> Vec<u8> {
         32 - (dict_size - 1).leading_zeros() as u8
     };
 
-    let mut out = Vec::new();
-    // Dict size
+    let packed_len = indices
+        .len()
+        .saturating_mul(bits_needed as usize)
+        .div_ceil(8);
+    let mut out = Vec::with_capacity(8 + dict.len() * item_size + 1 + packed_len);
     out.extend_from_slice(&dict_size.to_le_bytes());
-    // Item size
     out.extend_from_slice(&(item_size as u32).to_le_bytes());
-    // Dict entries
-    for entry in &dict {
+    for entry in dict {
         out.extend_from_slice(entry);
     }
-    // Bits per index
     out.push(bits_needed);
-    // Bitpacked indices
-    bitpack_u32(&indices, bits_needed, &mut out);
+    bitpack_u32(indices, bits_needed, &mut out);
 
     out
 }
@@ -192,6 +221,70 @@ pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
 }
 
 // ---------------------------------------------------------------------------
+// Signed delta codec: for u64 values that may move up or down by small steps
+// (for example historical block numbers during reverse sync).
+// Format: [base: u64] [max_zigzag_bits: u8] [packed zigzag deltas...]
+// ---------------------------------------------------------------------------
+
+pub fn signed_delta_encode(values: &[u64]) -> Vec<u8> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    let base = values[0];
+    let mut deltas: Vec<u64> = Vec::with_capacity(values.len().saturating_sub(1));
+    let mut prev = base;
+    for &value in &values[1..] {
+        let delta = value.wrapping_sub(prev) as i64;
+        deltas.push(zigzag_encode(delta));
+        prev = value;
+    }
+
+    let max_delta = deltas.iter().copied().max().unwrap_or(0);
+    let bits = if max_delta == 0 {
+        1
+    } else {
+        64 - max_delta.leading_zeros() as u8
+    };
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&base.to_le_bytes());
+    out.push(bits);
+    bitpack_u64(&deltas, bits, &mut out);
+
+    out
+}
+
+pub fn signed_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
+    if row_count == 0 {
+        return Ok(Vec::new());
+    }
+    if data.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "signed delta data too short",
+        ));
+    }
+
+    let base = u64::from_le_bytes(data[0..8].try_into().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "signed delta header truncated")
+    })?);
+    let bits = data[8];
+    let deltas = bitunpack_u64(&data[9..], row_count - 1, bits)?;
+
+    let mut result = Vec::with_capacity(row_count);
+    result.push(base);
+    let mut prev = base;
+    for delta in deltas {
+        let signed = zigzag_decode(delta);
+        prev = prev.wrapping_add(signed as u64);
+        result.push(prev);
+    }
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Delta-of-delta codec: for near-constant-interval u64 (timestamp)
 // Format: [base: u64] [first_delta: i64] [max_dd_bits: u8] [packed dd as zigzag...]
 // ---------------------------------------------------------------------------
@@ -292,7 +385,11 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
 // ---------------------------------------------------------------------------
 
 pub fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
-    zstd::encode_all(data, 3)
+    zstd::encode_all(data, 1)
+}
+
+pub fn zstd_compress_level(data: &[u8], level: i32) -> io::Result<Vec<u8>> {
+    zstd::encode_all(data, level)
 }
 
 pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
@@ -480,6 +577,19 @@ mod tests {
         let encoded = delta_encode(&values);
         let decoded = delta_decode(&encoded, 100).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_signed_delta_roundtrip_descending() {
+        let values: Vec<u64> = vec![1_000, 1_000, 999, 999, 998, 997, 997];
+        let encoded = signed_delta_encode(&values);
+        let decoded = signed_delta_decode(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+        assert!(
+            encoded.len() < values.len() * 8,
+            "encoded size: {}",
+            encoded.len()
+        );
     }
 
     #[test]

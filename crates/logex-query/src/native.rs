@@ -52,6 +52,9 @@ pub fn execute_log_filter(
 ) -> std::io::Result<Vec<LogRow>> {
     let snapshot = StorageSnapshot::from_storage(storage);
     let mut rows = Vec::new();
+    let scan_limit = filter
+        .limit
+        .map(|limit| limit.saturating_add(filter.offset));
 
     for partition in snapshot.partitions_in_order(filter.order) {
         if !partition_matches_filter(&partition, filter) {
@@ -73,7 +76,7 @@ pub fn execute_log_filter(
 
         rows.extend(partition_rows);
 
-        if let Some(limit) = filter.limit
+        if let Some(limit) = scan_limit
             && rows.len() >= limit
         {
             rows.truncate(limit);
@@ -85,6 +88,14 @@ pub fn execute_log_filter(
         rows.sort_by_key(native_log_sort_key);
     } else {
         rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
+    }
+
+    if filter.offset > 0 {
+        if filter.offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows.drain(..filter.offset);
+        }
     }
 
     if let Some(limit) = filter.limit {
@@ -426,6 +437,18 @@ mod tests {
     fn uses_block_hash_index_when_available() {
         let (_tmp, storage) = setup_storage();
         let filter = NativeLogFilter::new().with_block_hash(B256::repeat_byte(0x02));
+
+        let rows = execute_log_filter(&storage, &filter).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].block_number, 101);
+    }
+
+    #[test]
+    fn applies_offset_after_native_sort_order() {
+        let (_tmp, storage) = setup_storage();
+        let mut filter = NativeLogFilter::new();
+        filter.limit = Some(1);
+        filter.offset = 1;
 
         let rows = execute_log_filter(&storage, &filter).unwrap();
         assert_eq!(rows.len(), 1);

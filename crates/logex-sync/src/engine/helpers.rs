@@ -1,4 +1,8 @@
 use super::*;
+use alloy_primitives::U256;
+use logex_cl::MAINNET_CONSENSUS_CHAIN_SPEC;
+use logex_types::ExecutionAnchor;
+use reth_chainspec::{EthChainSpec, MAINNET};
 use std::future::Future;
 
 impl SyncEngine {
@@ -7,6 +11,8 @@ impl SyncEngine {
             let status = self.sync_status.lock().unwrap();
             status.node_state
         };
+        self.progress
+            .update_execution_network_state(self.peers.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -16,6 +22,8 @@ impl SyncEngine {
     }
 
     pub(super) fn set_runtime_state(&self, state: NodeState) {
+        self.progress
+            .update_execution_network_state(self.peers.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -36,6 +44,19 @@ impl SyncEngine {
         );
 
         self.set_runtime_state(state);
+    }
+
+    pub(super) fn set_peer_head_from_consensus(&mut self) -> bool {
+        let Some(anchor) = self
+            .consensus
+            .as_ref()
+            .and_then(|consensus| consensus.anchor_coverage().ceiling)
+        else {
+            return false;
+        };
+
+        self.peers.set_head(consensus_anchor_head(anchor));
+        true
     }
 
     pub(super) fn sync_cursor(&self) -> (u64, u64) {
@@ -66,6 +87,15 @@ impl SyncEngine {
         if target_block == 0 || current_block < target_block {
             return false;
         }
+        {
+            let status = self.sync_status.lock().unwrap();
+            if status
+                .historical_execution_floor
+                .is_some_and(|floor| floor.block_number > status.historical_target_block)
+            {
+                return false;
+            }
+        }
 
         let already_synced = {
             let status = self.sync_status.lock().unwrap();
@@ -80,7 +110,7 @@ impl SyncEngine {
     }
 
     pub(super) fn shutdown_requested(&self) -> bool {
-        self.shutdown.has_changed().unwrap_or(true)
+        shutdown_requested(&self.shutdown)
     }
 
     pub(super) fn finish_shutdown(&self) -> Result<()> {
@@ -106,6 +136,10 @@ impl SyncEngine {
     }
 }
 
+pub(super) fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
+}
+
 pub(super) fn should_mark_historical_complete(
     next_block: u64,
     target_block: Option<u64>,
@@ -122,6 +156,24 @@ pub(super) fn should_switch_to_live_without_target(
     consecutive_empty: u32,
 ) -> bool {
     target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
+}
+
+pub(super) fn should_run_historical_backfill(
+    current_block: u64,
+    _target_block: u64,
+    _max_live_lag: u64,
+) -> bool {
+    current_block > 0
+}
+
+pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
+    if max_peers == 0 {
+        return 0;
+    }
+
+    (max_peers / 3)
+        .clamp(1, HISTORICAL_BACKFILL_CONNECTED_PEER_FLOOR_CAP)
+        .min(max_peers)
 }
 
 pub(super) fn runtime_state_for_connectivity(
@@ -187,13 +239,37 @@ where
 }
 
 pub(super) fn refill_peer_floor(max_peers: usize) -> usize {
-    max_peers.clamp(1, MIN_ACTIVE_SYNC_PEERS)
+    max_peers.clamp(1, TARGET_ACTIVE_SYNC_PEERS.max(MIN_ACTIVE_SYNC_PEERS))
 }
 
-pub(super) fn desired_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
-    (connected_peers + 1)
-        .max(refill_peer_floor(max_peers))
-        .min(max_peers)
+pub(super) fn nonblocking_refill_min_peers(connected_peers: usize, max_peers: usize) -> usize {
+    connected_peers
+        .saturating_add(PEER_REFILL_STEP)
+        .clamp(1, max_peers)
+}
+
+pub(super) fn active_refill_min_peers(max_peers: usize) -> usize {
+    refill_peer_floor(max_peers).min(max_peers)
+}
+
+pub(super) fn peer_refill_goal(
+    connected_peers: usize,
+    serving_peers: usize,
+    max_peers: usize,
+) -> Option<usize> {
+    if max_peers == 0 {
+        return None;
+    }
+
+    if serving_peers < MIN_ACTIVE_SYNC_PEERS && connected_peers < max_peers {
+        return Some(active_refill_min_peers(max_peers));
+    }
+
+    if connected_peers < max_peers / 2 {
+        return Some(nonblocking_refill_min_peers(connected_peers, max_peers));
+    }
+
+    None
 }
 
 pub(super) fn should_note_serving_peer(
@@ -201,6 +277,52 @@ pub(super) fn should_note_serving_peer(
     newly_serving: &mut HashSet<PeerId>,
 ) -> bool {
     peer_id != PeerId::ZERO && newly_serving.insert(peer_id)
+}
+
+pub(super) fn preferred_body_peers<B>(
+    bodies: &[(PeerId, B)],
+    fallback_peer: PeerId,
+) -> Vec<PeerId> {
+    let mut peers = Vec::with_capacity(bodies.len().saturating_add(1));
+    for (peer_id, _) in bodies {
+        if *peer_id != PeerId::ZERO && !peers.contains(peer_id) {
+            peers.push(*peer_id);
+        }
+    }
+    if fallback_peer != PeerId::ZERO && !peers.contains(&fallback_peer) {
+        peers.push(fallback_peer);
+    }
+    peers
+}
+
+pub(super) fn consensus_anchor_head(anchor: ExecutionAnchor) -> Head {
+    execution_head(
+        anchor.block_number,
+        anchor.block_hash,
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .genesis_time
+            .saturating_add(anchor.beacon_slot.saturating_mul(12)),
+    )
+}
+
+pub(super) fn execution_head(number: u64, hash: B256, timestamp: u64) -> Head {
+    Head {
+        number,
+        hash,
+        timestamp,
+        difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            U256::ZERO
+        },
+        total_difficulty: if number == 0 {
+            MAINNET.genesis().difficulty
+        } else {
+            MAINNET
+                .final_paris_total_difficulty()
+                .unwrap_or(MAINNET.genesis().difficulty)
+        },
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +365,23 @@ mod tests {
     }
 
     #[test]
+    fn historical_backfill_runs_independently_of_live_lag() {
+        assert!(!should_run_historical_backfill(0, 0, 32));
+        assert!(should_run_historical_backfill(100, 0, 32));
+        assert!(should_run_historical_backfill(100, 132, 32));
+        assert!(should_run_historical_backfill(140, 132, 32));
+        assert!(should_run_historical_backfill(100, 133, 32));
+    }
+
+    #[test]
+    fn historical_backfill_peer_floor_scales_with_configured_pool() {
+        assert_eq!(historical_backfill_peer_floor(0), 0);
+        assert_eq!(historical_backfill_peer_floor(1), 1);
+        assert_eq!(historical_backfill_peer_floor(8), 2);
+        assert_eq!(historical_backfill_peer_floor(100), 4);
+    }
+
+    #[test]
     fn runtime_state_only_reports_synced_when_caught_up_to_known_tip() {
         assert_eq!(
             runtime_state_for_connectivity(false, 0, 0, 0, 0, 0),
@@ -271,12 +410,56 @@ mod tests {
     }
 
     #[test]
-    fn desired_refill_min_peers_maintains_a_small_live_floor() {
-        assert_eq!(desired_refill_min_peers(0, 50), 4);
-        assert_eq!(desired_refill_min_peers(1, 50), 4);
-        assert_eq!(desired_refill_min_peers(3, 50), 4);
-        assert_eq!(desired_refill_min_peers(4, 50), 5);
-        assert_eq!(desired_refill_min_peers(0, 2), 2);
+    fn nonblocking_refill_min_peers_grows_pool_incrementally() {
+        assert_eq!(nonblocking_refill_min_peers(0, 50), 16);
+        assert_eq!(nonblocking_refill_min_peers(1, 50), 17);
+        assert_eq!(nonblocking_refill_min_peers(7, 50), 23);
+        assert_eq!(nonblocking_refill_min_peers(50, 50), 50);
+        assert_eq!(nonblocking_refill_min_peers(0, 2), 2);
+    }
+
+    #[test]
+    fn active_refill_min_peers_uses_sync_target() {
+        assert_eq!(active_refill_min_peers(100), 80);
+        assert_eq!(active_refill_min_peers(50), 50);
+        assert_eq!(active_refill_min_peers(8), 8);
+        assert_eq!(active_refill_min_peers(2), 2);
+    }
+
+    #[test]
+    fn peer_refill_goal_refills_toward_active_pool() {
+        assert_eq!(peer_refill_goal(0, 0, 50), Some(50));
+        assert_eq!(peer_refill_goal(2, 1, 50), Some(50));
+        assert_eq!(peer_refill_goal(49, 1, 50), Some(50));
+        assert_eq!(peer_refill_goal(50, 1, 50), None);
+        assert_eq!(peer_refill_goal(10, 50, 50), Some(26));
+        assert_eq!(peer_refill_goal(30, 50, 50), None);
+        assert_eq!(peer_refill_goal(48, 48, 100), Some(64));
+        assert_eq!(peer_refill_goal(52, 48, 100), None);
+    }
+
+    #[test]
+    fn post_merge_execution_heads_advertise_terminal_total_difficulty() {
+        let head = execution_head(25_000_000, B256::repeat_byte(0x11), 1_778_000_000);
+
+        assert_eq!(head.difficulty, U256::ZERO);
+        assert_eq!(
+            head.total_difficulty,
+            MAINNET.final_paris_total_difficulty().unwrap()
+        );
+    }
+
+    #[test]
+    fn merge_boundary_constants_match_mainnet_chainspec() {
+        let (merge_block, _) = MAINNET
+            .paris_block_and_final_difficulty
+            .expect("mainnet Paris block must be known");
+
+        assert_eq!(merge_block, logex_types::EXECUTION_MERGE_BLOCK);
+        assert_eq!(
+            logex_types::EXECUTION_TERMINAL_POW_BLOCK + 1,
+            logex_types::EXECUTION_MERGE_BLOCK
+        );
     }
 
     #[test]
@@ -287,5 +470,15 @@ mod tests {
         assert!(should_note_serving_peer(first, &mut seen));
         assert!(!should_note_serving_peer(first, &mut seen));
         assert!(!should_note_serving_peer(PeerId::ZERO, &mut seen));
+    }
+
+    #[tokio::test]
+    async fn shutdown_requested_stays_true_after_change_is_observed() {
+        let (tx, mut rx) = watch::channel(false);
+
+        tx.send(true).unwrap();
+        rx.changed().await.unwrap();
+
+        assert!(shutdown_requested(&rx));
     }
 }

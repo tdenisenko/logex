@@ -49,8 +49,8 @@ use crate::rpc::{
 use crate::{
     ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock, VerifiedLightClientStore,
     apply_finality_update_payload, apply_light_client_update_payload,
-    apply_optimistic_update_payload, decode_verified_beacon_block, force_update_light_client_store,
-    verify_bootstrap_payload,
+    apply_optimistic_update_payload, decode_finality_update, decode_optimistic_update,
+    decode_verified_beacon_block, force_update_light_client_store, verify_bootstrap_payload,
 };
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -461,6 +461,7 @@ struct ConsensusNetwork {
     last_rpc_failure: Option<String>,
     last_response_send_failure: Option<String>,
     verified_beacon_blocks: HashMap<B256, VerifiedBeaconBlock>,
+    verified_beacon_block_children: HashMap<B256, Vec<VerifiedBeaconBlock>>,
     verified_beacon_block_payloads: HashMap<B256, RawRpcResponse>,
     active_history_target: Option<HistorySyncTarget>,
 }
@@ -585,6 +586,32 @@ fn verified_beacon_blocks_from_light_client_store(
             })
         })
         .collect()
+}
+
+fn finality_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
+    decode_finality_update(bytes).is_ok_and(|status| {
+        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
+            && status.finalized_header.beacon_slot <= store.finalized_header.beacon.slot
+    })
+}
+
+fn optimistic_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
+    decode_optimistic_update(bytes).is_ok_and(|status| {
+        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
+    })
+}
+
+fn verified_beacon_block_children_from_blocks(
+    blocks: &HashMap<B256, VerifiedBeaconBlock>,
+) -> HashMap<B256, Vec<VerifiedBeaconBlock>> {
+    let mut children: HashMap<B256, Vec<VerifiedBeaconBlock>> = HashMap::new();
+    for block in blocks.values().copied() {
+        children.entry(block.parent_root).or_default().push(block);
+    }
+    for blocks in children.values_mut() {
+        blocks.sort_by_key(|block| (block.slot, block.beacon_root));
+    }
+    children
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -920,23 +947,34 @@ fn cached_light_client_update_payloads_by_range(
     responses
 }
 
-fn select_checkpoint_forward_child(
-    children: &[VerifiedBeaconBlock],
+fn select_checkpoint_forward_child<I>(
+    children: I,
     preferred_roots: &HashSet<B256>,
-) -> Option<VerifiedBeaconBlock> {
-    if children.is_empty() {
-        return None;
+) -> Option<VerifiedBeaconBlock>
+where
+    I: IntoIterator<Item = VerifiedBeaconBlock>,
+{
+    let mut only_child = None;
+    let mut child_count = 0usize;
+    let mut only_preferred_child = None;
+    let mut preferred_child_count = 0usize;
+
+    for child in children {
+        child_count = child_count.saturating_add(1);
+        only_child = Some(child);
+        if preferred_roots.contains(&child.beacon_root) {
+            preferred_child_count = preferred_child_count.saturating_add(1);
+            only_preferred_child = Some(child);
+        }
     }
 
-    let preferred_children = children
-        .iter()
-        .copied()
-        .filter(|block| preferred_roots.contains(&block.beacon_root))
-        .collect::<Vec<_>>();
-    if preferred_children.len() == 1 {
-        return preferred_children.into_iter().next();
+    if preferred_child_count == 1 {
+        only_preferred_child
+    } else if child_count == 1 {
+        only_child
+    } else {
+        None
     }
-    (children.len() == 1).then_some(children[0])
 }
 
 #[derive(Debug, Clone)]
@@ -1546,6 +1584,8 @@ impl ConsensusNetwork {
                 verified_beacon_blocks.insert(block.beacon_root, block);
             }
         }
+        let verified_beacon_block_children =
+            verified_beacon_block_children_from_blocks(&verified_beacon_blocks);
 
         Ok(Self {
             config,
@@ -1592,6 +1632,7 @@ impl ConsensusNetwork {
             last_rpc_failure: None,
             last_response_send_failure: None,
             verified_beacon_blocks,
+            verified_beacon_block_children,
             verified_beacon_block_payloads: HashMap::new(),
             active_history_target: None,
         })
@@ -2043,11 +2084,19 @@ impl ConsensusNetwork {
                 );
                 return gossipsub::MessageAcceptance::Ignore;
             };
+            if finality_update_is_stale(&decoded, &store) {
+                tracing::trace!(
+                    %propagation_source,
+                    bytes = decoded.len(),
+                    "ignoring stale consensus finality-update gossip"
+                );
+                return gossipsub::MessageAcceptance::Ignore;
+            }
 
             match apply_finality_update_payload(&decoded, &store) {
                 Ok((summary, next_store, _, _)) => {
                     self.gossip_counts.finality_update += 1;
-                    tracing::info!(
+                    tracing::debug!(
                         %propagation_source,
                         bytes = decoded.len(),
                         fork = ?summary.fork,
@@ -2096,11 +2145,19 @@ impl ConsensusNetwork {
                 );
                 return gossipsub::MessageAcceptance::Ignore;
             };
+            if optimistic_update_is_stale(&decoded, &store) {
+                tracing::trace!(
+                    %propagation_source,
+                    bytes = decoded.len(),
+                    "ignoring stale consensus optimistic-update gossip"
+                );
+                return gossipsub::MessageAcceptance::Ignore;
+            }
 
             match apply_optimistic_update_payload(&decoded, &store) {
                 Ok((summary, next_store, _)) => {
                     self.gossip_counts.optimistic_update += 1;
-                    tracing::info!(
+                    tracing::debug!(
                         %propagation_source,
                         bytes = decoded.len(),
                         fork = ?summary.fork,
@@ -2235,7 +2292,7 @@ impl ConsensusNetwork {
                             "{peer_context} request={} response={response:?}",
                             kind.as_str()
                         ));
-                        tracing::warn!(
+                        tracing::debug!(
                             %peer,
                             error = ?response,
                             "failed to send consensus RPC response"
@@ -2274,7 +2331,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             request = kind.as_str(),
                             %error,
@@ -2349,7 +2406,7 @@ impl ConsensusNetwork {
                             self.last_response_send_failure = Some(format!(
                                 "{peer_context} request=goodbye response={response:?}"
                             ));
-                            tracing::warn!(
+                            tracing::debug!(
                                 %peer,
                                 error = ?response,
                                 "failed to send consensus goodbye RPC response"
@@ -2466,7 +2523,7 @@ impl ConsensusNetwork {
                         self.last_response_send_failure = Some(format!(
                             "{peer_context} request=metadata response={response:?}"
                         ));
-                        tracing::warn!(
+                        tracing::debug!(
                             %peer,
                             error = ?response,
                             "failed to send consensus metadata RPC response"
@@ -2627,7 +2684,7 @@ impl ConsensusNetwork {
                             let period = sync_committee_period_for_slot(
                                 next.optimistic_status.attested_header.beacon_slot,
                             );
-                            tracing::info!(
+                            tracing::debug!(
                                 %peer,
                                 bytes = chunk.bytes.len(),
                                 period,
@@ -2689,9 +2746,17 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
+                if finality_update_is_stale(&payload.bytes, &store) {
+                    tracing::trace!(
+                        %peer,
+                        bytes = payload.bytes.len(),
+                        "ignoring stale light-client finality update response"
+                    );
+                    return;
+                }
                 match apply_finality_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _, _)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
                             fork = ?summary.fork,
@@ -2742,9 +2807,17 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
+                if optimistic_update_is_stale(&payload.bytes, &store) {
+                    tracing::trace!(
+                        %peer,
+                        bytes = payload.bytes.len(),
+                        "ignoring stale light-client optimistic update response"
+                    );
+                    return;
+                }
                 match apply_optimistic_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
                             fork = ?summary.fork,
@@ -2955,7 +3028,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             request = kind.as_str(),
                             error_code = error.code,
@@ -3025,7 +3098,7 @@ impl ConsensusNetwork {
         dialable.sort_by(|(left, _), (right, _)| {
             self.peer_priority(*right, bootstrap_needed)
                 .cmp(&self.peer_priority(*left, bootstrap_needed))
-                .then_with(|| left.to_string().cmp(&right.to_string()))
+                .then_with(|| left.cmp(right))
         });
 
         let mut active_targets = self.connected_peers.len() + self.dialing_peers.len();
@@ -3060,7 +3133,7 @@ impl ConsensusNetwork {
         connected.sort_by(|left, right| {
             self.peer_priority(*right, bootstrap_needed)
                 .cmp(&self.peer_priority(*left, bootstrap_needed))
-                .then_with(|| left.to_string().cmp(&right.to_string()))
+                .then_with(|| left.cmp(right))
         });
         for peer in connected {
             if self
@@ -3568,8 +3641,7 @@ impl ConsensusNetwork {
         &self,
         target: HistorySyncTarget,
     ) -> Option<CachedForwardPathProgress> {
-        let chain = self.checkpoint_forward_chain_blocks(target)?;
-        let highest_cached_slot = chain.last()?.slot;
+        let highest_cached_slot = self.checkpoint_forward_highest_cached_slot(target)?;
         Some(CachedForwardPathProgress {
             checkpoint_slot: target.checkpoint_slot,
             target_slot: target.optimistic_slot,
@@ -3586,7 +3658,38 @@ impl ConsensusNetwork {
             self.verified_beacon_block_payloads
                 .insert(block.beacon_root, payload);
         }
-        self.verified_beacon_blocks.insert(block.beacon_root, block) != Some(block)
+        let previous = self.verified_beacon_blocks.insert(block.beacon_root, block);
+        if previous == Some(block) {
+            return false;
+        }
+
+        if let Some(previous) = previous {
+            let remove_parent = self
+                .verified_beacon_block_children
+                .get_mut(&previous.parent_root)
+                .is_some_and(|children| {
+                    children.retain(|child| child.beacon_root != previous.beacon_root);
+                    children.is_empty()
+                });
+            if remove_parent {
+                self.verified_beacon_block_children
+                    .remove(&previous.parent_root);
+            }
+        }
+
+        let children = self
+            .verified_beacon_block_children
+            .entry(block.parent_root)
+            .or_default();
+        if !children
+            .iter()
+            .any(|child| child.beacon_root == block.beacon_root)
+        {
+            children.push(block);
+            children.sort_by_key(|child| (child.slot, child.beacon_root));
+        }
+
+        true
     }
 
     fn seed_verified_light_client_headers(&mut self) -> bool {
@@ -3722,17 +3825,13 @@ impl ConsensusNetwork {
         )
     }
 
-    fn checkpoint_forward_chain_blocks(
-        &self,
-        target: HistorySyncTarget,
-    ) -> Option<Vec<VerifiedBeaconBlock>> {
+    fn checkpoint_forward_highest_cached_slot(&self, target: HistorySyncTarget) -> Option<u64> {
         let checkpoint_block = *self.verified_beacon_blocks.get(&target.checkpoint_root)?;
         if checkpoint_block.slot != target.checkpoint_slot {
             return None;
         }
 
         let preferred_roots = self.cached_target_lineage_roots(target);
-        let mut chain = vec![checkpoint_block];
         let mut current = checkpoint_block;
         while let Some(child) = self.next_checkpoint_forward_child(
             current.beacon_root,
@@ -3740,11 +3839,10 @@ impl ConsensusNetwork {
             target.optimistic_slot,
             &preferred_roots,
         ) {
-            chain.push(child);
             current = child;
         }
 
-        Some(chain)
+        Some(current.slot)
     }
 
     fn serving_forward_chain_blocks(&self) -> Option<Vec<VerifiedBeaconBlock>> {
@@ -3795,18 +3893,14 @@ impl ConsensusNetwork {
         target_slot: u64,
         preferred_roots: &HashSet<B256>,
     ) -> Option<VerifiedBeaconBlock> {
-        let mut children = self
-            .verified_beacon_blocks
-            .values()
-            .copied()
-            .filter(|block| {
-                block.parent_root == parent_root
-                    && block.slot > parent_slot
-                    && block.slot <= target_slot
-            })
-            .collect::<Vec<_>>();
-        children.sort_by_key(|block| (block.slot, block.beacon_root));
-        select_checkpoint_forward_child(&children, preferred_roots)
+        select_checkpoint_forward_child(
+            self.verified_beacon_block_children
+                .get(&parent_root)?
+                .iter()
+                .copied()
+                .filter(|child| child.slot > parent_slot && child.slot <= target_slot),
+            preferred_roots,
+        )
     }
 
     fn maybe_force_light_client_store(&mut self) {
@@ -5603,15 +5697,15 @@ mod tests {
         let preferred_roots = HashSet::from([child_b.beacon_root]);
 
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a, child_b], &preferred_roots),
+            select_checkpoint_forward_child([child_a, child_b], &preferred_roots),
             Some(child_b)
         );
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a], &HashSet::new()),
+            select_checkpoint_forward_child([child_a], &HashSet::new()),
             Some(child_a)
         );
         assert_eq!(
-            select_checkpoint_forward_child(&[child_a, child_b], &HashSet::new()),
+            select_checkpoint_forward_child([child_a, child_b], &HashSet::new()),
             None
         );
     }

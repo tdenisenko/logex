@@ -6,6 +6,8 @@ pub mod primitives;
 pub mod progress;
 pub mod validation;
 
+pub use logex_types::EXECUTION_HISTORY_TARGET_BLOCK;
+
 /// Configuration for the sync engine.
 pub struct SyncConfig {
     /// Maximum concurrent peer connections.
@@ -21,9 +23,9 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            max_peers: 50,
+            max_peers: 100,
             header_batch_size: 1024,
-            fetch_batch_size: 32,
+            fetch_batch_size: 1024,
         }
     }
 }

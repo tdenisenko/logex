@@ -5,11 +5,14 @@ use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, proofs};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
 use logex_types::ExecutionAnchor;
-use reth_chainspec::{ChainSpec, MAINNET};
-use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
+use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
+use reth_consensus::{ConsensusError, HeaderValidator};
+use reth_consensus_common::validation::{
+    MAX_RLP_BLOCK_SIZE, validate_body_against_header as validate_reth_body_against_header,
+};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_primitives::{Block as EthereumBlock, BlockBody as EthereumBlockBody};
-use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_primitives_traits::{Block, BlockBody, GotExpected, SealedHeader};
 
 static EXECUTION_CONSENSUS: LazyLock<EthBeaconConsensus<ChainSpec>> =
     LazyLock::new(|| EthBeaconConsensus::new(MAINNET.clone()));
@@ -32,6 +35,8 @@ pub enum ReceiptValidationError {
 #[derive(Debug, Clone)]
 pub enum HeaderValidationError {
     StartBlockMismatch { expected: u64, got: u64 },
+    ReverseStartBlockMismatch { expected: u64, got: u64 },
+    BrokenReverseParentLink { child: u64, parent: u64 },
     Standalone(ConsensusError),
     AgainstParent(ConsensusError),
 }
@@ -50,6 +55,18 @@ impl fmt::Display for HeaderValidationError {
                 write!(
                     f,
                     "header batch started at unexpected block: expected {expected}, got {got}"
+                )
+            }
+            Self::ReverseStartBlockMismatch { expected, got } => {
+                write!(
+                    f,
+                    "reverse header batch started at unexpected block: expected {expected}, got {got}"
+                )
+            }
+            Self::BrokenReverseParentLink { child, parent } => {
+                write!(
+                    f,
+                    "reverse header batch has a broken parent link: block {parent} is not the parent of block {child}"
                 )
             }
             Self::Standalone(error) => write!(f, "{error}"),
@@ -150,22 +167,85 @@ pub fn validate_downloaded_headers(
     Ok(())
 }
 
+pub fn validate_reverse_downloaded_headers(
+    child_header: &Header,
+    headers: &[Header],
+) -> Result<(), HeaderValidationError> {
+    validate_reverse_downloaded_headers_with_hashes(child_header, headers).map(|_| ())
+}
+
+pub fn validate_reverse_downloaded_headers_with_hashes(
+    child_header: &Header,
+    headers: &[Header],
+) -> Result<Vec<B256>, HeaderValidationError> {
+    let Some(first_header) = headers.first() else {
+        return Ok(Vec::new());
+    };
+
+    let expected_start_block = child_header.number().saturating_sub(1);
+    if first_header.number() != expected_start_block {
+        return Err(HeaderValidationError::ReverseStartBlockMismatch {
+            expected: expected_start_block,
+            got: first_header.number(),
+        });
+    }
+
+    let mut child = SealedHeader::new_unhashed(child_header.clone());
+    let mut hashes = Vec::with_capacity(headers.len());
+    for parent_header in headers {
+        let parent_hash = parent_header.hash_slow();
+        if child.parent_hash() != parent_hash {
+            return Err(HeaderValidationError::BrokenReverseParentLink {
+                child: child.number(),
+                parent: parent_header.number(),
+            });
+        }
+
+        let parent = SealedHeader::new(parent_header.clone(), parent_hash);
+        EXECUTION_CONSENSUS
+            .validate_header(&parent)
+            .map_err(HeaderValidationError::Standalone)?;
+        EXECUTION_CONSENSUS
+            .validate_header_against_parent(&child, &parent)
+            .map_err(HeaderValidationError::AgainstParent)?;
+        hashes.push(parent_hash);
+        child = parent;
+    }
+
+    Ok(hashes)
+}
+
 pub fn validate_block_pre_execution(
     header: &Header,
+    _block_hash: B256,
     body: &EthereumBlockBody,
 ) -> Result<(), ConsensusError> {
-    let sealed_header = SealedHeader::seal_slow(header.clone());
-    <EthBeaconConsensus<ChainSpec> as Consensus<EthereumBlock>>::validate_body_against_header(
-        &*EXECUTION_CONSENSUS,
-        body,
-        &sealed_header,
-    )?;
+    validate_reth_body_against_header(body, header)?;
 
-    let sealed_block = SealedBlock::seal_slow(EthereumBlock {
-        header: header.clone(),
-        body: body.clone(),
-    });
-    EXECUTION_CONSENSUS.validate_block_pre_execution(&sealed_block)
+    if let Some(header_blob_gas_used) = header.blob_gas_used() {
+        let total_blob_gas = body.blob_gas_used();
+        if total_blob_gas != header_blob_gas_used {
+            return Err(ConsensusError::BlobGasUsedDiff(GotExpected {
+                got: header_blob_gas_used,
+                expected: total_blob_gas,
+            }));
+        }
+    }
+
+    if EXECUTION_CONSENSUS
+        .chain_spec()
+        .is_osaka_active_at_timestamp(header.timestamp())
+    {
+        let rlp_length = EthereumBlock::rlp_length(header, body);
+        if rlp_length > MAX_RLP_BLOCK_SIZE {
+            return Err(ConsensusError::BlockTooLarge {
+                rlp_length,
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 impl std::fmt::Display for ReceiptValidationError {
@@ -205,6 +285,19 @@ where
             expected: header.gas_used(),
             got: cumulative_gas_used,
         });
+    }
+
+    if receipts.is_empty() {
+        if header.receipts_root() != EMPTY_TRIE_ROOT {
+            return Err(ReceiptValidationError::ReceiptRootMismatch {
+                expected: header.receipts_root(),
+                got: EMPTY_TRIE_ROOT,
+            });
+        }
+        if header.logs_bloom() != Bloom::ZERO {
+            return Err(ReceiptValidationError::LogsBloomMismatch);
+        }
+        return Ok(());
     }
 
     let calculated_root = proofs::calculate_receipt_root(receipts);
@@ -263,6 +356,49 @@ mod tests {
     }
 
     #[test]
+    fn reverse_headers_reject_wrong_start_block_before_consensus_validation() {
+        let child = Header {
+            number: 10,
+            parent_hash: B256::repeat_byte(0xAA),
+            ..Default::default()
+        };
+        let wrong_parent = Header {
+            number: 8,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[wrong_parent]),
+            Err(HeaderValidationError::ReverseStartBlockMismatch {
+                expected: 9,
+                got: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn reverse_headers_reject_broken_parent_link_before_consensus_validation() {
+        let child = Header {
+            number: 10,
+            parent_hash: B256::repeat_byte(0xAA),
+            ..Default::default()
+        };
+        let wrong_parent = Header {
+            number: 9,
+            parent_hash: B256::repeat_byte(0xBB),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[wrong_parent]),
+            Err(HeaderValidationError::BrokenReverseParentLink {
+                child: 10,
+                parent: 9
+            })
+        ));
+    }
+
+    #[test]
     fn empty_receipts_match_empty_root_post_byzantium() {
         let empty: Vec<ReceiptWithBloom<RethReceipt>> = vec![];
         let header = Header {
@@ -285,6 +421,21 @@ mod tests {
             validate_receipts_for_header(&header, &empty),
             Err(ReceiptValidationError::ReceiptRootMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn empty_receipts_reject_nonzero_logs_bloom() {
+        let empty: Vec<ReceiptWithBloom<RethReceipt>> = vec![];
+        let header = Header {
+            number: 4_370_000,
+            receipts_root: EMPTY_TRIE_ROOT,
+            logs_bloom: Bloom::repeat_byte(0x01),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_receipts_for_header(&header, &empty),
+            Err(ReceiptValidationError::LogsBloomMismatch)
+        );
     }
 
     #[test]
@@ -347,6 +498,23 @@ mod tests {
         assert!(matches!(
             validate_header_matches_anchor(&wrong_anchor, &header, header.hash_slow()),
             Err(AnchorValidationError::ReceiptsRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_execution_validation_rejects_blob_gas_mismatch() {
+        let body = EthereumBlockBody::default();
+        let header = Header {
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            blob_gas_used: Some(1),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &body),
+            Err(ConsensusError::BlobGasUsedDiff(_))
         ));
     }
 

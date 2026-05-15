@@ -6,8 +6,15 @@ mod runtime;
 
 use clap::Parser;
 
-use cli::{Cli, Command, Config};
+use cli::{Cli, Command, Config, default_data_dir};
 use logex_storage::PartitionManagerConfig;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_LOG_FILTER: &str = "info,discv5=error";
 
 fn main() {
     let cli = Cli::parse();
@@ -19,13 +26,7 @@ fn main() {
     }
     let file_config = file_config.and_then(|r| r.ok()).unwrap_or_default();
 
-    let log_level = if cli.log_level != "info" {
-        cli.log_level.clone()
-    } else {
-        file_config
-            .log_level
-            .unwrap_or_else(|| cli.log_level.clone())
-    };
+    let log_level = effective_log_filter(&cli.log_level, file_config.log_level);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -34,12 +35,15 @@ fn main() {
         )
         .init();
 
-    let data_dir = file_config.data_dir.unwrap_or(cli.data_dir);
+    let data_dir = file_config
+        .data_dir
+        .unwrap_or_else(|| cli.data_dir.unwrap_or_else(default_data_dir));
     let partition_target_rows = file_config
         .partition_target_rows
         .unwrap_or(cli.partition_target_rows);
     let checkpoint = file_config.checkpoint.or(cli.checkpoint);
     let checkpoint_sync_url = file_config.checkpoint_sync_url.or(cli.checkpoint_sync_url);
+    let config_nat = file_config.nat;
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -55,10 +59,28 @@ fn main() {
             discovery_port,
             p2p_port,
             max_peers,
+            nat,
             cl_discovery_port,
             cl_p2p_port,
             cl_max_peers,
+            disable_dashboard,
+            dashboard_password,
         } => {
+            let nat = if nat == "any" {
+                config_nat.unwrap_or(nat)
+            } else {
+                nat
+            };
+            let dashboard_enabled =
+                file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
+            let dashboard_password = dashboard_password.or(file_config.dashboard_password);
+            if dashboard_password
+                .as_ref()
+                .is_some_and(|password| password.is_empty())
+            {
+                eprintln!("Error: dashboard password cannot be empty");
+                std::process::exit(1);
+            }
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
@@ -69,12 +91,56 @@ fn main() {
                 discovery_port,
                 p2p_port,
                 max_peers,
+                nat,
                 cl_discovery_port,
                 cl_p2p_port,
                 cl_max_peers,
+                dashboard_enabled,
+                dashboard_password,
             }));
         }
         Command::BuildIndexes => commands::run_build_indexes(pm_config),
+        Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
+    }
+}
+
+fn effective_log_filter(cli_log_level: &str, config_log_level: Option<String>) -> String {
+    let requested = if cli_log_level != DEFAULT_LOG_LEVEL {
+        cli_log_level.to_owned()
+    } else {
+        config_log_level.unwrap_or_else(|| DEFAULT_LOG_FILTER.to_owned())
+    };
+    normalize_info_log_filter(requested)
+}
+
+fn normalize_info_log_filter(filter: String) -> String {
+    if filter.trim() == DEFAULT_LOG_LEVEL {
+        DEFAULT_LOG_FILTER.to_owned()
+    } else {
+        filter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_LOG_FILTER, effective_log_filter};
+
+    #[test]
+    fn default_info_log_filter_suppresses_noisy_discovery_warnings() {
+        assert_eq!(effective_log_filter("info", None), DEFAULT_LOG_FILTER);
+        assert_eq!(
+            effective_log_filter("info", Some("info".to_owned())),
+            DEFAULT_LOG_FILTER
+        );
+    }
+
+    #[test]
+    fn explicit_log_filters_are_preserved() {
+        assert_eq!(effective_log_filter("debug", None), "debug");
+        assert_eq!(
+            effective_log_filter("info", Some("info,discv5=warn".to_owned())),
+            "info,discv5=warn"
+        );
     }
 }

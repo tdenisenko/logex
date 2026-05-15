@@ -19,7 +19,7 @@ impl Default for NativeStorageConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            hot_target_rows: 50_000_000,
+            hot_target_rows: 1_000_000,
             compaction_safety_margin_blocks: 2_048,
         }
     }
@@ -74,10 +74,13 @@ pub enum SegmentKind {
 pub enum CompressionCodec {
     None,
     Delta,
+    DeltaZigZag,
     DeltaOfDelta,
     Dictionary,
     Zstd,
     Lz4,
+    AdaptiveFixed,
+    AdaptiveBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +165,11 @@ impl NativeStorageCatalog {
         let catalog_path = paths.catalog_path();
         if catalog_path.exists() {
             let json = fs::read_to_string(&catalog_path)?;
-            let catalog = serde_json::from_str(&json).map_err(std::io::Error::other)?;
+            let mut catalog: Self = serde_json::from_str(&json).map_err(std::io::Error::other)?;
+            if catalog.hot_target_rows != config.hot_target_rows {
+                catalog.hot_target_rows = config.hot_target_rows;
+                catalog.persist(&paths)?;
+            }
             return Ok((catalog, paths));
         }
 
@@ -182,19 +189,28 @@ impl NativeStorageCatalog {
         paths.ensure_base_dirs()?;
         let path = paths.catalog_path();
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         fs::write(&tmp, json)?;
         fs::rename(tmp, path)?;
         Ok(())
     }
 
     pub fn register_segment(&mut self, kind: SegmentKind) -> SegmentDescriptor {
+        let descriptor = self.allocate_segment(kind);
+        if kind == SegmentKind::Hot {
+            self.active_hot_segment = Some(descriptor.id);
+        }
+        self.segments.push(descriptor.clone());
+        descriptor
+    }
+
+    pub fn allocate_segment(&mut self, kind: SegmentKind) -> SegmentDescriptor {
         let id = self.next_segment_id;
         self.next_segment_id += 1;
 
         let relative_path = PathBuf::from(SEGMENTS_DIR).join(format!("s_{id:016}"));
         let manifest_relative_path = relative_path.join("segment.json");
-        let descriptor = SegmentDescriptor {
+        SegmentDescriptor {
             id,
             generation: 0,
             kind,
@@ -203,13 +219,7 @@ impl NativeStorageCatalog {
             min_block: None,
             max_block: None,
             row_count: 0,
-        };
-
-        if kind == SegmentKind::Hot {
-            self.active_hot_segment = Some(id);
         }
-        self.segments.push(descriptor.clone());
-        descriptor
     }
 
     pub fn active_hot_segment(&self) -> Option<&SegmentDescriptor> {
@@ -244,6 +254,25 @@ mod tests {
         let (reloaded, _) = NativeStorageCatalog::open_or_create(&config).unwrap();
         assert_eq!(reloaded.active_hot_segment, Some(hot.id));
         assert_eq!(reloaded.segments.len(), 1);
+    }
+
+    #[test]
+    fn catalog_updates_hot_target_rows_from_config_on_reload() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let _ = NativeStorageCatalog::open_or_create(&config).unwrap();
+
+        let updated_config = NativeStorageConfig {
+            hot_target_rows: 1_000,
+            ..config
+        };
+        let (reloaded, _) = NativeStorageCatalog::open_or_create(&updated_config).unwrap();
+
+        assert_eq!(reloaded.hot_target_rows, 1_000);
     }
 
     #[test]

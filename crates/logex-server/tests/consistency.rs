@@ -167,6 +167,7 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
             canonical_only: Some(true),
             descending: Some(false),
             limit: None,
+            offset: None,
         }))
         .await
         .unwrap()

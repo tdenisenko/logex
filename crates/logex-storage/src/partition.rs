@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use alloy_consensus::Header;
 use alloy_primitives::B256;
-use logex_types::{ChainAnchors, ExecutionAnchor, LogRow, PartitionMeta};
+use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 
-use crate::native::{NativeStorage, NativeStorageConfig};
+use crate::native::{NativeStorage, NativeStorageConfig, SegmentCompactionPlan};
 use crate::state::SyncHead;
 
 /// A read-only compatibility view over a storage segment.
@@ -29,7 +29,7 @@ impl Default for PartitionManagerConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            partition_target_rows: 50_000_000,
+            partition_target_rows: 1_000_000,
             compaction_safety_margin_blocks: 2_048,
         }
     }
@@ -82,6 +82,13 @@ impl PartitionManager {
         Ok(())
     }
 
+    /// Ingest immutable historical rows directly as sealed compacted segments.
+    pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
+        self.inner.write_historical_batch(rows)?;
+        self.refresh_views();
+        Ok(())
+    }
+
     /// Refresh manifest metadata after indexes are rebuilt externally.
     pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.inner.refresh_segment_indexes(segment_id)
@@ -90,6 +97,68 @@ impl PartitionManager {
     /// Compact sealed segments that are safely behind the current head.
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
         self.inner.compact_eligible_segments()
+    }
+
+    /// Compact up to `limit` sealed segments that are safely behind the current head.
+    pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        let compacted = self.inner.compact_eligible_segments_limit(limit)?;
+        if compacted > 0 {
+            self.refresh_views();
+        }
+        Ok(compacted)
+    }
+
+    /// Compact raw sealed segments without migrating stale compacted profiles.
+    pub fn compact_raw_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        let compacted = self.inner.compact_raw_segments_limit(limit)?;
+        if compacted > 0 {
+            self.refresh_views();
+        }
+        Ok(compacted)
+    }
+
+    /// Select sealed segments that can be compacted outside the storage lock.
+    pub fn segment_compaction_plan(&self, limit: usize) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.segment_compaction_plan(limit)
+    }
+
+    /// Select raw sealed segments that can be compacted outside the storage lock.
+    pub fn raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.raw_segment_compaction_plan(limit)
+    }
+
+    /// Select recent raw sealed segments that can be compacted outside the storage lock.
+    pub fn recent_raw_segment_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.recent_raw_segment_compaction_plan(limit)
+    }
+
+    /// Select compacted sealed segments that only need migration to the current profile.
+    pub fn profile_rewrite_compaction_plan(
+        &self,
+        limit: usize,
+    ) -> std::io::Result<SegmentCompactionPlan> {
+        self.inner.profile_rewrite_compaction_plan(limit)
+    }
+
+    /// Count sealed segments that are eligible for compaction.
+    pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.compaction_backlog_count()
+    }
+
+    /// Count raw sealed segments that need first-time compaction.
+    pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.raw_compaction_backlog_count()
+    }
+
+    /// Count compacted sealed segments that need migration to the current profile.
+    pub fn profile_rewrite_backlog_count(&self) -> std::io::Result<usize> {
+        self.inner.profile_rewrite_backlog_count()
     }
 
     /// Persist the latest fully-validated block, even when it produced no logs.
@@ -113,6 +182,26 @@ impl PartitionManager {
         self.inner.recent_headers()
     }
 
+    /// Return the lowest verified historical EL header, if any.
+    pub fn historical_floor_header(&self) -> Option<&Header> {
+        self.inner.historical_floor_header()
+    }
+
+    /// Return the anchor header where EL reverse backfill started, if any.
+    pub fn historical_anchor_header(&self) -> Option<&Header> {
+        self.inner.historical_anchor_header()
+    }
+
+    /// Return the lowest verified historical EL block marker, if any.
+    pub fn historical_floor(&self) -> Option<ExecutionBlockMarker> {
+        self.inner.historical_floor()
+    }
+
+    /// Return the historical reverse backfill anchor marker, if any.
+    pub fn historical_anchor(&self) -> Option<ExecutionBlockMarker> {
+        self.inner.historical_anchor()
+    }
+
     /// Persist the latest canonical head and recent canonical header window.
     pub fn record_canonical_state(
         &mut self,
@@ -132,6 +221,11 @@ impl PartitionManager {
     ) -> std::io::Result<()> {
         self.inner
             .record_verified_canonical_state(anchor, header, recent_headers)
+    }
+
+    /// Persist the lowest verified historical EL header without moving the live sync head.
+    pub fn record_historical_floor(&mut self, header: &Header) -> std::io::Result<()> {
+        self.inner.record_historical_floor(header)
     }
 
     /// Return the persisted chain anchors, if any.
@@ -251,8 +345,8 @@ mod tests {
 
         assert_eq!(mgr.total_rows(), 150);
         assert_eq!(mgr.sealed_count(), 1);
-        assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 150);
-        assert_eq!(mgr.hot_partition().meta.row_count, 0);
+        assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 100);
+        assert_eq!(mgr.hot_partition().meta.row_count, 50);
     }
 
     #[test]

@@ -17,6 +17,7 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio-stream = "0.1"
+base64 = "0.22"
 hex = "0.4"
 libc = "0.2"
 

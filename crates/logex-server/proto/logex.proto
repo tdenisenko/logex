@@ -20,12 +20,18 @@ message Empty {}
 
 message QueryRequest {
   string sql = 1;
+  optional uint64 limit = 2;
+  optional uint64 offset = 3;
 }
 
 message QueryResponse {
   repeated QueryRow rows = 1;
   uint64 total_scanned = 2;
   uint64 row_count = 3;
+  uint64 limit = 4;
+  uint64 offset = 5;
+  optional uint64 next_offset = 6;
+  uint64 max_limit = 7;
 }
 
 message QueryRow {
@@ -45,6 +51,7 @@ message GetLogsRequest {
   optional bool canonical_only = 6;
   optional bool descending = 7;
   optional uint64 limit = 8;
+  optional uint64 offset = 9;
 }
 
 message TopicFilter {

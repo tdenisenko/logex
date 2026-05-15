@@ -5090,7 +5090,9 @@ dependencies = [
 name = "logex-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "clap",
+ "libc",
  "logex-cl",
  "logex-index",
  "logex-server",
@@ -5099,10 +5101,13 @@ dependencies = [
  "logex-types",
  "reqwest",
  "reth-chainspec",
+ "reth-discv4",
  "reth-ethereum-forks",
  "secp256k1 0.30.0",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "toml",
  "tracing",
@@ -5135,6 +5140,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "axum",
+ "base64",
  "hex",
  "libc",
  "logex-index",
@@ -5162,6 +5168,7 @@ dependencies = [
  "crc32fast",
  "logex-types",
  "lz4_flex 0.11.6",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -5180,6 +5187,7 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
+ "libc",
  "logex-cl",
  "logex-index",
  "logex-server",
@@ -5188,8 +5196,10 @@ dependencies = [
  "rand 0.8.5",
  "reth-chainspec",
  "reth-consensus",
+ "reth-consensus-common",
  "reth-db-models",
  "reth-discv4",
+ "reth-dns-discovery",
  "reth-eth-wire",
  "reth-ethereum-consensus",
  "reth-ethereum-forks",
@@ -5198,6 +5208,7 @@ dependencies = [
  "reth-network-peers",
  "reth-primitives-traits",
  "reth-storage-api",
+ "rustc-hash",
  "secp256k1 0.30.0",
  "serde_json",
  "tempfile",
@@ -8728,6 +8739,26 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

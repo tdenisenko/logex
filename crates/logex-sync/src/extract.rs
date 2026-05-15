@@ -1,4 +1,6 @@
+use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{B256, Log};
+use reth_primitives_traits::BlockBody;
 
 use logex_types::{BlockContext, LogRow};
 
@@ -8,7 +10,8 @@ use logex_types::{BlockContext, LogRow};
 /// receipt_logs)` pairs, and produces a flat list of `LogRow`s with correct
 /// per-transaction and global block log indexing.
 pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Vec<LogRow> {
-    let mut rows = Vec::new();
+    let total_logs = txs.iter().map(|(_, logs)| logs.len()).sum();
+    let mut rows = Vec::with_capacity(total_logs);
     let mut global_log_index = 0u32;
 
     for (tx_index, (tx_hash, logs)) in txs.iter().enumerate() {
@@ -41,6 +44,43 @@ pub fn extract_from_block(
         timestamp,
     };
     extract_logs(&ctx, txs)
+}
+
+/// Append `LogRow`s directly from a block body and receipts into an existing
+/// buffer. This is used by historical batch ingestion to avoid per-block
+/// temporary vectors while preserving transaction and log ordering.
+pub fn append_from_body_receipts<B, R>(
+    rows: &mut Vec<LogRow>,
+    block_number: u64,
+    block_hash: B256,
+    timestamp: u64,
+    body: &B,
+    receipts: &[R],
+) where
+    B: BlockBody,
+    B::Transaction: TxHashRef,
+    R: alloy_consensus::TxReceipt<Log = Log>,
+{
+    let ctx = BlockContext {
+        block_number,
+        block_hash,
+        timestamp,
+    };
+    let mut global_log_index = 0u32;
+
+    for (tx_index, (tx, receipt)) in body.transactions().iter().zip(receipts.iter()).enumerate() {
+        let tx_hash = *tx.tx_hash();
+        for log in receipt.logs() {
+            rows.push(LogRow::from_primitives_log(
+                log,
+                &ctx,
+                tx_hash,
+                tx_index as u32,
+                global_log_index,
+            ));
+            global_log_index += 1;
+        }
+    }
 }
 
 #[cfg(test)]

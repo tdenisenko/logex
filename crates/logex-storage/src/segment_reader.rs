@@ -1,5 +1,5 @@
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use alloy_primitives::{Address, B256, Bytes};
@@ -121,14 +121,25 @@ impl SegmentReader {
     }
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
-        let path = self
-            .manifest
-            .as_ref()
-            .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
-            .unwrap_or_else(|| self.dir.join("canonical.bitmap"));
-        let data = fs::read(path)?;
+        let data = fs::read(self.canonical_path())?;
         NullBitmap::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+    }
+
+    pub fn read_canonical_len(&self) -> io::Result<u64> {
+        let mut file = File::open(self.canonical_path())?;
+        let mut len_bytes = [0u8; 8];
+        file.read_exact(&mut len_bytes)?;
+        let len = u64::from_le_bytes(len_bytes);
+        let expected_len = 8 + len.div_ceil(8);
+        let actual_len = file.metadata()?.len();
+        if actual_len < expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap is truncated",
+            ));
+        }
+        Ok(len)
     }
 
     pub fn read_row_count(&self) -> io::Result<u64> {
@@ -191,6 +202,13 @@ impl SegmentReader {
             .find(|column| column.name == name && column.page_index_path.is_some())
     }
 
+    fn canonical_path(&self) -> PathBuf {
+        self.manifest
+            .as_ref()
+            .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
+            .unwrap_or_else(|| self.dir.join("canonical.bitmap"))
+    }
+
     fn read_fixed_width_values(
         &self,
         column: &str,
@@ -201,14 +219,14 @@ impl SegmentReader {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
-        let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
         match row_ids {
             Some(ids) => {
                 let mut result = vec![None; ids.len()];
                 for selection in build_selections(ids, &page_index)? {
+                    let page_data = self.read_page_payload(descriptor, &selection.entry)?;
                     let page = decode_fixed_width_page(
-                        self.slice_page(&data, &selection.entry)?,
+                        &page_data,
                         selection.entry.row_count as usize,
                         item_size,
                         descriptor.codec,
@@ -226,6 +244,7 @@ impl SegmentReader {
                 materialize_selected(result)
             }
             None => {
+                let data = fs::read(self.dir.join(&descriptor.data_path))?;
                 let mut result = Vec::with_capacity(self.read_row_count()? as usize);
                 for entry in page_index {
                     let page = decode_fixed_width_page(
@@ -246,15 +265,26 @@ impl SegmentReader {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
-        let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
-        read_selected_pages(row_ids, &page_index, |entry| {
-            decode_u64_page(
-                self.slice_page(&data, entry)?,
-                entry.row_count as usize,
-                descriptor.codec,
-            )
-        })
+        match row_ids {
+            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
+                decode_u64_page(
+                    &self.read_page_payload(descriptor, entry)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                )
+            }),
+            None => {
+                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                read_selected_pages(None, &page_index, |entry| {
+                    decode_u64_page(
+                        self.slice_page(&data, entry)?,
+                        entry.row_count as usize,
+                        descriptor.codec,
+                    )
+                })
+            }
+        }
     }
 
     fn read_u32_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
@@ -262,15 +292,26 @@ impl SegmentReader {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
-        let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
-        read_selected_pages(row_ids, &page_index, |entry| {
-            decode_u32_page(
-                self.slice_page(&data, entry)?,
-                entry.row_count as usize,
-                descriptor.codec,
-            )
-        })
+        match row_ids {
+            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
+                decode_u32_page(
+                    &self.read_page_payload(descriptor, entry)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                )
+            }),
+            None => {
+                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                read_selected_pages(None, &page_index, |entry| {
+                    decode_u32_page(
+                        self.slice_page(&data, entry)?,
+                        entry.row_count as usize,
+                        descriptor.codec,
+                    )
+                })
+            }
+        }
     }
 
     fn read_u8_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
@@ -278,15 +319,26 @@ impl SegmentReader {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
-        let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
-        read_selected_pages(row_ids, &page_index, |entry| {
-            decode_u8_page(
-                self.slice_page(&data, entry)?,
-                entry.row_count as usize,
-                descriptor.codec,
-            )
-        })
+        match row_ids {
+            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
+                decode_u8_page(
+                    &self.read_page_payload(descriptor, entry)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                )
+            }),
+            None => {
+                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                read_selected_pages(None, &page_index, |entry| {
+                    decode_u8_page(
+                        self.slice_page(&data, entry)?,
+                        entry.row_count as usize,
+                        descriptor.codec,
+                    )
+                })
+            }
+        }
     }
 
     fn read_var_bytes_values(
@@ -298,11 +350,21 @@ impl SegmentReader {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor)?;
-        let data = fs::read(self.dir.join(&descriptor.data_path))?;
 
-        read_selected_pages(row_ids, &page_index, |entry| {
-            decode_var_bytes_page(self.slice_page(&data, entry)?, descriptor.codec)
-        })
+        match row_ids {
+            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
+                decode_var_bytes_page(
+                    &self.read_page_payload(descriptor, entry)?,
+                    descriptor.codec,
+                )
+            }),
+            None => {
+                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                read_selected_pages(None, &page_index, |entry| {
+                    decode_var_bytes_page(self.slice_page(&data, entry)?, descriptor.codec)
+                })
+            }
+        }
     }
 
     fn read_null_bitmap(&self, column: &str) -> io::Result<NullBitmap> {
@@ -343,6 +405,18 @@ impl SegmentReader {
                 "compacted page is out of bounds",
             )
         })
+    }
+
+    fn read_page_payload(
+        &self,
+        descriptor: &ColumnDescriptor,
+        entry: &PageIndexEntry,
+    ) -> io::Result<Vec<u8>> {
+        let mut file = File::open(self.dir.join(&descriptor.data_path))?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut payload = vec![0u8; entry.encoded_len as usize];
+        file.read_exact(&mut payload)?;
+        Ok(payload)
     }
 }
 
@@ -535,6 +609,7 @@ mod tests {
         compact_segment(&paths, &descriptor).unwrap();
 
         let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_canonical_len().unwrap(), rows.len() as u64);
         let reread = reader.read_log_rows(None).unwrap();
         assert_eq!(reread, rows);
 
@@ -589,6 +664,21 @@ mod tests {
         let err = reader
             .read_nullable_b256("topic0", Some(&[0]))
             .expect_err("page-index corruption should fail reads");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn canonical_len_rejects_truncated_bitmap() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("segment");
+        fs::create_dir_all(&dir).unwrap();
+        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        fs::write(dir.join("canonical.bitmap"), 20u64.to_le_bytes()).unwrap();
+
+        let reader = SegmentReader::open(&dir).unwrap();
+        let err = reader
+            .read_canonical_len()
+            .expect_err("truncated canonical bitmap should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
