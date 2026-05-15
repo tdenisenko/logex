@@ -18,6 +18,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
   - High-memory historical write chunks scale to 1m rows when Linux reports healthy available memory.
   - Historical body/receipt planning reuses already-validated header hashes instead of hashing headers again.
   - Peer refill no longer blocks each historical batch while the client already has enough serving peers to make progress; event draining still submits pending dials.
+  - All-empty historical header chunks can advance the verified floor without body/receipt P2P requests when every body/receipt commitment is the canonical empty root.
   - High-memory historical fetch lookahead depth increased to 5 after the blocking refill fix made the retry beneficial.
 - Kept the dense historical fetch window at 5,000 blocks after live samples improved dense-range throughput.
 - Raised the medium-dense fetch lookahead cap to 4 while keeping very-dense ranges capped at 3 to avoid unnecessary memory pressure.
@@ -55,6 +56,7 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - CL sync is forward-only from a recent checkpoint. EL historical sync walks backward from the CL-authenticated pivot to genesis.
 - Logs are valid only inside the verified contiguous stored range.
 - Historical EL validation verifies parent-hash ancestry, body commitments, receipt roots, cumulative gas, and logs bloom against each header.
+- Historical chunks whose headers prove empty transaction, receipt, ommer, and withdrawal roots can be ingested header-only because the empty body and receipt tries are uniquely determined by those roots.
 - Historical ETA is log-based when log-rate data is available; block/sec remains an advanced diagnostic because block density varies heavily across history.
 - Query responses keep a hard `10,000` row cap and dashboard pagination defaults to `50` rows.
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
@@ -78,6 +80,9 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 
 - Challenge: Historical batches were spending wall-clock time waiting for peer refill toward 80 serving peers even while enough peers were already serving data.
   - Resolution: Changed refill policy so the hot loop only blocks on peer fill below the minimum serving floor. Warmed remote status improved to roughly 500k logs/sec and batch intervals moved closer to local processing time.
+
+- Challenge: Very old empty blocks would still require body/receipt P2P work even when their header roots already prove empty bodies and receipts.
+  - Resolution: Added a guarded sequential path that advances the historical floor for all-empty header chunks without body/receipt requests.
 
 - Challenge: The remote host may still need more effective storage than the root volume during fresh dense-range runs.
   - Resolution: Mounted the extra volumes and reserved them for moving immutable sealed segments behind symlinks if root free space falls near the safety threshold.

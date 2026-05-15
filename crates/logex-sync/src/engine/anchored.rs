@@ -4,7 +4,7 @@ use crate::extract;
 use crate::p2p::peer_manager::SourcedBodyReceipts;
 use crate::primitives::LogexNetworkPrimitives;
 use crate::validation::validate_header_matches_anchor;
-use alloy_consensus::ReceiptWithBloom;
+use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH, ReceiptWithBloom};
 use alloy_eips::BlockHashOrNumber;
 use logex_types::{ExecutionAnchor, NodeState};
 use reth_eth_wire::NetworkPrimitives;
@@ -780,6 +780,15 @@ fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<
         .checked_sub(1)
         .and_then(|index| batch.headers.get(index))
         .cloned()
+}
+
+fn historical_header_has_empty_body_and_receipts(header: &Header) -> bool {
+    header.transactions_root() == EMPTY_ROOT_HASH
+        && header.receipts_root() == EMPTY_ROOT_HASH
+        && header.ommers_hash() == EMPTY_OMMER_ROOT_HASH
+        && header
+            .withdrawals_root()
+            .is_none_or(|root| root == EMPTY_ROOT_HASH)
 }
 
 fn historical_header_batch_matches_child(
@@ -1608,6 +1617,19 @@ impl SyncEngine {
             return Ok(None);
         }
 
+        if header_batch
+            .headers
+            .iter()
+            .all(historical_header_has_empty_body_and_receipts)
+        {
+            tracing::debug!(
+                headers = header_batch.headers.len(),
+                required_block = header_batch.required_block,
+                "historical header batch has empty body and receipt roots"
+            );
+            return Ok(None);
+        }
+
         let body_receipt_hashes = header_batch.hashes.clone();
         let body_receipt_gas_used = header_batch
             .headers
@@ -1982,6 +2004,20 @@ impl SyncEngine {
                 .map(|header| header.number())
                 .unwrap_or(child_header.number().saturating_sub(1));
 
+            if chunk_headers
+                .iter()
+                .all(historical_header_has_empty_body_and_receipts)
+            {
+                self.ingest_empty_historical_header_chunk(
+                    header_peer,
+                    &chunk_headers,
+                    &mut newly_serving_peers,
+                )
+                .await?;
+                progressed = true;
+                continue;
+            }
+
             let bodies = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_bodies_prefer_peers(
@@ -2115,6 +2151,54 @@ impl SyncEngine {
 
         self.refresh_historical_status().await;
         Ok(progressed)
+    }
+
+    async fn ingest_empty_historical_header_chunk(
+        &mut self,
+        header_peer: PeerId,
+        headers: &[Header],
+        newly_serving_peers: &mut HashSet<PeerId>,
+    ) -> Result<()> {
+        let Some(lowest_header) = headers.iter().min_by_key(|header| header.number()) else {
+            return Ok(());
+        };
+        let highest_block = headers
+            .iter()
+            .map(|header| header.number())
+            .max()
+            .unwrap_or_else(|| lowest_header.number());
+        let block_count = headers.len() as u64;
+        let floor = super::ingest::execution_marker_from_header(lowest_header);
+        let anchor = {
+            let mut storage = self.storage.write().await;
+            storage
+                .record_historical_floor(lowest_header)
+                .map_err(|error| eyre::eyre!("historical metadata error: {error}"))?;
+            storage.historical_anchor()
+        };
+        let outcome = HistoricalIngestOutcome {
+            block_count,
+            row_count: 0,
+            floor,
+            anchor,
+            extraction_elapsed: Duration::ZERO,
+            write_elapsed: Duration::ZERO,
+        };
+        self.record_historical_ingest_outcome(outcome);
+        self.historical_rows_per_block_ewma = update_historical_density_ewma(
+            self.historical_rows_per_block_ewma,
+            0,
+            headers.len(),
+        );
+        self.note_serving_peer(header_peer, newly_serving_peers);
+
+        tracing::debug!(
+            lowest_block = lowest_header.number(),
+            highest_block,
+            blocks = headers.len(),
+            "historical empty-root header batch ingested without body/receipt requests"
+        );
+        Ok(())
     }
 
     async fn reconcile_consensus_reorg(&mut self) -> Result<bool> {
@@ -2265,6 +2349,24 @@ mod tests {
             finalized: false,
             parent_beacon_root: None,
         }
+    }
+
+    #[test]
+    fn empty_body_receipt_detection_requires_empty_commitments() {
+        let mut empty = header(100, B256::ZERO, 0x01);
+        empty.transactions_root = EMPTY_ROOT_HASH;
+        empty.receipts_root = EMPTY_ROOT_HASH;
+        empty.ommers_hash = EMPTY_OMMER_ROOT_HASH;
+        empty.withdrawals_root = None;
+        assert!(historical_header_has_empty_body_and_receipts(&empty));
+
+        let mut with_receipts = empty.clone();
+        with_receipts.receipts_root = B256::repeat_byte(0x22);
+        assert!(!historical_header_has_empty_body_and_receipts(&with_receipts));
+
+        let mut with_withdrawals = empty;
+        with_withdrawals.withdrawals_root = Some(B256::repeat_byte(0x33));
+        assert!(!historical_header_has_empty_body_and_receipts(&with_withdrawals));
     }
 
     #[test]
