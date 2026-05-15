@@ -287,6 +287,19 @@ where
         });
     }
 
+    if receipts.is_empty() {
+        if header.receipts_root() != EMPTY_TRIE_ROOT {
+            return Err(ReceiptValidationError::ReceiptRootMismatch {
+                expected: header.receipts_root(),
+                got: EMPTY_TRIE_ROOT,
+            });
+        }
+        if header.logs_bloom() != Bloom::ZERO {
+            return Err(ReceiptValidationError::LogsBloomMismatch);
+        }
+        return Ok(());
+    }
+
     let calculated_root = proofs::calculate_receipt_root(receipts);
     if calculated_root != header.receipts_root() {
         return Err(ReceiptValidationError::ReceiptRootMismatch {
@@ -408,6 +421,21 @@ mod tests {
             validate_receipts_for_header(&header, &empty),
             Err(ReceiptValidationError::ReceiptRootMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn empty_receipts_reject_nonzero_logs_bloom() {
+        let empty: Vec<ReceiptWithBloom<RethReceipt>> = vec![];
+        let header = Header {
+            number: 4_370_000,
+            receipts_root: EMPTY_TRIE_ROOT,
+            logs_bloom: Bloom::repeat_byte(0x01),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_receipts_for_header(&header, &empty),
+            Err(ReceiptValidationError::LogsBloomMismatch)
+        );
     }
 
     #[test]
