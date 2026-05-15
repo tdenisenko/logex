@@ -1,13 +1,11 @@
 # Rust build artifacts
 /target
 
-# Markdown files kept local by default, except tracked project docs
-*.md
-!README.md
-!ROADMAP.md
-
 # Claude Code local settings
 .claude/
 
 # Local data
 /logex-data
+
+# Local archives
+/old-docs/
