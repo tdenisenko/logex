@@ -6,7 +6,7 @@ use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray,
-    ListArray, ListBuilder, StringArray, StringBuilder, UInt32Array, UInt64Array,
+    ListArray, ListBuilder, StringArray, StringBuilder, UInt32Array, UInt64Array, new_empty_array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -185,11 +185,51 @@ impl TableProvider for LogexTableProvider {
         }
 
         self.total_scanned.store(scanned_rows, Ordering::Relaxed);
+        if generators.is_empty() {
+            generators.push(Arc::new(parking_lot::RwLock::new(
+                EmptyLogBatchGenerator::new(projected_schema.clone()),
+            )));
+        }
 
         Ok(Arc::new(LazyMemoryExec::try_new(
             projected_schema,
             generators,
         )?))
+    }
+}
+
+#[derive(Debug)]
+struct EmptyLogBatchGenerator {
+    schema: SchemaRef,
+    yielded: bool,
+}
+
+impl EmptyLogBatchGenerator {
+    fn new(schema: SchemaRef) -> Self {
+        Self {
+            schema,
+            yielded: false,
+        }
+    }
+}
+
+impl std::fmt::Display for EmptyLogBatchGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "empty log batch generator")
+    }
+}
+
+impl LazyBatchGenerator for EmptyLogBatchGenerator {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn generate_next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
+        if self.yielded {
+            return Ok(None);
+        }
+        self.yielded = true;
+        Ok(Some(empty_projected_batch(self.schema.clone())?))
     }
 }
 
@@ -402,6 +442,24 @@ fn build_projected_batch(
     }
 
     RecordBatch::try_new(schema, arrays).map_err(std::io::Error::other)
+}
+
+fn empty_projected_batch(schema: SchemaRef) -> DataFusionResult<RecordBatch> {
+    if schema.fields().is_empty() {
+        let options = RecordBatchOptions::new().with_row_count(Some(0));
+        return Ok(RecordBatch::try_new_with_options(
+            schema,
+            Vec::new(),
+            &options,
+        )?);
+    }
+
+    let arrays = schema
+        .fields()
+        .iter()
+        .map(|field| new_empty_array(field.data_type()))
+        .collect();
+    Ok(RecordBatch::try_new(schema, arrays)?)
 }
 
 fn read_column_as_array(
@@ -1278,6 +1336,38 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["bn"], 200);
+    }
+
+    #[tokio::test]
+    async fn returns_empty_rows_when_filter_matches_no_segments() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number, tx_hash FROM logs WHERE block_number = 999 ORDER BY block_number DESC, tx_index DESC, log_index DESC",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(MAX_QUERY_LIMIT), 0),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.total_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn aggregates_over_empty_log_matches() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql(
+            "SELECT COUNT(*) AS total FROM logs WHERE block_number = 999",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["total"], 0);
+        assert_eq!(result.total_scanned, 0);
     }
 
     #[tokio::test]

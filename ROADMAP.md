@@ -15,6 +15,9 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Added browser-local query history with most recent queries first, expandable SQL detail rows, reuse buttons, and per-query `.sql` export.
 - Fixed query history layout so entries wrap within the page instead of requiring horizontal scrolling.
 - Made query result cells clickable and keyboard-copyable so field text can be copied to the clipboard.
+- Changed query history rows back to strict one-line truncated summaries with full SQL only in the expanded detail row.
+- Persisted the SQL editor text across page refreshes and made generated defaults apply only once from the latest stored log block.
+- Fixed empty log matches so queries return a clear empty result instead of exposing a DataFusion zero-partition planning error.
 - Documented query-engine, query-builder, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -87,6 +90,9 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: Query performance tests need realistic compressed segment access without committing large mainnet data.
   - Resolution: Track deterministic synthetic integration coverage separately from optional active benchmarks against a full synced data directory.
 
+- Challenge: DataFusion rejected sorted queries when the log filter matched no storage segments because the lazy memory plan had zero partitions.
+  - Resolution: Added an explicit empty batch generator so empty matches have a valid single-partition plan and return normal empty results.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the dashboard query UI path and reused existing localStorage patterns. No backend query-engine code has been removed in this first query-workbench slice.
@@ -95,7 +101,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, plus query history wrapping and result-cell copy fixes.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, and empty-result query planning fixes.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.

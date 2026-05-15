@@ -509,9 +509,10 @@
     table-layout: fixed;
   }
 
-  .history-table-wrap th, .history-table-wrap td {
-    white-space: normal;
-    overflow-wrap: anywhere;
+  .history-table-wrap th, .history-row td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .history-table-wrap th:nth-child(1), .history-table-wrap td:nth-child(1) { width: 9%; }
@@ -550,15 +551,14 @@
 
   .history-sql code {
     color: var(--soft);
-    white-space: normal;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
 
   .history-actions {
     display: flex;
     gap: 8px;
-    justify-content: flex-end;
-    flex-wrap: wrap;
+    justify-content: center;
+    flex-wrap: nowrap;
   }
 
   .history-actions button {
@@ -568,6 +568,7 @@
   }
 
   .history-detail td {
+    overflow: visible;
     white-space: normal;
     background: rgba(21, 27, 36, .50);
   }
@@ -914,10 +915,12 @@ var chartHours = 1;
 var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
 var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
+var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
 var QUERY_HISTORY_LIMIT = 50;
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
+var defaultQueryApplied = false;
 var queryHistory = loadQueryHistory();
 var queryStartedAtMs = null;
 var queryTimerInterval = null;
@@ -1117,10 +1120,12 @@ function buildDefaultQuery(fromBlock, toBlock) {
 }
 
 function updateDefaultQuery(fromBlock, toBlock) {
-  if (querySqlTouched) return;
+  if (querySqlTouched || defaultQueryApplied) return;
   var sql = buildDefaultQuery(fromBlock, toBlock);
   if (!sql) return;
   byId('sql').value = sql;
+  defaultQueryApplied = true;
+  saveQuerySql(sql);
 }
 
 function shortHash(value) {
@@ -1174,6 +1179,8 @@ function updateStatus(data) {
   var anchorTimeValue = historicalAnchor && historicalAnchor.timestamp != null ? numberOrNull(historicalAnchor.timestamp) : null;
   var queryFrom = numberOrNull(query.verified_from_block);
   var queryTo = numberOrNull(query.verified_to_block);
+  var storedLogFrom = numberOrNull(query.stored_log_from_block);
+  var storedLogTo = numberOrNull(query.stored_log_to_block);
   var latestBlock = numberOrNull(query.latest_block) || numberOrNull(data.head_block) || numberOrNull(data.target_block);
   var latestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
   var syncedBlock = numberOrNull(data.current_block) || numberOrNull(data.head_block);
@@ -1301,7 +1308,7 @@ function updateStatus(data) {
   setText('debugStoredRows', fmt(data.total_rows));
   setText('debugSegments', fmt(data.sealed_partitions));
   setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
-  updateDefaultQuery(queryFrom, queryTo);
+  updateDefaultQuery(storedLogFrom == null ? queryFrom : storedLogFrom, storedLogTo == null ? queryTo : storedLogTo);
 
   addPerfSample({
     ts: Date.now(),
@@ -1352,6 +1359,28 @@ function savePerfSamples() {
   try {
     localStorage.setItem(PERF_SAMPLE_STORAGE_KEY, JSON.stringify(perfSamples));
   } catch (_) {}
+}
+
+function loadQuerySql() {
+  try {
+    return localStorage.getItem(QUERY_SQL_STORAGE_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveQuerySql(sql) {
+  try {
+    localStorage.setItem(QUERY_SQL_STORAGE_KEY, sql);
+  } catch (_) {}
+}
+
+function initQuerySql() {
+  var saved = loadQuerySql();
+  if (saved === null) return;
+  byId('sql').value = saved;
+  querySqlTouched = true;
+  defaultQueryApplied = true;
 }
 
 function loadFoldoutState() {
@@ -1801,6 +1830,7 @@ function useQueryHistoryEntry(id) {
   if (!entry) return;
   byId('sql').value = entry.sql;
   querySqlTouched = true;
+  saveQuerySql(entry.sql);
   var queryFoldout = document.querySelector('details[data-foldout-key="query-logs"]');
   if (queryFoldout) queryFoldout.open = true;
   byId('sql').focus();
@@ -1849,7 +1879,7 @@ function updateQueryButtons() {
 
 function renderQueryPage() {
   if (queryRows.length === 0) {
-    renderTable([], 'Query returned no rows.');
+    renderTable([], 'No matching logs were found in the verified local range.');
     setText('resultCount', '0 rows returned; ' + fmt(queryScannedRows) + ' rows scanned.');
     updateQueryButtons();
     return;
@@ -1992,6 +2022,7 @@ byId('sql').addEventListener('keydown', function(event) {
 
 byId('sql').addEventListener('input', function() {
   querySqlTouched = true;
+  saveQuerySql(byId('sql').value);
 });
 
 byId('queryHistoryTable').addEventListener('click', function(event) {
@@ -2022,6 +2053,7 @@ byId('resultsTable').addEventListener('keydown', function(event) {
 });
 
 initFoldouts();
+initQuerySql();
 renderQueryHistory();
 fetchStatus();
 renderChart();
