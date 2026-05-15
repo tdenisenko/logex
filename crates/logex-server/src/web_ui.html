@@ -497,14 +497,42 @@
 
   .history-table-wrap {
     max-height: 320px;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: #070a0e;
   }
 
   .history-table-wrap table {
-    min-width: 980px;
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  .history-table-wrap th, .history-table-wrap td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .history-table-wrap th:nth-child(1), .history-table-wrap td:nth-child(1) { width: 9%; }
+  .history-table-wrap th:nth-child(2), .history-table-wrap td:nth-child(2) { width: 14%; }
+  .history-table-wrap th:nth-child(3), .history-table-wrap td:nth-child(3) { width: 10%; }
+  .history-table-wrap th:nth-child(4), .history-table-wrap td:nth-child(4) { width: 16%; }
+  .history-table-wrap th:nth-child(5), .history-table-wrap td:nth-child(5) { width: 35%; }
+  .history-table-wrap th:nth-child(6), .history-table-wrap td:nth-child(6) { width: 16%; }
+
+  .copy-cell {
+    cursor: copy;
+  }
+
+  .copy-cell:focus {
+    outline: 2px solid rgba(178, 140, 255, .70);
+    outline-offset: -2px;
+  }
+
+  .copy-cell.copied {
+    color: var(--text);
+    background: rgba(72, 214, 184, .16);
   }
 
   .history-row {
@@ -516,20 +544,21 @@
   }
 
   .history-sql {
-    max-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .history-sql code {
     color: var(--soft);
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .history-actions {
     display: flex;
     gap: 8px;
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .history-actions button {
@@ -1559,7 +1588,8 @@ function renderTable(rows, emptyMessage) {
   }).join('') + '</tr>';
   tbody.innerHTML = rows.map(function(row) {
     return '<tr>' + keys.map(function(key) {
-      return '<td>' + escapeHtml(formatCell(row[key])) + '</td>';
+      var text = formatCell(row[key]);
+      return '<td class="copy-cell" tabindex="0" title="Click to copy" data-copy-value="' + escapeHtml(text) + '">' + escapeHtml(text) + '</td>';
     }).join('') + '</tr>';
   }).join('');
   empty.style.display = 'none';
@@ -1588,6 +1618,56 @@ function csvCell(value) {
     return '"' + text.replace(/"/g, '""') + '"';
   }
   return text;
+}
+
+function fallbackCopyText(text) {
+  return new Promise(function(resolve, reject) {
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      if (document.execCommand('copy')) {
+        resolve();
+      } else {
+        reject(new Error('Copy failed.'));
+      }
+    } catch (err) {
+      reject(err);
+    } finally {
+      textarea.remove();
+    }
+  });
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(function() {
+      return fallbackCopyText(text);
+    });
+  }
+  return fallbackCopyText(text);
+}
+
+function markCopiedCell(cell) {
+  cell.classList.add('copied');
+  cell.setAttribute('title', 'Copied');
+  setTimeout(function() {
+    cell.classList.remove('copied');
+    cell.setAttribute('title', 'Click to copy');
+  }, 900);
+}
+
+function copyResultCell(cell) {
+  if (!cell) return;
+  copyText(cell.getAttribute('data-copy-value') || '').then(function() {
+    markCopiedCell(cell);
+  }).catch(function() {
+    showQueryError('Could not copy field text to clipboard.');
+  });
 }
 
 function pad2(value) {
@@ -1927,6 +2007,18 @@ byId('queryHistoryTable').addEventListener('click', function(event) {
 
   var row = event.target.closest('[data-history-id]');
   if (row) toggleQueryHistoryDetail(row.getAttribute('data-history-id'));
+});
+
+byId('resultsTable').addEventListener('click', function(event) {
+  copyResultCell(event.target.closest('td[data-copy-value]'));
+});
+
+byId('resultsTable').addEventListener('keydown', function(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  var cell = event.target.closest('td[data-copy-value]');
+  if (!cell) return;
+  event.preventDefault();
+  copyResultCell(cell);
 });
 
 initFoldouts();

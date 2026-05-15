@@ -13,6 +13,8 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Started the query workbench branch and draft PR scope.
 - Added a query execution timer in `MM:SS:mmm` format.
 - Added browser-local query history with most recent queries first, expandable SQL detail rows, reuse buttons, and per-query `.sql` export.
+- Fixed query history layout so entries wrap within the page instead of requiring horizontal scrolling.
+- Made query result cells clickable and keyboard-copyable so field text can be copied to the clipboard.
 - Documented query-engine, query-builder, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -93,7 +95,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, plus query history wrapping and result-cell copy fixes.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.
