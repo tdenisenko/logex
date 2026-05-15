@@ -18,6 +18,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Normalized dashboard CPU utilization by logical core capacity while keeping raw process CPU in advanced status data.
 - Added local completion time beside the historical sync time remaining.
 - Added a sparse-range receipt validation fast path for empty receipt sets, avoiding generic trie construction while still enforcing gas, empty receipt root, and zero logs bloom.
+- Fixed the GitHub test failure in historical ingest coalescing by making the row-limit test deterministic across different CI runner memory sizes.
 - Validated the branch with the CI commands `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`; targeted server checks also covered the new CPU metric and ETA display data path.
 
 ## Remaining TODOs
@@ -68,6 +69,9 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 - Challenge: Sparse historical ranges still pay fixed validation overhead for empty receipt sets inside otherwise non-empty batches.
   - Resolution: Added a direct empty-root/zero-bloom validation path for empty receipts.
 
+- Challenge: The historical ingest coalescing test depended on the host's available memory, so GitHub's higher-memory runner used a larger row threshold than the local machine.
+  - Resolution: Added an explicit row-limit coalescing helper for deterministic unit coverage while leaving the production memory-adaptive limit intact.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Pruned stale temporary worktree metadata and rechecked the active performance changes against the live profile. No obsolete EL sync path was removed in this pass.
@@ -78,7 +82,7 @@ The current remote run has crossed the Merge boundary and is validating pre-Merg
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`; a local sparse receipt validation commit is pending validation.
+- Commits made during this run: `1c1889d`, `0fb7326`, `e6e1d1b`, `41cf8f0`, `2270dcc`, plus the GitHub CI test-determinism fix in the latest commit.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.

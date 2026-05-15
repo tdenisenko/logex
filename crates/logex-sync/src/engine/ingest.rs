@@ -468,6 +468,13 @@ async fn write_extracted_historical_chunk(
 fn coalesce_historical_write_chunks(
     chunks: Vec<HistoricalExtractedChunk>,
 ) -> Vec<HistoricalExtractedChunk> {
+    coalesce_historical_write_chunks_with_row_limit(chunks, historical_write_chunk_row_limit())
+}
+
+fn coalesce_historical_write_chunks_with_row_limit(
+    chunks: Vec<HistoricalExtractedChunk>,
+    row_limit: u64,
+) -> Vec<HistoricalExtractedChunk> {
     let mut write_chunks = Vec::new();
     let mut write_buffer: Option<HistoricalExtractedChunk> = None;
 
@@ -479,7 +486,7 @@ fn coalesce_historical_write_chunks(
 
         if write_buffer
             .as_ref()
-            .is_some_and(historical_write_chunk_is_ready)
+            .is_some_and(|buffer| historical_write_chunk_is_ready_with_row_limit(buffer, row_limit))
         {
             write_chunks.push(
                 write_buffer
@@ -497,11 +504,34 @@ fn coalesce_historical_write_chunks(
 }
 
 fn historical_write_chunk_is_ready(buffer: &HistoricalExtractedChunk) -> bool {
-    historical_write_chunk_counts_are_ready(buffer.block_count, buffer.row_count)
+    historical_write_chunk_is_ready_with_row_limit(buffer, historical_write_chunk_row_limit())
+}
+
+fn historical_write_chunk_is_ready_with_row_limit(
+    buffer: &HistoricalExtractedChunk,
+    row_limit: u64,
+) -> bool {
+    historical_write_chunk_counts_are_ready_with_row_limit(
+        buffer.block_count,
+        buffer.row_count,
+        row_limit,
+    )
 }
 
 fn historical_write_chunk_counts_are_ready(block_count: usize, row_count: u64) -> bool {
-    block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS || row_count >= historical_write_chunk_row_limit()
+    historical_write_chunk_counts_are_ready_with_row_limit(
+        block_count,
+        row_count,
+        historical_write_chunk_row_limit(),
+    )
+}
+
+fn historical_write_chunk_counts_are_ready_with_row_limit(
+    block_count: usize,
+    row_count: u64,
+    row_limit: u64,
+) -> bool {
+    block_count >= HISTORICAL_WRITE_CHUNK_BLOCKS || row_count >= row_limit
 }
 
 fn historical_write_chunk_row_limit() -> u64 {
@@ -607,7 +637,8 @@ mod tests {
             .map(|index| extracted_chunk(128, (15 - index) * 128))
             .collect();
 
-        let write_chunks = coalesce_historical_write_chunks(chunks);
+        let write_chunks =
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
 
         assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, HISTORICAL_WRITE_CHUNK_BLOCKS);
@@ -618,7 +649,8 @@ mod tests {
     fn keeps_partial_historical_write_chunk() {
         let chunks = vec![extracted_chunk(300, 700), extracted_chunk(300, 400)];
 
-        let write_chunks = coalesce_historical_write_chunks(chunks);
+        let write_chunks =
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
 
         assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, 600);
