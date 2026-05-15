@@ -12,7 +12,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 - Started the post-merge dashboard follow-up on `fix/dashboard-synced-live-metrics`.
 - Added live `logs_per_sec` status data for new blocks after historical sync has reached genesis.
-- Updated the execution sync card so completed historical sync shows live remaining blocks, live logs/sec, and `Synced` in the estimate field.
+- Updated the execution sync card so completed historical sync shows live remaining blocks to head, live logs/sec, and `Synced` in the estimate field while keeping the bar full and idle.
 - Removed the `local` suffix from completion-time estimates and switched those times to 24-hour formatting.
 
 ## Remaining TODOs
@@ -70,7 +70,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 - Current branch: `fix/dashboard-synced-live-metrics`
 - New branch created this run: `fix/dashboard-synced-live-metrics` from `origin/master`.
-- Commits made during this run: `2fa719d`, plus this roadmap update.
+- Commits made during this run: `2fa719d`, `de82200`, plus this follow-up adjustment.
 - Pull request status: pending validation and push.
 - Merge status: pending.
 - Blockers: none known.
