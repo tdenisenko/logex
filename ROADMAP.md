@@ -4,16 +4,16 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active branch: `fix/dashboard-synced-live-metrics`. PR #76 was merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active branch: `fix/dashboard-synced-copy`. PRs #76 and #78 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
 The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
-- Started the post-merge dashboard follow-up on `fix/dashboard-synced-live-metrics`.
-- Added live `logs_per_sec` status data for new blocks after historical sync has reached genesis.
-- Updated the execution sync card so completed historical sync shows live remaining blocks to head, live logs/sec, and `Synced` in the estimate field while keeping the bar full and idle.
-- Removed the `local` suffix from completion-time estimates and switched those times to 24-hour formatting.
+- Started the dashboard copy/state follow-up on `fix/dashboard-synced-copy`.
+- Updated dashboard copy for the product header, historical sync title, and completed-history estimate wording.
+- Made the top status badge display `Synced` when historical sync is complete and the live head gap is under 3 blocks.
+- Made the Sync Performance charts section collapsed by default using the same expandable pattern as advanced metrics.
 
 ## Remaining TODOs
 
@@ -68,9 +68,9 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 ## Git Workflow
 
-- Current branch: `fix/dashboard-synced-live-metrics`
-- New branch created this run: `fix/dashboard-synced-live-metrics` from `origin/master`.
-- Commits made during this run: `2fa719d`, `de82200`, plus this follow-up adjustment.
+- Current branch: `fix/dashboard-synced-copy`
+- New branch created this run: `fix/dashboard-synced-copy` from `origin/master`.
+- Commits made during this run: pending.
 - Pull request status: pending validation and push.
 - Merge status: pending.
 - Blockers: none known.
