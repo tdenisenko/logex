@@ -530,7 +530,7 @@ fn validate_and_extract_historical_block_chunk(
         })
         .sum();
     let mut rows = Vec::with_capacity(total_log_capacity);
-    let mut peer_notes = Vec::with_capacity(block_count.saturating_mul(2));
+    let mut peer_notes = Vec::new();
     let mut lowest_header = None;
     let mut lowest_block = u64::MAX;
     let mut highest_block = 0u64;
@@ -583,8 +583,8 @@ fn validate_and_extract_historical_block_chunk(
         );
         extraction_elapsed += extraction_started.elapsed();
 
-        peer_notes.push(job.body_peer);
-        peer_notes.push(job.receipt_peer);
+        push_unique_peer_note(&mut peer_notes, job.body_peer);
+        push_unique_peer_note(&mut peer_notes, job.receipt_peer);
         lowest_block = lowest_block.min(block_number);
         highest_block = highest_block.max(block_number);
         if lowest_header
@@ -614,6 +614,12 @@ fn validate_and_extract_historical_block_chunk(
         highest_block,
         validation_elapsed: validation_started.elapsed(),
     })
+}
+
+fn push_unique_peer_note(peer_notes: &mut Vec<PeerId>, peer_id: PeerId) {
+    if peer_id != PeerId::ZERO && !peer_notes.contains(&peer_id) {
+        peer_notes.push(peer_id);
+    }
 }
 
 fn validate_historical_block_chunk(
