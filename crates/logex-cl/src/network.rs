@@ -49,8 +49,8 @@ use crate::rpc::{
 use crate::{
     ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock, VerifiedLightClientStore,
     apply_finality_update_payload, apply_light_client_update_payload,
-    apply_optimistic_update_payload, decode_verified_beacon_block, force_update_light_client_store,
-    verify_bootstrap_payload,
+    apply_optimistic_update_payload, decode_finality_update, decode_optimistic_update,
+    decode_verified_beacon_block, force_update_light_client_store, verify_bootstrap_payload,
 };
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -586,6 +586,19 @@ fn verified_beacon_blocks_from_light_client_store(
             })
         })
         .collect()
+}
+
+fn finality_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
+    decode_finality_update(bytes).is_ok_and(|status| {
+        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
+            && status.finalized_header.beacon_slot <= store.finalized_header.beacon.slot
+    })
+}
+
+fn optimistic_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
+    decode_optimistic_update(bytes).is_ok_and(|status| {
+        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
+    })
 }
 
 fn verified_beacon_block_children_from_blocks(
@@ -2071,11 +2084,19 @@ impl ConsensusNetwork {
                 );
                 return gossipsub::MessageAcceptance::Ignore;
             };
+            if finality_update_is_stale(&decoded, &store) {
+                tracing::trace!(
+                    %propagation_source,
+                    bytes = decoded.len(),
+                    "ignoring stale consensus finality-update gossip"
+                );
+                return gossipsub::MessageAcceptance::Ignore;
+            }
 
             match apply_finality_update_payload(&decoded, &store) {
                 Ok((summary, next_store, _, _)) => {
                     self.gossip_counts.finality_update += 1;
-                    tracing::info!(
+                    tracing::debug!(
                         %propagation_source,
                         bytes = decoded.len(),
                         fork = ?summary.fork,
@@ -2124,11 +2145,19 @@ impl ConsensusNetwork {
                 );
                 return gossipsub::MessageAcceptance::Ignore;
             };
+            if optimistic_update_is_stale(&decoded, &store) {
+                tracing::trace!(
+                    %propagation_source,
+                    bytes = decoded.len(),
+                    "ignoring stale consensus optimistic-update gossip"
+                );
+                return gossipsub::MessageAcceptance::Ignore;
+            }
 
             match apply_optimistic_update_payload(&decoded, &store) {
                 Ok((summary, next_store, _)) => {
                     self.gossip_counts.optimistic_update += 1;
-                    tracing::info!(
+                    tracing::debug!(
                         %propagation_source,
                         bytes = decoded.len(),
                         fork = ?summary.fork,
@@ -2302,7 +2331,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             request = kind.as_str(),
                             %error,
@@ -2655,7 +2684,7 @@ impl ConsensusNetwork {
                             let period = sync_committee_period_for_slot(
                                 next.optimistic_status.attested_header.beacon_slot,
                             );
-                            tracing::info!(
+                            tracing::debug!(
                                 %peer,
                                 bytes = chunk.bytes.len(),
                                 period,
@@ -2717,9 +2746,17 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
+                if finality_update_is_stale(&payload.bytes, &store) {
+                    tracing::trace!(
+                        %peer,
+                        bytes = payload.bytes.len(),
+                        "ignoring stale light-client finality update response"
+                    );
+                    return;
+                }
                 match apply_finality_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _, _)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
                             fork = ?summary.fork,
@@ -2770,9 +2807,17 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
+                if optimistic_update_is_stale(&payload.bytes, &store) {
+                    tracing::trace!(
+                        %peer,
+                        bytes = payload.bytes.len(),
+                        "ignoring stale light-client optimistic update response"
+                    );
+                    return;
+                }
                 match apply_optimistic_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
                             fork = ?summary.fork,
@@ -2983,7 +3028,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::info!(
+                        tracing::debug!(
                             %peer,
                             request = kind.as_str(),
                             error_code = error.code,

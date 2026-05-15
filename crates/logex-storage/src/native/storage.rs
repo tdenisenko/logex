@@ -294,6 +294,7 @@ impl NativeStorage {
         }
 
         let target_rows = self.config.hot_target_rows.max(1) as usize;
+        let mut wrote_segment = false;
         for chunk in rows.chunks(target_rows) {
             let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
             let segment_dir = self.paths.segment_dir(descriptor.id);
@@ -304,6 +305,9 @@ impl NativeStorage {
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
             persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
             self.catalog.segments.push(descriptor);
+            wrote_segment = true;
+        }
+        if wrote_segment {
             self.persist_catalog()?;
         }
 
