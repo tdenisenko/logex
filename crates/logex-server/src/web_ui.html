@@ -435,6 +435,27 @@
     gap: 12px;
   }
 
+  .query-run-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .query-timer {
+    min-width: 92px;
+    padding: 7px 10px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 8px;
+    color: var(--text);
+    background: rgba(21, 27, 36, .78);
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-title);
+    font-weight: 760;
+    text-align: center;
+  }
+
   textarea {
     width: 100%;
     min-height: 132px;
@@ -463,6 +484,86 @@
     flex-wrap: wrap;
     color: var(--muted);
     font-size: var(--font-body);
+  }
+
+  .query-history-body {
+    gap: 12px;
+  }
+
+  .query-history-meta {
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .history-table-wrap {
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #070a0e;
+  }
+
+  .history-table-wrap table {
+    min-width: 980px;
+  }
+
+  .history-row {
+    cursor: pointer;
+  }
+
+  .history-row.status-error td {
+    color: #ffd3d3;
+  }
+
+  .history-sql {
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .history-sql code {
+    color: var(--soft);
+    white-space: nowrap;
+  }
+
+  .history-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .history-actions button {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: var(--font-small);
+  }
+
+  .history-detail td {
+    white-space: normal;
+    background: rgba(21, 27, 36, .50);
+  }
+
+  .history-detail pre {
+    margin: 0;
+    max-height: 180px;
+    overflow: auto;
+    color: var(--text);
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-small);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .history-detail .history-error {
+    margin-top: 10px;
+    color: #ffd3d3;
+  }
+
+  .history-empty {
+    padding: 24px;
+    color: var(--muted);
+    text-align: center;
   }
 
   .button-row {
@@ -721,7 +822,10 @@
         <div>
           <p id="queryScope">Queries scan the verified local range.</p>
         </div>
-        <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
+        <div class="query-run-controls">
+          <span class="query-timer" id="queryTimer">00:00:000</span>
+          <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
+        </div>
       </div>
       <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
       <div class="query-actions">
@@ -742,6 +846,29 @@
       <div class="error" id="queryError"></div>
     </div>
   </details>
+
+  <details class="foldout query-history" data-foldout-key="query-history" open>
+    <summary>Query History</summary>
+    <div class="foldout-body query-history-body">
+      <div class="query-history-meta" id="queryHistoryMeta">Browser-local history. Most recent queries appear first.</div>
+      <div class="history-table-wrap">
+        <table id="queryHistoryTable">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Time</th>
+              <th>Duration</th>
+              <th>Rows</th>
+              <th>SQL</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queryHistoryBody"></tbody>
+        </table>
+        <div class="history-empty" id="queryHistoryEmpty">No query history yet.</div>
+      </div>
+    </div>
+  </details>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
@@ -757,9 +884,14 @@ var lastStatusTimestamp = null;
 var chartHours = 1;
 var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
+var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
+var QUERY_HISTORY_LIMIT = 50;
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
+var queryHistory = loadQueryHistory();
+var queryStartedAtMs = null;
+var queryTimerInterval = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -896,6 +1028,19 @@ function fmtCompletionTime(seconds) {
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    hourCycle: 'h23'
+  });
+}
+
+function fmtDateTime(value) {
+  var date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '--';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
     hourCycle: 'h23'
   });
 }
@@ -1445,6 +1590,173 @@ function csvCell(value) {
   return text;
 }
 
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function pad3(value) {
+  return String(value).padStart(3, '0');
+}
+
+function formatQueryDuration(durationMs) {
+  var totalMs = Math.max(0, Math.floor(Number(durationMs) || 0));
+  var minutes = Math.floor(totalMs / 60000);
+  var seconds = Math.floor((totalMs % 60000) / 1000);
+  var millis = totalMs % 1000;
+  return pad2(minutes) + ':' + pad2(seconds) + ':' + pad3(millis);
+}
+
+function updateQueryTimer() {
+  if (queryStartedAtMs == null) return;
+  setText('queryTimer', formatQueryDuration(performance.now() - queryStartedAtMs));
+}
+
+function startQueryTimer() {
+  stopQueryTimer();
+  queryStartedAtMs = performance.now();
+  setText('queryTimer', '00:00:000');
+  queryTimerInterval = setInterval(updateQueryTimer, 31);
+}
+
+function stopQueryTimer() {
+  if (queryStartedAtMs == null) {
+    if (queryTimerInterval != null) {
+      clearInterval(queryTimerInterval);
+      queryTimerInterval = null;
+    }
+    return 0;
+  }
+  var durationMs = performance.now() - queryStartedAtMs;
+  if (queryTimerInterval != null) {
+    clearInterval(queryTimerInterval);
+    queryTimerInterval = null;
+  }
+  queryStartedAtMs = null;
+  setText('queryTimer', formatQueryDuration(durationMs));
+  return durationMs;
+}
+
+function loadQueryHistory() {
+  try {
+    var parsed = JSON.parse(localStorage.getItem(QUERY_HISTORY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(function(entry) {
+      return entry && typeof entry.sql === 'string';
+    }).slice(0, QUERY_HISTORY_LIMIT);
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveQueryHistory() {
+  try {
+    localStorage.setItem(QUERY_HISTORY_STORAGE_KEY, JSON.stringify(queryHistory.slice(0, QUERY_HISTORY_LIMIT)));
+  } catch (_) {}
+}
+
+function queryHistoryId() {
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function addQueryHistory(entry) {
+  queryHistory.unshift(Object.assign({
+    id: queryHistoryId(),
+    executedAt: new Date().toISOString()
+  }, entry));
+  queryHistory = queryHistory.slice(0, QUERY_HISTORY_LIMIT);
+  saveQueryHistory();
+  renderQueryHistory();
+}
+
+function queryHistorySummary(entry) {
+  if (entry.ok) {
+    return fmt(entry.rowCount) + ' returned; ' + fmt(entry.scannedRows) + ' scanned';
+  }
+  return entry.error || 'Query failed';
+}
+
+function renderQueryHistory() {
+  var tbody = byId('queryHistoryBody');
+  var empty = byId('queryHistoryEmpty');
+  var meta = byId('queryHistoryMeta');
+  if (!tbody || !empty) return;
+
+  if (!queryHistory.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    if (meta) meta.textContent = 'Browser-local history. Most recent queries appear first.';
+    return;
+  }
+
+  empty.style.display = 'none';
+  if (meta) meta.textContent = fmt(queryHistory.length) + ' saved queries in this browser. Most recent appears first.';
+  tbody.innerHTML = queryHistory.map(function(entry) {
+    var status = entry.ok ? 'Success' : 'Failed';
+    var statusClass = entry.ok ? 'status-success' : 'status-error';
+    var detailId = 'history-detail-' + entry.id;
+    return '<tr class="history-row ' + statusClass + '" data-history-id="' + escapeHtml(entry.id) + '" aria-controls="' + escapeHtml(detailId) + '">' +
+      '<td>' + status + '</td>' +
+      '<td>' + escapeHtml(fmtDateTime(entry.executedAt)) + '</td>' +
+      '<td>' + escapeHtml(formatQueryDuration(entry.durationMs)) + '</td>' +
+      '<td>' + escapeHtml(queryHistorySummary(entry)) + '</td>' +
+      '<td class="history-sql"><code>' + escapeHtml(entry.sql) + '</code></td>' +
+      '<td><div class="history-actions">' +
+      '<button type="button" class="secondary" data-history-action="use" data-history-id="' + escapeHtml(entry.id) + '">Use</button>' +
+      '<button type="button" class="secondary" data-history-action="export" data-history-id="' + escapeHtml(entry.id) + '">.sql</button>' +
+      '</div></td>' +
+      '</tr>' +
+      '<tr class="history-detail" id="' + escapeHtml(detailId) + '" data-history-detail-id="' + escapeHtml(entry.id) + '" hidden>' +
+      '<td colspan="6"><pre>' + escapeHtml(entry.sql) + '</pre>' +
+      (entry.ok ? '' : '<div class="history-error">' + escapeHtml(entry.error || 'Query failed') + '</div>') +
+      '</td></tr>';
+  }).join('');
+}
+
+function findQueryHistoryEntry(id) {
+  return queryHistory.find(function(entry) { return entry.id === id; }) || null;
+}
+
+function useQueryHistoryEntry(id) {
+  var entry = findQueryHistoryEntry(id);
+  if (!entry) return;
+  byId('sql').value = entry.sql;
+  querySqlTouched = true;
+  var queryFoldout = document.querySelector('details[data-foldout-key="query-logs"]');
+  if (queryFoldout) queryFoldout.open = true;
+  byId('sql').focus();
+}
+
+function exportQueryHistoryEntry(id) {
+  var entry = findQueryHistoryEntry(id);
+  if (!entry) return;
+  downloadSql(entry.sql, 'logex-query-' + safeFileTimestamp(entry.executedAt || new Date().toISOString()) + '.sql');
+}
+
+function toggleQueryHistoryDetail(id) {
+  var row = Array.prototype.find.call(document.querySelectorAll('[data-history-detail-id]'), function(candidate) {
+    return candidate.getAttribute('data-history-detail-id') === id;
+  });
+  if (row) row.hidden = !row.hidden;
+}
+
+function downloadSql(sql, filename) {
+  var blob = new Blob([sql.trim() + '\n'], { type: 'application/sql;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileTimestamp(value) {
+  var date = new Date(value);
+  if (!Number.isFinite(date.getTime())) date = new Date();
+  return date.toISOString().replace(/[:.]/g, '-');
+}
+
 function queryPageRows() {
   return queryRows.slice(queryOffset, queryOffset + QUERY_PAGE_SIZE);
 }
@@ -1495,9 +1807,12 @@ function runQuery() {
   showQueryError('');
   if (!sql) {
     showQueryError('Enter a SQL query.');
+    stopQueryTimer();
+    setText('queryTimer', '00:00:000');
     return;
   }
 
+  startQueryTimer();
   byId('runBtn').disabled = true;
   setText('resultCount', 'Running query...');
   renderTable([], 'Running query...');
@@ -1528,10 +1843,21 @@ function runQuery() {
       queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
       queryWasCapped = result.data.next_offset != null || queryRows.length >= MAX_QUERY_LIMIT;
       queryScannedRows = result.data.total_scanned;
+      var durationMs = stopQueryTimer();
       renderQueryPage();
+      addQueryHistory({
+        ok: true,
+        sql: sql,
+        durationMs: durationMs,
+        rowCount: queryRows.length,
+        scannedRows: queryScannedRows,
+        capped: queryWasCapped
+      });
     })
     .catch(function(err) {
-      showQueryError(err.message || 'Query failed.');
+      var errorMessage = err.message || 'Query failed.';
+      var durationMs = stopQueryTimer();
+      showQueryError(errorMessage);
       setText('resultCount', 'Query failed.');
       queryRows = [];
       queryColumns = [];
@@ -1539,8 +1865,17 @@ function runQuery() {
       queryScannedRows = null;
       updateQueryButtons();
       renderTable([], 'Query failed.');
+      addQueryHistory({
+        ok: false,
+        sql: sql,
+        durationMs: durationMs,
+        rowCount: 0,
+        scannedRows: null,
+        error: errorMessage
+      });
     })
     .finally(function() {
+      stopQueryTimer();
       byId('runBtn').disabled = false;
     });
 }
@@ -1579,7 +1914,23 @@ byId('sql').addEventListener('input', function() {
   querySqlTouched = true;
 });
 
+byId('queryHistoryTable').addEventListener('click', function(event) {
+  var actionButton = event.target.closest('[data-history-action]');
+  if (actionButton) {
+    event.stopPropagation();
+    var action = actionButton.getAttribute('data-history-action');
+    var id = actionButton.getAttribute('data-history-id');
+    if (action === 'use') useQueryHistoryEntry(id);
+    if (action === 'export') exportQueryHistoryEntry(id);
+    return;
+  }
+
+  var row = event.target.closest('[data-history-id]');
+  if (row) toggleQueryHistoryDetail(row.getAttribute('data-history-id'));
+});
+
 initFoldouts();
+renderQueryHistory();
 fetchStatus();
 renderChart();
 setInterval(fetchStatus, 2000);

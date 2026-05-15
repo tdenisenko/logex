@@ -4,15 +4,16 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active development branch for this run: `fix/dashboard-persisted-foldouts`. PRs #76, #78, and #79 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active development branch for this run: `feature/query-workbench`. PRs #76, #78, #79, and #81 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
 The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
 ## Completed Since Last Run
 
-- Made Historical Sync, Sync Performance, Advanced metrics, and Query Logs use the same expandable dashboard section pattern.
-- Kept Historical Sync expanded by default and Query Logs, Sync Performance, and Advanced metrics collapsed by default.
-- Added browser-local persistence so each section remembers its expanded or collapsed state.
+- Started the query workbench branch and draft PR scope.
+- Added a query execution timer in `MM:SS:mmm` format.
+- Added browser-local query history with most recent queries first, expandable SQL detail rows, reuse buttons, and per-query `.sql` export.
+- Documented query-engine, query-builder, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
 
@@ -23,6 +24,22 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 2. Complete release validation and hardening.
    - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, graceful shutdown, and exposed listener safety.
    - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and public deployment safety.
+
+3. Build PostgreSQL-like query introspection for the supported LogEx schema.
+   - Reason: Users need to discover available tables and fields without reading source code.
+   - Completion criteria: Supported SQL can list available query tables and log table columns with data types, and tests cover the supported introspection queries and rejected out-of-scope system catalog access.
+
+4. Expand query-engine compatibility for Ethereum event-log analysis.
+   - Reason: LogEx should feel close to a PostgreSQL-style analytical query surface while staying scoped to verified Ethereum logs.
+   - Completion criteria: A broad TDD query suite covers projections, aliases, filters, block ranges, address/topic predicates, ordering, limit/offset caps, aggregates, grouping, distinct values, null handling, invalid SQL, unsupported tables, and deterministic error messages.
+
+5. Add the dashboard query builder.
+   - Reason: Non-SQL users need a deterministic way to build common log queries without guessing field names or event predicates.
+   - Completion criteria: The UI exposes togglable `logs` fields, block range inputs, and a common ERC20 token selector that generates deterministic SQL and fills the Query Logs editor without executing automatically.
+
+6. Measure and improve query performance on realistic segment access patterns.
+   - Reason: Complex queries may touch many compressed segments and expose decompression, scanning, or indexing bottlenecks that small unit fixtures cannot reveal.
+   - Completion criteria: Synthetic integration tests cover sparse and dense block ranges, and an optional active benchmark against a full synced data directory records query time, scanned rows/segments, and regressions worth optimizing.
 
 ## Design Decisions
 
@@ -38,6 +55,9 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.
 - Dashboard section expansion state is stored in browser `localStorage` because it is a per-browser display preference, not node state.
+- Query history is stored only in browser `localStorage`; it is user convenience state and must not be written to the node data directory.
+- ERC20 token names in the query builder should map to contract addresses, not event topics. The ERC20 `Transfer` topic0 is shared across tokens, while the log `address` identifies the token contract.
+- Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions
 
@@ -62,17 +82,20 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: The full-history run needed more disk headroom than the primary remote volume alone could provide.
   - Resolution: Kept the product UI/data-dir model single-disk oriented and used a test-machine-only sealed-segment symlink relocation for extra mounted volumes.
 
+- Challenge: Query performance tests need realistic compressed segment access without committing large mainnet data.
+  - Resolution: Track deterministic synthetic integration coverage separately from optional active benchmarks against a full synced data directory.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard section markup and styles. Removed obsolete `overview`, `panel`, `query-panel`, and `card-label` CSS after the historical and query areas moved into foldout sections.
+- Inspected the dashboard query UI path and reused existing localStorage patterns. No backend query-engine code has been removed in this first query-workbench slice.
 
 ## Git Workflow
 
-- Current branch: `fix/dashboard-persisted-foldouts`
-- New branch created this run: `fix/dashboard-persisted-foldouts` from `origin/master`.
-- Commits made during this run: dashboard foldout persistence changes.
-- Pull request status: created after local validation.
-- Merge status: handled after CI passes.
+- Current branch: `feature/query-workbench`
+- New branch created this run: `feature/query-workbench` from `origin/master`.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work.
+- Pull request status: draft PR for ongoing query work.
+- Merge status: intentionally not merged until user approval.
 - Blockers: none known.
 
 ## Known Issues or Risks
