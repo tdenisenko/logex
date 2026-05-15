@@ -4,7 +4,7 @@
 
 LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
 
-Active branch: `fix/dashboard-synced-copy`. PRs #76 and #78 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active branch: `master`. PRs #76, #78, and #79 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
 The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
 
@@ -68,11 +68,11 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 ## Git Workflow
 
-- Current branch: `fix/dashboard-synced-copy`
+- Current branch: `master`
 - New branch created this run: `fix/dashboard-synced-copy` from `origin/master`.
-- Commits made during this run: pending.
-- Pull request status: pending validation and push.
-- Merge status: pending.
+- Commits made during this run: `ba453b2` on `fix/dashboard-synced-copy`; merged as `f09d4d2`.
+- Pull request status: PR #79 was created and passed CI.
+- Merge status: PR #79 was squash-merged.
 - Blockers: none known.
 
 ## Known Issues or Risks
