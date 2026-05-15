@@ -18,6 +18,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Changed query history rows back to strict one-line truncated summaries with full SQL only in the expanded detail row.
 - Persisted the SQL editor text across page refreshes and made generated defaults apply only once from the latest stored log block.
 - Fixed empty log matches so queries return a clear empty result instead of exposing a DataFusion zero-partition planning error.
+- Polished query history display by renaming rows to result, widening that column, moving result detail into the expanded row, left-aligning actions, and adding copy feedback for result cells.
 - Documented query-engine, query-builder, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -95,13 +96,13 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage patterns. No backend query-engine code has been removed in this first query-workbench slice.
+- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. No obsolete query UI code was found during this polish pass.
 
 ## Git Workflow
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, and empty-result query planning fixes.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, and query history polish.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.

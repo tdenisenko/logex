@@ -518,12 +518,12 @@
   .history-table-wrap th:nth-child(1), .history-table-wrap td:nth-child(1) { width: 9%; }
   .history-table-wrap th:nth-child(2), .history-table-wrap td:nth-child(2) { width: 14%; }
   .history-table-wrap th:nth-child(3), .history-table-wrap td:nth-child(3) { width: 10%; }
-  .history-table-wrap th:nth-child(4), .history-table-wrap td:nth-child(4) { width: 16%; }
-  .history-table-wrap th:nth-child(5), .history-table-wrap td:nth-child(5) { width: 35%; }
-  .history-table-wrap th:nth-child(6), .history-table-wrap td:nth-child(6) { width: 16%; }
+  .history-table-wrap th:nth-child(4), .history-table-wrap td:nth-child(4) { width: 20%; }
+  .history-table-wrap th:nth-child(5), .history-table-wrap td:nth-child(5) { width: 33%; }
+  .history-table-wrap th:nth-child(6), .history-table-wrap td:nth-child(6) { width: 14%; }
 
   .copy-cell {
-    cursor: copy;
+    cursor: pointer;
   }
 
   .copy-cell:focus {
@@ -557,7 +557,7 @@
   .history-actions {
     display: flex;
     gap: 8px;
-    justify-content: center;
+    justify-content: flex-start;
     flex-wrap: nowrap;
   }
 
@@ -588,6 +588,34 @@
   .history-detail .history-error {
     margin-top: 10px;
     color: #ffd3d3;
+  }
+
+  .history-detail .history-result {
+    margin-top: 10px;
+    color: var(--muted);
+  }
+
+  .copy-toast {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 40;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity .18s ease, transform .18s ease;
+    border: 1px solid rgba(72, 214, 184, .35);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    background: rgba(16, 21, 28, .96);
+    box-shadow: 0 18px 54px rgba(0, 0, 0, .28);
+    font-size: var(--font-body);
+  }
+
+  .copy-toast.visible {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .history-empty {
@@ -888,7 +916,7 @@
               <th>Status</th>
               <th>Time</th>
               <th>Duration</th>
-              <th>Rows</th>
+              <th>Result</th>
               <th>SQL</th>
               <th>Actions</th>
             </tr>
@@ -900,6 +928,8 @@
     </div>
   </details>
 </div>
+
+<div class="copy-toast" id="copyToast" role="status" aria-live="polite">Copied to clipboard</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
 <script>
@@ -924,6 +954,7 @@ var defaultQueryApplied = false;
 var queryHistory = loadQueryHistory();
 var queryStartedAtMs = null;
 var queryTimerInterval = null;
+var copyToastTimeout = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -1682,12 +1713,25 @@ function copyText(text) {
 }
 
 function markCopiedCell(cell) {
+  showCopyToast('Copied to clipboard');
   cell.classList.add('copied');
   cell.setAttribute('title', 'Copied');
   setTimeout(function() {
     cell.classList.remove('copied');
     cell.setAttribute('title', 'Click to copy');
   }, 900);
+}
+
+function showCopyToast(message) {
+  var toast = byId('copyToast');
+  if (!toast) return;
+  toast.textContent = message || 'Copied to clipboard';
+  toast.classList.add('visible');
+  if (copyToastTimeout != null) clearTimeout(copyToastTimeout);
+  copyToastTimeout = setTimeout(function() {
+    toast.classList.remove('visible');
+    copyToastTimeout = null;
+  }, 1200);
 }
 
 function copyResultCell(cell) {
@@ -1781,7 +1825,7 @@ function queryHistorySummary(entry) {
   if (entry.ok) {
     return fmt(entry.rowCount) + ' returned; ' + fmt(entry.scannedRows) + ' scanned';
   }
-  return entry.error || 'Query failed';
+  return 'Failed';
 }
 
 function renderQueryHistory() {
@@ -1816,7 +1860,8 @@ function renderQueryHistory() {
       '</tr>' +
       '<tr class="history-detail" id="' + escapeHtml(detailId) + '" data-history-detail-id="' + escapeHtml(entry.id) + '" hidden>' +
       '<td colspan="6"><pre>' + escapeHtml(entry.sql) + '</pre>' +
-      (entry.ok ? '' : '<div class="history-error">' + escapeHtml(entry.error || 'Query failed') + '</div>') +
+      '<div class="history-result">Result: ' + escapeHtml(queryHistorySummary(entry)) + '</div>' +
+      (entry.ok ? '' : '<div class="history-error">Error: ' + escapeHtml(entry.error || 'Query failed') + '</div>') +
       '</td></tr>';
   }).join('');
 }
