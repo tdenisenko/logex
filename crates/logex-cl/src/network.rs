@@ -2292,7 +2292,7 @@ impl ConsensusNetwork {
                             "{peer_context} request={} response={response:?}",
                             kind.as_str()
                         ));
-                        tracing::warn!(
+                        tracing::debug!(
                             %peer,
                             error = ?response,
                             "failed to send consensus RPC response"
@@ -2406,7 +2406,7 @@ impl ConsensusNetwork {
                             self.last_response_send_failure = Some(format!(
                                 "{peer_context} request=goodbye response={response:?}"
                             ));
-                            tracing::warn!(
+                            tracing::debug!(
                                 %peer,
                                 error = ?response,
                                 "failed to send consensus goodbye RPC response"
@@ -2523,7 +2523,7 @@ impl ConsensusNetwork {
                         self.last_response_send_failure = Some(format!(
                             "{peer_context} request=metadata response={response:?}"
                         ));
-                        tracing::warn!(
+                        tracing::debug!(
                             %peer,
                             error = ?response,
                             "failed to send consensus metadata RPC response"
@@ -3098,7 +3098,7 @@ impl ConsensusNetwork {
         dialable.sort_by(|(left, _), (right, _)| {
             self.peer_priority(*right, bootstrap_needed)
                 .cmp(&self.peer_priority(*left, bootstrap_needed))
-                .then_with(|| left.to_string().cmp(&right.to_string()))
+                .then_with(|| left.cmp(right))
         });
 
         let mut active_targets = self.connected_peers.len() + self.dialing_peers.len();
@@ -3133,7 +3133,7 @@ impl ConsensusNetwork {
         connected.sort_by(|left, right| {
             self.peer_priority(*right, bootstrap_needed)
                 .cmp(&self.peer_priority(*left, bootstrap_needed))
-                .then_with(|| left.to_string().cmp(&right.to_string()))
+                .then_with(|| left.cmp(right))
         });
         for peer in connected {
             if self

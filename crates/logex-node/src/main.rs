@@ -13,6 +13,9 @@ use logex_storage::PartitionManagerConfig;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_LOG_FILTER: &str = "info,discv5=error";
+
 fn main() {
     let cli = Cli::parse();
 
@@ -23,13 +26,7 @@ fn main() {
     }
     let file_config = file_config.and_then(|r| r.ok()).unwrap_or_default();
 
-    let log_level = if cli.log_level != "info" {
-        cli.log_level.clone()
-    } else {
-        file_config
-            .log_level
-            .unwrap_or_else(|| cli.log_level.clone())
-    };
+    let log_level = effective_log_filter(&cli.log_level, file_config.log_level);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -105,5 +102,45 @@ fn main() {
         Command::BuildIndexes => commands::run_build_indexes(pm_config),
         Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
+    }
+}
+
+fn effective_log_filter(cli_log_level: &str, config_log_level: Option<String>) -> String {
+    let requested = if cli_log_level != DEFAULT_LOG_LEVEL {
+        cli_log_level.to_owned()
+    } else {
+        config_log_level.unwrap_or_else(|| DEFAULT_LOG_FILTER.to_owned())
+    };
+    normalize_info_log_filter(requested)
+}
+
+fn normalize_info_log_filter(filter: String) -> String {
+    if filter.trim() == DEFAULT_LOG_LEVEL {
+        DEFAULT_LOG_FILTER.to_owned()
+    } else {
+        filter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_LOG_FILTER, effective_log_filter};
+
+    #[test]
+    fn default_info_log_filter_suppresses_noisy_discovery_warnings() {
+        assert_eq!(effective_log_filter("info", None), DEFAULT_LOG_FILTER);
+        assert_eq!(
+            effective_log_filter("info", Some("info".to_owned())),
+            DEFAULT_LOG_FILTER
+        );
+    }
+
+    #[test]
+    fn explicit_log_filters_are_preserved() {
+        assert_eq!(effective_log_filter("debug", None), "debug");
+        assert_eq!(
+            effective_log_filter("info", Some("info,discv5=warn".to_owned())),
+            "info,discv5=warn"
+        );
     }
 }

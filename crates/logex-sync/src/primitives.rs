@@ -4,11 +4,15 @@ use alloy_consensus::{
 };
 use alloy_eips::Typed2718;
 use alloy_eips::eip2718::Eip2718Result;
-use alloy_primitives::{Bloom, Log};
+use alloy_primitives::{Address, B256, Bloom, Log};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_eth_wire::BasicNetworkPrimitives;
 use reth_ethereum_primitives::{Block, BlockBody, PooledTransactionVariant, TransactionSigned};
 use reth_primitives_traits::{InMemorySize, NodePrimitives};
+use rustc_hash::FxHashMap;
+
+const RECEIPT_BLOOM_ADDRESS_CACHE_LIMIT: usize = 4_096;
+const RECEIPT_BLOOM_TOPIC_CACHE_LIMIT: usize = 8_192;
 
 /// LogEx's internal primitive set keeps Ethereum block/transaction types but
 /// uses a receipt representation that can decode both pre- and post-Byzantium
@@ -39,6 +43,83 @@ pub struct LogexReceipt {
     pub status: Eip658Value,
     pub cumulative_gas_used: u64,
     pub logs: Vec<Log>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReceiptBloomCache {
+    address_blooms: FxHashMap<Address, Bloom>,
+    topic_blooms: FxHashMap<B256, Bloom>,
+}
+
+impl ReceiptBloomCache {
+    pub(crate) fn receipt_bloom(&mut self, receipt: &LogexReceipt) -> Bloom {
+        let mut bloom = Bloom::ZERO;
+        for log in &receipt.logs {
+            let address_bloom = self.address_bloom(log.address);
+            bloom.accrue_bloom(&address_bloom);
+            for topic in log.topics() {
+                let topic_bloom = self.topic_bloom(*topic);
+                bloom.accrue_bloom(&topic_bloom);
+            }
+        }
+        bloom
+    }
+
+    fn address_bloom(&mut self, address: Address) -> Bloom {
+        if let Some(bloom) = self.address_blooms.get(&address) {
+            return *bloom;
+        }
+
+        let bloom = bloom_for_bytes(address.as_slice());
+        if self.address_blooms.len() < RECEIPT_BLOOM_ADDRESS_CACHE_LIMIT {
+            self.address_blooms.insert(address, bloom);
+        }
+        bloom
+    }
+
+    fn topic_bloom(&mut self, topic: B256) -> Bloom {
+        if let Some(bloom) = self.topic_blooms.get(&topic) {
+            return *bloom;
+        }
+
+        let bloom = bloom_for_bytes(topic.as_slice());
+        if self.topic_blooms.len() < RECEIPT_BLOOM_TOPIC_CACHE_LIMIT {
+            self.topic_blooms.insert(topic, bloom);
+        }
+        bloom
+    }
+
+    #[cfg(test)]
+    fn cached_entries(&self) -> (usize, usize) {
+        (self.address_blooms.len(), self.topic_blooms.len())
+    }
+}
+
+pub(crate) fn logex_receipt_batches_with_cached_blooms(
+    receipts: Vec<Vec<LogexReceipt>>,
+    cache: &mut ReceiptBloomCache,
+) -> Vec<Vec<ReceiptWithBloom<LogexReceipt>>> {
+    receipts
+        .into_iter()
+        .map(|block_receipts| {
+            block_receipts
+                .into_iter()
+                .map(|receipt| {
+                    let logs_bloom = cache.receipt_bloom(&receipt);
+                    ReceiptWithBloom {
+                        receipt,
+                        logs_bloom,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn bloom_for_bytes(bytes: &[u8]) -> Bloom {
+    let mut bloom = Bloom::ZERO;
+    bloom.m3_2048(bytes);
+    bloom
 }
 
 impl LogexReceipt {
@@ -286,6 +367,23 @@ mod tests {
             address: Address::repeat_byte(0x11),
             data: LogData::new_unchecked(vec![B256::repeat_byte(0x22)], Bytes::from_static(b"log")),
         }
+    }
+
+    #[test]
+    fn cached_receipt_bloom_matches_alloy_bloom() {
+        let receipt = LogexReceipt {
+            tx_type: TxType::Eip1559,
+            status: Eip658Value::success(),
+            cumulative_gas_used: 42_000,
+            logs: vec![test_log(), test_log()],
+        };
+        let mut cache = ReceiptBloomCache::default();
+
+        let cached = cache.receipt_bloom(&receipt);
+        let expected = alloy_primitives::logs_bloom(receipt.logs.iter());
+
+        assert_eq!(cached, expected);
+        assert_eq!(cache.cached_entries(), (1, 1));
     }
 
     #[test]

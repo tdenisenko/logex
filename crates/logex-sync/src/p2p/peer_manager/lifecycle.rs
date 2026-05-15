@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{FutureExt, StreamExt};
 use tokio::time::timeout;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::*;
 
@@ -630,7 +630,7 @@ impl PeerManager {
                 "peer session closed"
             );
         } else if reason.is_some() && !noisy_non_serving_disconnect {
-            info!(
+            debug!(
                 peer = %peer_id,
                 remote_addr = %peer.remote_record.tcp_addr(),
                 client_version = %peer.client_version,

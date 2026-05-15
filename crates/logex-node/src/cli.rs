@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub data_dir: Option<PathBuf>,
 
-    /// Log level (trace, debug, info, warn, error).
+    /// Tracing filter (for example: info, debug, or info,discv5=error).
     #[arg(long, default_value = "info", global = true)]
     pub log_level: String,
 

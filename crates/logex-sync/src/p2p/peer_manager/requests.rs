@@ -6,6 +6,10 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
+use crate::primitives::{
+    LogexReceipt, ReceiptBloomCache, logex_receipt_batches_with_cached_blooms,
+};
+
 use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
@@ -1157,7 +1161,11 @@ impl BodyReceiptRequestPlan {
                 response,
             })
             .await?;
-        Ok(Receipts69(receipts).into_with_bloom().0)
+        let mut bloom_cache = ReceiptBloomCache::default();
+        Ok(logex_receipt_batches_with_cached_blooms(
+            receipts,
+            &mut bloom_cache,
+        ))
     }
 
     async fn request_receipts70(
@@ -1177,6 +1185,7 @@ impl BodyReceiptRequestPlan {
         let mut merged = Vec::with_capacity(hashes.len());
         let mut next_block_index = 0usize;
         let mut first_block_receipt_index = 0u64;
+        let mut bloom_cache = ReceiptBloomCache::default();
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
@@ -1196,6 +1205,7 @@ impl BodyReceiptRequestPlan {
                 first_block_receipt_index,
                 response,
                 hashes.len(),
+                &mut bloom_cache,
             )
             .map_err(Receipts70MergeError::into_request_attempt)?;
 
@@ -2457,7 +2467,11 @@ impl PeerManager {
                 response,
             })
             .await?;
-        Ok(Receipts69(receipts).into_with_bloom().0)
+        let mut bloom_cache = ReceiptBloomCache::default();
+        Ok(logex_receipt_batches_with_cached_blooms(
+            receipts,
+            &mut bloom_cache,
+        ))
     }
 
     pub(super) async fn request_receipts70(
@@ -2477,6 +2491,7 @@ impl PeerManager {
         let mut merged = Vec::with_capacity(hashes.len());
         let mut next_block_index = 0usize;
         let mut first_block_receipt_index = 0u64;
+        let mut bloom_cache = ReceiptBloomCache::default();
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
@@ -2496,6 +2511,7 @@ impl PeerManager {
                 first_block_receipt_index,
                 response,
                 hashes.len(),
+                &mut bloom_cache,
             )
             .map_err(Receipts70MergeError::into_request_attempt)?;
 
@@ -2939,16 +2955,14 @@ fn receipt_count_mismatch_disables_receipt_peer(error: ReceiptCountMismatch) -> 
     !receipt_count_mismatch_is_protocol_breach(error)
 }
 
-pub(super) fn merge_receipts70_response<T>(
-    merged: &mut Vec<Vec<alloy_consensus::ReceiptWithBloom<T>>>,
+pub(super) fn merge_receipts70_response(
+    merged: &mut ReceiptBatch,
     next_block_index: usize,
     first_block_receipt_index: u64,
-    response: Receipts70<T>,
+    response: Receipts70<LogexReceipt>,
     expected_blocks: usize,
-) -> std::result::Result<(usize, u64), Receipts70MergeError>
-where
-    T: alloy_consensus::TxReceipt,
-{
+    bloom_cache: &mut ReceiptBloomCache,
+) -> std::result::Result<(usize, u64), Receipts70MergeError> {
     let previous_state = (next_block_index, first_block_receipt_index);
     let returned_blocks = response.receipts.len();
     if returned_blocks == 0 {
@@ -2960,7 +2974,7 @@ where
     }
 
     let last_block_incomplete = response.last_block_incomplete;
-    let receipts = response.into_with_bloom().0;
+    let receipts = logex_receipt_batches_with_cached_blooms(response.receipts, bloom_cache);
     for (offset, block_receipts) in receipts.into_iter().enumerate() {
         let target_index = next_block_index + offset;
         if target_index < merged.len() {
@@ -3192,9 +3206,8 @@ fn body_receipt_scheduled_chunk_limit(
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::{ReceiptWithBloom, TxType};
+    use alloy_consensus::{Eip658Value, TxType};
     use alloy_primitives::Log;
-    use reth_ethereum_primitives::Receipt;
 
     use super::*;
 
@@ -3477,10 +3490,10 @@ mod tests {
         ));
     }
 
-    fn fake_receipt(gas: u64) -> Receipt {
-        Receipt {
+    fn fake_receipt(gas: u64) -> LogexReceipt {
+        LogexReceipt {
             tx_type: TxType::Legacy,
-            success: true,
+            status: Eip658Value::success(),
             cumulative_gas_used: gas,
             logs: Vec::<Log>::new(),
         }
@@ -3488,7 +3501,8 @@ mod tests {
 
     #[test]
     fn eth70_partial_receipts_are_merged_across_requests() {
-        let mut merged = Vec::<Vec<ReceiptWithBloom<Receipt>>>::new();
+        let mut merged = ReceiptBatch::new();
+        let mut bloom_cache = ReceiptBloomCache::default();
 
         let (next_block_index, first_block_receipt_index) = merge_receipts70_response(
             &mut merged,
@@ -3503,6 +3517,7 @@ mod tests {
                 ],
             },
             3,
+            &mut bloom_cache,
         )
         .expect("first partial response should merge");
 
@@ -3520,6 +3535,7 @@ mod tests {
                 receipts: vec![vec![fake_receipt(4)]],
             },
             3,
+            &mut bloom_cache,
         )
         .expect("continuation response should merge");
 
@@ -3531,7 +3547,8 @@ mod tests {
 
     #[test]
     fn eth70_empty_response_is_rejected() {
-        let mut merged = Vec::<Vec<ReceiptWithBloom<Receipt>>>::new();
+        let mut merged = ReceiptBatch::new();
+        let mut bloom_cache = ReceiptBloomCache::default();
 
         let error = merge_receipts70_response(
             &mut merged,
@@ -3539,9 +3556,10 @@ mod tests {
             0,
             Receipts70 {
                 last_block_incomplete: false,
-                receipts: Vec::<Vec<Receipt>>::new(),
+                receipts: Vec::<Vec<LogexReceipt>>::new(),
             },
             1,
+            &mut bloom_cache,
         )
         .expect_err("empty response should be rejected");
 

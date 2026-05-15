@@ -5207,6 +5207,7 @@ dependencies = [
  "reth-network-peers",
  "reth-primitives-traits",
  "reth-storage-api",
+ "rustc-hash",
  "secp256k1 0.30.0",
  "serde_json",
  "tempfile",

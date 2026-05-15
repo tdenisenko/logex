@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, use
 
 Active branch: `feature/el-reverse-sync` / draft PR #76. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
 
-The remote run is validating EL reverse sync toward genesis with the improved pipeline. It has crossed the Merge boundary and is continuing through pre-Merge history. Warmed samples have held strong peer retention, zero raw compression backlog, and roughly 400k-450k historical logs/sec in the tested ranges. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The two extra remote volumes now hold symlinked immutable sealed segments so the root volume has enough write headroom for the rest of the run.
+The remote run is validating EL reverse sync toward genesis with the improved pipeline. It has crossed the Merge boundary and is continuing through pre-Merge history. Warmed samples have held strong peer retention, zero raw compression backlog, and have reached roughly 500k-800k historical logs/sec depending on block density and peer warm-up. The dominant local cost is still receipt/body verification, especially receipt-root Keccak; body/receipt fetch latency can become the wall-clock limiter when peer warm-up is still low. The current fresh run writes to the root data directory; the two extra mounted volumes are reserved for a machine-specific symlink relocation if root write headroom gets low.
 
 ## Completed Since Last Run
 
@@ -21,6 +21,8 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - All-empty historical header chunks can advance the verified floor without body/receipt P2P requests when every body/receipt commitment is the canonical empty root.
 - High-memory historical fetch lookahead depth increased to 5 after the blocking refill fix made the retry beneficial.
 - Added a density-aware fetch-window expansion for healthy-memory medium/sparse ranges so lower-log-density pre-Merge ranges can amortize per-batch overhead without raising dense-range memory pressure.
+- Suppressed noisy default `discv5` warning logs at the normal `info` filter, demoted non-actionable peer/session response-channel churn to debug, and removed CL peer-sort base58 formatting from hot tie-breakers.
+- Added a bounded receipt-bloom cache for eth/69 and eth/70 receipt responses, avoiding repeated bloom Keccak for common log addresses/topics while preserving receipt-root and logs-bloom verification. The cache uses `FxHashMap` because it is local, bounded, and not exposed to adversarial lookup semantics.
 - Kept the dense historical fetch window at 5,000 blocks after live samples improved dense-range throughput.
 - Raised the medium-dense fetch lookahead cap to 4 while keeping very-dense ranges capped at 3 to avoid unnecessary memory pressure.
 - Reduced normal CL light-client log churn and skipped stale finality/optimistic updates before expensive verification.
@@ -92,6 +94,9 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Challenge: After crossing Merge, lower-log-density blocks made per-batch overhead more visible.
   - Resolution: Added a guarded density-aware fetch-window boost for medium/sparse ranges. Initial pre-Merge remote samples improved block throughput without increasing backlog or RSS.
 
+- Challenge: Profiling showed avoidable CPU in peer-id formatting and receipt-bloom reconstruction.
+  - Resolution: Normal info logs now filter noisy discovery warnings, routine peer/session churn is debug-level, CL peer sorting uses `PeerId` ordering instead of base58 strings, and receipt bloom reconstruction caches repeated address/topic bitsets per response chunk.
+
 - Challenge: A storage-metrics test compared two live filesystem free-space probes exactly.
   - Resolution: The test now allows a small tolerance while preserving the same semantic checks.
 
@@ -107,14 +112,15 @@ The remote run is validating EL reverse sync toward genesis with the improved pi
 - Deduplicated historical peer-note collection so repeated peer IDs from the same batch are not carried through the ingest path.
 - Inspected the status/dashboard performance path and versioned the browser performance sample key so old block/sec samples are not reused as logs/sec samples.
 - Inspected storage-metrics tests after validation failure and removed the brittle exact free-space comparison.
-- Removed the local rebuilt `target/debug` artifacts to recover workspace disk space; later validation rebuilt the artifacts needed for checks.
+- Removed two accidentally copied files from the remote checkout root after a bad rsync target and redeployed using relative paths.
+- Inspected the local geth/nethermind reference directories, but the available worktrees had been cleaned down to empty directory skeletons and were not useful for this pass.
 - No additional obsolete EL sync paths were removed in this pass; remaining changes are active code paths used by the remote run.
 
 ## Git Workflow
 
 - Current branch: `feature/el-reverse-sync`
 - New branch created this run: none; continuing the EL reverse-sync PR branch.
-- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, `9f62d2f`, `3a4815c`, and `8cde903`. This pass also validates a density-window sync update before PR readiness.
+- Commits made during this run include: `20ead78`, `e7cb97b`, `2cf8120`, `4f9a84f`, `99793ce`, `09dfd57`, `fc3f815`, `5fce0ac`, `a4e599a`, `a977297`, `bd1e16a`, `b9623de`, `ffcee7f`, `9f62d2f`, `3a4815c`, `8cde903`, and `perf: reduce receipt bloom and peer logging overhead`.
 - Pull request status: draft PR #76 remains open.
 - Merge status: not ready; EL production validation through genesis and final performance review remain incomplete.
 - Blockers: none known.
