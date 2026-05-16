@@ -25,6 +25,8 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Display query-result `timestamp` fields as local `YYYY-MM-DD HH:mm:ss` values while keeping Unix timestamps as the raw copied/exported value.
 - Added exact native `SUM(data)` support for Ethereum `uint256` event data, including `SUM(CAST(data AS NUMERIC))` and PostgreSQL-style `SUM(data::NUMERIC)`.
 - Validated `SUM(data)` on the remote full-sync data directory: the exact bounded USDC query scanned the same 5 rows as the non-aggregate query and completed in 0.21-0.24 seconds; a dense one-day USDC range summed 505,388 rows in 1.93 seconds.
+- Added native conditional aggregate support for common ERC20 balance queries using `SUM(CASE WHEN ... THEN data ELSE 0 END)` and arithmetic between aggregate results.
+- Optimized cross-topic sender/receiver `OR` predicates by unioning exact candidate row IDs before aggregation; the provided USDC sent/received/net query now completes on the remote full-sync data directory in 2.16 seconds with `total_scanned = 3`.
 
 ## Remaining TODOs
 
@@ -55,6 +57,7 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Bounded log queries should prune whole segments with metadata first, then use exact indexes where available, then apply row-level checks for correctness.
 - The native SQL fast path is limited to simple ordered `logs` queries; more complex SQL continues through DataFusion.
 - `SUM(data)` is handled by a dedicated native aggregate path instead of DataFusion because Ethereum event `data` is hex-encoded `uint256`; returning an exact decimal string avoids `u64`/JavaScript precision loss.
+- Native aggregate queries may evaluate `CASE` and arithmetic over exact signed big integers after each `SUM`, while the underlying event `data` values remain unsigned `uint256`.
 - ERC20 Transfer indexing prioritizes `(address, topic0)`, `(address, topic0, topic1)`, and `(address, topic0, topic2)` because those cover token, sender, and receiver filters used by the query builder.
 - Query execution snapshots storage metadata before scanning so long queries do not block sync writes.
 - Query-builder date/time controls show LogEx's custom calendar icon while clicks in the icon area open the native `datetime-local` picker through `showPicker()`; the hand cursor is limited to that same icon hit area.
@@ -76,11 +79,14 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Challenge: DataFusion cannot directly aggregate LogEx's hex-encoded Ethereum `uint256` `data` values without lossy or unsupported casts.
   - Resolution: Added a native `SUM(data)` path that uses the existing predicate/index pruning, reads only matching `data` cells, sums with arbitrary precision, and returns the exact decimal result.
 
+- Challenge: ERC20 balance queries combine sender/receiver conditions with `OR`, which cannot be represented as one simple native filter.
+  - Resolution: Detect topic OR groups, run exact candidate filters for each side, union row IDs to avoid duplicate self-transfers, then evaluate the full predicate before conditional aggregation.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected query UI, SQL execution, native scanning, index building, and storage metadata paths.
 - Inspected query-result rendering and SQL aggregate execution for obsolete formatting or debug code.
-- Kept row-level predicate rechecks for materialized native row queries; the `SUM(data)` path relies on exact candidate row-id filtering and reads only the `data` column.
+- Kept row-level predicate rechecks for materialized native row queries and conditional aggregate queries; plain `SUM(data)` still reads only the `data` column after exact candidate filtering.
 - No debug-only code is intentionally left in the query path.
 
 ## Git Workflow

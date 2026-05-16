@@ -27,7 +27,8 @@ use datafusion::sql::sqlparser::ast::{
     FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr,
     Statement as SqlStatement, TableFactor, Value as SqlValue,
 };
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
+use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
@@ -625,9 +626,40 @@ struct NativeSqlQuery {
 }
 
 struct NativeDataSumQuery {
-    output_column: String,
+    projections: Vec<NativeAggregateProjection>,
+    sums: Vec<NativeRowValueExpr>,
     filter: NativeLogFilter,
+    candidate_filters: Vec<NativeLogFilter>,
+    selection: Option<SqlAstExpr>,
     sql_limit: Option<usize>,
+}
+
+struct NativeAggregateProjection {
+    output_column: String,
+    expr: NativeAggregateExpr,
+}
+
+#[derive(Clone)]
+enum NativeAggregateExpr {
+    Sum(usize),
+    Add(Box<NativeAggregateExpr>, Box<NativeAggregateExpr>),
+    Sub(Box<NativeAggregateExpr>, Box<NativeAggregateExpr>),
+}
+
+#[derive(Clone)]
+enum NativeRowValueExpr {
+    Data,
+    Literal(BigInt),
+    Case {
+        branches: Vec<(SqlAstExpr, NativeRowValueExpr)>,
+        else_expr: Option<Box<NativeRowValueExpr>>,
+    },
+}
+
+struct NativeSumState {
+    expr: NativeRowValueExpr,
+    sum: BigInt,
+    count: u64,
 }
 
 fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQueryError> {
@@ -719,15 +751,24 @@ fn try_execute_native_data_sum(
         }));
     }
 
-    let (sum, total_scanned) =
-        execute_native_data_sum(snapshot, &native_query.filter, cancel_check.as_ref())?;
-    let mut row = Map::with_capacity(1);
-    let value = if total_scanned == 0 {
-        Value::Null
-    } else {
-        Value::String(sum.to_string())
-    };
-    row.insert(native_query.output_column, value);
+    let (values, total_scanned) = execute_native_data_sum(
+        snapshot,
+        &native_query.filter,
+        &native_query.candidate_filters,
+        native_query.selection.as_ref(),
+        &native_query.projections,
+        &native_query.sums,
+        cancel_check.as_ref(),
+    )?;
+    let mut row = Map::with_capacity(values.len());
+    for (projection, value) in native_query.projections.iter().zip(values) {
+        row.insert(
+            projection.output_column.clone(),
+            value
+                .map(|value| Value::String(value.to_string()))
+                .unwrap_or(Value::Null),
+        );
+    }
 
     Ok(Some(SqlQueryResult {
         rows: vec![Value::Object(row)],
@@ -780,7 +821,7 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
         return Ok(None);
     }
 
-    let Some(output_column) = native_data_sum_projection(&select.projection) else {
+    let Some((projections, sums)) = native_aggregate_projections(&select.projection) else {
         return Ok(None);
     };
     let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
@@ -788,35 +829,108 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
     };
 
     let mut filter = NativeLogFilter::new();
-    if let Some(selection) = &select.selection
-        && !apply_sql_ast_filter(&mut filter, selection)?
-    {
-        return Ok(None);
+    let mut selection = None;
+    if let Some(selection_expr) = &select.selection {
+        let mut exact_filter = NativeLogFilter::new();
+        if apply_sql_ast_filter(&mut exact_filter, selection_expr)? {
+            filter = exact_filter;
+        } else {
+            apply_sql_ast_filter_conjuncts(&mut filter, selection_expr)?;
+            selection = Some(selection_expr.clone());
+        }
     }
+    let candidate_filters = selection
+        .as_ref()
+        .and_then(|selection| topic_or_candidate_filters(&filter, selection))
+        .unwrap_or_else(|| vec![filter.clone()]);
 
     Ok(Some(NativeDataSumQuery {
-        output_column,
+        projections,
+        sums,
         filter,
+        candidate_filters,
+        selection,
         sql_limit,
     }))
 }
 
-fn native_data_sum_projection(projection: &[SelectItem]) -> Option<String> {
-    if projection.len() != 1 {
-        return None;
-    }
-    match &projection[0] {
-        SelectItem::UnnamedExpr(expr) if is_sum_data_expr(expr) => Some("sum".to_owned()),
-        SelectItem::ExprWithAlias { expr, alias } if is_sum_data_expr(expr) => {
-            Some(alias.value.clone())
+fn apply_sql_ast_filter_conjuncts(
+    filter: &mut NativeLogFilter,
+    expr: &SqlAstExpr,
+) -> Result<(), SqlQueryError> {
+    match expr {
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
+            apply_sql_ast_filter_conjuncts(filter, left)?;
+            apply_sql_ast_filter_conjuncts(filter, right)?;
         }
-        _ => None,
+        other => {
+            let _ = apply_sql_ast_filter(filter, other)?;
+        }
+    }
+    Ok(())
+}
+
+fn native_aggregate_projections(
+    projection: &[SelectItem],
+) -> Option<(Vec<NativeAggregateProjection>, Vec<NativeRowValueExpr>)> {
+    let mut projections = Vec::with_capacity(projection.len());
+    let mut sums = Vec::new();
+    for item in projection {
+        match item {
+            SelectItem::UnnamedExpr(expr) => {
+                projections.push(NativeAggregateProjection {
+                    output_column: native_aggregate_output_name(expr),
+                    expr: parse_native_aggregate_expr(expr, &mut sums)?,
+                });
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                projections.push(NativeAggregateProjection {
+                    output_column: alias.value.clone(),
+                    expr: parse_native_aggregate_expr(expr, &mut sums)?,
+                });
+            }
+            _ => return None,
+        }
+    }
+    (!projections.is_empty()).then_some((projections, sums))
+}
+
+fn native_aggregate_output_name(expr: &SqlAstExpr) -> String {
+    if is_plain_sum_data_expr(expr) {
+        "sum".to_owned()
+    } else {
+        expr.to_string()
     }
 }
 
-fn is_sum_data_expr(expr: &SqlAstExpr) -> bool {
+fn parse_native_aggregate_expr(
+    expr: &SqlAstExpr,
+    sums: &mut Vec<NativeRowValueExpr>,
+) -> Option<NativeAggregateExpr> {
+    match expr {
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Plus => {
+            Some(NativeAggregateExpr::Add(
+                Box::new(parse_native_aggregate_expr(left, sums)?),
+                Box::new(parse_native_aggregate_expr(right, sums)?),
+            ))
+        }
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Minus => {
+            Some(NativeAggregateExpr::Sub(
+                Box::new(parse_native_aggregate_expr(left, sums)?),
+                Box::new(parse_native_aggregate_expr(right, sums)?),
+            ))
+        }
+        SqlAstExpr::Nested(expr) => parse_native_aggregate_expr(expr, sums),
+        _ => parse_native_sum_expr(expr, sums),
+    }
+}
+
+fn parse_native_sum_expr(
+    expr: &SqlAstExpr,
+    sums: &mut Vec<NativeRowValueExpr>,
+) -> Option<NativeAggregateExpr> {
     let SqlAstExpr::Function(function) = expr else {
-        return false;
+        return None;
     };
     if !function.name.to_string().eq_ignore_ascii_case("sum")
         || !matches!(&function.parameters, FunctionArguments::None)
@@ -825,33 +939,74 @@ fn is_sum_data_expr(expr: &SqlAstExpr) -> bool {
         || function.over.is_some()
         || !function.within_group.is_empty()
     {
-        return false;
+        return None;
     }
     let FunctionArguments::List(args) = &function.args else {
-        return false;
+        return None;
     };
     if matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct))
         || !args.clauses.is_empty()
         || args.args.len() != 1
     {
-        return false;
+        return None;
     }
     let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = &args.args[0] else {
-        return false;
+        return None;
     };
-    is_data_integer_expr(expr)
+    let index = sums.len();
+    sums.push(parse_native_row_value_expr(expr)?);
+    Some(NativeAggregateExpr::Sum(index))
 }
 
-fn is_data_integer_expr(expr: &SqlAstExpr) -> bool {
+fn is_plain_sum_data_expr(expr: &SqlAstExpr) -> bool {
+    let mut sums = Vec::new();
+    matches!(
+        parse_native_sum_expr(expr, &mut sums),
+        Some(NativeAggregateExpr::Sum(0))
+    ) && matches!(sums.first(), Some(NativeRowValueExpr::Data))
+}
+
+fn parse_native_row_value_expr(expr: &SqlAstExpr) -> Option<NativeRowValueExpr> {
     match expr {
-        SqlAstExpr::Identifier(_) | SqlAstExpr::CompoundIdentifier(_) => {
-            sql_identifier(expr).is_some_and(|column| column == "data")
-        }
-        SqlAstExpr::Nested(expr) => is_data_integer_expr(expr),
+        SqlAstExpr::Identifier(_) | SqlAstExpr::CompoundIdentifier(_) => sql_identifier(expr)
+            .is_some_and(|column| column == "data")
+            .then_some(NativeRowValueExpr::Data),
+        SqlAstExpr::Nested(expr) => parse_native_row_value_expr(expr),
         SqlAstExpr::Cast {
             expr, data_type, ..
-        } => is_integer_cast_target(data_type) && is_data_integer_expr(expr),
-        _ => false,
+        } => {
+            if is_integer_cast_target(data_type) {
+                parse_native_row_value_expr(expr)
+            } else {
+                None
+            }
+        }
+        SqlAstExpr::Value(value) => sql_bigint_value(value).map(NativeRowValueExpr::Literal),
+        SqlAstExpr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            if operand.is_some() {
+                return None;
+            }
+            let mut branches = Vec::with_capacity(conditions.len());
+            for condition in conditions {
+                branches.push((
+                    condition.condition.clone(),
+                    parse_native_row_value_expr(&condition.result)?,
+                ));
+            }
+            Some(NativeRowValueExpr::Case {
+                branches,
+                else_expr: match else_result.as_deref() {
+                    Some(expr) => Some(Box::new(parse_native_row_value_expr(expr)?)),
+                    None => None,
+                },
+            })
+        }
+        _ => None,
     }
 }
 
@@ -860,13 +1015,89 @@ fn is_integer_cast_target(data_type: &datafusion::sql::sqlparser::ast::DataType)
     name.contains("int") || name.contains("numeric") || name.contains("decimal")
 }
 
+fn topic_or_candidate_filters(
+    base_filter: &NativeLogFilter,
+    selection: &SqlAstExpr,
+) -> Option<Vec<NativeLogFilter>> {
+    let terms = find_topic_or_terms(selection)?;
+    if terms.len() < 2 {
+        return None;
+    }
+    let mut filters = Vec::with_capacity(terms.len());
+    for (index, topic) in terms {
+        let mut filter = base_filter.clone();
+        merge_topic_constraint(&mut filter.topics[index], TopicConstraint::One(topic));
+        filters.push(filter);
+    }
+    Some(filters)
+}
+
+fn find_topic_or_terms(expr: &SqlAstExpr) -> Option<Vec<(usize, B256)>> {
+    match expr {
+        SqlAstExpr::Nested(expr) => find_topic_or_terms(expr),
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
+            find_topic_or_terms(left).or_else(|| find_topic_or_terms(right))
+        }
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
+            let mut terms = collect_topic_or_terms(left)?;
+            terms.extend(collect_topic_or_terms(right)?);
+            Some(terms)
+        }
+        _ => None,
+    }
+}
+
+fn collect_topic_or_terms(expr: &SqlAstExpr) -> Option<Vec<(usize, B256)>> {
+    match expr {
+        SqlAstExpr::Nested(expr) => collect_topic_or_terms(expr),
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
+            let mut terms = collect_topic_or_terms(left)?;
+            terms.extend(collect_topic_or_terms(right)?);
+            Some(terms)
+        }
+        _ => parse_topic_eq_term(expr).map(|term| vec![term]),
+    }
+}
+
+fn parse_topic_eq_term(expr: &SqlAstExpr) -> Option<(usize, B256)> {
+    let SqlAstExpr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    if *op != SqlBinaryOperator::Eq {
+        return None;
+    }
+    let (column, literal, reversed) = normalize_sql_binary(left, right)?;
+    if reversed {
+        return None;
+    }
+    let index = topic_column_index(&column)?;
+    let topic = sql_string(literal).and_then(parse_b256)?;
+    Some((index, topic))
+}
+
 fn execute_native_data_sum(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
+    candidate_filters: &[NativeLogFilter],
+    selection: Option<&SqlAstExpr>,
+    projections: &[NativeAggregateProjection],
+    sum_inputs: &[NativeRowValueExpr],
     cancel_check: Option<&QueryCancelCheck>,
-) -> Result<(BigUint, u64), SqlQueryError> {
+) -> Result<(Vec<Option<BigInt>>, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-    let mut sum = BigUint::default();
+    let mut states = sum_inputs
+        .iter()
+        .cloned()
+        .map(|expr| NativeSumState {
+            expr,
+            sum: BigInt::default(),
+            count: 0,
+        })
+        .collect::<Vec<_>>();
+    let data_only = selection.is_none()
+        && sum_inputs
+            .iter()
+            .all(|expr| matches!(expr, NativeRowValueExpr::Data));
     let mut total_scanned = 0u64;
 
     for partition in snapshot.partitions_in_order(filter.order) {
@@ -874,23 +1105,284 @@ fn execute_native_data_sum(
         if !partition_matches_filter(&partition, filter) {
             continue;
         }
-        let row_ids =
-            candidate_row_ids(&partition.path, filter, true).map_err(map_native_query_io_error)?;
+        let mut row_bitmap = RoaringBitmap::new();
+        for candidate_filter in candidate_filters {
+            if !partition_matches_filter(&partition, candidate_filter) {
+                continue;
+            }
+            let row_ids = candidate_row_ids(&partition.path, candidate_filter, true)
+                .map_err(map_native_query_io_error)?;
+            row_bitmap.extend(row_ids);
+        }
+        let row_ids = row_bitmap.iter().collect::<Vec<_>>();
         if row_ids.is_empty() {
             continue;
         }
 
         let reader = SegmentReader::open(&partition.path).map_err(map_native_query_io_error)?;
-        let values = reader
-            .read_var_bytes("data", Some(&row_ids))
-            .map_err(map_native_query_io_error)?;
-        for value in values {
-            sum += BigUint::from_bytes_be(value.as_ref());
+        if data_only {
+            let values = reader
+                .read_var_bytes("data", Some(&row_ids))
+                .map_err(map_native_query_io_error)?;
+            for value in values {
+                let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
+                for state in &mut states {
+                    state.sum += value.clone();
+                    state.count += 1;
+                }
+            }
+            total_scanned += row_ids.len() as u64;
+            continue;
         }
-        total_scanned += row_ids.len() as u64;
+
+        let rows = reader
+            .read_log_rows(Some(&row_ids))
+            .map_err(map_native_query_io_error)?;
+        for row in rows {
+            if let Some(selection) = selection
+                && !eval_sql_predicate(&row, selection)
+            {
+                continue;
+            }
+            for state in &mut states {
+                if let Some(value) = eval_native_row_value(&row, &state.expr) {
+                    state.sum += value;
+                    state.count += 1;
+                }
+            }
+            total_scanned += 1;
+        }
     }
 
-    Ok((sum, total_scanned))
+    Ok((
+        projections
+            .iter()
+            .map(|projection| eval_native_aggregate_expr(&projection.expr, &states))
+            .collect(),
+        total_scanned,
+    ))
+}
+
+fn eval_native_aggregate_expr(
+    expr: &NativeAggregateExpr,
+    states: &[NativeSumState],
+) -> Option<BigInt> {
+    match expr {
+        NativeAggregateExpr::Sum(index) => {
+            let state = states.get(*index)?;
+            (state.count > 0).then(|| state.sum.clone())
+        }
+        NativeAggregateExpr::Add(left, right) => Some(
+            eval_native_aggregate_expr(left, states)? + eval_native_aggregate_expr(right, states)?,
+        ),
+        NativeAggregateExpr::Sub(left, right) => Some(
+            eval_native_aggregate_expr(left, states)? - eval_native_aggregate_expr(right, states)?,
+        ),
+    }
+}
+
+fn eval_native_row_value(row: &logex_types::LogRow, expr: &NativeRowValueExpr) -> Option<BigInt> {
+    match expr {
+        NativeRowValueExpr::Data => Some(BigInt::from(BigUint::from_bytes_be(row.data.as_ref()))),
+        NativeRowValueExpr::Literal(value) => Some(value.clone()),
+        NativeRowValueExpr::Case {
+            branches,
+            else_expr,
+        } => {
+            for (condition, result) in branches {
+                if eval_sql_predicate(row, condition) {
+                    return eval_native_row_value(row, result);
+                }
+            }
+            else_expr
+                .as_deref()
+                .and_then(|expr| eval_native_row_value(row, expr))
+        }
+    }
+}
+
+fn eval_sql_predicate(row: &logex_types::LogRow, expr: &SqlAstExpr) -> bool {
+    match expr {
+        SqlAstExpr::Nested(expr) => eval_sql_predicate(row, expr),
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
+            eval_sql_predicate(row, left) && eval_sql_predicate(row, right)
+        }
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
+            eval_sql_predicate(row, left) || eval_sql_predicate(row, right)
+        }
+        SqlAstExpr::BinaryOp { left, op, right } => {
+            eval_sql_comparison(row, left, op.clone(), right)
+        }
+        SqlAstExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let Some(column) = sql_identifier(expr) else {
+                return false;
+            };
+            let Some(value) = row_numeric_value(row, &column) else {
+                return false;
+            };
+            let Some(low) = sql_u64(low) else {
+                return false;
+            };
+            let Some(high) = sql_u64(high) else {
+                return false;
+            };
+            let matches = value >= low && value <= high;
+            if *negated { !matches } else { matches }
+        }
+        SqlAstExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let Some(column) = sql_identifier(expr) else {
+                return false;
+            };
+            let matches = list
+                .iter()
+                .any(|literal| eval_column_literal_eq(row, &column, literal));
+            if *negated { !matches } else { matches }
+        }
+        _ => false,
+    }
+}
+
+fn eval_sql_comparison(
+    row: &logex_types::LogRow,
+    left: &SqlAstExpr,
+    operator: SqlBinaryOperator,
+    right: &SqlAstExpr,
+) -> bool {
+    if let Some(column) = sql_identifier(left) {
+        return eval_column_literal_comparison(row, &column, operator, right, false);
+    }
+    if let Some(column) = sql_identifier(right) {
+        return eval_column_literal_comparison(row, &column, operator, left, true);
+    }
+    false
+}
+
+fn eval_column_literal_comparison(
+    row: &logex_types::LogRow,
+    column: &str,
+    operator: SqlBinaryOperator,
+    literal: &SqlAstExpr,
+    reversed: bool,
+) -> bool {
+    match column {
+        "block_number" | "timestamp" | "data_len" | "source" => {
+            let Some(row_value) = row_numeric_value(row, column) else {
+                return false;
+            };
+            let Some(literal_value) = sql_u64(literal) else {
+                return false;
+            };
+            compare_u64(row_value, operator, literal_value, reversed)
+        }
+        "block_hash" => {
+            let Some(value) = sql_string(literal).and_then(parse_b256) else {
+                return false;
+            };
+            compare_eq(row.block_hash == value, operator, reversed)
+        }
+        "address" => {
+            let Some(value) = sql_string(literal).and_then(parse_address) else {
+                return false;
+            };
+            compare_eq(row.address == value, operator, reversed)
+        }
+        column if topic_column_index(column).is_some() => {
+            let Some(value) = sql_string(literal).and_then(parse_b256) else {
+                return false;
+            };
+            let topic = row_topic(row, topic_column_index(column).unwrap());
+            compare_eq(topic == Some(value), operator, reversed)
+        }
+        "data" => {
+            let Some(value) = sql_string(literal).and_then(parse_hex_bytes) else {
+                return false;
+            };
+            compare_bytes(row.data.as_ref(), operator, value.as_slice(), reversed)
+        }
+        _ => false,
+    }
+}
+
+fn eval_column_literal_eq(row: &logex_types::LogRow, column: &str, literal: &SqlAstExpr) -> bool {
+    eval_column_literal_comparison(row, column, SqlBinaryOperator::Eq, literal, false)
+}
+
+fn row_numeric_value(row: &logex_types::LogRow, column: &str) -> Option<u64> {
+    match column {
+        "block_number" => Some(row.block_number),
+        "timestamp" => Some(row.timestamp),
+        "data_len" => Some(row.data_len as u64),
+        "source" => Some(row.source as u8 as u64),
+        _ => None,
+    }
+}
+
+fn row_topic(row: &logex_types::LogRow, index: usize) -> Option<B256> {
+    match index {
+        0 => row.topic0,
+        1 => row.topic1,
+        2 => row.topic2,
+        3 => row.topic3,
+        _ => None,
+    }
+}
+
+fn compare_eq(matches: bool, operator: SqlBinaryOperator, _reversed: bool) -> bool {
+    match operator {
+        SqlBinaryOperator::Eq => matches,
+        SqlBinaryOperator::NotEq => !matches,
+        _ => false,
+    }
+}
+
+fn compare_u64(left: u64, operator: SqlBinaryOperator, right: u64, reversed: bool) -> bool {
+    if reversed {
+        return compare_u64(right, operator, left, false);
+    }
+    match operator {
+        SqlBinaryOperator::Eq => left == right,
+        SqlBinaryOperator::NotEq => left != right,
+        SqlBinaryOperator::Gt => left > right,
+        SqlBinaryOperator::GtEq => left >= right,
+        SqlBinaryOperator::Lt => left < right,
+        SqlBinaryOperator::LtEq => left <= right,
+        _ => false,
+    }
+}
+
+fn compare_bytes(left: &[u8], operator: SqlBinaryOperator, right: &[u8], reversed: bool) -> bool {
+    if reversed {
+        return compare_bytes(right, operator, left, false);
+    }
+    match operator {
+        SqlBinaryOperator::Eq => left == right,
+        SqlBinaryOperator::NotEq => left != right,
+        SqlBinaryOperator::Gt => left > right,
+        SqlBinaryOperator::GtEq => left >= right,
+        SqlBinaryOperator::Lt => left < right,
+        SqlBinaryOperator::LtEq => left <= right,
+        _ => false,
+    }
+}
+
+fn sql_bigint_value(value: &datafusion::sql::sqlparser::ast::ValueWithSpan) -> Option<BigInt> {
+    match &value.value {
+        SqlValue::Number(value, _) => value.parse().ok(),
+        SqlValue::SingleQuotedString(value)
+        | SqlValue::DoubleQuotedString(value)
+        | SqlValue::TripleSingleQuotedString(value)
+        | SqlValue::TripleDoubleQuotedString(value) => value.parse().ok(),
+        _ => None,
+    }
 }
 
 fn map_native_query_io_error(err: std::io::Error) -> SqlQueryError {
@@ -2366,7 +2858,7 @@ fn to_hex_bytes(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, B256, bytes};
+    use alloy_primitives::{Address, B256, bytes, keccak256};
     use logex_index::IndexBuilder;
     use logex_storage::PartitionManagerConfig;
     use logex_types::{LogRow, Source};
@@ -2494,6 +2986,77 @@ mod tests {
         (tmp, storage)
     }
 
+    fn setup_transfer_balance_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let token = parse_address("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let target = padded_address_topic("0xE6c031F4C63e76e453d9A0aAe566D06236d11F95");
+        let other = padded_address_topic("0x99C7ec507e16489F901214aB4ed558737B5e9BDe");
+        let transfer = keccak256(b"Transfer(address,address,uint256)");
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        storage
+            .write_batch(&[
+                transfer_row(25_000_001, token, other, target, 100),
+                transfer_row(25_000_002, token, target, other, 30),
+                transfer_row(25_000_002, token, target, target, 20),
+                transfer_row(25_000_003, token, other, target, 5),
+                transfer_row(24_999_999, token, other, target, 1_000),
+            ])
+            .unwrap();
+        IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        storage
+            .refresh_segment_indexes(storage.hot_partition().meta.id)
+            .unwrap();
+
+        let rows = storage
+            .hot_partition()
+            .meta
+            .path
+            .join("indexes")
+            .join("topic0.bptree");
+        assert!(rows.exists());
+        assert_eq!(transfer, keccak256(b"Transfer(address,address,uint256)"));
+        (tmp, storage)
+    }
+
+    fn padded_address_topic(address: &str) -> B256 {
+        let address = parse_address(address).unwrap();
+        let mut padded = [0u8; 32];
+        padded[12..].copy_from_slice(address.as_slice());
+        B256::from(padded)
+    }
+
+    fn transfer_row(
+        block_number: u64,
+        token: Address,
+        from: B256,
+        to: B256,
+        amount: u64,
+    ) -> LogRow {
+        let mut data = [0u8; 32];
+        data[24..].copy_from_slice(&amount.to_be_bytes());
+        LogRow {
+            block_number,
+            block_hash: B256::repeat_byte((block_number % 255) as u8),
+            timestamp: 1_700_000_000 + block_number,
+            tx_hash: B256::repeat_byte((block_number % 251) as u8),
+            tx_index: 0,
+            log_index: 0,
+            address: token,
+            topic0: Some(keccak256(b"Transfer(address,address,uint256)")),
+            topic1: Some(from),
+            topic2: Some(to),
+            topic3: None,
+            data: data.into(),
+            data_len: 32,
+            source: Source::Receipt,
+        }
+    }
+
     #[tokio::test]
     async fn executes_aggregate_sql_against_native_storage() {
         let (_tmp, storage) = setup_storage();
@@ -2582,6 +3145,44 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert!(result.rows[0]["total"].is_null());
         assert_eq!(result.total_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn sums_case_expressions_and_subtracts_exact_uint256_values() {
+        let (_tmp, storage) = setup_transfer_balance_storage();
+        let result = execute_sql_page(
+            "SELECT
+               SUM(CASE WHEN topic2 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) AS total_received,
+               SUM(CASE WHEN topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) AS total_sent,
+               SUM(CASE WHEN topic2 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) -
+               SUM(CASE WHEN topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) AS net_balance
+             FROM logs
+             WHERE topic0 = event'Transfer(address,address,uint256)'
+               AND address = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+               AND (
+                 topic2 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                 OR
+                 topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+               )
+               AND block_number BETWEEN 25000000 AND 25108000
+               AND data_len = 32
+               AND data >= '0x000000000000000000000000000000000000000000000000000000000000000a'",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["total_received"], "120");
+        assert_eq!(result.rows[0]["total_sent"], "50");
+        assert_eq!(result.rows[0]["net_balance"], "70");
+        assert_eq!(result.total_scanned, 3);
     }
 
     #[tokio::test]
