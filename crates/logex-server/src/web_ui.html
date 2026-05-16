@@ -1680,7 +1680,7 @@ function displayAddressValue(address) {
   var normalized = normalizeAddress(address);
   if (!normalized) return String(address || '');
   var token = tokenForAddress(normalized);
-  return token ? tokenDisplayName(token) : normalized;
+  return token ? tokenDisplayName(token) : toChecksumAddress(normalized) || normalized;
 }
 
 function normalizeTopicHash(value) {
