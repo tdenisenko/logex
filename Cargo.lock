@@ -5125,6 +5125,7 @@ dependencies = [
  "logex-index",
  "logex-storage",
  "logex-types",
+ "num-bigint",
  "parking_lot",
  "roaring",
  "serde_json",

@@ -23,9 +23,11 @@ use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
-    BinaryOperator as SqlBinaryOperator, Expr as SqlAstExpr, GroupByExpr, LimitClause, OrderByKind,
-    SelectItem, SetExpr, Statement as SqlStatement, TableFactor, Value as SqlValue,
+    BinaryOperator as SqlBinaryOperator, DuplicateTreatment, Expr as SqlAstExpr, FunctionArg,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr,
+    Statement as SqlStatement, TableFactor, Value as SqlValue,
 };
+use num_bigint::BigUint;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
@@ -405,6 +407,10 @@ pub async fn execute_sql_page_on_snapshot(
     }
     let sql = rewrite_legacy_sql(sql, head_block)?;
     enforce_read_only_sql(&sql)?;
+    if let Some(result) = try_execute_native_data_sum(&sql, &snapshot, page, cancel_check.clone())?
+    {
+        return Ok(result);
+    }
     if let Some(result) = try_execute_native_select(&sql, &snapshot, page, cancel_check.clone())? {
         return Ok(result);
     }
@@ -618,6 +624,12 @@ struct NativeSqlQuery {
     sql_limit: Option<usize>,
 }
 
+struct NativeDataSumQuery {
+    output_column: String,
+    filter: NativeLogFilter,
+    sql_limit: Option<usize>,
+}
+
 fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQueryError> {
     let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
     if statements.len() != 1 {
@@ -688,6 +700,205 @@ fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQue
         filter,
         sql_limit,
     }))
+}
+
+fn try_execute_native_data_sum(
+    sql: &str,
+    snapshot: &StorageSnapshot,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<Option<SqlQueryResult>, SqlQueryError> {
+    let Some(native_query) = parse_native_data_sum_query(sql)? else {
+        return Ok(None);
+    };
+
+    if native_query.sql_limit == Some(0) || page.limit == Some(0) || page.offset > 0 {
+        return Ok(Some(SqlQueryResult {
+            rows: Vec::new(),
+            total_scanned: 0,
+        }));
+    }
+
+    let (sum, total_scanned) =
+        execute_native_data_sum(snapshot, &native_query.filter, cancel_check.as_ref())?;
+    let mut row = Map::with_capacity(1);
+    let value = if total_scanned == 0 {
+        Value::Null
+    } else {
+        Value::String(sum.to_string())
+    };
+    row.insert(native_query.output_column, value);
+
+    Ok(Some(SqlQueryResult {
+        rows: vec![Value::Object(row)],
+        total_scanned,
+    }))
+}
+
+fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, SqlQueryError> {
+    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return Ok(None);
+    };
+    let SqlStatement::Query(query) = statement.as_ref() else {
+        return Ok(None);
+    };
+    if query.with.is_some()
+        || query.order_by.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.pipe_operators.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(None);
+    };
+    if select.distinct.is_some()
+        || select.top.is_some()
+        || select.into.is_some()
+        || !select.lateral_views.is_empty()
+        || select.prewhere.is_some()
+        || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty())
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+        || select.connect_by.is_some()
+        || !select_has_logs_from(&select.from)
+    {
+        return Ok(None);
+    }
+
+    let Some(output_column) = native_data_sum_projection(&select.projection) else {
+        return Ok(None);
+    };
+    let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
+        return Ok(None);
+    };
+
+    let mut filter = NativeLogFilter::new();
+    if let Some(selection) = &select.selection
+        && !apply_sql_ast_filter(&mut filter, selection)?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(NativeDataSumQuery {
+        output_column,
+        filter,
+        sql_limit,
+    }))
+}
+
+fn native_data_sum_projection(projection: &[SelectItem]) -> Option<String> {
+    if projection.len() != 1 {
+        return None;
+    }
+    match &projection[0] {
+        SelectItem::UnnamedExpr(expr) if is_sum_data_expr(expr) => Some("sum".to_owned()),
+        SelectItem::ExprWithAlias { expr, alias } if is_sum_data_expr(expr) => {
+            Some(alias.value.clone())
+        }
+        _ => None,
+    }
+}
+
+fn is_sum_data_expr(expr: &SqlAstExpr) -> bool {
+    let SqlAstExpr::Function(function) = expr else {
+        return false;
+    };
+    if !function.name.to_string().eq_ignore_ascii_case("sum")
+        || !matches!(&function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return false;
+    }
+    let FunctionArguments::List(args) = &function.args else {
+        return false;
+    };
+    if matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct))
+        || !args.clauses.is_empty()
+        || args.args.len() != 1
+    {
+        return false;
+    }
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = &args.args[0] else {
+        return false;
+    };
+    is_data_integer_expr(expr)
+}
+
+fn is_data_integer_expr(expr: &SqlAstExpr) -> bool {
+    match expr {
+        SqlAstExpr::Identifier(_) | SqlAstExpr::CompoundIdentifier(_) => {
+            sql_identifier(expr).is_some_and(|column| column == "data")
+        }
+        SqlAstExpr::Nested(expr) => is_data_integer_expr(expr),
+        SqlAstExpr::Cast {
+            expr, data_type, ..
+        } => is_integer_cast_target(data_type) && is_data_integer_expr(expr),
+        _ => false,
+    }
+}
+
+fn is_integer_cast_target(data_type: &datafusion::sql::sqlparser::ast::DataType) -> bool {
+    let name = data_type.to_string().to_ascii_lowercase();
+    name.contains("int") || name.contains("numeric") || name.contains("decimal")
+}
+
+fn execute_native_data_sum(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<(BigUint, u64), SqlQueryError> {
+    check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+    let mut sum = BigUint::default();
+    let mut total_scanned = 0u64;
+
+    for partition in snapshot.partitions_in_order(filter.order) {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        if !partition_matches_filter(&partition, filter) {
+            continue;
+        }
+        let row_ids =
+            candidate_row_ids(&partition.path, filter, true).map_err(map_native_query_io_error)?;
+        if row_ids.is_empty() {
+            continue;
+        }
+
+        let reader = SegmentReader::open(&partition.path).map_err(map_native_query_io_error)?;
+        let values = reader
+            .read_var_bytes("data", Some(&row_ids))
+            .map_err(map_native_query_io_error)?;
+        for value in values {
+            sum += BigUint::from_bytes_be(value.as_ref());
+        }
+        total_scanned += row_ids.len() as u64;
+    }
+
+    Ok((sum, total_scanned))
+}
+
+fn map_native_query_io_error(err: std::io::Error) -> SqlQueryError {
+    if err.kind() == std::io::ErrorKind::Interrupted {
+        SqlQueryError::DataFusion(DataFusionError::Execution("query canceled".to_owned()))
+    } else {
+        SqlQueryError::Storage(err)
+    }
 }
 
 fn select_has_logs_from(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]) -> bool {
@@ -2228,6 +2439,61 @@ mod tests {
         (tmp, storage)
     }
 
+    fn setup_amount_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        storage
+            .write_batch(&[
+                LogRow {
+                    block_number: 300,
+                    block_hash: B256::repeat_byte(0x03),
+                    timestamp: 1_700_003_000,
+                    tx_hash: B256::repeat_byte(0x33),
+                    tx_index: 0,
+                    log_index: 0,
+                    address: Address::repeat_byte(0xCC),
+                    topic0: Some(B256::repeat_byte(0xDD)),
+                    topic1: None,
+                    topic2: None,
+                    topic3: None,
+                    data: bytes!(
+                        "0000000000000000000000000000000100000000000000000000000000000000"
+                    ),
+                    data_len: 32,
+                    source: Source::Receipt,
+                },
+                LogRow {
+                    block_number: 301,
+                    block_hash: B256::repeat_byte(0x04),
+                    timestamp: 1_700_003_012,
+                    tx_hash: B256::repeat_byte(0x44),
+                    tx_index: 0,
+                    log_index: 0,
+                    address: Address::repeat_byte(0xCC),
+                    topic0: Some(B256::repeat_byte(0xDD)),
+                    topic1: None,
+                    topic2: None,
+                    topic3: None,
+                    data: bytes!(
+                        "0000000000000000000000000000000000000000000000000000000000000005"
+                    ),
+                    data_len: 32,
+                    source: Source::Receipt,
+                },
+            ])
+            .unwrap();
+        IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        storage
+            .refresh_segment_indexes(storage.hot_partition().meta.id)
+            .unwrap();
+        (tmp, storage)
+    }
+
     #[tokio::test]
     async fn executes_aggregate_sql_against_native_storage() {
         let (_tmp, storage) = setup_storage();
@@ -2241,6 +2507,81 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn sums_hex_data_as_exact_decimal_bigint() {
+        let (_tmp, storage) = setup_amount_storage();
+        let result = execute_sql_page(
+            "SELECT SUM(data) AS total FROM logs WHERE data_len = 32",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0]["total"],
+            "340282366920938463463374607431768211461"
+        );
+        assert_eq!(result.total_scanned, 2);
+    }
+
+    #[tokio::test]
+    async fn sums_cast_hex_data_as_numeric() {
+        let (_tmp, storage) = setup_amount_storage();
+        let result = execute_sql_page(
+            "SELECT SUM(CAST(data AS NUMERIC)) AS total FROM logs WHERE data_len = 32",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.rows[0]["total"],
+            "340282366920938463463374607431768211461"
+        );
+        assert_eq!(result.total_scanned, 2);
+    }
+
+    #[tokio::test]
+    async fn sums_postgres_style_cast_hex_data_as_numeric() {
+        let (_tmp, storage) = setup_amount_storage();
+        let result = execute_sql_page(
+            "SELECT SUM(data::NUMERIC) AS total FROM logs WHERE data_len = 32",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.rows[0]["total"],
+            "340282366920938463463374607431768211461"
+        );
+        assert_eq!(result.total_scanned, 2);
+    }
+
+    #[tokio::test]
+    async fn sum_data_returns_null_when_no_rows_match() {
+        let (_tmp, storage) = setup_amount_storage();
+        let result = execute_sql_page(
+            "SELECT SUM(data) AS total FROM logs WHERE block_number = 999",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0]["total"].is_null());
+        assert_eq!(result.total_scanned, 0);
     }
 
     #[tokio::test]

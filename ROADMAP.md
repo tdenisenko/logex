@@ -22,6 +22,9 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Validated a broader USDC Transfer smoke over the same timestamp range: 500 rows in 1.23 seconds.
 - Restored the larger custom date-picker icon while keeping the interactive `showPicker()` click path.
 - Added a hand cursor only over the date-picker icon hit area.
+- Display query-result `timestamp` fields as local `YYYY-MM-DD HH:mm:ss` values while keeping Unix timestamps as the raw copied/exported value.
+- Added exact native `SUM(data)` support for Ethereum `uint256` event data, including `SUM(CAST(data AS NUMERIC))` and PostgreSQL-style `SUM(data::NUMERIC)`.
+- Validated `SUM(data)` on the remote full-sync data directory: the exact bounded USDC query scanned the same 5 rows as the non-aggregate query and completed in 0.21-0.24 seconds; a dense one-day USDC range summed 505,388 rows in 1.93 seconds.
 
 ## Remaining TODOs
 
@@ -31,7 +34,7 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 
 2. Broaden query compatibility tests.
    - Reason: The SQL surface should stay close to PostgreSQL-style log analysis while remaining scoped to verified Ethereum logs.
-   - Completion criteria: Tests cover projections, aliases, predicates, block/time bounds, ordering, limit/offset, unbounded results, aggregates, grouping, distinct, nulls, invalid SQL, unsupported tables, and deterministic errors.
+   - Completion criteria: Tests cover projections, aliases, predicates, block/time bounds, ordering, limit/offset, unbounded results, aggregates beyond `SUM(data)`, grouping, distinct, nulls, invalid SQL, unsupported tables, and deterministic errors.
 
 3. Broaden common ERC20 query performance coverage.
    - Reason: Transfer queries over dense mainnet ranges must stay fast for token-wide, sender-filtered, receiver-filtered, amount-filtered, and time-bounded shapes.
@@ -51,6 +54,7 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Dashboard query history and query-builder state remain browser-local only.
 - Bounded log queries should prune whole segments with metadata first, then use exact indexes where available, then apply row-level checks for correctness.
 - The native SQL fast path is limited to simple ordered `logs` queries; more complex SQL continues through DataFusion.
+- `SUM(data)` is handled by a dedicated native aggregate path instead of DataFusion because Ethereum event `data` is hex-encoded `uint256`; returning an exact decimal string avoids `u64`/JavaScript precision loss.
 - ERC20 Transfer indexing prioritizes `(address, topic0)`, `(address, topic0, topic1)`, and `(address, topic0, topic2)` because those cover token, sender, and receiver filters used by the query builder.
 - Query execution snapshots storage metadata before scanning so long queries do not block sync writes.
 - Query-builder date/time controls show LogEx's custom calendar icon while clicks in the icon area open the native `datetime-local` picker through `showPicker()`; the hand cursor is limited to that same icon hit area.
@@ -69,10 +73,14 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Challenge: Timestamp predicates previously could still touch irrelevant segments.
   - Resolution: Added timestamp metadata to segments/manifests and pruned partitions before opening segment data.
 
+- Challenge: DataFusion cannot directly aggregate LogEx's hex-encoded Ethereum `uint256` `data` values without lossy or unsupported casts.
+  - Resolution: Added a native `SUM(data)` path that uses the existing predicate/index pruning, reads only matching `data` cells, sums with arbitrary precision, and returns the exact decimal result.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected query UI, SQL execution, native scanning, index building, and storage metadata paths.
-- Removed obsolete assumptions around exact predicate pushdown by rechecking native predicates before returning rows.
+- Inspected query-result rendering and SQL aggregate execution for obsolete formatting or debug code.
+- Kept row-level predicate rechecks for materialized native row queries; the `SUM(data)` path relies on exact candidate row-id filtering and reads only the `data` column.
 - No debug-only code is intentionally left in the query path.
 
 ## Git Workflow

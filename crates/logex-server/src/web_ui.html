@@ -1756,6 +1756,24 @@ function formatTokenAmount(value, token) {
   return formatted + (token.symbol ? ' ' + token.symbol : '');
 }
 
+function formatUnixTimestampLocal(value) {
+  var raw = formatCell(value).trim();
+  if (!/^\d+$/.test(raw)) return null;
+  var seconds = Number(raw);
+  if (!Number.isFinite(seconds)) return null;
+  var date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return null;
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')
+  ].join('-') + ' ' + [
+    String(date.getHours()).padStart(2, '0'),
+    String(date.getMinutes()).padStart(2, '0'),
+    String(date.getSeconds()).padStart(2, '0')
+  ].join(':');
+}
+
 function displayTopicValue(column, value) {
   var raw = formatCell(value);
   var topic = normalizeTopicHash(raw);
@@ -1774,6 +1792,7 @@ function tokenForResultRow(row) {
 
 function displayCellValue(column, value, row) {
   var raw = formatCell(value);
+  if (column === 'timestamp') return formatUnixTimestampLocal(raw) || raw;
   if (column === 'address') return displayAddressValue(raw);
   if (/^topic[0-3]$/.test(column)) return displayTopicValue(column, value);
   if (column === 'topics' && Array.isArray(value)) {
@@ -1799,6 +1818,7 @@ function resultHasTransferContext(rows) {
 
 function columnTitle(column, rows) {
   var transfer = resultHasTransferContext(rows);
+  if (column === 'timestamp') return 'timestamp (local)';
   if (column === 'topic0') return transfer ? 'topic0 (Transfer)' : 'topic0 (event)';
   if (transfer && column === 'topic1') return 'topic1 (from)';
   if (transfer && column === 'topic2') return 'topic2 (to)';
