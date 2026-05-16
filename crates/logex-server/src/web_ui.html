@@ -502,7 +502,7 @@
 
   .builder-controls {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
   }
 
@@ -534,6 +534,30 @@
   .builder-control input:focus, .builder-control select:focus {
     border-color: var(--query);
     box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
+  }
+
+  .builder-mode {
+    display: inline-flex;
+    width: 100%;
+    min-height: 42px;
+    padding: 3px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #070a0e;
+  }
+
+  .builder-mode button {
+    flex: 1;
+    min-height: 34px;
+    padding: 0 10px;
+    color: var(--muted);
+    background: transparent;
+    font-size: var(--font-small);
+  }
+
+  .builder-mode button.active {
+    color: var(--text);
+    background: rgba(178, 140, 255, .18);
   }
 
   .builder-fields {
@@ -953,11 +977,18 @@
     <div class="foldout-body query-builder-body">
       <div class="builder-controls">
         <label class="builder-control">
-          <span>From block</span>
+          <span>Range</span>
+          <span class="builder-mode" role="group" aria-label="Range type">
+            <button type="button" class="active" data-builder-range-mode="block">Blocks</button>
+            <button type="button" data-builder-range-mode="time">Time</button>
+          </span>
+        </label>
+        <label class="builder-control">
+          <span id="builderFromLabel">From block</span>
           <input type="number" id="builderFromBlock" min="0" step="1" inputmode="numeric">
         </label>
         <label class="builder-control">
-          <span>To block</span>
+          <span id="builderToLabel">To block</span>
           <input type="number" id="builderToBlock" min="0" step="1" inputmode="numeric">
         </label>
         <label class="builder-control">
@@ -966,9 +997,15 @@
         </label>
         <label class="builder-control">
           <span>Event</span>
-          <select id="builderEvent">
-            <option value="transfer">Transfer</option>
-          </select>
+          <input type="text" id="builderEvent" value="Transfer(address,address,uint256)" spellcheck="false">
+        </label>
+        <label class="builder-control">
+          <span>Amount min</span>
+          <input type="text" id="builderAmountMin" inputmode="numeric" placeholder="Raw uint256">
+        </label>
+        <label class="builder-control">
+          <span>Amount max</span>
+          <input type="text" id="builderAmountMax" inputmode="numeric" placeholder="Raw uint256">
         </label>
       </div>
       <div class="builder-fields" id="builderFields"></div>
@@ -1054,6 +1091,9 @@ var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
 var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
 var QUERY_HISTORY_LIMIT = 50;
 var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
+var EVENT_SIGNATURE_BY_TOPIC = {};
+EVENT_SIGNATURE_BY_TOPIC[TRANSFER_TOPIC0] = TRANSFER_EVENT_SIGNATURE;
 var LOG_FIELDS = [
   'block_number',
   'block_hash',
@@ -1075,6 +1115,7 @@ var DEFAULT_BUILDER_FIELDS = [
   'block_number',
   'tx_hash',
   'address',
+  'topic0',
   'topic1',
   'topic2',
   'data',
@@ -1126,6 +1167,7 @@ var queryStartedAtMs = null;
 var queryTimerInterval = null;
 var copyToastTimeout = null;
 var queryBuilderTouched = false;
+var builderRangeMode = 'block';
 
 function byId(id) {
   return document.getElementById(id);
@@ -1344,15 +1386,58 @@ function tokenDisplayName(token) {
   return token.name === token.symbol ? token.symbol : token.name + ' (' + token.symbol + ')';
 }
 
-function tokenForCellValue(value) {
-  var address = normalizeAddress(value);
-  return address ? ERC20_TOKEN_BY_ADDRESS[address] || null : null;
+function displayAddressValue(address) {
+  var normalized = normalizeAddress(address);
+  if (!normalized) return String(address || '');
+  var token = ERC20_TOKEN_BY_ADDRESS[normalized];
+  return token ? tokenDisplayName(token) : normalized;
+}
+
+function normalizeTopicHash(value) {
+  var text = String(value || '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(text)) return null;
+  return text.toLowerCase();
+}
+
+function decodeTopicAddress(value) {
+  var topic = normalizeTopicHash(value);
+  if (!topic || topic.slice(2, 26) !== '000000000000000000000000') return null;
+  return '0x' + topic.slice(26);
+}
+
+function decodeUint256Hex(value) {
+  var topic = normalizeTopicHash(value);
+  if (!topic) return null;
+  try {
+    return BigInt(topic).toString(10);
+  } catch (_) {
+    return null;
+  }
+}
+
+function displayTopicValue(column, value) {
+  var raw = formatCell(value);
+  var topic = normalizeTopicHash(raw);
+  if (!topic) return raw;
+  if (column === 'topic0' && EVENT_SIGNATURE_BY_TOPIC[topic]) {
+    return EVENT_SIGNATURE_BY_TOPIC[topic];
+  }
+  var decodedAddress = decodeTopicAddress(topic);
+  return decodedAddress ? displayAddressValue(decodedAddress) : topic;
 }
 
 function displayCellValue(column, value) {
   var raw = formatCell(value);
-  var token = tokenForCellValue(raw);
-  if (token) return tokenDisplayName(token);
+  if (column === 'address') return displayAddressValue(raw);
+  if (/^topic[0-3]$/.test(column)) return displayTopicValue(column, value);
+  if (column === 'topics' && Array.isArray(value)) {
+    return value.map(function(topic, index) {
+      return displayTopicValue('topic' + index, topic);
+    }).join(', ');
+  }
+  if (column === 'data') {
+    return decodeUint256Hex(raw) || raw;
+  }
   return raw;
 }
 
@@ -1388,6 +1473,59 @@ function parseBuilderBlock(id) {
   return number;
 }
 
+function parseBuilderTimestamp(id, label) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  var millis = Date.parse(value);
+  if (!Number.isFinite(millis)) {
+    throw new Error(label + ' must be a valid local time.');
+  }
+  return Math.floor(millis / 1000);
+}
+
+function normalizeEventSignature(value) {
+  var text = String(value || '').trim().replace(/\s+/g, '');
+  var match = text.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\((.*)\)$/);
+  if (!match) {
+    throw new Error('Event must use the format Transfer(address,address,uint256).');
+  }
+  var args = match[2];
+  if (args === '') return match[1] + '()';
+  var types = args.split(',');
+  if (!types.every(function(type) {
+    return /^[A-Za-z][A-Za-z0-9_]*(\[[0-9]*\])*$/.test(type);
+  })) {
+    throw new Error('Event argument types must be canonical ABI types without names.');
+  }
+  return match[1] + '(' + types.join(',') + ')';
+}
+
+function parseUint256Amount(id, label) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  var parsed;
+  try {
+    if (/^0x[0-9a-fA-F]+$/.test(value)) {
+      parsed = BigInt(value);
+    } else if (/^\d+$/.test(value)) {
+      parsed = BigInt(value);
+    } else {
+      throw new Error();
+    }
+  } catch (_) {
+    throw new Error(label + ' must be a non-negative integer or 0x hex amount.');
+  }
+  var max = (1n << 256n) - 1n;
+  if (parsed < 0n || parsed > max) {
+    throw new Error(label + ' must fit in uint256.');
+  }
+  return parsed;
+}
+
+function uint256SqlHex(value) {
+  return '0x' + value.toString(16).padStart(64, '0');
+}
+
 function selectedBuilderFields() {
   return Array.prototype.map.call(document.querySelectorAll('[data-builder-field].active'), function(button) {
     return button.getAttribute('data-builder-field');
@@ -1400,21 +1538,44 @@ function buildQueryFromBuilder() {
   var selectedFields = selectedBuilderFields();
   if (!selectedFields.length) throw new Error('Select at least one field.');
 
-  var fromBlock = parseBuilderBlock('builderFromBlock');
-  var toBlock = parseBuilderBlock('builderToBlock');
-  if (fromBlock != null && toBlock != null && fromBlock > toBlock) {
-    throw new Error('From block must be less than or equal to to block.');
+  var eventSignature = normalizeEventSignature(byId('builderEvent').value);
+  var rangeColumn = builderRangeMode === 'time' ? 'timestamp' : 'block_number';
+  var fromRange = builderRangeMode === 'time'
+    ? parseBuilderTimestamp('builderFromBlock', 'From time')
+    : parseBuilderBlock('builderFromBlock');
+  var toRange = builderRangeMode === 'time'
+    ? parseBuilderTimestamp('builderToBlock', 'To time')
+    : parseBuilderBlock('builderToBlock');
+  if (fromRange != null && toRange != null && fromRange > toRange) {
+    throw new Error(builderRangeMode === 'time'
+      ? 'From time must be before or equal to to time.'
+      : 'From block must be less than or equal to to block.');
   }
 
-  var conditions = ['topic0 = ' + sqlString(TRANSFER_TOPIC0)];
+  var minAmount = parseUint256Amount('builderAmountMin', 'Amount min');
+  var maxAmount = parseUint256Amount('builderAmountMax', 'Amount max');
+  if (minAmount != null && maxAmount != null && minAmount > maxAmount) {
+    throw new Error('Amount min must be less than or equal to amount max.');
+  }
+
+  var conditions = ['topic0 = event' + sqlString(eventSignature)];
   var tokenAddress = normalizeAddress(byId('builderToken').value);
   if (tokenAddress) conditions.push('address = ' + sqlString(tokenAddress));
-  if (fromBlock != null && toBlock != null) {
-    conditions.push('block_number BETWEEN ' + fromBlock + ' AND ' + toBlock);
-  } else if (fromBlock != null) {
-    conditions.push('block_number >= ' + fromBlock);
-  } else if (toBlock != null) {
-    conditions.push('block_number <= ' + toBlock);
+  if (fromRange != null && toRange != null) {
+    conditions.push(rangeColumn + ' BETWEEN ' + fromRange + ' AND ' + toRange);
+  } else if (fromRange != null) {
+    conditions.push(rangeColumn + ' >= ' + fromRange);
+  } else if (toRange != null) {
+    conditions.push(rangeColumn + ' <= ' + toRange);
+  }
+  if (minAmount != null || maxAmount != null) {
+    conditions.push('data_len = 32');
+  }
+  if (minAmount != null) {
+    conditions.push('data >= ' + sqlString(uint256SqlHex(minAmount)));
+  }
+  if (maxAmount != null) {
+    conditions.push('data <= ' + sqlString(uint256SqlHex(maxAmount)));
   }
 
   return [
@@ -1445,10 +1606,43 @@ function markQueryBuilderTouched() {
   queryBuilderTouched = true;
 }
 
+function setBuilderRangeMode(mode) {
+  builderRangeMode = mode === 'time' ? 'time' : 'block';
+  Array.prototype.forEach.call(document.querySelectorAll('[data-builder-range-mode]'), function(button) {
+    button.classList.toggle('active', button.getAttribute('data-builder-range-mode') === builderRangeMode);
+  });
+  var fromInput = byId('builderFromBlock');
+  var toInput = byId('builderToBlock');
+  var isTime = builderRangeMode === 'time';
+  byId('builderFromLabel').textContent = isTime ? 'From time' : 'From block';
+  byId('builderToLabel').textContent = isTime ? 'To time' : 'To block';
+  fromInput.value = '';
+  toInput.value = '';
+  fromInput.placeholder = '';
+  toInput.placeholder = '';
+  fromInput.type = isTime ? 'datetime-local' : 'number';
+  toInput.type = isTime ? 'datetime-local' : 'number';
+  if (isTime) {
+    fromInput.removeAttribute('min');
+    toInput.removeAttribute('min');
+    fromInput.removeAttribute('step');
+    toInput.removeAttribute('step');
+    fromInput.removeAttribute('inputmode');
+    toInput.removeAttribute('inputmode');
+  } else {
+    fromInput.setAttribute('min', '0');
+    toInput.setAttribute('min', '0');
+    fromInput.setAttribute('step', '1');
+    toInput.setAttribute('step', '1');
+    fromInput.setAttribute('inputmode', 'numeric');
+  }
+}
+
 function maybeApplyBuilderRange(fromBlock, toBlock) {
   var fromInput = byId('builderFromBlock');
   var toInput = byId('builderToBlock');
   if (!fromInput || !toInput || queryBuilderTouched) return;
+  if (builderRangeMode !== 'block') return;
   if (toBlock == null) return;
   fromInput.value = String(toBlock);
   toInput.value = String(toBlock);
@@ -2379,7 +2573,14 @@ byId('builderFields').addEventListener('click', function(event) {
   markQueryBuilderTouched();
 });
 
-['builderFromBlock', 'builderToBlock', 'builderToken', 'builderEvent'].forEach(function(id) {
+document.querySelector('.builder-mode').addEventListener('click', function(event) {
+  var button = event.target.closest('[data-builder-range-mode]');
+  if (!button) return;
+  setBuilderRangeMode(button.getAttribute('data-builder-range-mode'));
+  markQueryBuilderTouched();
+});
+
+['builderFromBlock', 'builderToBlock', 'builderToken', 'builderEvent', 'builderAmountMin', 'builderAmountMax'].forEach(function(id) {
   byId(id).addEventListener('input', markQueryBuilderTouched);
   byId(id).addEventListener('change', markQueryBuilderTouched);
 });

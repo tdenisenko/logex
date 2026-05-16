@@ -21,6 +21,8 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Polished query history display by renaming rows to result, widening that column, moving result detail into the expanded row, left-aligning actions, and adding copy feedback for result cells.
 - Added the dashboard query builder with field toggles, block range inputs, a Transfer event default, and a top ERC20 token selector that generates SQL into the Query Logs editor.
 - Added display-only token names for known ERC20 contract addresses in query results while preserving raw values for copy and CSV export.
+- Reworked the query builder event control into a free-form ABI signature input, added mutually exclusive block/time ranges, and added raw `uint256` amount range filters for transfer-style logs.
+- Added display-only decoding for known event topics, ABI-encoded address topics, and 32-byte amount data while preserving raw copy/export behavior.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -62,6 +64,8 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Query history is stored only in browser `localStorage`; it is user convenience state and must not be written to the node data directory.
 - ERC20 token names in the query builder should map to contract addresses, not event topics. The ERC20 `Transfer` topic0 is shared across tokens, while the log `address` identifies the token contract.
 - Token-name substitution in query results is display-only; copy and CSV export keep the raw query values.
+- Query-builder amount filters operate on raw `uint256` event data because token decimals are not stored yet. User-facing decimal-unit filters would require trusted token metadata.
+- The builder uses the query engine's `event'...'` literal for event signatures so topic hashing stays consistent with server-side SQL rewriting.
 - Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions
@@ -96,15 +100,18 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: The token selector needs a current but deterministic top-token list without making the dashboard depend on a live market-data API.
   - Resolution: Generated a static Ethereum-platform token dictionary from CoinGecko market-cap order and used it only as dashboard metadata.
 
+- Challenge: Filtering by Transfer amount requires decoding event data, but LogEx stores raw verified logs and does not yet carry token decimals.
+  - Resolution: Added raw `uint256` amount filters over the 32-byte `data` field and kept human token-unit conversion out of scope until token metadata is available.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Removed no code; the builder is an additive UI over the existing query endpoint.
+- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input and removed the now-obsolete fixed-topic builder path.
 
 ## Git Workflow
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, and query builder work.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, and query-builder filter decoding updates.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.
