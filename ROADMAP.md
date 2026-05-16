@@ -24,6 +24,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Reworked the query builder event control into a free-form ABI signature input, added mutually exclusive block/time ranges, and added decimal-aware amount range filters for transfer-style logs.
 - Added display-only decoding for known event topics, ABI-encoded address topics, and 32-byte amount data while preserving raw copy/export behavior.
 - Added token-decimal-aware amount filters, custom ERC20 token input, custom decimals input, explicit local-time to UTC timestamp conversion for time ranges, from/to address chips, and Transfer-aware result headers.
+- Fixed SQL scan correctness for older or unindexed segments by verifying pushed native predicates before returning candidate rows.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -105,15 +106,18 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: Filtering by Transfer amount needs to preserve raw log correctness while matching user-facing token units.
   - Resolution: Added static known-token decimals plus custom-token decimals, then generate raw `uint256` predicates and keep copy/export values raw.
 
+- Challenge: A live query smoke showed pushed SQL filters could be treated as exact even when a segment lacked the matching index.
+  - Resolution: SQL scans now re-check pushed native predicates against materialized candidate rows, and a regression test covers unindexed storage.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input, removed the obsolete fixed-topic builder path, and removed the unused raw `uint256` display helper after token-aware amount formatting replaced it.
+- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input, removed the obsolete fixed-topic builder path, removed the unused raw `uint256` display helper after token-aware amount formatting replaced it, and checked the SQL native scan path for obsolete exact-pushdown assumptions.
 
 ## Git Workflow
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, query-builder filter decoding updates, and custom token/decimal query-builder updates.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, query-builder filter decoding updates, custom token/decimal query-builder updates, and SQL filter correctness updates.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.

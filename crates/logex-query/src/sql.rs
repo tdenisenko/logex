@@ -29,7 +29,9 @@ use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
 
 use crate::lexer::{Token, tokenize};
-use crate::native::{StorageSnapshot, candidate_row_ids, partition_matches_filter};
+use crate::native::{
+    StorageSnapshot, candidate_row_ids, matches_native_filter, partition_matches_filter,
+};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
@@ -160,6 +162,13 @@ impl TableProvider for LogexTableProvider {
             if row_ids.is_empty() {
                 continue;
             }
+            if has_native_constraints(&filter) {
+                row_ids = exact_candidate_row_ids(&partition.path, &filter, row_ids)
+                    .map_err(DataFusionError::IoError)?;
+                if row_ids.is_empty() {
+                    continue;
+                }
+            }
 
             scanned_rows += row_ids.len() as u64;
 
@@ -196,6 +205,31 @@ impl TableProvider for LogexTableProvider {
             generators,
         )?))
     }
+}
+
+fn has_native_constraints(filter: &NativeLogFilter) -> bool {
+    filter.block_hash.is_some()
+        || filter.from_block.is_some()
+        || filter.to_block.is_some()
+        || !filter.addresses.is_empty()
+        || filter
+            .topics
+            .iter()
+            .any(|constraint| !matches!(constraint, TopicConstraint::Any))
+}
+
+fn exact_candidate_row_ids(
+    dir: &std::path::Path,
+    filter: &NativeLogFilter,
+    row_ids: Vec<u32>,
+) -> std::io::Result<Vec<u32>> {
+    let reader = SegmentReader::open(dir)?;
+    let rows = reader.read_log_rows(Some(&row_ids))?;
+    Ok(row_ids
+        .into_iter()
+        .zip(rows)
+        .filter_map(|(row_id, row)| matches_native_filter(&row, filter).then_some(row_id))
+        .collect())
 }
 
 #[derive(Debug)]
@@ -1308,6 +1342,18 @@ mod tests {
         (tmp, storage)
     }
 
+    fn setup_unindexed_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        storage.write_batch(&make_test_rows()).unwrap();
+        (tmp, storage)
+    }
+
     #[tokio::test]
     async fn executes_aggregate_sql_against_native_storage() {
         let (_tmp, storage) = setup_storage();
@@ -1352,6 +1398,26 @@ mod tests {
 
         assert!(result.rows.is_empty());
         assert_eq!(result.total_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn applies_pushed_filters_when_segment_indexes_are_missing() {
+        let (_tmp, storage) = setup_unindexed_storage();
+        let result = execute_sql_page(
+            "SELECT block_number, address FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND block_number BETWEEN 100 AND 100",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(MAX_QUERY_LIMIT), 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert_eq!(
+            result.rows[0]["address"],
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
     }
 
     #[tokio::test]
