@@ -25,6 +25,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Added display-only decoding for known event topics, ABI-encoded address topics, and 32-byte amount data while preserving raw copy/export behavior.
 - Added token-decimal-aware amount filters, custom ERC20 token input, custom decimals input, explicit local-time to UTC timestamp conversion for time ranges, from/to address chips, and Transfer-aware result headers.
 - Fixed SQL scan correctness for older or unindexed segments by verifying pushed native predicates before returning candidate rows.
+- Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, separating from/to address panels, removing amount placeholders, and improving the dark date-picker affordance.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -69,6 +70,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Query-builder amount filters accept user-facing token units and convert them to raw `uint256` values using the selected token's decimals. Known-token decimals are stored in the static dashboard dictionary; custom tokens require the user to provide decimals.
 - The builder uses the query engine's `event'...'` literal for event signatures so topic hashing stays consistent with server-side SQL rewriting.
 - Query-builder time ranges use browser-local date/time inputs but generate UTC epoch-second predicates because Ethereum block timestamps are UTC Unix timestamps.
+- Query-builder address chips store checksummed addresses. All-lower/all-upper inputs are accepted and converted to checksum form; mixed-case inputs must pass EIP-55 validation.
 - Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions
@@ -109,9 +111,12 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Challenge: A live query smoke showed pushed SQL filters could be treated as exact even when a segment lacked the matching index.
   - Resolution: SQL scans now re-check pushed native predicates against materialized candidate rows, and a regression test covers unindexed storage.
 
+- Challenge: Multi-address chip growth could disturb adjacent builder controls and invalid mixed-case addresses were not rejected.
+  - Resolution: Split from/to address inputs into independent panels and added browser-side EIP-55 checksum validation with checksum normalization.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input, removed the obsolete fixed-topic builder path, removed the unused raw `uint256` display helper after token-aware amount formatting replaced it, and checked the SQL native scan path for obsolete exact-pushdown assumptions.
+- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input, removed the obsolete fixed-topic builder path, removed the unused raw `uint256` display helper after token-aware amount formatting replaced it, removed the hidden-token-metadata control path, and checked the SQL native scan path for obsolete exact-pushdown assumptions.
 
 ## Git Workflow
 

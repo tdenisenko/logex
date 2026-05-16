@@ -536,8 +536,20 @@
     box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
   }
 
-  .builder-control.hidden {
-    display: none;
+  .builder-control input[readonly] {
+    color: var(--soft);
+    background: rgba(7, 10, 14, .72);
+  }
+
+  .builder-control input[type="datetime-local"] {
+    color-scheme: dark;
+    padding-right: 10px;
+  }
+
+  .builder-control input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 1;
+    filter: invert(1);
   }
 
   .builder-mode {
@@ -566,18 +578,30 @@
 
   .builder-address-groups {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     gap: 12px;
   }
 
-  .builder-address-group {
+  .builder-address-panel {
     display: grid;
     gap: 8px;
     min-width: 0;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 8px;
+    padding: 12px;
+    background: rgba(9, 13, 18, .72);
+  }
+
+  .builder-address-title {
+    color: var(--muted);
+    font-size: var(--font-small);
+    font-weight: 700;
+    text-transform: uppercase;
   }
 
   .builder-address-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
   }
 
@@ -593,6 +617,7 @@
   .builder-address-list {
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 8px;
     min-height: 30px;
   }
@@ -903,7 +928,7 @@
       justify-content: flex-start;
     }
 
-    .debug-grid, .mini-grid, .builder-controls, .builder-fields, .builder-address-groups {
+    .debug-grid, .mini-grid, .builder-controls, .builder-fields {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -918,7 +943,7 @@
       flex-direction: column;
     }
 
-    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups {
+    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields {
       grid-template-columns: 1fr;
     }
   }
@@ -1062,13 +1087,13 @@
           <span>Token</span>
           <select id="builderToken"></select>
         </label>
-        <label class="builder-control hidden" id="builderCustomTokenAddressControl">
-          <span>Custom token</span>
-          <input type="text" id="builderCustomTokenAddress" placeholder="0x..." spellcheck="false">
+        <label class="builder-control" id="builderCustomTokenAddressControl">
+          <span>Token address</span>
+          <input type="text" id="builderCustomTokenAddress" spellcheck="false" readonly>
         </label>
-        <label class="builder-control hidden" id="builderCustomTokenDecimalsControl">
+        <label class="builder-control" id="builderCustomTokenDecimalsControl">
           <span>Decimals</span>
-          <input type="number" id="builderCustomTokenDecimals" min="0" max="36" step="1" inputmode="numeric" value="18">
+          <input type="number" id="builderCustomTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
         </label>
         <label class="builder-control">
           <span>Event</span>
@@ -1076,32 +1101,28 @@
         </label>
         <label class="builder-control">
           <span>Amount min</span>
-          <input type="text" id="builderAmountMin" inputmode="decimal" placeholder="Token amount">
+          <input type="text" id="builderAmountMin" inputmode="decimal">
         </label>
         <label class="builder-control">
           <span>Amount max</span>
-          <input type="text" id="builderAmountMax" inputmode="decimal" placeholder="Token amount">
+          <input type="text" id="builderAmountMax" inputmode="decimal">
         </label>
       </div>
       <div class="builder-address-groups">
-        <div class="builder-address-group">
-          <label class="builder-control">
-            <span>From addresses</span>
-            <span class="builder-address-row">
-              <input type="text" id="builderFromAddress" data-builder-address-input="from" placeholder="0x..." spellcheck="false">
-              <button type="button" class="secondary" data-add-builder-address="from">Add</button>
-            </span>
-          </label>
+        <div class="builder-address-panel" data-builder-address-panel="from">
+          <div class="builder-address-title">From addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="builderFromAddress" data-builder-address-input="from" placeholder="0x..." spellcheck="false" aria-label="From address">
+            <button type="button" class="secondary" data-add-builder-address="from">Add</button>
+          </div>
           <div class="builder-address-list" id="builderFromAddressList" data-builder-address-list="from"></div>
         </div>
-        <div class="builder-address-group">
-          <label class="builder-control">
-            <span>To addresses</span>
-            <span class="builder-address-row">
-              <input type="text" id="builderToAddress" data-builder-address-input="to" placeholder="0x..." spellcheck="false">
-              <button type="button" class="secondary" data-add-builder-address="to">Add</button>
-            </span>
-          </label>
+        <div class="builder-address-panel" data-builder-address-panel="to">
+          <div class="builder-address-title">To addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="builderToAddress" data-builder-address-input="to" placeholder="0x..." spellcheck="false" aria-label="To address">
+            <button type="button" class="secondary" data-add-builder-address="to">Add</button>
+          </div>
           <div class="builder-address-list" id="builderToAddressList" data-builder-address-list="to"></div>
         </div>
       </div>
@@ -1192,6 +1213,22 @@ var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
 var DEFAULT_TOKEN_DECIMALS = 18;
 var CUSTOM_TOKEN_VALUE = '__custom_erc20__';
 var MAX_TOKEN_DECIMALS = 36;
+var KECCAK_64_MASK = (1n << 64n) - 1n;
+var KECCAK_ROUND_CONSTANTS = [
+  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+  0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+  0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+  0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+  0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
+];
+var KECCAK_ROTATION_OFFSETS = [
+  [0, 36, 3, 41, 18],
+  [1, 44, 10, 45, 2],
+  [62, 6, 43, 15, 61],
+  [28, 55, 25, 21, 56],
+  [27, 20, 39, 8, 14]
+];
 var EVENT_SIGNATURE_BY_TOPIC = {};
 EVENT_SIGNATURE_BY_TOPIC[TRANSFER_TOPIC0] = TRANSFER_EVENT_SIGNATURE;
 var LOG_FIELDS = [
@@ -1484,6 +1521,115 @@ function normalizeAddress(value) {
   return text.toLowerCase();
 }
 
+function rotateLeft64(value, offset) {
+  offset = BigInt(offset);
+  if (offset === 0n) return value & KECCAK_64_MASK;
+  return ((value << offset) | (value >> (64n - offset))) & KECCAK_64_MASK;
+}
+
+function keccakPermutation(state) {
+  for (var round = 0; round < KECCAK_ROUND_CONSTANTS.length; round++) {
+    var c = new Array(5);
+    var d = new Array(5);
+    for (var x = 0; x < 5; x++) {
+      c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+    }
+    for (var dx = 0; dx < 5; dx++) {
+      d[dx] = c[(dx + 4) % 5] ^ rotateLeft64(c[(dx + 1) % 5], 1);
+    }
+    for (var ax = 0; ax < 5; ax++) {
+      for (var ay = 0; ay < 5; ay++) {
+        state[ax + 5 * ay] = (state[ax + 5 * ay] ^ d[ax]) & KECCAK_64_MASK;
+      }
+    }
+
+    var b = new Array(25).fill(0n);
+    for (var bx = 0; bx < 5; bx++) {
+      for (var by = 0; by < 5; by++) {
+        var nextX = by;
+        var nextY = (2 * bx + 3 * by) % 5;
+        b[nextX + 5 * nextY] = rotateLeft64(
+          state[bx + 5 * by],
+          KECCAK_ROTATION_OFFSETS[bx][by]
+        );
+      }
+    }
+
+    for (var cx = 0; cx < 5; cx++) {
+      for (var cy = 0; cy < 5; cy++) {
+        state[cx + 5 * cy] = (
+          b[cx + 5 * cy] ^
+          ((~b[((cx + 1) % 5) + 5 * cy] & KECCAK_64_MASK) & b[((cx + 2) % 5) + 5 * cy])
+        ) & KECCAK_64_MASK;
+      }
+    }
+
+    state[0] = (state[0] ^ KECCAK_ROUND_CONSTANTS[round]) & KECCAK_64_MASK;
+  }
+}
+
+function keccak256AsciiHex(text) {
+  var rate = 136;
+  var bytes = Array.prototype.map.call(String(text), function(char) {
+    return char.charCodeAt(0) & 0xff;
+  });
+  bytes.push(0x01);
+  while (bytes.length % rate !== rate - 1) bytes.push(0);
+  bytes.push(0x80);
+
+  var state = new Array(25).fill(0n);
+  for (var offset = 0; offset < bytes.length; offset += rate) {
+    for (var lane = 0; lane < rate / 8; lane++) {
+      var laneValue = 0n;
+      for (var byteIndex = 0; byteIndex < 8; byteIndex++) {
+        laneValue |= BigInt(bytes[offset + lane * 8 + byteIndex]) << BigInt(8 * byteIndex);
+      }
+      state[lane] ^= laneValue;
+    }
+    keccakPermutation(state);
+  }
+
+  var out = [];
+  for (var outLane = 0; out.length < 32; outLane++) {
+    var value = state[outLane];
+    for (var outByte = 0; outByte < 8 && out.length < 32; outByte++) {
+      out.push(Number((value >> BigInt(8 * outByte)) & 0xffn));
+    }
+  }
+  return out.map(function(byte) {
+    return byte.toString(16).padStart(2, '0');
+  }).join('');
+}
+
+function toChecksumAddress(address) {
+  var normalized = normalizeAddress(address);
+  if (!normalized) return null;
+  var hex = normalized.slice(2);
+  var hash = keccak256AsciiHex(hex);
+  var checksummed = '';
+  for (var index = 0; index < hex.length; index++) {
+    var char = hex[index];
+    checksummed += parseInt(hash[index], 16) >= 8 ? char.toUpperCase() : char;
+  }
+  return '0x' + checksummed;
+}
+
+function parseChecksummedAddress(value, label) {
+  var text = String(value || '').trim();
+  var normalized = normalizeAddress(text);
+  if (!normalized) {
+    throw new Error(label + ' must be a 20-byte 0x address.');
+  }
+  var body = text.slice(2);
+  var hasLower = /[a-f]/.test(body);
+  var hasUpper = /[A-F]/.test(body);
+  var checksummed = toChecksumAddress(normalized);
+  if (hasLower && hasUpper && text !== checksummed) {
+    throw new Error(label + ' has an invalid EIP-55 checksum.');
+  }
+  return checksummed;
+}
+
 function tokenDisplayName(token) {
   return token.name === token.symbol ? token.symbol : token.name + ' (' + token.symbol + ')';
 }
@@ -1505,9 +1651,11 @@ function customBuilderToken(strict) {
   if (!selector || selector.value !== CUSTOM_TOKEN_VALUE) return null;
   var addressInput = byId('builderCustomTokenAddress');
   var decimalsInput = byId('builderCustomTokenDecimals');
-  var address = normalizeAddress(addressInput ? addressInput.value : '');
-  if (!address) {
-    if (strict) throw new Error('Custom token must be a 20-byte 0x address.');
+  var address;
+  try {
+    address = parseChecksummedAddress(addressInput ? addressInput.value : '', 'Custom token');
+  } catch (err) {
+    if (strict) throw err;
     return null;
   }
   var decimals;
@@ -1642,8 +1790,7 @@ function renderQueryBuilder() {
     return '<button type="button" class="field-toggle' + (selected ? ' active' : '') + '" data-builder-field="' + escapeHtml(field) + '" aria-pressed="' + (selected ? 'true' : 'false') + '">' + escapeHtml(field) + '</button>';
   }).join('');
   renderBuilderAddressLists();
-  updateCustomTokenControls();
-  updateBuilderAmountPlaceholders();
+  updateBuilderTokenControls();
 }
 
 function setBuilderStatus(message, isError) {
@@ -1724,21 +1871,35 @@ function builderHasAmountFilter() {
   return byId('builderAmountMin').value.trim() !== '' || byId('builderAmountMax').value.trim() !== '';
 }
 
-function updateCustomTokenControls() {
-  var isCustom = byId('builderToken').value === CUSTOM_TOKEN_VALUE;
-  var addressControl = byId('builderCustomTokenAddressControl');
-  var decimalsControl = byId('builderCustomTokenDecimalsControl');
-  if (addressControl) addressControl.classList.toggle('hidden', !isCustom);
-  if (decimalsControl) decimalsControl.classList.toggle('hidden', !isCustom);
-}
+function updateBuilderTokenControls() {
+  var selector = byId('builderToken');
+  var addressInput = byId('builderCustomTokenAddress');
+  var decimalsInput = byId('builderCustomTokenDecimals');
+  if (!selector || !addressInput || !decimalsInput) return;
 
-function updateBuilderAmountPlaceholders() {
+  var isCustom = selector.value === CUSTOM_TOKEN_VALUE;
   var token = selectedBuilderToken(false);
-  var placeholder = token
-    ? 'Token amount (' + token.decimals + ' decimals)'
-    : 'Select token for amount filter';
-  byId('builderAmountMin').placeholder = placeholder;
-  byId('builderAmountMax').placeholder = placeholder;
+  var wasReadOnly = addressInput.readOnly;
+  addressInput.readOnly = !isCustom;
+  decimalsInput.readOnly = !isCustom;
+  if (token && !isCustom) {
+    addressInput.value = toChecksumAddress(token.address) || token.address;
+    decimalsInput.value = String(token.decimals);
+    return;
+  }
+  if (!isCustom) {
+    addressInput.value = '';
+    decimalsInput.value = '';
+    return;
+  }
+  if (wasReadOnly) {
+    addressInput.value = '';
+    decimalsInput.value = String(DEFAULT_TOKEN_DECIMALS);
+    return;
+  }
+  if (decimalsInput.value.trim() === '') {
+    decimalsInput.value = String(DEFAULT_TOKEN_DECIMALS);
+  }
 }
 
 function parseBuilderAmount(id, label, decimals) {
@@ -1803,9 +1964,12 @@ function renderBuilderAddressLists() {
 
 function addBuilderAddress(kind) {
   var input = byId(builderAddressInputId(kind));
-  var address = normalizeAddress(input.value);
-  if (!address) {
-    setBuilderStatus((kind === 'from' ? 'From' : 'To') + ' address must be a 20-byte 0x address.', true);
+  var label = kind === 'from' ? 'From address' : 'To address';
+  var address;
+  try {
+    address = parseChecksummedAddress(input.value, label);
+  } catch (err) {
+    setBuilderStatus(err.message || label + ' is invalid.', true);
     return;
   }
   var addresses = builderAddressList(kind);
@@ -2895,12 +3059,7 @@ document.querySelector('.builder-mode').addEventListener('click', function(event
 });
 
 byId('builderToken').addEventListener('change', function() {
-  updateCustomTokenControls();
-  updateBuilderAmountPlaceholders();
-});
-
-['builderCustomTokenAddress', 'builderCustomTokenDecimals'].forEach(function(id) {
-  byId(id).addEventListener('input', updateBuilderAmountPlaceholders);
+  updateBuilderTokenControls();
 });
 
 Array.prototype.forEach.call(document.querySelectorAll('[data-add-builder-address]'), function(button) {
