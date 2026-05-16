@@ -28,7 +28,8 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, preserving side-by-side from/to address panels with stable chip-list heights, removing amount placeholders, and adding a deterministic dark-theme date-picker icon.
 - Persisted query builder fields and address lists in browser storage and added per-list reset buttons.
 - Fixed the time-range date picker so the visible calendar affordance is the native interactive picker target with a `showPicker()` fallback.
-- Restored the custom date-picker icon while keeping the interactive `showPicker()` click path.
+- Kept date/time inputs on the native interactive picker path after the custom icon hit target proved unreliable.
+- Removed the hidden 10,000-row SQL query cap, changed dashboard-generated SQL to default to `LIMIT 500`, and left full-result CSV export tied to the complete returned result set.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -62,7 +63,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Historical ETA is log-based when log-rate data is available; block/sec remains an advanced diagnostic because block density varies heavily across history.
 - After EL history reaches genesis, the main dashboard switches from historical reverse-sync metrics to live head-gap metrics.
 - Dashboard CPU is shown as capacity utilization across logical CPUs; raw multi-core process CPU remains available in advanced status data.
-- Query responses keep a hard `10,000` row cap and dashboard pagination defaults to `50` rows.
+- SQL query responses have no hidden server-side row cap; dashboard-generated queries include `LIMIT 500` by default and still paginate loaded results by `50` visible rows.
 - Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
 - Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
 - Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.

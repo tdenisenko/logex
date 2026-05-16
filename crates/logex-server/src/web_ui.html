@@ -544,19 +544,16 @@
   .builder-control input[type="datetime-local"] {
     color-scheme: dark;
     padding-right: 42px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23b28cff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v4'/%3E%3Cpath d='M16 2v4'/%3E%3Crect width='18' height='18' x='3' y='4' rx='2'/%3E%3Cpath d='M3 10h18'/%3E%3C/svg%3E");
-    background-position: right 12px center;
-    background-repeat: no-repeat;
-    background-size: 18px 18px;
   }
 
   .builder-control input[type="datetime-local"]::-webkit-calendar-picker-indicator {
     cursor: pointer;
-    height: 100%;
-    margin-right: -6px;
-    opacity: 0;
-    pointer-events: none;
-    width: 34px;
+    filter: invert(76%) sepia(34%) saturate(1412%) hue-rotate(213deg) brightness(103%) contrast(101%);
+    opacity: .9;
+  }
+
+  .builder-control input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
   }
 
   .builder-mode {
@@ -1221,11 +1218,10 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
 <script>
 var QUERY_PAGE_SIZE = 50;
-var MAX_QUERY_LIMIT = 10000;
+var DEFAULT_QUERY_LIMIT = 500;
 var queryOffset = 0;
 var queryRows = [];
 var queryColumns = [];
-var queryWasCapped = false;
 var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
@@ -1529,7 +1525,8 @@ function buildDefaultQuery(fromBlock, toBlock) {
     'SELECT block_number, tx_hash, address, topic0, data_len, log_index',
     'FROM logs',
     'WHERE block_number = ' + to,
-    'ORDER BY block_number DESC, tx_index DESC, log_index DESC'
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC',
+    'LIMIT ' + DEFAULT_QUERY_LIMIT
   ].join('\n');
 }
 
@@ -2179,7 +2176,7 @@ function buildQueryFromBuilder() {
     'FROM logs',
     'WHERE ' + conditions.join('\n  AND '),
     'ORDER BY block_number DESC, tx_index DESC, log_index DESC',
-    'LIMIT ' + MAX_QUERY_LIMIT
+    'LIMIT ' + DEFAULT_QUERY_LIMIT
   ].join('\n');
 }
 
@@ -3042,9 +3039,8 @@ function renderQueryPage() {
 
   var start = queryOffset + 1;
   var end = Math.min(queryOffset + QUERY_PAGE_SIZE, queryRows.length);
-  var cap = queryWasCapped ? '; capped at ' + fmt(MAX_QUERY_LIMIT) + ' rows' : '';
   setText('resultCount',
-    fmt(queryRows.length) + ' rows loaded' + cap + '; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
+    fmt(queryRows.length) + ' rows loaded; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
   updateQueryButtons();
 }
 
@@ -3062,7 +3058,6 @@ function runQuery() {
   queryOffset = 0;
   queryRows = [];
   queryColumns = [];
-  queryWasCapped = false;
   queryScannedRows = null;
   updateQueryButtons();
   showQueryError('');
@@ -3081,7 +3076,7 @@ function runQuery() {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql: sql, limit: MAX_QUERY_LIMIT, offset: 0 })
+    body: JSON.stringify({ sql: sql, offset: 0 })
   })
     .then(function(response) {
       return response.text().then(function(text) {
@@ -3102,7 +3097,6 @@ function runQuery() {
       }
       queryRows = Array.isArray(result.data.rows) ? result.data.rows : [];
       queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
-      queryWasCapped = result.data.next_offset != null || queryRows.length >= MAX_QUERY_LIMIT;
       queryScannedRows = result.data.total_scanned;
       var durationMs = stopQueryTimer();
       renderQueryPage();
@@ -3111,8 +3105,7 @@ function runQuery() {
         sql: sql,
         durationMs: durationMs,
         rowCount: queryRows.length,
-        scannedRows: queryScannedRows,
-        capped: queryWasCapped
+        scannedRows: queryScannedRows
       });
     })
     .catch(function(err) {
@@ -3122,7 +3115,6 @@ function runQuery() {
       setText('resultCount', 'Query failed.');
       queryRows = [];
       queryColumns = [];
-      queryWasCapped = false;
       queryScannedRows = null;
       updateQueryButtons();
       renderTable([], 'Query failed.');

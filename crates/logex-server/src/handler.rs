@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::response::Json;
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
@@ -12,6 +12,8 @@ use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 use crate::storage_metrics::CachedStorageMetrics;
 
 use crate::ws::SubscriptionManager;
+
+pub(crate) const MAX_LOG_FILTER_LIMIT: usize = 10_000;
 
 /// Shared application state.
 pub struct AppState {
@@ -86,12 +88,12 @@ fn handle_eth_get_logs(
     }
 
     if let Some(limit) = filter.limit
-        && limit > MAX_QUERY_LIMIT
+        && limit > MAX_LOG_FILTER_LIMIT
     {
-        return Err(format!("limit must be at most {MAX_QUERY_LIMIT}"));
+        return Err(format!("limit must be at most {MAX_LOG_FILTER_LIMIT}"));
     }
-    if filter.offset >= MAX_QUERY_LIMIT {
-        return Err(format!("offset must be less than {MAX_QUERY_LIMIT}"));
+    if filter.offset >= MAX_LOG_FILTER_LIMIT {
+        return Err(format!("offset must be less than {MAX_LOG_FILTER_LIMIT}"));
     }
 
     let mut native_filter = filter.to_native_filter(storage.head_block().unwrap_or(0));
@@ -99,7 +101,7 @@ fn handle_eth_get_logs(
         filter
             .limit
             .unwrap_or(DEFAULT_QUERY_PAGE_SIZE)
-            .min(MAX_QUERY_LIMIT - filter.offset),
+            .min(MAX_LOG_FILTER_LIMIT - filter.offset),
     );
     native_filter.offset = filter.offset;
     let rows = logex_query::execute_log_filter(storage, &native_filter)

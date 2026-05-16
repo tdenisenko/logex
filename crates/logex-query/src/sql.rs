@@ -35,7 +35,6 @@ use crate::native::{
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
-pub const MAX_QUERY_LIMIT: usize = 10_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlQueryError {
@@ -62,7 +61,7 @@ pub struct SqlQueryPage {
 impl Default for SqlQueryPage {
     fn default() -> Self {
         Self {
-            limit: Some(DEFAULT_QUERY_PAGE_SIZE),
+            limit: None,
             offset: 0,
         }
     }
@@ -71,23 +70,6 @@ impl Default for SqlQueryPage {
 impl SqlQueryPage {
     pub fn new(limit: Option<usize>, offset: usize) -> Self {
         Self { limit, offset }
-    }
-
-    fn validated(self) -> Result<(usize, usize), SqlQueryError> {
-        if self.offset >= MAX_QUERY_LIMIT {
-            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                "query offset must be less than {MAX_QUERY_LIMIT}"
-            ))));
-        }
-
-        let limit = self.limit.unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
-        if limit > MAX_QUERY_LIMIT {
-            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                "query limit must be at most {MAX_QUERY_LIMIT}"
-            ))));
-        }
-
-        Ok((self.offset, limit.min(MAX_QUERY_LIMIT - self.offset)))
     }
 }
 
@@ -338,7 +320,7 @@ pub async fn execute_sql_page(
     head_block: Option<u64>,
     page: SqlQueryPage,
 ) -> Result<SqlQueryResult, SqlQueryError> {
-    let (offset, limit) = page.validated()?;
+    let SqlQueryPage { limit, offset } = page;
     let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
     if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
@@ -355,7 +337,11 @@ pub async fn execute_sql_page(
     ctx.register_table("logs", Arc::new(table))?;
 
     let dataframe = ctx.sql(&sql).await?;
-    let dataframe = dataframe.limit(offset, Some(limit))?;
+    let dataframe = if offset > 0 || limit.is_some() {
+        dataframe.limit(offset, limit)?
+    } else {
+        dataframe
+    };
     let batches = dataframe.collect().await?;
     let rows = record_batches_to_json(&batches);
 
@@ -1391,7 +1377,7 @@ mod tests {
             "SELECT block_number, tx_hash FROM logs WHERE block_number = 999 ORDER BY block_number DESC, tx_index DESC, log_index DESC",
             &storage,
             storage.head_block(),
-            SqlQueryPage::new(Some(MAX_QUERY_LIMIT), 0),
+            SqlQueryPage::new(None, 0),
         )
         .await
         .unwrap();
@@ -1407,7 +1393,7 @@ mod tests {
             "SELECT block_number, address FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND block_number BETWEEN 100 AND 100",
             &storage,
             storage.head_block(),
-            SqlQueryPage::new(Some(MAX_QUERY_LIMIT), 0),
+            SqlQueryPage::new(None, 0),
         )
         .await
         .unwrap();
@@ -1437,18 +1423,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_query_pages_above_hard_cap() {
+    async fn accepts_large_explicit_query_page_limits() {
         let (_tmp, storage) = setup_storage();
-        let error = execute_sql_page(
+        let result = execute_sql_page(
             "SELECT * FROM logs",
             &storage,
             storage.head_block(),
-            SqlQueryPage::new(Some(MAX_QUERY_LIMIT + 1), 0),
+            SqlQueryPage::new(Some(10_001), 0),
         )
         .await
-        .expect_err("oversized query limit must be rejected");
+        .expect("large query page limits should be accepted");
 
-        assert!(matches!(error, SqlQueryError::DataFusion(_)));
+        assert_eq!(result.rows.len(), 2);
     }
 
     #[tokio::test]

@@ -28,9 +28,11 @@ message QueryResponse {
   repeated QueryRow rows = 1;
   uint64 total_scanned = 2;
   uint64 row_count = 3;
+  // Requested transport page limit. 0 means no transport limit was applied.
   uint64 limit = 4;
   uint64 offset = 5;
   optional uint64 next_offset = 6;
+  // Maximum accepted transport page limit. 0 means unlimited.
   uint64 max_limit = 7;
 }
 
