@@ -52,19 +52,10 @@ pub struct SqlQueryResult {
     pub total_scanned: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SqlQueryPage {
     pub limit: Option<usize>,
     pub offset: usize,
-}
-
-impl Default for SqlQueryPage {
-    fn default() -> Self {
-        Self {
-            limit: None,
-            offset: 0,
-        }
-    }
 }
 
 impl SqlQueryPage {

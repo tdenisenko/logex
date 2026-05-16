@@ -30,6 +30,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Fixed the time-range date picker so the visible calendar affordance is the native interactive picker target with a `showPicker()` fallback.
 - Kept date/time inputs on the native interactive picker path after the custom icon hit target proved unreliable.
 - Removed the hidden 10,000-row SQL query cap, changed dashboard-generated SQL to default to `LIMIT 500`, and left full-result CSV export tied to the complete returned result set.
+- Fixed the CI Clippy failure by deriving `Default` for the now-unbounded SQL query page type.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -48,7 +49,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 4. Expand query-engine compatibility for Ethereum event-log analysis.
    - Reason: LogEx should feel close to a PostgreSQL-style analytical query surface while staying scoped to verified Ethereum logs.
-   - Completion criteria: A broad TDD query suite covers projections, aliases, filters, block ranges, address/topic predicates, ordering, limit/offset caps, aggregates, grouping, distinct values, null handling, invalid SQL, unsupported tables, and deterministic error messages.
+   - Completion criteria: A broad TDD query suite covers projections, aliases, filters, block ranges, address/topic predicates, ordering, limit/offset behavior, unbounded SQL query behavior, aggregates, grouping, distinct values, null handling, invalid SQL, unsupported tables, and deterministic error messages.
 
 5. Measure and improve query performance on realistic segment access patterns.
    - Reason: Complex queries may touch many compressed segments and expose decompression, scanning, or indexing bottlenecks that small unit fixtures cannot reveal.
@@ -128,7 +129,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 
 - Current branch: `feature/query-workbench`
 - New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, query-builder filter decoding updates, custom token/decimal query-builder updates, and SQL filter correctness updates.
+- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, query-builder filter decoding updates, custom token/decimal query-builder updates, SQL filter correctness updates, and unbounded SQL query result handling.
 - Pull request status: draft PR for ongoing query work.
 - Merge status: intentionally not merged until user approval.
 - Blockers: none known.
