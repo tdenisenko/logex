@@ -26,6 +26,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Added token-decimal-aware amount filters, custom ERC20 token input, custom decimals input, explicit local-time to UTC timestamp conversion for time ranges, from/to address chips, and Transfer-aware result headers.
 - Fixed SQL scan correctness for older or unindexed segments by verifying pushed native predicates before returning candidate rows.
 - Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, preserving side-by-side from/to address panels with stable chip-list heights, removing amount placeholders, and adding a deterministic dark-theme date-picker icon.
+- Persisted query builder fields and address lists in browser storage and added per-list reset buttons.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -71,6 +72,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - The builder uses the query engine's `event'...'` literal for event signatures so topic hashing stays consistent with server-side SQL rewriting.
 - Query-builder time ranges use browser-local date/time inputs but generate UTC epoch-second predicates because Ethereum block timestamps are UTC Unix timestamps.
 - Query-builder address chips store checksummed addresses. All-lower/all-upper inputs are accepted and converted to checksum form; mixed-case inputs must pass EIP-55 validation.
+- Query-builder state is stored only in browser `localStorage`, including selected fields, ranges, token metadata, amount inputs, pending address inputs, and from/to address chips.
 - Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions

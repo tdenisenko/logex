@@ -608,7 +608,7 @@
 
   .builder-address-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 8px;
   }
 
@@ -1137,6 +1137,7 @@
           <div class="builder-address-row">
             <input type="text" id="builderFromAddress" data-builder-address-input="from" placeholder="0x..." spellcheck="false" aria-label="From address">
             <button type="button" class="secondary" data-add-builder-address="from">Add</button>
+            <button type="button" class="secondary" data-reset-builder-addresses="from">Reset</button>
           </div>
           <div class="builder-address-list" id="builderFromAddressList" data-builder-address-list="from"></div>
         </div>
@@ -1145,6 +1146,7 @@
           <div class="builder-address-row">
             <input type="text" id="builderToAddress" data-builder-address-input="to" placeholder="0x..." spellcheck="false" aria-label="To address">
             <button type="button" class="secondary" data-add-builder-address="to">Add</button>
+            <button type="button" class="secondary" data-reset-builder-addresses="to">Reset</button>
           </div>
           <div class="builder-address-list" id="builderToAddressList" data-builder-address-list="to"></div>
         </div>
@@ -1230,6 +1232,7 @@ var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
 var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
 var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
+var QUERY_BUILDER_STORAGE_KEY = 'logex.queryBuilder.v1';
 var QUERY_HISTORY_LIMIT = 50;
 var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
@@ -1814,6 +1817,7 @@ function renderQueryBuilder() {
   }).join('');
   renderBuilderAddressLists();
   updateBuilderTokenControls();
+  applySavedQueryBuilderState();
 }
 
 function setBuilderStatus(message, isError) {
@@ -1959,6 +1963,90 @@ function selectedBuilderFields() {
   });
 }
 
+function loadQueryBuilderState() {
+  try {
+    var raw = localStorage.getItem(QUERY_BUILDER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveQueryBuilderState() {
+  try {
+    localStorage.setItem(QUERY_BUILDER_STORAGE_KEY, JSON.stringify({
+      rangeMode: builderRangeMode,
+      fromRange: byId('builderFromBlock').value,
+      toRange: byId('builderToBlock').value,
+      tokenValue: byId('builderToken').value,
+      tokenAddress: byId('builderCustomTokenAddress').value,
+      tokenDecimals: byId('builderCustomTokenDecimals').value,
+      event: byId('builderEvent').value,
+      amountMin: byId('builderAmountMin').value,
+      amountMax: byId('builderAmountMax').value,
+      pendingFromAddress: byId('builderFromAddress').value,
+      pendingToAddress: byId('builderToAddress').value,
+      fromAddresses: builderFromAddresses,
+      toAddresses: builderToAddresses,
+      fields: selectedBuilderFields()
+    }));
+  } catch (_) {}
+}
+
+function sanitizeBuilderAddresses(values) {
+  if (!Array.isArray(values)) return [];
+  var addresses = [];
+  values.forEach(function(value) {
+    try {
+      var address = parseChecksummedAddress(value, 'Address');
+      if (addresses.indexOf(address) === -1) addresses.push(address);
+    } catch (_) {}
+  });
+  return addresses;
+}
+
+function applySavedQueryBuilderState() {
+  var state = loadQueryBuilderState();
+  if (!state || typeof state !== 'object') return;
+
+  setBuilderRangeMode(state.rangeMode === 'time' ? 'time' : 'block');
+  byId('builderFromBlock').value = state.fromRange || '';
+  byId('builderToBlock').value = state.toRange || '';
+
+  var tokenSelect = byId('builderToken');
+  var tokenValue = String(state.tokenValue || '');
+  tokenSelect.value = Array.prototype.some.call(tokenSelect.options, function(option) {
+    return option.value === tokenValue;
+  }) ? tokenValue : '';
+  updateBuilderTokenControls();
+  if (tokenSelect.value === CUSTOM_TOKEN_VALUE) {
+    byId('builderCustomTokenAddress').value = state.tokenAddress || '';
+    byId('builderCustomTokenDecimals').value = state.tokenDecimals || String(DEFAULT_TOKEN_DECIMALS);
+  }
+
+  byId('builderEvent').value = state.event || TRANSFER_EVENT_SIGNATURE;
+  byId('builderAmountMin').value = state.amountMin || '';
+  byId('builderAmountMax').value = state.amountMax || '';
+  byId('builderFromAddress').value = state.pendingFromAddress || '';
+  byId('builderToAddress').value = state.pendingToAddress || '';
+
+  if (Array.isArray(state.fields)) {
+    var selected = state.fields.filter(function(field) {
+      return LOG_FIELDS.indexOf(field) !== -1;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-builder-field]'), function(button) {
+      var active = selected.indexOf(button.getAttribute('data-builder-field')) !== -1;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  builderFromAddresses = sanitizeBuilderAddresses(state.fromAddresses);
+  builderToAddresses = sanitizeBuilderAddresses(state.toAddresses);
+  renderBuilderAddressLists();
+  queryBuilderTouched = true;
+}
+
 function builderAddressList(kind) {
   return kind === 'from' ? builderFromAddresses : builderToAddresses;
 }
@@ -2012,6 +2100,17 @@ function removeBuilderAddress(kind, index) {
     renderBuilderAddressLists();
     markQueryBuilderTouched();
   }
+}
+
+function resetBuilderAddresses(kind) {
+  if (kind === 'from') {
+    builderFromAddresses = [];
+  } else {
+    builderToAddresses = [];
+  }
+  renderBuilderAddressLists();
+  markQueryBuilderTouched();
+  setBuilderStatus((kind === 'from' ? 'From' : 'To') + ' addresses reset.');
 }
 
 function builderAddressSqlList(addresses) {
@@ -2100,6 +2199,7 @@ function generateBuilderQuery() {
 
 function markQueryBuilderTouched() {
   queryBuilderTouched = true;
+  saveQueryBuilderState();
 }
 
 function setBuilderRangeMode(mode) {
@@ -3076,18 +3176,25 @@ document.querySelector('.builder-mode').addEventListener('click', function(event
   markQueryBuilderTouched();
 });
 
-['builderFromBlock', 'builderToBlock', 'builderToken', 'builderCustomTokenAddress', 'builderCustomTokenDecimals', 'builderEvent', 'builderAmountMin', 'builderAmountMax'].forEach(function(id) {
+['builderFromBlock', 'builderToBlock', 'builderCustomTokenAddress', 'builderCustomTokenDecimals', 'builderEvent', 'builderAmountMin', 'builderAmountMax', 'builderFromAddress', 'builderToAddress'].forEach(function(id) {
   byId(id).addEventListener('input', markQueryBuilderTouched);
   byId(id).addEventListener('change', markQueryBuilderTouched);
 });
 
 byId('builderToken').addEventListener('change', function() {
   updateBuilderTokenControls();
+  markQueryBuilderTouched();
 });
 
 Array.prototype.forEach.call(document.querySelectorAll('[data-add-builder-address]'), function(button) {
   button.addEventListener('click', function() {
     addBuilderAddress(button.getAttribute('data-add-builder-address'));
+  });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-reset-builder-addresses]'), function(button) {
+  button.addEventListener('click', function() {
+    resetBuilderAddresses(button.getAttribute('data-reset-builder-addresses'));
   });
 });
 
