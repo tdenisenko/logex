@@ -1167,6 +1167,7 @@
         <div class="query-run-controls">
           <span class="query-timer" id="queryTimer">00:00:000</span>
           <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
+          <button type="button" class="secondary" id="stopQueryBtn" onclick="cancelRunningQuery()" disabled hidden>Stop</button>
         </div>
       </div>
       <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
@@ -1325,6 +1326,8 @@ var defaultQueryApplied = false;
 var queryHistory = loadQueryHistory();
 var queryStartedAtMs = null;
 var queryTimerInterval = null;
+var queryAbortController = null;
+var queryRunning = false;
 var copyToastTimeout = null;
 var queryBuilderTouched = false;
 var builderRangeMode = 'block';
@@ -2867,6 +2870,13 @@ function updateQueryTimer() {
   setText('queryTimer', formatQueryDuration(performance.now() - queryStartedAtMs));
 }
 
+function setQueryRunning(running) {
+  queryRunning = running;
+  byId('runBtn').disabled = running;
+  byId('stopQueryBtn').disabled = !running;
+  byId('stopQueryBtn').hidden = !running;
+}
+
 function startQueryTimer() {
   stopQueryTimer();
   queryStartedAtMs = performance.now();
@@ -3053,7 +3063,23 @@ function runQueryPage(direction) {
   renderQueryPage();
 }
 
+function cancelRunningQuery() {
+  if (!queryRunning) return;
+  setText('resultCount', 'Stopping query...');
+  fetch('/query/cancel', {
+    method: 'POST',
+    credentials: 'same-origin'
+  }).catch(function() {});
+  if (queryAbortController) {
+    queryAbortController.abort();
+  }
+}
+
 function runQuery() {
+  if (queryRunning) {
+    showQueryError('A query is already running. Stop it before starting another one.');
+    return;
+  }
   var sql = byId('sql').value.trim();
   queryOffset = 0;
   queryRows = [];
@@ -3069,12 +3095,14 @@ function runQuery() {
   }
 
   startQueryTimer();
-  byId('runBtn').disabled = true;
+  setQueryRunning(true);
+  queryAbortController = new AbortController();
   setText('resultCount', 'Running query...');
   renderTable([], 'Running query...');
   fetch('/query', {
     method: 'POST',
     credentials: 'same-origin',
+    signal: queryAbortController.signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sql: sql, offset: 0 })
   })
@@ -3109,15 +3137,16 @@ function runQuery() {
       });
     })
     .catch(function(err) {
-      var errorMessage = err.message || 'Query failed.';
+      var wasCanceled = err && err.name === 'AbortError';
+      var errorMessage = wasCanceled ? 'Query canceled.' : (err.message || 'Query failed.');
       var durationMs = stopQueryTimer();
       showQueryError(errorMessage);
-      setText('resultCount', 'Query failed.');
+      setText('resultCount', wasCanceled ? 'Query canceled.' : 'Query failed.');
       queryRows = [];
       queryColumns = [];
       queryScannedRows = null;
       updateQueryButtons();
-      renderTable([], 'Query failed.');
+      renderTable([], wasCanceled ? 'Query canceled.' : 'Query failed.');
       addQueryHistory({
         ok: false,
         sql: sql,
@@ -3129,7 +3158,8 @@ function runQuery() {
     })
     .finally(function() {
       stopQueryTimer();
-      byId('runBtn').disabled = false;
+      queryAbortController = null;
+      setQueryRunning(false);
     });
 }
 

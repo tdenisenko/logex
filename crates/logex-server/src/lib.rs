@@ -57,6 +57,7 @@ pub fn build_router_with_config(state: Arc<AppState>, config: HttpServerConfig) 
         .route("/", root)
         .route("/status", get(rest::handle_status))
         .route("/query", post(rest::handle_query))
+        .route("/query/cancel", post(rest::handle_query_cancel))
         .route("/ws", get(ws::handle_ws_upgrade))
         .route_layer(middleware::from_fn_with_state(
             config.clone(),

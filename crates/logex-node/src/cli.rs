@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 #[derive(Parser, Debug)]
@@ -139,8 +139,44 @@ pub enum Command {
         dashboard_password: Option<String>,
     },
 
-    /// Build or rebuild indexes on the hot partition.
-    BuildIndexes,
+    /// Build or rebuild query indexes.
+    BuildIndexes {
+        /// Include sealed historical segments.
+        #[arg(long)]
+        sealed: bool,
+
+        /// Include the active hot segment. When neither --hot nor --sealed is set, hot is implied.
+        #[arg(long)]
+        hot: bool,
+
+        /// Index profile to build.
+        #[arg(long, value_enum, default_value = "all")]
+        profile: IndexProfile,
+
+        /// Skip segments that already have every index required by the selected profile.
+        #[arg(long)]
+        missing_only: bool,
+
+        /// Maximum number of matching segments to index.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Only index segments whose block range overlaps this lower bound.
+        #[arg(long)]
+        from_block: Option<u64>,
+
+        /// Only index segments whose block range overlaps this upper bound.
+        #[arg(long)]
+        to_block: Option<u64>,
+
+        /// Only index segments whose timestamp range overlaps this lower bound.
+        #[arg(long)]
+        from_timestamp: Option<u64>,
+
+        /// Only index segments whose timestamp range overlaps this upper bound.
+        #[arg(long)]
+        to_timestamp: Option<u64>,
+    },
 
     /// Compact sealed storage segments.
     Compact {
@@ -151,6 +187,13 @@ pub enum Command {
 
     /// Show storage statistics.
     Info,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum IndexProfile {
+    All,
+    LogQuery,
+    Erc20Transfer,
 }
 
 /// TOML config file structure.

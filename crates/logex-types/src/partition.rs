@@ -11,6 +11,12 @@ pub struct PartitionMeta {
     pub min_block: u64,
     /// Highest block number in this partition.
     pub max_block: u64,
+    /// Lowest block timestamp in this partition, when known.
+    #[serde(default)]
+    pub min_timestamp: Option<u64>,
+    /// Highest block timestamp in this partition, when known.
+    #[serde(default)]
+    pub max_timestamp: Option<u64>,
     /// Total number of log rows in this partition.
     pub row_count: u64,
     /// Whether this partition has been sealed (immutable).

@@ -120,6 +120,16 @@ pub fn partition_matches_filter(meta: &PartitionMeta, filter: &NativeLogFilter) 
     {
         return false;
     }
+    if let Some(from) = filter.from_timestamp
+        && meta.max_timestamp.is_some_and(|max| max < from)
+    {
+        return false;
+    }
+    if let Some(to) = filter.to_timestamp
+        && meta.min_timestamp.is_some_and(|min| min > to)
+    {
+        return false;
+    }
     true
 }
 
@@ -135,10 +145,13 @@ pub fn candidate_row_ids(
     }
 
     let bitmap = if use_indexes {
-        build_candidate_bitmap(dir, filter, row_count)?
+        build_candidate_bitmap(dir, &reader, filter, row_count)?
     } else {
         (0..row_count as u32).collect()
     };
+    if bitmap.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let canonical = reader.read_canonical()?;
     let row_ids = bitmap
@@ -170,7 +183,32 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
     {
         return false;
     }
+    if let Some(from_timestamp) = filter.from_timestamp
+        && row.timestamp < from_timestamp
+    {
+        return false;
+    }
+    if let Some(to_timestamp) = filter.to_timestamp
+        && row.timestamp > to_timestamp
+    {
+        return false;
+    }
     if !filter.addresses.is_empty() && !filter.addresses.contains(&row.address) {
+        return false;
+    }
+    if let Some(data_len) = filter.data_len
+        && row.data_len != data_len
+    {
+        return false;
+    }
+    if let Some(data_min) = &filter.data_min
+        && row.data.as_ref() < data_min.as_slice()
+    {
+        return false;
+    }
+    if let Some(data_max) = &filter.data_max
+        && row.data.as_ref() > data_max.as_slice()
+    {
         return false;
     }
 
@@ -200,21 +238,81 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
 
 fn build_candidate_bitmap(
     dir: &Path,
+    segment_reader: &SegmentReader,
     filter: &NativeLogFilter,
     row_count: u64,
 ) -> std::io::Result<RoaringBitmap> {
     let index_dir = dir.join("indexes");
     let mut result: Option<RoaringBitmap> = None;
+    let mut covered_addresses = false;
+    let mut covered_topics = [false; 4];
 
     if let Some(block_hash) = filter.block_hash {
         let block_hash_path = index_dir.join("block_hash.bptree");
         if block_hash_path.exists() {
-            let reader = BTreeIndexReader::open(&block_hash_path)?;
-            if let Some(bitmap) = reader.get(block_hash.as_slice()) {
-                result = Some(intersect_optional(result, bitmap.clone()));
+            if let Some(bitmap) =
+                BTreeIndexReader::get_from_file(&block_hash_path, block_hash.as_slice())?
+            {
+                result = Some(intersect_optional(result, bitmap));
             } else {
                 return Ok(RoaringBitmap::new());
             }
+        }
+    }
+
+    if let (Some(address), Some(topic0), Some(topic1_values)) = (
+        single_address(&filter.addresses),
+        single_topic(&filter.topics[0]),
+        topic_values(&filter.topics[1]),
+    ) {
+        let composite_path = index_dir.join("address_topic0_topic1.bptree");
+        if composite_path.exists() {
+            let mut union = RoaringBitmap::new();
+            for topic1 in topic1_values {
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic1_from_file(
+                    &composite_path,
+                    &address,
+                    &topic0,
+                    &topic1,
+                )? {
+                    union |= bitmap;
+                }
+            }
+            if union.is_empty() {
+                return Ok(RoaringBitmap::new());
+            }
+            result = Some(intersect_optional(result, union));
+            covered_addresses = true;
+            covered_topics[0] = true;
+            covered_topics[1] = true;
+        }
+    }
+
+    if let (Some(address), Some(topic0), Some(topic2_values)) = (
+        single_address(&filter.addresses),
+        single_topic(&filter.topics[0]),
+        topic_values(&filter.topics[2]),
+    ) {
+        let composite_path = index_dir.join("address_topic0_topic2.bptree");
+        if composite_path.exists() {
+            let mut union = RoaringBitmap::new();
+            for topic2 in topic2_values {
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic2_from_file(
+                    &composite_path,
+                    &address,
+                    &topic0,
+                    &topic2,
+                )? {
+                    union |= bitmap;
+                }
+            }
+            if union.is_empty() {
+                return Ok(RoaringBitmap::new());
+            }
+            result = Some(intersect_optional(result, union));
+            covered_addresses = true;
+            covered_topics[0] = true;
+            covered_topics[2] = true;
         }
     }
 
@@ -238,15 +336,21 @@ fn build_candidate_bitmap(
                     to_exclusive,
                 );
                 result = Some(intersect_optional(result, bitmap));
+                covered_addresses = true;
+                covered_topics[0] = true;
             }
         }
         (Some(address), Some(topic0), _, _) => {
             let composite_path = index_dir.join("address_topic0.bptree");
             if composite_path.exists() {
-                let reader = BTreeIndexReader::open(&composite_path)?;
-                if let Some(bitmap) = CompositeQuery::get_address_topic0(&reader, &address, &topic0)
-                {
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_from_file(
+                    &composite_path,
+                    &address,
+                    &topic0,
+                )? {
                     result = Some(intersect_optional(result, bitmap));
+                    covered_addresses = true;
+                    covered_topics[0] = true;
                 } else {
                     return Ok(RoaringBitmap::new());
                 }
@@ -255,28 +359,37 @@ fn build_candidate_bitmap(
         _ => {}
     }
 
-    if let (Some(topic0), Some(topic1)) = (
+    if let (Some(topic0), Some(topic1_values)) = (
         single_topic(&filter.topics[0]),
-        single_topic(&filter.topics[1]),
+        topic_values(&filter.topics[1]),
     ) {
         let composite_path = index_dir.join("topic0_topic1.bptree");
-        if composite_path.exists() {
-            let reader = BTreeIndexReader::open(&composite_path)?;
-            if let Some(bitmap) = CompositeQuery::get_topic0_topic1(&reader, &topic0, &topic1) {
-                result = Some(intersect_optional(result, bitmap));
-            } else {
+        if composite_path.exists() && (!covered_topics[0] || !covered_topics[1]) {
+            let mut union = RoaringBitmap::new();
+            for topic1 in topic1_values {
+                if let Some(bitmap) =
+                    CompositeQuery::get_topic0_topic1_from_file(&composite_path, &topic0, &topic1)?
+                {
+                    union |= bitmap;
+                }
+            }
+            if union.is_empty() {
                 return Ok(RoaringBitmap::new());
             }
+            result = Some(intersect_optional(result, union));
+            covered_topics[0] = true;
+            covered_topics[1] = true;
         }
     }
 
-    if !filter.addresses.is_empty() {
+    if !filter.addresses.is_empty() && !covered_addresses {
         let address_path = index_dir.join("address.bptree");
         if address_path.exists() {
-            let reader = BTreeIndexReader::open(&address_path)?;
             let mut union = RoaringBitmap::new();
             for address in &filter.addresses {
-                if let Some(bitmap) = reader.get(address.as_slice()) {
+                if let Some(bitmap) =
+                    BTreeIndexReader::get_from_file(&address_path, address.as_slice())?
+                {
                     union |= bitmap;
                 }
             }
@@ -287,14 +400,16 @@ fn build_candidate_bitmap(
         }
     }
 
-    if let Some(topic_bitmap) = build_topic0_bitmap(&index_dir, &filter.topics[0])? {
+    if !covered_topics[0]
+        && let Some(topic_bitmap) = build_topic0_bitmap(&index_dir, &filter.topics[0])?
+    {
         if topic_bitmap.is_empty() {
             return Ok(RoaringBitmap::new());
         }
         result = Some(intersect_optional(result, topic_bitmap));
     }
 
-    if filter.from_block.is_some() || filter.to_block.is_some() {
+    if result.is_none() && (filter.from_block.is_some() || filter.to_block.is_some()) {
         let block_path = index_dir.join("block_number.bptree");
         if block_path.exists() {
             let reader = BTreeIndexReader::open(&block_path)?;
@@ -305,7 +420,182 @@ fn build_candidate_bitmap(
         }
     }
 
+    if result.is_none() && (filter.from_timestamp.is_some() || filter.to_timestamp.is_some()) {
+        let timestamp_path = index_dir.join("timestamp.bptree");
+        if timestamp_path.exists() {
+            let reader = BTreeIndexReader::open(&timestamp_path)?;
+            let from = filter.from_timestamp.unwrap_or(0);
+            let to_exclusive = filter
+                .to_timestamp
+                .unwrap_or(u64::MAX - 1)
+                .saturating_add(1);
+            let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
+            result = Some(intersect_optional(result, bitmap));
+        }
+    }
+
+    result = refine_candidate_bitmap_from_columns(segment_reader, filter, row_count, result)?;
+
     Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
+}
+
+fn refine_candidate_bitmap_from_columns(
+    reader: &SegmentReader,
+    filter: &NativeLogFilter,
+    row_count: u64,
+    mut result: Option<RoaringBitmap>,
+) -> std::io::Result<Option<RoaringBitmap>> {
+    if !filter.addresses.is_empty() {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_address(row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |address| filter.addresses.contains(address),
+        ));
+        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+            return Ok(result);
+        }
+    }
+
+    if let Some(block_hash) = filter.block_hash {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_b256("block_hash", row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |value| *value == block_hash,
+        ));
+        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+            return Ok(result);
+        }
+    }
+
+    for (index, constraint) in filter.topics.iter().enumerate() {
+        if matches!(constraint, TopicConstraint::Any) {
+            continue;
+        }
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_nullable_b256(&format!("topic{index}"), row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |topic| topic_matches_constraint(*topic, constraint),
+        ));
+        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+            return Ok(result);
+        }
+    }
+
+    if filter.from_block.is_some() || filter.to_block.is_some() {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_u64("block_number", row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |block| {
+                filter.from_block.is_none_or(|from| *block >= from)
+                    && filter.to_block.is_none_or(|to| *block <= to)
+            },
+        ));
+        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+            return Ok(result);
+        }
+    }
+
+    if filter.from_timestamp.is_some() || filter.to_timestamp.is_some() {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_u64("timestamp", row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |timestamp| {
+                filter.from_timestamp.is_none_or(|from| *timestamp >= from)
+                    && filter.to_timestamp.is_none_or(|to| *timestamp <= to)
+            },
+        ));
+    }
+
+    if let Some(data_len) = filter.data_len {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_u32("data_len", row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |value| *value == data_len,
+        ));
+        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+            return Ok(result);
+        }
+    }
+
+    if filter.data_min.is_some() || filter.data_max.is_some() {
+        let row_ids = row_ids_from_bitmap(result.as_ref());
+        let values = reader.read_var_bytes("data", row_ids.as_deref())?;
+        result = Some(bitmap_from_values(
+            row_ids.as_deref(),
+            row_count,
+            values,
+            |data| {
+                filter
+                    .data_min
+                    .as_ref()
+                    .is_none_or(|min| data.as_ref() >= min.as_slice())
+                    && filter
+                        .data_max
+                        .as_ref()
+                        .is_none_or(|max| data.as_ref() <= max.as_slice())
+            },
+        ));
+    }
+
+    Ok(result)
+}
+
+fn row_ids_from_bitmap(bitmap: Option<&RoaringBitmap>) -> Option<Vec<u32>> {
+    bitmap.map(|bitmap| bitmap.iter().collect())
+}
+
+fn bitmap_from_values<T>(
+    row_ids: Option<&[u32]>,
+    row_count: u64,
+    values: Vec<T>,
+    mut matches: impl FnMut(&T) -> bool,
+) -> RoaringBitmap {
+    let mut bitmap = RoaringBitmap::new();
+    match row_ids {
+        Some(row_ids) => {
+            for (row_id, value) in row_ids.iter().copied().zip(values.iter()) {
+                if matches(value) {
+                    bitmap.insert(row_id);
+                }
+            }
+        }
+        None => {
+            for (row_id, value) in (0..row_count as u32).zip(values.iter()) {
+                if matches(value) {
+                    bitmap.insert(row_id);
+                }
+            }
+        }
+    }
+    bitmap
+}
+
+fn topic_matches_constraint(topic: Option<B256>, constraint: &TopicConstraint) -> bool {
+    match constraint {
+        TopicConstraint::Any => true,
+        TopicConstraint::One(expected) => topic == Some(*expected),
+        TopicConstraint::AnyOf(candidates) => {
+            topic.is_some_and(|topic| candidates.contains(&topic))
+        }
+    }
 }
 
 fn build_topic0_bitmap(
@@ -317,14 +607,17 @@ fn build_topic0_bitmap(
         return Ok(None);
     }
 
-    let reader = BTreeIndexReader::open(&topic_path)?;
     let bitmap = match constraint {
         TopicConstraint::Any => return Ok(None),
-        TopicConstraint::One(topic) => reader.get(topic.as_slice()).cloned().unwrap_or_default(),
+        TopicConstraint::One(topic) => {
+            BTreeIndexReader::get_from_file(&topic_path, topic.as_slice())?.unwrap_or_default()
+        }
         TopicConstraint::AnyOf(topics) => {
             let mut union = RoaringBitmap::new();
             for topic in topics {
-                if let Some(bitmap) = reader.get(topic.as_slice()) {
+                if let Some(bitmap) =
+                    BTreeIndexReader::get_from_file(&topic_path, topic.as_slice())?
+                {
                     union |= bitmap;
                 }
             }
@@ -349,6 +642,18 @@ fn single_address(addresses: &[Address]) -> Option<[u8; 20]> {
 fn single_topic(constraint: &TopicConstraint) -> Option<[u8; 32]> {
     match constraint {
         TopicConstraint::One(topic) => topic.as_slice().try_into().ok(),
+        TopicConstraint::AnyOf(topics) if topics.len() == 1 => topics[0].as_slice().try_into().ok(),
+        _ => None,
+    }
+}
+
+fn topic_values(constraint: &TopicConstraint) -> Option<Vec<[u8; 32]>> {
+    match constraint {
+        TopicConstraint::One(topic) => topic.as_slice().try_into().ok().map(|topic| vec![topic]),
+        TopicConstraint::AnyOf(topics) if !topics.is_empty() => topics
+            .iter()
+            .map(|topic| topic.as_slice().try_into().ok())
+            .collect(),
         _ => None,
     }
 }
@@ -441,6 +746,23 @@ mod tests {
         let rows = execute_log_filter(&storage, &filter).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].block_number, 101);
+    }
+
+    #[test]
+    fn uses_transfer_composite_indexes_for_topic_in_filters() {
+        let (_tmp, storage) = setup_storage();
+        let filter = NativeLogFilter::new()
+            .with_addresses(vec![Address::repeat_byte(0xAA)])
+            .with_topic(0, TopicConstraint::One(B256::repeat_byte(0x10)))
+            .with_topic(
+                1,
+                TopicConstraint::AnyOf(vec![B256::repeat_byte(0x20), B256::repeat_byte(0x21)]),
+            );
+
+        let rows = execute_log_filter(&storage, &filter).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].block_number, 100);
+        assert_eq!(rows[0].topic1, Some(B256::repeat_byte(0x20)));
     }
 
     #[test]

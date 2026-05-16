@@ -90,7 +90,10 @@ pub enum IndexKind {
     BlockHash,
     Address,
     Topic0,
+    Timestamp,
     AddressTopic0,
+    AddressTopic0Topic1,
+    AddressTopic0Topic2,
     Custom,
 }
 
@@ -105,6 +108,10 @@ pub struct SegmentDescriptor {
     pub min_block: Option<u64>,
     #[serde(default)]
     pub max_block: Option<u64>,
+    #[serde(default)]
+    pub min_timestamp: Option<u64>,
+    #[serde(default)]
+    pub max_timestamp: Option<u64>,
     pub row_count: u64,
 }
 
@@ -118,6 +125,10 @@ pub struct SegmentManifest {
     pub min_block: Option<u64>,
     #[serde(default)]
     pub max_block: Option<u64>,
+    #[serde(default)]
+    pub min_timestamp: Option<u64>,
+    #[serde(default)]
+    pub max_timestamp: Option<u64>,
     pub row_count: u64,
     pub canonical_rows_path: String,
     pub columns: Vec<ColumnDescriptor>,
@@ -218,6 +229,8 @@ impl NativeStorageCatalog {
             manifest_relative_path,
             min_block: None,
             max_block: None,
+            min_timestamp: None,
+            max_timestamp: None,
             row_count: 0,
         }
     }

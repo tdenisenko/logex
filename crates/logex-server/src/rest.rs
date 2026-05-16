@@ -47,6 +47,11 @@ pub struct QueryResponse {
     pub max_limit: usize,
 }
 
+#[derive(Serialize, serde::Deserialize)]
+pub struct QueryCancelResponse {
+    pub canceled: bool,
+}
+
 /// Error response.
 #[derive(Serialize)]
 pub struct ErrorResponse {
@@ -64,12 +69,47 @@ pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> Response {
-    let storage = state.storage.read().await;
-    let head_block = storage.head_block();
+    let Some(query_guard) = state.query_control.start() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "another SQL query is already running; stop it before starting a new one"
+                    .to_owned(),
+            }),
+        )
+            .into_response();
+    };
+    let cancel_check = query_guard.cancel_check();
+    let (storage_snapshot, head_block) = {
+        let storage = state.storage.read().await;
+        (
+            logex_query::NativeStorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+        )
+    };
     let requested_limit = req.limit;
     let page = SqlQueryPage::new(requested_limit, req.offset);
-    let result = match logex_query::execute_sql_page(&req.sql, &storage, head_block, page).await {
+    let result = match logex_query::execute_sql_page_on_snapshot(
+        &req.sql,
+        storage_snapshot,
+        head_block,
+        page,
+        Some(cancel_check),
+    )
+    .await
+    {
         Ok(r) => r,
+        Err(SqlQueryError::DataFusion(e))
+            if query_guard.was_canceled() || e.to_string().contains("query canceled") =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "query canceled".to_owned(),
+                }),
+            )
+                .into_response();
+        }
         Err(SqlQueryError::DataFusion(e)) => {
             return ErrorResponse {
                 error: format!("query error: {e}"),
@@ -108,6 +148,13 @@ pub async fn handle_query(
         max_limit: 0,
     })
     .into_response()
+}
+
+/// Handle POST /query/cancel — request cancellation for the active SQL query.
+pub async fn handle_query_cancel(State(state): State<Arc<AppState>>) -> Json<QueryCancelResponse> {
+    Json(QueryCancelResponse {
+        canceled: state.query_control.cancel_active(),
+    })
 }
 
 /// Handle GET /health.
@@ -709,6 +756,30 @@ mod tests {
         let result: QueryResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.row_count, 2);
         assert_eq!(result.rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_cancel_endpoint_reports_active_query() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let active_query = state.query_control.start().unwrap();
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query/cancel")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
+        assert!(result.canceled);
+        assert!(active_query.was_canceled());
     }
 
     #[tokio::test]

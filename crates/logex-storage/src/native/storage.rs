@@ -384,6 +384,17 @@ impl NativeStorage {
         }
     }
 
+    pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
+        let descriptor = self
+            .catalog
+            .segments
+            .iter()
+            .find(|segment| segment.id == segment_id)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("segment not found"))?;
+        persist_segment_manifest(&self.paths, &descriptor)
+    }
+
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
         self.compact_eligible_segments_limit(usize::MAX)
     }
@@ -631,14 +642,19 @@ impl NativeStorage {
         let mut changed = false;
 
         for segment in &self.catalog.segments {
-            if let Some(descriptor) = descriptors.remove(&segment.id) {
+            if let Some(mut descriptor) = descriptors.remove(&segment.id) {
+                if repair_missing_timestamp_metadata(&self.paths, &mut descriptor)? {
+                    changed = true;
+                }
                 if &descriptor != segment {
-                    tracing::warn!(
-                        segment_id = segment.id,
-                        catalog_rows = segment.row_count,
-                        manifest_rows = descriptor.row_count,
-                        "repairing storage catalog segment metadata from manifest"
-                    );
+                    if !segment_diff_is_timestamp_metadata_only(segment, &descriptor) {
+                        tracing::warn!(
+                            segment_id = segment.id,
+                            catalog_rows = segment.row_count,
+                            manifest_rows = descriptor.row_count,
+                            "repairing storage catalog segment metadata from manifest"
+                        );
+                    }
                     changed = true;
                 }
                 repaired_segments.push(descriptor);
@@ -647,7 +663,8 @@ impl NativeStorage {
             }
         }
 
-        for descriptor in descriptors.into_values() {
+        for mut descriptor in descriptors.into_values() {
+            repair_missing_timestamp_metadata(&self.paths, &mut descriptor)?;
             tracing::warn!(
                 segment_id = descriptor.id,
                 row_count = descriptor.row_count,
@@ -736,6 +753,8 @@ impl NativeStorage {
             id: descriptor.id,
             min_block: descriptor.min_block.unwrap_or(u64::MAX),
             max_block: descriptor.max_block.unwrap_or(0),
+            min_timestamp: descriptor.min_timestamp,
+            max_timestamp: descriptor.max_timestamp,
             row_count: descriptor.row_count,
             sealed: descriptor.kind == SegmentKind::Sealed,
             path: self.paths.segment_dir(descriptor.id),
@@ -986,6 +1005,61 @@ fn verify_segment_integrity(
     Ok(())
 }
 
+fn segment_diff_is_timestamp_metadata_only(
+    catalog: &SegmentDescriptor,
+    repaired: &SegmentDescriptor,
+) -> bool {
+    let mut comparable = catalog.clone();
+    comparable.min_timestamp = repaired.min_timestamp;
+    comparable.max_timestamp = repaired.max_timestamp;
+    &comparable == repaired
+}
+
+fn repair_missing_timestamp_metadata(
+    paths: &StorageCatalogPaths,
+    descriptor: &mut SegmentDescriptor,
+) -> io::Result<bool> {
+    if descriptor.row_count == 0 {
+        let changed =
+            descriptor.min_timestamp.take().is_some() || descriptor.max_timestamp.take().is_some();
+        if changed {
+            persist_segment_manifest(paths, descriptor)?;
+        }
+        return Ok(changed);
+    }
+
+    if descriptor.min_timestamp.is_some() && descriptor.max_timestamp.is_some() {
+        return Ok(false);
+    }
+
+    let dir = paths.segment_dir(descriptor.id);
+    let reader = SegmentReader::open(&dir)?;
+    let last_row = u32::try_from(descriptor.row_count - 1).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} exceeds supported per-segment row addressing",
+                descriptor.id
+            ),
+        )
+    })?;
+    let boundary_timestamps = reader.read_u64("timestamp", Some(&[0, last_row]))?;
+    if boundary_timestamps.len() != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment {} failed to read boundary timestamps",
+                descriptor.id
+            ),
+        ));
+    }
+
+    descriptor.min_timestamp = boundary_timestamps.iter().copied().min();
+    descriptor.max_timestamp = boundary_timestamps.iter().copied().max();
+    persist_segment_manifest(paths, descriptor)?;
+    Ok(true)
+}
+
 fn load_manifest_descriptors(
     paths: &StorageCatalogPaths,
 ) -> std::io::Result<BTreeMap<u64, SegmentDescriptor>> {
@@ -1032,6 +1106,8 @@ fn load_manifest_descriptors(
                 manifest_relative_path: relative_path.join("segment.json"),
                 min_block: manifest.min_block,
                 max_block: manifest.max_block,
+                min_timestamp: manifest.min_timestamp,
+                max_timestamp: manifest.max_timestamp,
                 row_count: manifest.row_count,
             },
         );

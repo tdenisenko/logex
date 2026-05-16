@@ -21,6 +21,12 @@ const ADDR_TOPIC0_BLOCK_KEY_SIZE: usize = 20 + 32 + 8;
 /// Key layout: `[topic0: 32B][topic1: 32B]` = 64 bytes.
 const TOPIC0_TOPIC1_KEY_SIZE: usize = 32 + 32;
 
+/// Key layout: `[address: 20B][topic0: 32B][topic1: 32B]` = 84 bytes.
+const ADDR_TOPIC0_TOPIC1_KEY_SIZE: usize = 20 + 32 + 32;
+
+/// Key layout: `[address: 20B][topic0: 32B][topic2: 32B]` = 84 bytes.
+const ADDR_TOPIC0_TOPIC2_KEY_SIZE: usize = 20 + 32 + 32;
+
 /// Builds composite indexes for a partition.
 pub struct CompositeIndexBuilder;
 
@@ -30,16 +36,46 @@ impl CompositeIndexBuilder {
         let index_dir = partition_dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
 
-        Self::build_address_topic0(partition_dir, &index_dir)?;
-        Self::build_address_topic0_block(partition_dir, &index_dir)?;
-        Self::build_topic0_topic1(partition_dir, &index_dir)?;
+        Self::build_log_query_indexes(partition_dir, &index_dir)?;
+
+        Ok(())
+    }
+
+    /// Build composite indexes used by the log query engine's common event-log
+    /// access paths.
+    pub fn build_log_query_indexes(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(index_dir)?;
+
+        Self::build_address_topic0(partition_dir, index_dir)?;
+        Self::build_address_topic0_block(partition_dir, index_dir)?;
+        Self::build_topic0_topic1(partition_dir, index_dir)?;
+        Self::build_address_topic0_topic1(partition_dir, index_dir)?;
+        Self::build_address_topic0_topic2(partition_dir, index_dir)?;
+
+        Ok(())
+    }
+
+    /// Build the minimal composites needed for ERC20 Transfer queries that
+    /// constrain token address plus indexed `from` or `to` address.
+    pub fn build_erc20_transfer_indexes(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        fs::create_dir_all(index_dir)?;
+
+        Self::build_address_topic0(partition_dir, index_dir)?;
+        Self::build_address_topic0_topic1(partition_dir, index_dir)?;
+        Self::build_address_topic0_topic2(partition_dir, index_dir)?;
 
         Ok(())
     }
 
     /// Build (address, topic0) composite index.
     /// Only indexes rows where topic0 is present.
-    fn build_address_topic0(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+    pub(crate) fn build_address_topic0(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
         let reader = SegmentReader::open(partition_dir)?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
@@ -64,7 +100,10 @@ impl CompositeIndexBuilder {
 
     /// Build (address, topic0, block_number) composite index.
     /// Only indexes rows where topic0 is present.
-    fn build_address_topic0_block(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+    pub(crate) fn build_address_topic0_block(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
         let reader = SegmentReader::open(partition_dir)?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
@@ -94,9 +133,82 @@ impl CompositeIndexBuilder {
         Ok(())
     }
 
+    /// Build (address, topic0, topic1) composite index.
+    /// Only indexes rows where topic0 and topic1 are present.
+    pub(crate) fn build_address_topic0_topic1(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        let reader = SegmentReader::open(partition_dir)?;
+        let addresses = reader.read_address(None)?;
+        let topic0s = reader.read_nullable_b256("topic0", None)?;
+        let topic1s = reader.read_nullable_b256("topic1", None)?;
+        let mut index = BTreeIndex::new(ADDR_TOPIC0_TOPIC1_KEY_SIZE);
+
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
+        for (row_id, ((addr, topic0), topic1)) in addresses
+            .iter()
+            .zip(topic0s.iter())
+            .zip(topic1s.iter())
+            .enumerate()
+        {
+            if let (Some(topic0), Some(topic1)) = (topic0, topic1) {
+                key[..20].copy_from_slice(addr.as_slice());
+                key[20..52].copy_from_slice(topic0.as_slice());
+                key[52..].copy_from_slice(topic1.as_slice());
+                index.insert(&key, row_id as u32);
+            }
+        }
+
+        index.write_to_file(&index_dir.join("address_topic0_topic1.bptree"))?;
+        tracing::debug!(
+            keys = index.key_count(),
+            "built address+topic0+topic1 composite index"
+        );
+        Ok(())
+    }
+
+    /// Build (address, topic0, topic2) composite index.
+    /// Only indexes rows where topic0 and topic2 are present.
+    pub(crate) fn build_address_topic0_topic2(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        let reader = SegmentReader::open(partition_dir)?;
+        let addresses = reader.read_address(None)?;
+        let topic0s = reader.read_nullable_b256("topic0", None)?;
+        let topic2s = reader.read_nullable_b256("topic2", None)?;
+        let mut index = BTreeIndex::new(ADDR_TOPIC0_TOPIC2_KEY_SIZE);
+
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
+        for (row_id, ((addr, topic0), topic2)) in addresses
+            .iter()
+            .zip(topic0s.iter())
+            .zip(topic2s.iter())
+            .enumerate()
+        {
+            if let (Some(topic0), Some(topic2)) = (topic0, topic2) {
+                key[..20].copy_from_slice(addr.as_slice());
+                key[20..52].copy_from_slice(topic0.as_slice());
+                key[52..].copy_from_slice(topic2.as_slice());
+                index.insert(&key, row_id as u32);
+            }
+        }
+
+        index.write_to_file(&index_dir.join("address_topic0_topic2.bptree"))?;
+        tracing::debug!(
+            keys = index.key_count(),
+            "built address+topic0+topic2 composite index"
+        );
+        Ok(())
+    }
+
     /// Build (topic0, topic1) composite index.
     /// Only indexes rows where both topic0 and topic1 are present.
-    fn build_topic0_topic1(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+    pub(crate) fn build_topic0_topic1(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
         let reader = SegmentReader::open(partition_dir)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
@@ -134,6 +246,74 @@ impl CompositeQuery {
         key[..20].copy_from_slice(address);
         key[20..].copy_from_slice(topic0);
         reader.get(&key).cloned()
+    }
+
+    /// Stream an exact (address, topic0) lookup from disk.
+    pub fn get_address_topic0_from_file(
+        path: &Path,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..].copy_from_slice(topic0);
+        BTreeIndexReader::get_from_file(path, &key)
+    }
+
+    /// Look up (address, topic0, topic1) in the composite index.
+    pub fn get_address_topic0_topic1(
+        reader: &BTreeIndexReader,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> Option<roaring::RoaringBitmap> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic1);
+        reader.get(&key).cloned()
+    }
+
+    /// Stream an exact (address, topic0, topic1) lookup from disk.
+    pub fn get_address_topic0_topic1_from_file(
+        path: &Path,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file(path, &key)
+    }
+
+    /// Look up (address, topic0, topic2) in the composite index.
+    pub fn get_address_topic0_topic2(
+        reader: &BTreeIndexReader,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic2: &[u8; 32],
+    ) -> Option<roaring::RoaringBitmap> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic2);
+        reader.get(&key).cloned()
+    }
+
+    /// Stream an exact (address, topic0, topic2) lookup from disk.
+    pub fn get_address_topic0_topic2_from_file(
+        path: &Path,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic2: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic2);
+        BTreeIndexReader::get_from_file(path, &key)
     }
 
     /// Prefix scan: all rows for a given address across all topic0 values.
@@ -198,6 +378,18 @@ impl CompositeQuery {
         reader.get(&key).cloned()
     }
 
+    /// Stream an exact (topic0, topic1) lookup from disk.
+    pub fn get_topic0_topic1_from_file(
+        path: &Path,
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
+        key[..32].copy_from_slice(topic0);
+        key[32..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file(path, &key)
+    }
+
     /// Prefix scan: all rows for a given topic0 across all topic1 values.
     pub fn scan_by_topic0(reader: &BTreeIndexReader, topic0: &[u8; 32]) -> roaring::RoaringBitmap {
         let mut start = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
@@ -241,7 +433,7 @@ mod tests {
                 address: Address::repeat_byte(0xAA),
                 topic0: Some(B256::repeat_byte(0xDD)),
                 topic1: Some(B256::repeat_byte(0xF1)),
-                topic2: None,
+                topic2: Some(B256::repeat_byte(0xA1)),
                 topic3: None,
                 data: bytes!(""),
                 data_len: 0,
@@ -257,7 +449,7 @@ mod tests {
                 address: Address::repeat_byte(0xBB),
                 topic0: Some(B256::repeat_byte(0xDD)),
                 topic1: Some(B256::repeat_byte(0xF2)),
-                topic2: None,
+                topic2: Some(B256::repeat_byte(0xA2)),
                 topic3: None,
                 data: bytes!("cafe"),
                 data_len: 2,
@@ -422,6 +614,60 @@ mod tests {
         .unwrap();
         assert!(bm.contains(1));
         assert_eq!(bm.len(), 1);
+    }
+
+    #[test]
+    fn test_address_topic0_topic1_index() {
+        let (_tmp, dir) = setup_partition();
+        let reader =
+            BTreeIndexReader::open(&dir.join("indexes/address_topic0_topic1.bptree")).unwrap();
+
+        let bm = CompositeQuery::get_address_topic0_topic1(
+            &reader,
+            &[0xAA; 20],
+            B256::repeat_byte(0xDD).as_slice().try_into().unwrap(),
+            B256::repeat_byte(0xF1).as_slice().try_into().unwrap(),
+        )
+        .unwrap();
+        assert!(bm.contains(0));
+        assert_eq!(bm.len(), 1);
+
+        assert!(
+            CompositeQuery::get_address_topic0_topic1(
+                &reader,
+                &[0xAA; 20],
+                B256::repeat_byte(0xDD).as_slice().try_into().unwrap(),
+                B256::repeat_byte(0xF2).as_slice().try_into().unwrap(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_address_topic0_topic2_index() {
+        let (_tmp, dir) = setup_partition();
+        let reader =
+            BTreeIndexReader::open(&dir.join("indexes/address_topic0_topic2.bptree")).unwrap();
+
+        let bm = CompositeQuery::get_address_topic0_topic2(
+            &reader,
+            &[0xBB; 20],
+            B256::repeat_byte(0xDD).as_slice().try_into().unwrap(),
+            B256::repeat_byte(0xA2).as_slice().try_into().unwrap(),
+        )
+        .unwrap();
+        assert!(bm.contains(1));
+        assert_eq!(bm.len(), 1);
+
+        assert!(
+            CompositeQuery::get_address_topic0_topic2(
+                &reader,
+                &[0xBB; 20],
+                B256::repeat_byte(0xDD).as_slice().try_into().unwrap(),
+                B256::repeat_byte(0xA1).as_slice().try_into().unwrap(),
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -2,143 +2,89 @@
 
 ## Current Status
 
-LogEx starts from a recent CL checkpoint, follows CL head/finality over P2P, uses CL-verified execution headers as the EL pivot, then syncs EL forward to head and backward toward genesis. EL historical sync verifies header ancestry, bodies, receipt roots, cumulative gas, and log blooms without executing the EVM. Queryable log coverage expands as verified segments are stored.
+LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, keeps following head, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active development branch for this run: `feature/query-workbench`. PRs #76, #78, #79, and #81 were merged. The remote test client is running on `root@165.22.64.42` with HTTP on `18683` and data in `/var/lib/logex/mainnet`.
+Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain unmerged until the query workbench is approved.
 
-The remote EL validation run reached genesis, kept live head tracking afterward, and survived a graceful service restart with historical floor still at `0`. Warmed samples held strong peer retention, zero raw compression backlog, and roughly 300k-450k historical logs/sec in dense ranges, then accelerated across sparse pre-Merge history. CPU profiles show the remaining hot path is mostly required receipt verification work, especially receipt-root Keccak. The two extra mounted volumes are being used for a machine-specific symlink relocation of sealed historical segments; this is not product storage behavior.
+This branch is focused on PostgreSQL-like log querying, query-builder UX, cancellation, and common ERC20 query performance.
 
 ## Completed Since Last Run
 
-- Started the query workbench branch and draft PR scope.
-- Added a query execution timer in `MM:SS:mmm` format.
-- Added browser-local query history with most recent queries first, expandable SQL detail rows, reuse buttons, and per-query `.sql` export.
-- Fixed query history layout so entries wrap within the page instead of requiring horizontal scrolling.
-- Made query result cells clickable and keyboard-copyable so field text can be copied to the clipboard.
-- Changed query history rows back to strict one-line truncated summaries with full SQL only in the expanded detail row.
-- Persisted the SQL editor text across page refreshes and made generated defaults apply only once from the latest stored log block.
-- Fixed empty log matches so queries return a clear empty result instead of exposing a DataFusion zero-partition planning error.
-- Polished query history display by renaming rows to result, widening that column, moving result detail into the expanded row, left-aligning actions, and adding copy feedback for result cells.
-- Added the dashboard query builder with field toggles, block range inputs, a Transfer event default, and a top ERC20 token selector that generates SQL into the Query Logs editor.
-- Added display-only token names for known ERC20 contract addresses in query results while preserving raw values for copy and CSV export.
-- Reworked the query builder event control into a free-form ABI signature input, added mutually exclusive block/time ranges, and added decimal-aware amount range filters for transfer-style logs.
-- Added display-only decoding for known event topics, ABI-encoded address topics, and 32-byte amount data while preserving raw copy/export behavior.
-- Added token-decimal-aware amount filters, custom ERC20 token input, custom decimals input, explicit local-time to UTC timestamp conversion for time ranges, from/to address chips, and Transfer-aware result headers.
-- Fixed SQL scan correctness for older or unindexed segments by verifying pushed native predicates before returning candidate rows.
-- Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, preserving side-by-side from/to address panels with stable chip-list heights, removing amount placeholders, and adding a deterministic dark-theme date-picker icon.
-- Persisted query builder fields and address lists in browser storage and added per-list reset buttons.
-- Fixed the time-range date picker so the visible calendar affordance is the native interactive picker target with a `showPicker()` fallback.
-- Kept date/time inputs on the native interactive picker path after the custom icon hit target proved unreliable.
-- Removed the hidden 10,000-row SQL query cap, changed dashboard-generated SQL to default to `LIMIT 500`, and left full-result CSV export tied to the complete returned result set.
-- Fixed the CI Clippy failure by deriving `Default` for the now-unbounded SQL query page type.
-- Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
+- Added cancellable SQL execution with a single active dashboard query and `POST /query/cancel`.
+- Released the storage read lock before expensive SQL execution by snapshotting segment metadata first.
+- Added timestamp/data predicate pushdown and timestamp-aware segment pruning.
+- Added a native fast path for ordered bounded `logs` queries so common log scans avoid DataFusion `TopK` overhead.
+- Added B-tree index format v2 with direct exact-key lookup while keeping v1 indexes readable.
+- Added ERC20 Transfer composite indexes for token-wide and token+from/to queries.
+- Made `build-indexes --missing-only` build only missing files instead of rewriting every index in a profile.
+- Backfilled the remote full-sync data directory with the new Transfer query indexes for the requested timestamp range.
+- Validated the provided bounded USDC Transfer query on the full remote data set: 5 matching rows in 2.26 seconds with `total_scanned = 5`.
+- Validated a broader USDC Transfer smoke over the same timestamp range: 500 rows in 1.23 seconds.
 
 ## Remaining TODOs
 
-1. Replace the temporary checkpoint source and stale-checkpoint policy.
-   - Reason: Weak-subjectivity safety requires a recent checkpoint and clear stale-checkpoint rejection.
+1. Add supported SQL introspection.
+   - Reason: Users need to discover LogEx tables and log fields without reading source.
+   - Completion criteria: Supported queries can list available tables and log columns with data types, and tests cover accepted and rejected introspection shapes.
+
+2. Broaden query compatibility tests.
+   - Reason: The SQL surface should stay close to PostgreSQL-style log analysis while remaining scoped to verified Ethereum logs.
+   - Completion criteria: Tests cover projections, aliases, predicates, block/time bounds, ordering, limit/offset, unbounded results, aggregates, grouping, distinct, nulls, invalid SQL, unsupported tables, and deterministic errors.
+
+3. Broaden common ERC20 query performance coverage.
+   - Reason: Transfer queries over dense mainnet ranges must stay fast for token-wide, sender-filtered, receiver-filtered, amount-filtered, and time-bounded shapes.
+   - Completion criteria: Representative ERC20 query-builder outputs are covered by tests or active benchmarks, and any required index backfill path is documented.
+
+4. Replace the temporary checkpoint source.
+   - Reason: Weak-subjectivity safety needs a first-party recent-checkpoint flow.
    - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
 
-2. Complete release validation and hardening.
-   - Reason: Trustless log validity depends on correct verification, storage canonicality, query limits, auth, graceful shutdown, and exposed listener safety.
-   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query caps/pagination, and public deployment safety.
-
-3. Build PostgreSQL-like query introspection for the supported LogEx schema.
-   - Reason: Users need to discover available tables and fields without reading source code.
-   - Completion criteria: Supported SQL can list available query tables and log table columns with data types, and tests cover the supported introspection queries and rejected out-of-scope system catalog access.
-
-4. Expand query-engine compatibility for Ethereum event-log analysis.
-   - Reason: LogEx should feel close to a PostgreSQL-style analytical query surface while staying scoped to verified Ethereum logs.
-   - Completion criteria: A broad TDD query suite covers projections, aliases, filters, block ranges, address/topic predicates, ordering, limit/offset behavior, unbounded SQL query behavior, aggregates, grouping, distinct values, null handling, invalid SQL, unsupported tables, and deterministic error messages.
-
-5. Measure and improve query performance on realistic segment access patterns.
-   - Reason: Complex queries may touch many compressed segments and expose decompression, scanning, or indexing bottlenecks that small unit fixtures cannot reveal.
-   - Completion criteria: Synthetic integration tests cover sparse and dense block ranges, and an optional active benchmark against a full synced data directory records query time, scanned rows/segments, and regressions worth optimizing.
+5. Complete release hardening.
+   - Reason: Production readiness depends on verification safety, query behavior, graceful shutdown, and deployment safety.
+   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query cancellation, auth, and exposed listener policy.
 
 ## Design Decisions
 
-- CL sync is forward-only from a recent checkpoint. EL historical sync walks backward from the CL-authenticated pivot to genesis.
-- Logs are valid only inside the verified contiguous stored range.
-- Historical EL validation verifies parent-hash ancestry, body commitments, receipt roots, cumulative gas, and logs bloom against each header.
-- Historical chunks whose headers prove empty transaction, receipt, ommer, and withdrawal roots can be ingested header-only because the empty body and receipt tries are uniquely determined by those roots.
-- Historical ETA is log-based when log-rate data is available; block/sec remains an advanced diagnostic because block density varies heavily across history.
-- After EL history reaches genesis, the main dashboard switches from historical reverse-sync metrics to live head-gap metrics.
-- Dashboard CPU is shown as capacity utilization across logical CPUs; raw multi-core process CPU remains available in advanced status data.
-- SQL query responses have no hidden server-side row cap; dashboard-generated queries include `LIMIT 500` by default and still paginate loaded results by `50` visible rows.
-- Historical storage writes sealed compacted segments directly, avoiding raw segment buildup during normal reverse sync.
-- Dashboard storage uses the normal user model: one data directory, one writable disk-free value. Multi-volume server hacks are not part of the main UI.
-- Historical fetch windows scale by serving peers, memory, and observed log density. Experiments that improve one range but regress RSS, peer usefulness, or logs/sec should be reverted.
-- Dashboard section expansion state is stored in browser `localStorage` because it is a per-browser display preference, not node state.
-- Query history is stored only in browser `localStorage`; it is user convenience state and must not be written to the node data directory.
-- ERC20 token names in the query builder should map to contract addresses, not event topics. The ERC20 `Transfer` topic0 is shared across tokens, while the log `address` identifies the token contract.
-- Token-name substitution in query results is display-only; copy and CSV export keep the raw query values.
-- Query-builder amount filters accept user-facing token units and convert them to raw `uint256` values using the selected token's decimals. Known-token decimals are stored in the static dashboard dictionary; custom tokens require the user to provide decimals.
-- The builder uses the query engine's `event'...'` literal for event signatures so topic hashing stays consistent with server-side SQL rewriting.
-- Query-builder time ranges use browser-local date/time inputs but generate UTC epoch-second predicates because Ethereum block timestamps are UTC Unix timestamps.
-- Query-builder address chips store checksummed addresses. All-lower/all-upper inputs are accepted and converted to checksum form; mixed-case inputs must pass EIP-55 validation.
-- Query-builder state is stored only in browser `localStorage`, including selected fields, ranges, token metadata, amount inputs, pending address inputs, and from/to address chips.
-- Query-builder date/time controls use the browser's native `datetime-local` behavior while showing LogEx's custom calendar icon; the icon area is wired to `showPicker()` instead of relying on a hidden native indicator as the click target.
-- Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
+- SQL responses no longer have a hidden server-side row cap; dashboard-generated queries default to `LIMIT 500`.
+- Dashboard query history and query-builder state remain browser-local only.
+- Bounded log queries should prune whole segments with metadata first, then use exact indexes where available, then apply row-level checks for correctness.
+- The native SQL fast path is limited to simple ordered `logs` queries; more complex SQL continues through DataFusion.
+- ERC20 Transfer indexing prioritizes `(address, topic0)`, `(address, topic0, topic1)`, and `(address, topic0, topic2)` because those cover token, sender, and receiver filters used by the query builder.
+- Query execution snapshots storage metadata before scanning so long queries do not block sync writes.
 
 ## Challenges and Resolutions
 
-- Challenge: Block/sec made ETA misleading because older blocks are much less log-dense than recent blocks.
-  - Resolution: Added logs/sec tracking and a log-count based ETA estimate.
+- Challenge: Long dashboard queries could continue running and block useful work.
+  - Resolution: Added server-side cancellation, a dashboard Stop button, and single-active-query enforcement.
 
-- Challenge: Dense historical validation spent avoidable CPU rebuilding repeated receipt-bloom components.
-  - Resolution: Added a bounded receipt-bloom cache for eth/69 and eth/70 responses while preserving receipt-root and logs-bloom verification.
+- Challenge: Empty matches surfaced a DataFusion zero-partition planning error.
+  - Resolution: Empty scans now return a valid empty single-partition result.
 
-- Challenge: Lower-log-density pre-Merge ranges make per-batch overhead more visible.
-  - Resolution: Historical fetch windows now adapt to peer count, memory, and observed log density, and the body/receipt pipeline can return the widened sparse-window range.
+- Challenge: The provided Transfer query was slow because v1 exact-key lookup scanned large index files per segment.
+  - Resolution: Added B-tree v2 direct point lookup and native exact Transfer composite lookups.
 
-- Challenge: Profiling after the latest deploy still showed small standard-hasher overhead in storage dictionary compression.
-  - Resolution: Switched the hot per-segment dictionary maps to `FxHashMap`.
-
-- Challenge: Sparse historical ranges still pay fixed validation overhead for empty receipt sets inside otherwise non-empty batches.
-  - Resolution: Added a direct empty-root/zero-bloom validation path for empty receipts.
-
-- Challenge: The historical ingest coalescing test depended on the host's available memory, so GitHub's higher-memory runner used a larger row threshold than the local machine.
-  - Resolution: Added an explicit row-limit coalescing helper for deterministic unit coverage while leaving the production memory-adaptive limit intact.
-
-- Challenge: The full-history run needed more disk headroom than the primary remote volume alone could provide.
-  - Resolution: Kept the product UI/data-dir model single-disk oriented and used a test-machine-only sealed-segment symlink relocation for extra mounted volumes.
-
-- Challenge: Query performance tests need realistic compressed segment access without committing large mainnet data.
-  - Resolution: Track deterministic synthetic integration coverage separately from optional active benchmarks against a full synced data directory.
-
-- Challenge: DataFusion rejected sorted queries when the log filter matched no storage segments because the lazy memory plan had zero partitions.
-  - Resolution: Added an explicit empty batch generator so empty matches have a valid single-partition plan and return normal empty results.
-
-- Challenge: The token selector needs a current but deterministic top-token list without making the dashboard depend on a live market-data API.
-  - Resolution: Generated a static Ethereum-platform token dictionary from CoinGecko market-cap order and used it only as dashboard metadata.
-
-- Challenge: Filtering by Transfer amount needs to preserve raw log correctness while matching user-facing token units.
-  - Resolution: Added static known-token decimals plus custom-token decimals, then generate raw `uint256` predicates and keep copy/export values raw.
-
-- Challenge: A live query smoke showed pushed SQL filters could be treated as exact even when a segment lacked the matching index.
-  - Resolution: SQL scans now re-check pushed native predicates against materialized candidate rows, and a regression test covers unindexed storage.
-
-- Challenge: Multi-address chip growth could disturb adjacent builder controls and invalid mixed-case addresses were not rejected.
-  - Resolution: Kept from/to lists as independent side-by-side panels with bounded scrolling chip areas and added browser-side EIP-55 checksum validation with checksum normalization.
+- Challenge: Timestamp predicates previously could still touch irrelevant segments.
+  - Resolution: Added timestamp metadata to segments/manifests and pruned partitions before opening segment data.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard query UI path and reused existing localStorage/copy patterns. Replaced the event dropdown with a normal input, removed the obsolete fixed-topic builder path, removed the unused raw `uint256` display helper after token-aware amount formatting replaced it, removed the hidden-token-metadata control path, and checked the SQL native scan path for obsolete exact-pushdown assumptions.
+- Inspected query UI, SQL execution, native scanning, index building, and storage metadata paths.
+- Removed obsolete assumptions around exact predicate pushdown by rechecking native predicates before returning rows.
+- No debug-only code is intentionally left in the query path.
 
 ## Git Workflow
 
 - Current branch: `feature/query-workbench`
-- New branch created this run: `feature/query-workbench` from `origin/master`.
-- Commits made during this run: initial query workbench roadmap and dashboard history/timer work, query history/cell copy fixes, persistent SQL editor state, empty-result query planning fixes, query history polish, query builder work, query-builder filter decoding updates, custom token/decimal query-builder updates, SQL filter correctness updates, and unbounded SQL query result handling.
-- Pull request status: draft PR for ongoing query work.
-- Merge status: intentionally not merged until user approval.
-- Blockers: none known.
+- New branch created this run: no
+- Commits made during this run: pending
+- Pull request status: draft PR #82 remains open
+- Merge status: intentionally not merged
+- Blockers: none for committing the current query-indexing milestone; PR remains draft until the query workbench is approved.
 
 ## Known Issues or Risks
 
-- The log-count ETA uses a reference total and recent-block average above block `25,093,066`; it is better than block/sec ETA but still an estimate.
-- Full sync performance is now mostly sensitive to receipt verification CPU and body/receipt response latency. Further optimization should be handled in a new focused PR only if fresh-run measurements show a meaningful regression or clear upside.
-- Extra server volumes are a test-environment workaround and not a product storage allocator.
+- Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive the newest Transfer composite indexes.
+- Queries without selective bounds or predicates can still be expensive because unbounded SQL is intentionally allowed.
+- The remote data directory still has many older segments without token-wide `(address, topic0)` indexes; current requested and latest-token benchmarks are fast, so full backfill should be driven by measured need.
 - HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
-- gRPC exposure still needs a clear auth/bind/disable policy before public deployment.
 - Verification-critical security review is still required before a production-ready release.

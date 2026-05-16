@@ -22,7 +22,10 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
-use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
+use datafusion::sql::sqlparser::ast::{
+    BinaryOperator as SqlBinaryOperator, Expr as SqlAstExpr, GroupByExpr, LimitClause, OrderByKind,
+    SelectItem, SetExpr, Statement as SqlStatement, TableFactor, Value as SqlValue,
+};
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
@@ -52,6 +55,8 @@ pub struct SqlQueryResult {
     pub total_scanned: u64,
 }
 
+pub type QueryCancelCheck = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqlQueryPage {
     pub limit: Option<usize>,
@@ -64,19 +69,34 @@ impl SqlQueryPage {
     }
 }
 
-#[derive(Debug)]
 struct LogexTableProvider {
     schema: SchemaRef,
     snapshot: StorageSnapshot,
     total_scanned: Arc<AtomicU64>,
+    cancel_check: Option<QueryCancelCheck>,
+}
+
+impl std::fmt::Debug for LogexTableProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogexTableProvider")
+            .field("schema", &self.schema)
+            .field("snapshot", &self.snapshot)
+            .field("total_scanned", &self.total_scanned)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LogexTableProvider {
-    fn new(snapshot: StorageSnapshot, total_scanned: Arc<AtomicU64>) -> Self {
+    fn new(
+        snapshot: StorageSnapshot,
+        total_scanned: Arc<AtomicU64>,
+        cancel_check: Option<QueryCancelCheck>,
+    ) -> Self {
         Self {
             schema: Arc::new(log_rows_schema()),
             snapshot,
             total_scanned,
+            cancel_check,
         }
     }
 }
@@ -126,6 +146,7 @@ impl TableProvider for LogexTableProvider {
         let mut generators: Vec<Arc<parking_lot::RwLock<dyn LazyBatchGenerator>>> = Vec::new();
 
         for partition in self.snapshot.partitions_in_order(filter.order) {
+            check_query_canceled(self.cancel_check.as_ref())?;
             if !partition_matches_filter(&partition, &filter) {
                 continue;
             }
@@ -136,8 +157,13 @@ impl TableProvider for LogexTableProvider {
                 continue;
             }
             if has_native_constraints(&filter) {
-                row_ids = exact_candidate_row_ids(&partition.path, &filter, row_ids)
-                    .map_err(DataFusionError::IoError)?;
+                row_ids = exact_candidate_row_ids(
+                    &partition.path,
+                    &filter,
+                    row_ids,
+                    self.cancel_check.as_ref(),
+                )
+                .map_err(DataFusionError::IoError)?;
                 if row_ids.is_empty() {
                     continue;
                 }
@@ -158,6 +184,7 @@ impl TableProvider for LogexTableProvider {
                     projected_schema.clone(),
                     projected_columns.clone(),
                     row_ids,
+                    self.cancel_check.clone(),
                 ),
             )));
 
@@ -184,6 +211,11 @@ fn has_native_constraints(filter: &NativeLogFilter) -> bool {
     filter.block_hash.is_some()
         || filter.from_block.is_some()
         || filter.to_block.is_some()
+        || filter.from_timestamp.is_some()
+        || filter.to_timestamp.is_some()
+        || filter.data_len.is_some()
+        || filter.data_min.is_some()
+        || filter.data_max.is_some()
         || !filter.addresses.is_empty()
         || filter
             .topics
@@ -191,13 +223,33 @@ fn has_native_constraints(filter: &NativeLogFilter) -> bool {
             .any(|constraint| !matches!(constraint, TopicConstraint::Any))
 }
 
+fn check_query_canceled(cancel_check: Option<&QueryCancelCheck>) -> DataFusionResult<()> {
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(DataFusionError::Execution("query canceled".to_owned()));
+    }
+    Ok(())
+}
+
 fn exact_candidate_row_ids(
     dir: &std::path::Path,
     filter: &NativeLogFilter,
     row_ids: Vec<u32>,
+    cancel_check: Option<&QueryCancelCheck>,
 ) -> std::io::Result<Vec<u32>> {
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
     let reader = SegmentReader::open(dir)?;
     let rows = reader.read_log_rows(Some(&row_ids))?;
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
     Ok(row_ids
         .into_iter()
         .zip(rows)
@@ -240,13 +292,24 @@ impl LazyBatchGenerator for EmptyLogBatchGenerator {
     }
 }
 
-#[derive(Debug)]
 struct LogSegmentBatchGenerator {
     dir: std::path::PathBuf,
     schema: SchemaRef,
     projected_columns: Vec<String>,
     row_ids: Vec<u32>,
     offset: usize,
+    cancel_check: Option<QueryCancelCheck>,
+}
+
+impl std::fmt::Debug for LogSegmentBatchGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogSegmentBatchGenerator")
+            .field("dir", &self.dir)
+            .field("projected_columns", &self.projected_columns)
+            .field("row_ids", &self.row_ids.len())
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LogSegmentBatchGenerator {
@@ -255,6 +318,7 @@ impl LogSegmentBatchGenerator {
         schema: SchemaRef,
         projected_columns: Vec<String>,
         row_ids: Vec<u32>,
+        cancel_check: Option<QueryCancelCheck>,
     ) -> Self {
         Self {
             dir,
@@ -262,6 +326,7 @@ impl LogSegmentBatchGenerator {
             projected_columns,
             row_ids,
             offset: 0,
+            cancel_check,
         }
     }
 }
@@ -278,6 +343,7 @@ impl LazyBatchGenerator for LogSegmentBatchGenerator {
     }
 
     fn generate_next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
+        check_query_canceled(self.cancel_check.as_ref())?;
         if self.offset >= self.row_ids.len() {
             return Ok(None);
         }
@@ -311,18 +377,39 @@ pub async fn execute_sql_page(
     head_block: Option<u64>,
     page: SqlQueryPage,
 ) -> Result<SqlQueryResult, SqlQueryError> {
-    let SqlQueryPage { limit, offset } = page;
+    execute_sql_page_with_cancel(sql, storage, head_block, page, None).await
+}
+
+pub async fn execute_sql_page_with_cancel(
+    sql: &str,
+    storage: &PartitionManager,
+    head_block: Option<u64>,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<SqlQueryResult, SqlQueryError> {
+    let snapshot = StorageSnapshot::from_storage(storage);
     let head_block = head_block.unwrap_or_else(|| storage.head_block().unwrap_or(0));
+    execute_sql_page_on_snapshot(sql, snapshot, head_block, page, cancel_check).await
+}
+
+pub async fn execute_sql_page_on_snapshot(
+    sql: &str,
+    snapshot: StorageSnapshot,
+    head_block: u64,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<SqlQueryResult, SqlQueryError> {
+    let SqlQueryPage { limit, offset } = page;
     if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
     }
     let sql = rewrite_legacy_sql(sql, head_block)?;
     enforce_read_only_sql(&sql)?;
+    if let Some(result) = try_execute_native_select(&sql, &snapshot, page, cancel_check.clone())? {
+        return Ok(result);
+    }
     let total_scanned = Arc::new(AtomicU64::new(0));
-    let table = LogexTableProvider::new(
-        StorageSnapshot::from_storage(storage),
-        Arc::clone(&total_scanned),
-    );
+    let table = LogexTableProvider::new(snapshot, Arc::clone(&total_scanned), cancel_check.clone());
 
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(table))?;
@@ -333,13 +420,669 @@ pub async fn execute_sql_page(
     } else {
         dataframe
     };
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     let batches = dataframe.collect().await?;
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     let rows = record_batches_to_json(&batches);
 
     Ok(SqlQueryResult {
         rows,
         total_scanned: total_scanned.load(Ordering::Relaxed),
     })
+}
+
+fn try_execute_native_select(
+    sql: &str,
+    snapshot: &StorageSnapshot,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<Option<SqlQueryResult>, SqlQueryError> {
+    let Some(mut native_query) = parse_native_select_query(sql)? else {
+        return Ok(None);
+    };
+
+    let page_limit = page.limit.map(|limit| limit.saturating_add(page.offset));
+    native_query.filter.limit = match (native_query.sql_limit, page_limit) {
+        (Some(sql_limit), Some(page_limit)) => Some(sql_limit.min(page_limit)),
+        (Some(sql_limit), None) => Some(sql_limit),
+        (None, Some(page_limit)) => Some(page_limit),
+        (None, None) => None,
+    };
+    native_query.filter.offset = page.offset;
+
+    let (rows, total_scanned) =
+        execute_native_sql_filter(snapshot, &native_query.filter, cancel_check.as_ref())?;
+    let rows = rows
+        .iter()
+        .map(|row| native_log_row_to_json(row, &native_query.columns))
+        .collect();
+
+    Ok(Some(SqlQueryResult {
+        rows,
+        total_scanned,
+    }))
+}
+
+fn execute_native_sql_filter(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<(Vec<logex_types::LogRow>, u64), SqlQueryError> {
+    check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+    let partitions: Vec<_> = snapshot
+        .partitions_in_order(filter.order)
+        .into_iter()
+        .filter(|partition| partition_matches_filter(partition, filter))
+        .collect();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8);
+    let window_size = worker_count.saturating_mul(4).max(1);
+    let scan_limit = filter
+        .limit
+        .map(|limit| limit.saturating_add(filter.offset));
+    let mut rows = Vec::new();
+    let mut total_scanned = 0u64;
+
+    'outer: for chunk in partitions.chunks(window_size) {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        let chunk_results = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for partition in chunk {
+                let path = partition.path.clone();
+                let filter = filter.clone();
+                let cancel_check = cancel_check.cloned();
+                let limit = scan_limit;
+                handles.push(scope.spawn(move || {
+                    scan_native_sql_partition(&path, &filter, limit, cancel_check.as_ref())
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for result in chunk_results {
+            let mut partition_rows = result.map_err(|err| {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    SqlQueryError::DataFusion(DataFusionError::Execution(
+                        "query canceled".to_owned(),
+                    ))
+                } else {
+                    SqlQueryError::Storage(err)
+                }
+            })?;
+            total_scanned += partition_rows.len() as u64;
+            rows.append(&mut partition_rows);
+            if let Some(limit) = scan_limit
+                && rows.len() >= limit
+            {
+                rows.truncate(limit);
+                break 'outer;
+            }
+        }
+    }
+
+    sort_native_rows(&mut rows, filter.order);
+    if filter.offset > 0 {
+        if filter.offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows.drain(..filter.offset);
+        }
+    }
+    if let Some(limit) = filter.limit {
+        rows.truncate(limit);
+    }
+
+    Ok((rows, total_scanned))
+}
+
+fn scan_native_sql_partition(
+    path: &std::path::Path,
+    filter: &NativeLogFilter,
+    limit: Option<usize>,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> std::io::Result<Vec<logex_types::LogRow>> {
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
+    let mut row_ids = candidate_row_ids(path, filter, true)?;
+    if row_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    order_and_truncate_row_ids(path, &mut row_ids, filter.order, limit)?;
+    if row_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reader = SegmentReader::open(path)?;
+    let mut rows = reader.read_log_rows(Some(&row_ids))?;
+    rows.retain(|row| matches_native_filter(row, filter));
+    sort_native_rows(&mut rows, filter.order);
+    Ok(rows)
+}
+
+fn order_and_truncate_row_ids(
+    path: &std::path::Path,
+    row_ids: &mut Vec<u32>,
+    order: logex_storage::native::LogOrder,
+    limit: Option<usize>,
+) -> std::io::Result<()> {
+    if row_ids.is_empty() {
+        return Ok(());
+    }
+    let reader = SegmentReader::open(path)?;
+    let blocks = reader.read_u64("block_number", Some(row_ids))?;
+    let tx_indices = reader.read_u32("tx_index", Some(row_ids))?;
+    let log_indices = reader.read_u32("log_index", Some(row_ids))?;
+    let mut keyed: Vec<_> = row_ids
+        .iter()
+        .copied()
+        .zip(blocks.into_iter().zip(tx_indices).zip(log_indices))
+        .map(|(row_id, ((block, tx_index), log_index))| (row_id, block, tx_index, log_index))
+        .collect();
+    if matches!(order, logex_storage::native::LogOrder::Descending) {
+        keyed.sort_by_key(|(_, block, tx_index, log_index)| {
+            std::cmp::Reverse((*block, *tx_index, *log_index))
+        });
+    } else {
+        keyed.sort_by_key(|(_, block, tx_index, log_index)| (*block, *tx_index, *log_index));
+    }
+    if let Some(limit) = limit {
+        keyed.truncate(limit);
+    }
+    *row_ids = keyed.into_iter().map(|(row_id, _, _, _)| row_id).collect();
+    Ok(())
+}
+
+fn sort_native_rows(rows: &mut [logex_types::LogRow], order: logex_storage::native::LogOrder) {
+    if matches!(order, logex_storage::native::LogOrder::Descending) {
+        rows.sort_by_key(|row| std::cmp::Reverse((row.block_number, row.tx_index, row.log_index)));
+    } else {
+        rows.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index));
+    }
+}
+
+struct NativeSqlQuery {
+    columns: Vec<String>,
+    filter: NativeLogFilter,
+    sql_limit: Option<usize>,
+}
+
+fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQueryError> {
+    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return Ok(None);
+    };
+    let SqlStatement::Query(query) = statement.as_ref() else {
+        return Ok(None);
+    };
+    if query.with.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.pipe_operators.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(None);
+    };
+    if select.distinct.is_some()
+        || select.top.is_some()
+        || select.into.is_some()
+        || !select.lateral_views.is_empty()
+        || select.prewhere.is_some()
+        || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty())
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+        || select.connect_by.is_some()
+    {
+        return Ok(None);
+    }
+    if !select_has_logs_from(&select.from) {
+        return Ok(None);
+    }
+
+    let Some(columns) = native_projection_columns(&select.projection) else {
+        return Ok(None);
+    };
+    let Some(order) = native_order(query.order_by.as_ref()) else {
+        return Ok(None);
+    };
+    let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
+        return Ok(None);
+    };
+
+    let mut filter = NativeLogFilter::new();
+    filter.order = order;
+    filter.limit = sql_limit;
+    if let Some(selection) = &select.selection
+        && !apply_sql_ast_filter(&mut filter, selection)?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(NativeSqlQuery {
+        columns,
+        filter,
+        sql_limit,
+    }))
+}
+
+fn select_has_logs_from(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]) -> bool {
+    if from.len() != 1 || !from[0].joins.is_empty() {
+        return false;
+    }
+    match &from[0].relation {
+        TableFactor::Table {
+            name,
+            alias,
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+            ..
+        } => {
+            name.to_string().eq_ignore_ascii_case("logs")
+                && alias.is_none()
+                && args.is_none()
+                && with_hints.is_empty()
+                && version.is_none()
+                && !*with_ordinality
+                && partitions.is_empty()
+                && json_path.is_none()
+                && sample.is_none()
+                && index_hints.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<String>> {
+    let mut columns = Vec::new();
+    for item in projection {
+        match item {
+            SelectItem::Wildcard(_) => return Some(all_log_columns()),
+            SelectItem::UnnamedExpr(expr) => columns.push(sql_identifier(expr)?),
+            SelectItem::ExprWithAlias { expr, .. } => columns.push(sql_identifier(expr)?),
+            SelectItem::QualifiedWildcard(_, _) => return None,
+        }
+    }
+    Some(columns)
+}
+
+fn all_log_columns() -> Vec<String> {
+    [
+        "block_number",
+        "block_hash",
+        "timestamp",
+        "tx_hash",
+        "tx_index",
+        "log_index",
+        "address",
+        "topic0",
+        "topic1",
+        "topic2",
+        "topic3",
+        "topics",
+        "data",
+        "data_len",
+        "source",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn native_order(
+    order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
+) -> Option<logex_storage::native::LogOrder> {
+    let Some(order_by) = order_by else {
+        return Some(logex_storage::native::LogOrder::Ascending);
+    };
+    let OrderByKind::Expressions(expressions) = &order_by.kind else {
+        return None;
+    };
+    let expected = ["block_number", "tx_index", "log_index"];
+    if expressions.len() != expected.len() {
+        return None;
+    }
+    let mut descending = None;
+    for (expr, expected) in expressions.iter().zip(expected) {
+        if sql_identifier(&expr.expr)?.eq_ignore_ascii_case(expected) {
+            let is_desc = !expr.options.asc.unwrap_or(true);
+            if let Some(existing) = descending {
+                if existing != is_desc {
+                    return None;
+                }
+            } else {
+                descending = Some(is_desc);
+            }
+            if expr.options.nulls_first.is_some() || expr.with_fill.is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    if descending.unwrap_or(false) {
+        Some(logex_storage::native::LogOrder::Descending)
+    } else {
+        Some(logex_storage::native::LogOrder::Ascending)
+    }
+}
+
+fn native_limit(limit_clause: Option<&LimitClause>) -> Option<Option<usize>> {
+    let Some(limit_clause) = limit_clause else {
+        return Some(None);
+    };
+    match limit_clause {
+        LimitClause::LimitOffset {
+            limit: Some(limit),
+            offset: None,
+            limit_by,
+        } if limit_by.is_empty() => sql_usize(limit).map(Some),
+        LimitClause::LimitOffset {
+            limit: None,
+            offset: None,
+            limit_by,
+        } if limit_by.is_empty() => Some(None),
+        _ => None,
+    }
+}
+
+fn apply_sql_ast_filter(
+    filter: &mut NativeLogFilter,
+    expr: &SqlAstExpr,
+) -> Result<bool, SqlQueryError> {
+    match expr {
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
+            Ok(apply_sql_ast_filter(filter, left)? && apply_sql_ast_filter(filter, right)?)
+        }
+        SqlAstExpr::BinaryOp { left, op, right } => {
+            apply_sql_binary_filter(filter, left, op.clone(), right)
+        }
+        SqlAstExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            if *negated {
+                return Ok(false);
+            }
+            let Some(column) = sql_identifier(expr) else {
+                return Ok(false);
+            };
+            let (Some(low), Some(high)) = (sql_u64(low), sql_u64(high)) else {
+                return Ok(false);
+            };
+            match column.as_str() {
+                "block_number" => {
+                    filter.from_block =
+                        Some(filter.from_block.map_or(low, |current| current.max(low)));
+                    filter.to_block =
+                        Some(filter.to_block.map_or(high, |current| current.min(high)));
+                    Ok(true)
+                }
+                "timestamp" => {
+                    filter.from_timestamp = Some(
+                        filter
+                            .from_timestamp
+                            .map_or(low, |current| current.max(low)),
+                    );
+                    filter.to_timestamp = Some(
+                        filter
+                            .to_timestamp
+                            .map_or(high, |current| current.min(high)),
+                    );
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        SqlAstExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            if *negated {
+                return Ok(false);
+            }
+            let Some(column) = sql_identifier(expr) else {
+                return Ok(false);
+            };
+            match column.as_str() {
+                "address" => {
+                    let mut addresses = Vec::with_capacity(list.len());
+                    for item in list {
+                        let Some(address) = sql_string(item).and_then(parse_address) else {
+                            return Ok(false);
+                        };
+                        addresses.push(address);
+                    }
+                    merge_addresses(filter, addresses);
+                    Ok(true)
+                }
+                column if topic_column_index(column).is_some() => {
+                    let index = topic_column_index(column).unwrap();
+                    let mut topics = Vec::with_capacity(list.len());
+                    for item in list {
+                        let Some(topic) = sql_string(item).and_then(parse_b256) else {
+                            return Ok(false);
+                        };
+                        topics.push(topic);
+                    }
+                    merge_topic_constraint(
+                        &mut filter.topics[index],
+                        TopicConstraint::AnyOf(topics),
+                    );
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
+fn apply_sql_binary_filter(
+    filter: &mut NativeLogFilter,
+    left: &SqlAstExpr,
+    operator: SqlBinaryOperator,
+    right: &SqlAstExpr,
+) -> Result<bool, SqlQueryError> {
+    let Some((column, literal, reversed)) = normalize_sql_binary(left, right) else {
+        return Ok(false);
+    };
+
+    match column.as_str() {
+        "block_number" => {
+            let Some(value) = sql_u64(literal) else {
+                return Ok(false);
+            };
+            apply_block_number_constraint(filter, sql_binary_operator(operator), value, reversed);
+            Ok(true)
+        }
+        "timestamp" => {
+            let Some(value) = sql_u64(literal) else {
+                return Ok(false);
+            };
+            apply_timestamp_constraint(filter, sql_binary_operator(operator), value, reversed);
+            Ok(true)
+        }
+        "data_len" if !reversed && operator == SqlBinaryOperator::Eq => {
+            let Some(value) = sql_u64(literal) else {
+                return Ok(false);
+            };
+            filter.data_len = Some(value.min(u32::MAX as u64) as u32);
+            Ok(true)
+        }
+        "data" if !reversed => {
+            let Some(value) = sql_string(literal).and_then(parse_hex_bytes) else {
+                return Ok(false);
+            };
+            match operator {
+                SqlBinaryOperator::Eq => apply_data_constraint(filter, Operator::Eq, value),
+                SqlBinaryOperator::GtEq => apply_data_constraint(filter, Operator::GtEq, value),
+                SqlBinaryOperator::LtEq => apply_data_constraint(filter, Operator::LtEq, value),
+                _ => return Ok(false),
+            }
+            Ok(true)
+        }
+        "block_hash" if !reversed && operator == SqlBinaryOperator::Eq => {
+            let Some(block_hash) = sql_string(literal).and_then(parse_b256) else {
+                return Ok(false);
+            };
+            filter.block_hash = Some(block_hash);
+            Ok(true)
+        }
+        "address" if !reversed && operator == SqlBinaryOperator::Eq => {
+            let Some(address) = sql_string(literal).and_then(parse_address) else {
+                return Ok(false);
+            };
+            merge_addresses(filter, vec![address]);
+            Ok(true)
+        }
+        column
+            if !reversed
+                && operator == SqlBinaryOperator::Eq
+                && topic_column_index(column).is_some() =>
+        {
+            let Some(topic) = sql_string(literal).and_then(parse_b256) else {
+                return Ok(false);
+            };
+            let index = topic_column_index(column).unwrap();
+            merge_topic_constraint(&mut filter.topics[index], TopicConstraint::One(topic));
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn normalize_sql_binary<'a>(
+    left: &'a SqlAstExpr,
+    right: &'a SqlAstExpr,
+) -> Option<(String, &'a SqlAstExpr, bool)> {
+    if let Some(column) = sql_identifier(left) {
+        return Some((column, right, false));
+    }
+    if let Some(column) = sql_identifier(right) {
+        return Some((column, left, true));
+    }
+    None
+}
+
+fn sql_binary_operator(operator: SqlBinaryOperator) -> Operator {
+    match operator {
+        SqlBinaryOperator::Eq => Operator::Eq,
+        SqlBinaryOperator::Gt => Operator::Gt,
+        SqlBinaryOperator::GtEq => Operator::GtEq,
+        SqlBinaryOperator::Lt => Operator::Lt,
+        SqlBinaryOperator::LtEq => Operator::LtEq,
+        _ => Operator::Eq,
+    }
+}
+
+fn sql_identifier(expr: &SqlAstExpr) -> Option<String> {
+    match expr {
+        SqlAstExpr::Identifier(ident) => Some(ident.value.to_ascii_lowercase()),
+        SqlAstExpr::CompoundIdentifier(parts) if parts.len() == 2 => {
+            (parts[0].value.eq_ignore_ascii_case("logs"))
+                .then(|| parts[1].value.to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
+fn sql_string(expr: &SqlAstExpr) -> Option<&str> {
+    match expr {
+        SqlAstExpr::Value(value) => match &value.value {
+            SqlValue::SingleQuotedString(value)
+            | SqlValue::DoubleQuotedString(value)
+            | SqlValue::TripleSingleQuotedString(value)
+            | SqlValue::TripleDoubleQuotedString(value) => Some(value.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sql_u64(expr: &SqlAstExpr) -> Option<u64> {
+    match expr {
+        SqlAstExpr::Value(value) => match &value.value {
+            SqlValue::Number(value, _) => value.parse().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sql_usize(expr: &SqlAstExpr) -> Option<usize> {
+    sql_u64(expr).and_then(|value| usize::try_from(value).ok())
+}
+
+fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[String]) -> Value {
+    let mut out = Map::with_capacity(columns.len());
+    for column in columns {
+        let value = match column.as_str() {
+            "block_number" => Value::Number(row.block_number.into()),
+            "block_hash" => Value::String(to_hex_hash(row.block_hash)),
+            "timestamp" => Value::Number(row.timestamp.into()),
+            "tx_hash" => Value::String(to_hex_hash(row.tx_hash)),
+            "tx_index" => Value::Number((row.tx_index as u64).into()),
+            "log_index" => Value::Number((row.log_index as u64).into()),
+            "address" => Value::String(to_hex_address(row.address.as_slice())),
+            "topic0" => optional_topic_to_json(row.topic0),
+            "topic1" => optional_topic_to_json(row.topic1),
+            "topic2" => optional_topic_to_json(row.topic2),
+            "topic3" => optional_topic_to_json(row.topic3),
+            "topics" => Value::Array(
+                [row.topic0, row.topic1, row.topic2, row.topic3]
+                    .into_iter()
+                    .flatten()
+                    .map(|topic| Value::String(to_hex_hash(topic)))
+                    .collect(),
+            ),
+            "data" => Value::String(to_hex_bytes(row.data.as_ref())),
+            "data_len" => Value::Number((row.data_len as u64).into()),
+            "source" => Value::Number((row.source as u8 as u64).into()),
+            _ => Value::Null,
+        };
+        out.insert(column.clone(), value);
+    }
+    Value::Object(out)
+}
+
+fn optional_topic_to_json(topic: Option<B256>) -> Value {
+    topic
+        .map(|topic| Value::String(to_hex_hash(topic)))
+        .unwrap_or(Value::Null)
 }
 
 fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
@@ -609,13 +1352,21 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
 
     match column.as_str() {
         "block_number" => numeric_scalar(literal).is_some(),
+        "timestamp" => numeric_scalar(literal).is_some(),
+        "data_len" if !reversed => {
+            matches!(binary.op, Operator::Eq) && numeric_scalar(literal).is_some()
+        }
+        "data" if !reversed => {
+            matches!(binary.op, Operator::Eq | Operator::GtEq | Operator::LtEq)
+                && parse_bytes_scalar(literal).is_some()
+        }
         "block_hash" if !reversed => {
             matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some()
         }
         "address" if !reversed => {
             matches!(binary.op, Operator::Eq) && parse_address_scalar(literal).is_some()
         }
-        "topic0" if !reversed => {
+        column if !reversed && topic_column_index(column).is_some() => {
             matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some()
         }
         _ => false,
@@ -623,7 +1374,7 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
 }
 
 fn supports_between_pushdown(between: &Between) -> bool {
-    matches!(between.expr.as_ref(), DataFusionExpr::Column(column) if column.name == "block_number")
+    matches!(between.expr.as_ref(), DataFusionExpr::Column(column) if column.name == "block_number" || column.name == "timestamp")
         && !between.negated
         && scalar_literal(between.low.as_ref())
             .and_then(numeric_scalar)
@@ -647,7 +1398,7 @@ fn supports_in_list_pushdown(in_list: &InList) -> bool {
                 .and_then(parse_address_scalar)
                 .is_some()
         }),
-        "topic0" => in_list
+        column if topic_column_index(column).is_some() => in_list
             .list
             .iter()
             .all(|expr| scalar_literal(expr).and_then(parse_b256_scalar).is_some()),
@@ -697,6 +1448,21 @@ fn apply_binary_pushdown(
                 .ok_or_else(|| DataFusionError::Plan("invalid block_number literal".to_owned()))?;
             apply_block_number_constraint(filter, binary.op, value, reversed);
         }
+        "timestamp" => {
+            let value = numeric_scalar(literal)
+                .ok_or_else(|| DataFusionError::Plan("invalid timestamp literal".to_owned()))?;
+            apply_timestamp_constraint(filter, binary.op, value, reversed);
+        }
+        "data_len" if !reversed && binary.op == Operator::Eq => {
+            let value = numeric_scalar(literal)
+                .ok_or_else(|| DataFusionError::Plan("invalid data_len literal".to_owned()))?;
+            filter.data_len = Some(value.min(u32::MAX as u64) as u32);
+        }
+        "data" if !reversed => {
+            let value = parse_bytes_scalar(literal)
+                .ok_or_else(|| DataFusionError::Plan("invalid data literal".to_owned()))?;
+            apply_data_constraint(filter, binary.op, value);
+        }
         "block_hash" if !reversed && binary.op == Operator::Eq => {
             filter.block_hash =
                 Some(parse_b256_scalar(literal).ok_or_else(|| {
@@ -713,12 +1479,15 @@ fn apply_binary_pushdown(
                 ],
             );
         }
-        "topic0" if !reversed && binary.op == Operator::Eq => {
+        column
+            if !reversed && binary.op == Operator::Eq && topic_column_index(column).is_some() =>
+        {
+            let index = topic_column_index(column).unwrap();
             merge_topic_constraint(
-                &mut filter.topics[0],
+                &mut filter.topics[index],
                 TopicConstraint::One(
                     parse_b256_scalar(literal).ok_or_else(|| {
-                        DataFusionError::Plan("invalid topic0 literal".to_owned())
+                        DataFusionError::Plan(format!("invalid {column} literal"))
                     })?,
                 ),
             );
@@ -735,7 +1504,7 @@ fn apply_between_pushdown(filter: &mut NativeLogFilter, between: &Between) -> Da
             "between pushdown requires a column".to_owned(),
         ));
     };
-    if column.name != "block_number" || between.negated {
+    if !matches!(column.name.as_str(), "block_number" | "timestamp") || between.negated {
         return Err(DataFusionError::Plan(
             "unsupported BETWEEN pushdown".to_owned(),
         ));
@@ -748,18 +1517,33 @@ fn apply_between_pushdown(filter: &mut NativeLogFilter, between: &Between) -> Da
         .and_then(numeric_scalar)
         .ok_or_else(|| DataFusionError::Plan("invalid BETWEEN high bound".to_owned()))?;
 
-    filter.from_block = Some(
-        filter
-            .from_block
-            .map(|current| current.max(low))
-            .unwrap_or(low),
-    );
-    filter.to_block = Some(
-        filter
-            .to_block
-            .map(|current| current.min(high))
-            .unwrap_or(high),
-    );
+    if column.name == "block_number" {
+        filter.from_block = Some(
+            filter
+                .from_block
+                .map(|current| current.max(low))
+                .unwrap_or(low),
+        );
+        filter.to_block = Some(
+            filter
+                .to_block
+                .map(|current| current.min(high))
+                .unwrap_or(high),
+        );
+    } else {
+        filter.from_timestamp = Some(
+            filter
+                .from_timestamp
+                .map(|current| current.max(low))
+                .unwrap_or(low),
+        );
+        filter.to_timestamp = Some(
+            filter
+                .to_timestamp
+                .map(|current| current.min(high))
+                .unwrap_or(high),
+        );
+    }
     Ok(())
 }
 
@@ -790,19 +1574,20 @@ fn apply_in_list_pushdown(filter: &mut NativeLogFilter, in_list: &InList) -> Dat
             }
             merge_addresses(filter, addresses);
         }
-        "topic0" => {
+        column if topic_column_index(column).is_some() => {
+            let index = topic_column_index(column).unwrap();
             let mut topics = Vec::with_capacity(in_list.list.len());
             for expr in &in_list.list {
                 let literal = scalar_literal(expr).ok_or_else(|| {
-                    DataFusionError::Plan("topic0 IN requires string literals".to_owned())
+                    DataFusionError::Plan(format!("{column} IN requires string literals"))
                 })?;
                 topics.push(
                     parse_b256_scalar(literal).ok_or_else(|| {
-                        DataFusionError::Plan("invalid topic0 literal".to_owned())
+                        DataFusionError::Plan(format!("invalid {column} literal"))
                     })?,
                 );
             }
-            merge_topic_constraint(&mut filter.topics[0], TopicConstraint::AnyOf(topics));
+            merge_topic_constraint(&mut filter.topics[index], TopicConstraint::AnyOf(topics));
         }
         _ => {}
     }
@@ -869,6 +1654,93 @@ fn apply_block_number_constraint(
     }
 }
 
+fn apply_timestamp_constraint(
+    filter: &mut NativeLogFilter,
+    operator: Operator,
+    value: u64,
+    reversed: bool,
+) {
+    match (operator, reversed) {
+        (Operator::Eq, false) | (Operator::Eq, true) => {
+            filter.from_timestamp = Some(
+                filter
+                    .from_timestamp
+                    .map(|current| current.max(value))
+                    .unwrap_or(value),
+            );
+            filter.to_timestamp = Some(
+                filter
+                    .to_timestamp
+                    .map(|current| current.min(value))
+                    .unwrap_or(value),
+            );
+        }
+        (Operator::Gt, false) | (Operator::Lt, true) => {
+            let bound = value.saturating_add(1);
+            filter.from_timestamp = Some(
+                filter
+                    .from_timestamp
+                    .map(|current| current.max(bound))
+                    .unwrap_or(bound),
+            );
+        }
+        (Operator::GtEq, false) | (Operator::LtEq, true) => {
+            filter.from_timestamp = Some(
+                filter
+                    .from_timestamp
+                    .map(|current| current.max(value))
+                    .unwrap_or(value),
+            );
+        }
+        (Operator::Lt, false) | (Operator::Gt, true) => {
+            let bound = value.saturating_sub(1);
+            filter.to_timestamp = Some(
+                filter
+                    .to_timestamp
+                    .map(|current| current.min(bound))
+                    .unwrap_or(bound),
+            );
+        }
+        (Operator::LtEq, false) | (Operator::GtEq, true) => {
+            filter.to_timestamp = Some(
+                filter
+                    .to_timestamp
+                    .map(|current| current.min(value))
+                    .unwrap_or(value),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn apply_data_constraint(filter: &mut NativeLogFilter, operator: Operator, value: Vec<u8>) {
+    match operator {
+        Operator::Eq => {
+            filter.data_min = Some(match filter.data_min.take() {
+                Some(current) => current.max(value.clone()),
+                None => value.clone(),
+            });
+            filter.data_max = Some(match filter.data_max.take() {
+                Some(current) => current.min(value),
+                None => value,
+            });
+        }
+        Operator::GtEq => {
+            filter.data_min = Some(match filter.data_min.take() {
+                Some(current) => current.max(value),
+                None => value,
+            });
+        }
+        Operator::LtEq => {
+            filter.data_max = Some(match filter.data_max.take() {
+                Some(current) => current.min(value),
+                None => value,
+            });
+        }
+        _ => {}
+    }
+}
+
 fn merge_addresses(filter: &mut NativeLogFilter, next: Vec<Address>) {
     if filter.addresses.is_empty() {
         filter.addresses = next;
@@ -913,6 +1785,16 @@ fn merge_topic_constraint(current: &mut TopicConstraint, next: TopicConstraint) 
                 .collect(),
         ),
     };
+}
+
+fn topic_column_index(column: &str) -> Option<usize> {
+    match column {
+        "topic0" => Some(0),
+        "topic1" => Some(1),
+        "topic2" => Some(2),
+        "topic3" => Some(3),
+        _ => None,
+    }
 }
 
 fn normalize_binary(binary: &BinaryExpr) -> Option<(String, &ScalarValue, bool)> {
@@ -966,6 +1848,15 @@ fn parse_b256_scalar(value: &ScalarValue) -> Option<B256> {
     }
 }
 
+fn parse_bytes_scalar(value: &ScalarValue) -> Option<Vec<u8>> {
+    match value {
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::Utf8View(Some(value))
+        | ScalarValue::LargeUtf8(Some(value)) => parse_hex_bytes(value.trim()),
+        _ => None,
+    }
+}
+
 fn parse_address(value: &str) -> Option<Address> {
     let hex = value.strip_prefix("0x").unwrap_or(value);
     let bytes = hex::decode(hex).ok()?;
@@ -976,6 +1867,12 @@ fn parse_b256(value: &str) -> Option<B256> {
     let hex = value.strip_prefix("0x").unwrap_or(value);
     let bytes = hex::decode(hex).ok()?;
     (bytes.len() == 32).then(|| B256::from_slice(&bytes))
+}
+
+fn parse_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    let hex = value.strip_prefix("0x").unwrap_or(value);
+    hex.len().is_multiple_of(2).then_some(())?;
+    hex::decode(hex).ok()
 }
 
 fn rewrite_legacy_sql(sql: &str, head_block: u64) -> Result<String, SqlQueryError> {
@@ -1395,6 +2292,125 @@ mod tests {
             result.rows[0]["address"],
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
+    }
+
+    #[tokio::test]
+    async fn pushes_timestamp_between_into_native_scan() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number FROM logs WHERE timestamp BETWEEN 1700001001 AND 1700001200",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 200);
+        assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn pushes_topic_in_predicates_beyond_topic0() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number FROM logs WHERE topic0 = '0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' AND topic1 IN ('0x9999999999999999999999999999999999999999999999999999999999999999')",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn pushes_address_topic_and_timestamp_filters_together() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number FROM logs \
+             WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+               AND topic0 = '0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' \
+               AND topic1 IN ('0x9999999999999999999999999999999999999999999999999999999999999999') \
+               AND timestamp BETWEEN 1700000000 AND 1700000000",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 100);
+        assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn pushes_data_len_and_data_range_into_native_scan() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number FROM logs \
+             WHERE data_len = 2 \
+               AND data >= '0xca00' \
+               AND data <= '0xcb00'",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 200);
+        assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn native_executes_ordered_limited_log_queries() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT block_number, data FROM logs \
+             WHERE data_len = 2 \
+               AND data >= '0xca00' \
+               AND data <= '0xcb00' \
+             ORDER BY block_number DESC, tx_index DESC, log_index DESC \
+             LIMIT 1",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], 200);
+        assert_eq!(result.rows[0]["data"], "0xcafe");
+        assert_eq!(result.total_scanned, 1);
+    }
+
+    #[test]
+    fn parses_transfer_query_shape_for_native_execution() {
+        let sql = rewrite_legacy_sql(
+            "SELECT block_number, tx_hash, log_index, address, topic0, topic1, topic2, data
+             FROM logs
+             WHERE topic0 = event'Transfer(address,address,uint256)'
+               AND address = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+               AND topic1 IN (address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95')
+               AND timestamp BETWEEN 1767214800 AND 1778924400
+               AND data_len = 32
+               AND data >= '0x00000000000000000000000000000000000000000000000000000000004c4b40'
+               AND data <= '0x00000000000000000000000000000000000000000000000000000002540be400'
+             ORDER BY block_number DESC, tx_index DESC, log_index DESC
+             LIMIT 500",
+            25_100_000,
+        )
+        .unwrap();
+
+        assert!(parse_native_select_query(&sql).unwrap().is_some());
     }
 
     #[tokio::test]
