@@ -25,7 +25,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Added display-only decoding for known event topics, ABI-encoded address topics, and 32-byte amount data while preserving raw copy/export behavior.
 - Added token-decimal-aware amount filters, custom ERC20 token input, custom decimals input, explicit local-time to UTC timestamp conversion for time ranges, from/to address chips, and Transfer-aware result headers.
 - Fixed SQL scan correctness for older or unindexed segments by verifying pushed native predicates before returning candidate rows.
-- Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, separating from/to address panels, removing amount placeholders, and improving the dark date-picker affordance.
+- Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, preserving side-by-side from/to address panels with stable chip-list heights, removing amount placeholders, and adding a deterministic dark-theme date-picker icon.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -112,7 +112,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
   - Resolution: SQL scans now re-check pushed native predicates against materialized candidate rows, and a regression test covers unindexed storage.
 
 - Challenge: Multi-address chip growth could disturb adjacent builder controls and invalid mixed-case addresses were not rejected.
-  - Resolution: Split from/to address inputs into independent panels and added browser-side EIP-55 checksum validation with checksum normalization.
+  - Resolution: Kept from/to lists as independent side-by-side panels with bounded scrolling chip areas and added browser-side EIP-55 checksum validation with checksum normalization.
 
 ## Dead Code and Obsolescence Cleanup
 
