@@ -28,6 +28,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Tightened the query builder UI by keeping token address/decimals visible for known and custom tokens, validating address chips with EIP-55 checksums, preserving side-by-side from/to address panels with stable chip-list heights, removing amount placeholders, and adding a deterministic dark-theme date-picker icon.
 - Persisted query builder fields and address lists in browser storage and added per-list reset buttons.
 - Fixed the time-range date picker so the visible calendar affordance is the native interactive picker target with a `showPicker()` fallback.
+- Restored the custom date-picker icon while keeping the interactive `showPicker()` click path.
 - Documented query-engine, performance, and coverage work as explicit TODOs for this branch.
 
 ## Remaining TODOs
@@ -74,7 +75,7 @@ The remote EL validation run reached genesis, kept live head tracking afterward,
 - Query-builder time ranges use browser-local date/time inputs but generate UTC epoch-second predicates because Ethereum block timestamps are UTC Unix timestamps.
 - Query-builder address chips store checksummed addresses. All-lower/all-upper inputs are accepted and converted to checksum form; mixed-case inputs must pass EIP-55 validation.
 - Query-builder state is stored only in browser `localStorage`, including selected fields, ranges, token metadata, amount inputs, pending address inputs, and from/to address chips.
-- Query-builder date/time controls use the browser's native `datetime-local` picker instead of a decorative replacement icon so the picker remains keyboard/editable and mouse-interactive.
+- Query-builder date/time controls use the browser's native `datetime-local` behavior while showing LogEx's custom calendar icon; the icon area is wired to `showPicker()` instead of relying on a hidden native indicator as the click target.
 - Query performance validation should combine deterministic synthetic fixtures with optional active full-data benchmarks because repository tests cannot carry the synced mainnet log dataset.
 
 ## Challenges and Resolutions
