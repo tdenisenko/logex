@@ -21,6 +21,7 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - Validated the provided bounded USDC Transfer query on the full remote data set: 5 matching rows in 2.26 seconds with `total_scanned = 5`.
 - Validated a broader USDC Transfer smoke over the same timestamp range: 500 rows in 1.23 seconds.
 - Restored the larger custom date-picker icon while keeping the interactive `showPicker()` click path.
+- Added a hand cursor only over the date-picker icon hit area.
 
 ## Remaining TODOs
 
@@ -52,7 +53,7 @@ This branch is focused on PostgreSQL-like log querying, query-builder UX, cancel
 - The native SQL fast path is limited to simple ordered `logs` queries; more complex SQL continues through DataFusion.
 - ERC20 Transfer indexing prioritizes `(address, topic0)`, `(address, topic0, topic1)`, and `(address, topic0, topic2)` because those cover token, sender, and receiver filters used by the query builder.
 - Query execution snapshots storage metadata before scanning so long queries do not block sync writes.
-- Query-builder date/time controls show LogEx's custom calendar icon while clicks in the icon area open the native `datetime-local` picker through `showPicker()`.
+- Query-builder date/time controls show LogEx's custom calendar icon while clicks in the icon area open the native `datetime-local` picker through `showPicker()`; the hand cursor is limited to that same icon hit area.
 
 ## Challenges and Resolutions
 

@@ -2214,6 +2214,8 @@ function setBuilderRangeMode(mode) {
   var fromInput = byId('builderFromBlock');
   var toInput = byId('builderToBlock');
   var isTime = builderRangeMode === 'time';
+  fromInput.style.cursor = '';
+  toInput.style.cursor = '';
   byId('builderFromLabel').textContent = isTime ? 'From time' : 'From block';
   byId('builderToLabel').textContent = isTime ? 'To time' : 'To block';
   fromInput.value = '';
@@ -2239,14 +2241,22 @@ function setBuilderRangeMode(mode) {
   }
 }
 
-function maybeOpenDateTimePicker(input, event) {
-  if (!input || input.type !== 'datetime-local' || typeof input.showPicker !== 'function') return;
+function isDateTimePickerArea(input, event) {
+  if (!input || input.type !== 'datetime-local') return false;
   var rect = input.getBoundingClientRect();
   var pickerWidth = 46;
-  var clickedPickerArea = document.dir === 'rtl'
+  return document.dir === 'rtl'
     ? event.clientX <= rect.left + pickerWidth
     : event.clientX >= rect.right - pickerWidth;
-  if (!clickedPickerArea) return;
+}
+
+function updateDateTimePickerCursor(input, event) {
+  if (!input || input.type !== 'datetime-local') return;
+  input.style.cursor = isDateTimePickerArea(input, event) ? 'pointer' : '';
+}
+
+function maybeOpenDateTimePicker(input, event) {
+  if (!isDateTimePickerArea(input, event) || typeof input.showPicker !== 'function') return;
   try {
     input.showPicker();
   } catch (_) {}
@@ -3224,6 +3234,12 @@ document.querySelector('.builder-mode').addEventListener('click', function(event
 ['builderFromBlock', 'builderToBlock'].forEach(function(id) {
   byId(id).addEventListener('click', function(event) {
     maybeOpenDateTimePicker(event.currentTarget, event);
+  });
+  byId(id).addEventListener('mousemove', function(event) {
+    updateDateTimePickerCursor(event.currentTarget, event);
+  });
+  byId(id).addEventListener('mouseleave', function(event) {
+    event.currentTarget.style.cursor = '';
   });
 });
 
