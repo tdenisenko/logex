@@ -81,7 +81,7 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
   - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
 
 - Challenge: The transaction cell needed both row-cell copy behavior and a nested external-link action.
-  - Resolution: Kept the cell copyable, added a scoped Etherscan button, and handled button clicks before the table-level copy handler.
+  - Resolution: Kept the cell copyable, added a scoped Etherscan link styled as a compact button, and handled link clicks before the table-level copy handler.
 
 ## Dead Code and Obsolescence Cleanup
 

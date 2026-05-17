@@ -810,8 +810,23 @@
   }
 
   .live-tx-open {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-height: 28px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
     padding: 0 8px;
+    color: var(--soft);
+    background: var(--surface-3);
+    text-decoration: none;
+    font-size: var(--font-body);
+    font-weight: 760;
+    cursor: pointer;
+  }
+
+  .live-tx-open:hover {
+    filter: brightness(1.07);
   }
 
   .history-table-wrap {
@@ -2794,15 +2809,6 @@ function etherscanTxUrl(txHash) {
   return 'https://etherscan.io/tx/' + tx;
 }
 
-function openEtherscanTx(txHash) {
-  var url = etherscanTxUrl(txHash);
-  if (!url) {
-    showCopyToast('Invalid transaction hash');
-    return;
-  }
-  window.open(url, '_blank', 'noopener');
-}
-
 function renderLiveTransfers() {
   var table = byId('liveTransferTable');
   var empty = byId('liveTransferEmpty');
@@ -2816,8 +2822,9 @@ function renderLiveTransfers() {
   }
   body.innerHTML = liveTransferRows.map(function(row) {
     var txHash = row.transactionHash || '';
-    var txButton = etherscanTxUrl(txHash)
-      ? '<button type="button" class="secondary live-tx-open" title="Open transaction in Etherscan" aria-label="Open transaction in Etherscan" data-open-tx="' + escapeHtml(txHash) + '">Open</button>'
+    var txUrl = etherscanTxUrl(txHash);
+    var txButton = txUrl
+      ? '<a class="live-tx-open" href="' + escapeHtml(txUrl) + '" target="_blank" rel="noopener noreferrer" title="Open transaction in Etherscan" aria-label="Open transaction in Etherscan" data-open-tx="' + escapeHtml(txHash) + '">Open</a>'
       : '';
     return '<tr>' +
       '<td>' + escapeHtml(formatUnixTimestampLocal(row.timestamp) || '--') + '</td>' +
@@ -3914,7 +3921,6 @@ byId('liveTransferTable').addEventListener('click', function(event) {
   var txButton = event.target.closest('[data-open-tx]');
   if (txButton) {
     event.stopPropagation();
-    openEtherscanTx(txButton.getAttribute('data-open-tx'));
     return;
   }
   copyResultCell(event.target.closest('td[data-copy-value]'));
