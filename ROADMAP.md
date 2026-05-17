@@ -8,10 +8,9 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 ## Completed Since Last Run
 
-- Allowed ERC20 transfer WebSocket subscriptions to track all wallet addresses for selected token contracts.
-- Kept empty live transfer subscriptions invalid when both wallet and token filters are missing.
-- Moved the Live ERC20 Transfers panel after Query History.
-- Stabilized the live transfer action row and made amount min/max controls the same width.
+- Changed the live transfer Connect button to show `Connecting...` while opening and `Connected` after the subscription acknowledgement.
+- Made live transfer token, sender, recipient, and transaction cells copy their raw values with the same copy affordance as query results.
+- Added an Etherscan open button next to each live transfer transaction hash.
 
 ## Remaining TODOs
 
@@ -81,6 +80,9 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Challenge: The live transfer status element reused the generic `.error` class, which hid it and caused the buttons to shift.
   - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
 
+- Challenge: The transaction cell needed both row-cell copy behavior and a nested external-link action.
+  - Resolution: Kept the cell copyable, added a scoped Etherscan button, and handled button clicks before the table-level copy handler.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -91,13 +93,14 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Reused the existing Ethereum address parser for WebSocket subscriptions instead of adding a second parser.
 - Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
 - Rechecked the live transfer WebSocket and dashboard paths for obsolete empty-filter assumptions.
+- Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
 
 ## Git Workflow
 
 - Current branch: `fix/live-transfer-hook-controls`
-- New branch created this run: yes
+- New branch created this run: no
 - Commits made during this run: pending
-- Pull request status: pending
+- Pull request status: draft PR #88 is open and will be updated after commit/push.
 - Merge status: blocked by user approval; this branch must not be merged until confirmed final.
 - Blockers: none currently.
 

@@ -799,6 +799,21 @@
     min-width: 1120px;
   }
 
+  .live-tx-cell {
+    white-space: nowrap;
+  }
+
+  .live-tx-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .live-tx-open {
+    min-height: 28px;
+    padding: 0 8px;
+  }
+
   .history-table-wrap {
     max-height: 320px;
     overflow-y: auto;
@@ -2674,8 +2689,10 @@ function websocketUrl() {
   return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
 }
 
-function setLiveTransferConnected(connected) {
-  byId('liveConnectBtn').disabled = !!connected;
+function setLiveTransferConnected(connected, label) {
+  var connectButton = byId('liveConnectBtn');
+  connectButton.disabled = !!connected;
+  connectButton.textContent = label || (connected ? 'Connected' : 'Connect');
   byId('liveDisconnectBtn').disabled = !connected;
 }
 
@@ -2696,7 +2713,7 @@ function connectLiveTransfers() {
   liveTransferManualDisconnect = false;
   var socket = new WebSocket(websocketUrl());
   liveTransferSocket = socket;
-  setLiveTransferConnected(true);
+  setLiveTransferConnected(true, 'Connecting...');
   setLiveTransferStatus('Connecting...');
 
   socket.onopen = function() {
@@ -2738,6 +2755,7 @@ function handleLiveTransferMessage(raw) {
     return;
   }
   if (data && data.status === 'subscribed') {
+    setLiveTransferConnected(true, 'Connected');
     setLiveTransferStatus('Subscribed.');
     return;
   }
@@ -2760,6 +2778,31 @@ function liveTokenLabelForAddress(address) {
   return token ? tokenDisplayName(token) : displayAddressValue(address);
 }
 
+function liveCopyCellHtml(value, displayHtml, title, extraClass) {
+  var raw = value || '';
+  var className = 'copy-cell' + (extraClass ? ' ' + extraClass : '');
+  return ' class="' + escapeHtml(className) + '" tabindex="0" title="' + escapeHtml(title || 'Click to copy raw field text') + '" data-copy-value="' + escapeHtml(raw) + '">' + displayHtml;
+}
+
+function liveCopyCell(value, display, title) {
+  return liveCopyCellHtml(value, escapeHtml(display || value || ''), title);
+}
+
+function etherscanTxUrl(txHash) {
+  var tx = String(txHash || '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return null;
+  return 'https://etherscan.io/tx/' + tx;
+}
+
+function openEtherscanTx(txHash) {
+  var url = etherscanTxUrl(txHash);
+  if (!url) {
+    showCopyToast('Invalid transaction hash');
+    return;
+  }
+  window.open(url, '_blank', 'noopener');
+}
+
 function renderLiveTransfers() {
   var table = byId('liveTransferTable');
   var empty = byId('liveTransferEmpty');
@@ -2772,14 +2815,18 @@ function renderLiveTransfers() {
     return;
   }
   body.innerHTML = liveTransferRows.map(function(row) {
+    var txHash = row.transactionHash || '';
+    var txButton = etherscanTxUrl(txHash)
+      ? '<button type="button" class="secondary live-tx-open" title="Open transaction in Etherscan" aria-label="Open transaction in Etherscan" data-open-tx="' + escapeHtml(txHash) + '">Open</button>'
+      : '';
     return '<tr>' +
       '<td>' + escapeHtml(formatUnixTimestampLocal(row.timestamp) || '--') + '</td>' +
       '<td>' + escapeHtml(fmt(row.blockNumber)) + '</td>' +
-      '<td title="' + escapeHtml(row.tokenAddress) + '">' + escapeHtml(liveTokenLabelForAddress(row.tokenAddress)) + '</td>' +
-      '<td title="' + escapeHtml(row.from) + '">' + escapeHtml(toChecksumAddress(row.from) || row.from) + '</td>' +
-      '<td title="' + escapeHtml(row.to) + '">' + escapeHtml(toChecksumAddress(row.to) || row.to) + '</td>' +
+      '<td' + liveCopyCell(row.tokenAddress, liveTokenLabelForAddress(row.tokenAddress), 'Click to copy token address') + '</td>' +
+      '<td' + liveCopyCell(row.from, toChecksumAddress(row.from) || row.from, 'Click to copy sender address') + '</td>' +
+      '<td' + liveCopyCell(row.to, toChecksumAddress(row.to) || row.to, 'Click to copy recipient address') + '</td>' +
       '<td title="' + escapeHtml(row.rawAmount) + '">' + escapeHtml(formatLiveTransferAmount(row)) + '</td>' +
-      '<td title="' + escapeHtml(row.transactionHash) + '">' + escapeHtml(shortHash(row.transactionHash)) + '</td>' +
+      '<td' + liveCopyCellHtml(txHash, '<span class="live-tx-content"><span>' + escapeHtml(shortHash(txHash)) + '</span>' + txButton + '</span>', 'Click to copy transaction hash', 'live-tx-cell') + '</td>' +
       '</tr>';
   }).join('');
   empty.style.display = 'none';
@@ -3862,6 +3909,25 @@ byId('liveResetTokensBtn').addEventListener('click', resetLiveTokens);
 byId('liveConnectBtn').addEventListener('click', connectLiveTransfers);
 byId('liveDisconnectBtn').addEventListener('click', disconnectLiveTransfers);
 byId('liveClearBtn').addEventListener('click', clearLiveTransfers);
+
+byId('liveTransferTable').addEventListener('click', function(event) {
+  var txButton = event.target.closest('[data-open-tx]');
+  if (txButton) {
+    event.stopPropagation();
+    openEtherscanTx(txButton.getAttribute('data-open-tx'));
+    return;
+  }
+  copyResultCell(event.target.closest('td[data-copy-value]'));
+});
+
+byId('liveTransferTable').addEventListener('keydown', function(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('[data-open-tx]')) return;
+  var cell = event.target.closest('td[data-copy-value]');
+  if (!cell) return;
+  event.preventDefault();
+  copyResultCell(cell);
+});
 
 byId('liveWalletList').addEventListener('click', function(event) {
   var button = event.target.closest('[data-remove-live-wallet]');
