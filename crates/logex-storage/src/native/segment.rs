@@ -179,6 +179,8 @@ pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows:
 
     let min_block = rows.iter().map(|row| row.block_number).min().unwrap_or(0);
     let max_block = rows.iter().map(|row| row.block_number).max().unwrap_or(0);
+    let min_timestamp = rows.iter().map(|row| row.timestamp).min().unwrap_or(0);
+    let max_timestamp = rows.iter().map(|row| row.timestamp).max().unwrap_or(0);
 
     descriptor.min_block = Some(
         descriptor
@@ -191,6 +193,18 @@ pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows:
             .max_block
             .map(|current| current.max(max_block))
             .unwrap_or(max_block),
+    );
+    descriptor.min_timestamp = Some(
+        descriptor
+            .min_timestamp
+            .map(|current| current.min(min_timestamp))
+            .unwrap_or(min_timestamp),
+    );
+    descriptor.max_timestamp = Some(
+        descriptor
+            .max_timestamp
+            .map(|current| current.max(max_timestamp))
+            .unwrap_or(max_timestamp),
     );
     descriptor.row_count += rows.len() as u64;
 }
@@ -205,6 +219,8 @@ pub(crate) fn apply_ordered_rows_to_descriptor(
 
     let min_block = first.block_number.min(last.block_number);
     let max_block = first.block_number.max(last.block_number);
+    let min_timestamp = first.timestamp.min(last.timestamp);
+    let max_timestamp = first.timestamp.max(last.timestamp);
 
     descriptor.min_block = Some(
         descriptor
@@ -217,6 +233,18 @@ pub(crate) fn apply_ordered_rows_to_descriptor(
             .max_block
             .map(|current| current.max(max_block))
             .unwrap_or(max_block),
+    );
+    descriptor.min_timestamp = Some(
+        descriptor
+            .min_timestamp
+            .map(|current| current.min(min_timestamp))
+            .unwrap_or(min_timestamp),
+    );
+    descriptor.max_timestamp = Some(
+        descriptor
+            .max_timestamp
+            .map(|current| current.max(max_timestamp))
+            .unwrap_or(max_timestamp),
     );
     descriptor.row_count += rows.len() as u64;
 }
@@ -244,6 +272,8 @@ pub(crate) fn persist_segment_manifest_with_columns(
         kind: descriptor.kind,
         min_block: descriptor.min_block,
         max_block: descriptor.max_block,
+        min_timestamp: descriptor.min_timestamp,
+        max_timestamp: descriptor.max_timestamp,
         row_count: descriptor.row_count,
         canonical_rows_path: "canonical.bitmap".to_owned(),
         columns,
@@ -909,7 +939,10 @@ fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> 
                 "topic0.bptree" => IndexKind::Topic0,
                 "block_number.bptree" => IndexKind::BlockNumber,
                 "block_hash.bptree" => IndexKind::BlockHash,
+                "timestamp.bptree" => IndexKind::Timestamp,
                 "address_topic0.bptree" => IndexKind::AddressTopic0,
+                "address_topic0_topic1.bptree" => IndexKind::AddressTopic0Topic1,
+                "address_topic0_topic2.bptree" => IndexKind::AddressTopic0Topic2,
                 _ => IndexKind::Custom,
             };
             Some(IndexDescriptor {
@@ -967,6 +1000,8 @@ mod tests {
                 .join("segment.json"),
             min_block: Some(0),
             max_block: Some(2_000),
+            min_timestamp: Some(1_699_996_940),
+            max_timestamp: Some(1_700_000_000),
             row_count: 8192,
         };
         let segment_dir = paths.segment_dir(descriptor.id);

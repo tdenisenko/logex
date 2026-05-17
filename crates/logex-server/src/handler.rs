@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::extract::State;
 use axum::response::Json;
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
@@ -13,6 +14,8 @@ use crate::storage_metrics::CachedStorageMetrics;
 
 use crate::ws::SubscriptionManager;
 
+pub(crate) const MAX_LOG_FILTER_LIMIT: usize = 10_000;
+
 /// Shared application state.
 pub struct AppState {
     pub storage: Arc<tokio::sync::RwLock<PartitionManager>>,
@@ -21,6 +24,7 @@ pub struct AppState {
     /// Live sync progress, updated by the sync task.
     pub sync_status: Arc<std::sync::Mutex<SyncStatus>>,
     pub(crate) storage_metrics: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
+    pub(crate) query_control: Arc<QueryControl>,
 }
 
 impl AppState {
@@ -34,7 +38,79 @@ impl AppState {
             subscriptions,
             sync_status: Arc::new(std::sync::Mutex::new(sync_status)),
             storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
+            query_control: Arc::new(QueryControl::default()),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct QueryControl {
+    next_query_id: AtomicU64,
+    active_query_id: AtomicU64,
+    cancel_requested: AtomicBool,
+}
+
+impl QueryControl {
+    pub(crate) fn start(self: &Arc<Self>) -> Option<ActiveQueryGuard> {
+        let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed) + 1;
+        if self
+            .active_query_id
+            .compare_exchange(0, query_id, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        self.cancel_requested.store(false, Ordering::Release);
+        Some(ActiveQueryGuard {
+            control: Arc::clone(self),
+            query_id,
+        })
+    }
+
+    pub(crate) fn cancel_active(&self) -> bool {
+        let active = self.active_query_id.load(Ordering::Acquire) != 0;
+        if active {
+            self.cancel_requested.store(true, Ordering::Release);
+        }
+        active
+    }
+
+    fn finish(&self, query_id: u64) {
+        if self
+            .active_query_id
+            .compare_exchange(query_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.cancel_requested.store(false, Ordering::Release);
+        }
+    }
+
+    fn is_canceled(&self, query_id: u64) -> bool {
+        self.active_query_id.load(Ordering::Acquire) != query_id
+            || self.cancel_requested.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) struct ActiveQueryGuard {
+    control: Arc<QueryControl>,
+    query_id: u64,
+}
+
+impl ActiveQueryGuard {
+    pub(crate) fn cancel_check(&self) -> logex_query::QueryCancelCheck {
+        let control = Arc::clone(&self.control);
+        let query_id = self.query_id;
+        Arc::new(move || control.is_canceled(query_id))
+    }
+
+    pub(crate) fn was_canceled(&self) -> bool {
+        self.control.is_canceled(self.query_id)
+    }
+}
+
+impl Drop for ActiveQueryGuard {
+    fn drop(&mut self) {
+        self.control.finish(self.query_id);
     }
 }
 
@@ -86,12 +162,12 @@ fn handle_eth_get_logs(
     }
 
     if let Some(limit) = filter.limit
-        && limit > MAX_QUERY_LIMIT
+        && limit > MAX_LOG_FILTER_LIMIT
     {
-        return Err(format!("limit must be at most {MAX_QUERY_LIMIT}"));
+        return Err(format!("limit must be at most {MAX_LOG_FILTER_LIMIT}"));
     }
-    if filter.offset >= MAX_QUERY_LIMIT {
-        return Err(format!("offset must be less than {MAX_QUERY_LIMIT}"));
+    if filter.offset >= MAX_LOG_FILTER_LIMIT {
+        return Err(format!("offset must be less than {MAX_LOG_FILTER_LIMIT}"));
     }
 
     let mut native_filter = filter.to_native_filter(storage.head_block().unwrap_or(0));
@@ -99,7 +175,7 @@ fn handle_eth_get_logs(
         filter
             .limit
             .unwrap_or(DEFAULT_QUERY_PAGE_SIZE)
-            .min(MAX_QUERY_LIMIT - filter.offset),
+            .min(MAX_LOG_FILTER_LIMIT - filter.offset),
     );
     native_filter.offset = filter.offset;
     let rows = logex_query::execute_log_filter(storage, &native_filter)

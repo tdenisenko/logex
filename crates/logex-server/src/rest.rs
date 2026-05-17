@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json, Response};
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT, SqlQueryError, SqlQueryPage};
+use logex_query::{self, SqlQueryError, SqlQueryPage};
 use logex_storage::PartitionManager;
 use serde::Serialize;
 
@@ -24,7 +24,8 @@ const HISTORICAL_LOG_ESTIMATE_RECENT_LOGS_PER_BLOCK: f64 = 733.0;
 pub struct QueryRequest {
     /// SQL query string.
     pub sql: String,
-    /// Maximum rows to return in this page. Defaults to 50 and is capped at 10,000.
+    /// Optional transport page limit. When omitted, the SQL result set is returned without
+    /// an extra server-side row cap.
     #[serde(default)]
     pub limit: Option<usize>,
     /// Zero-based row offset for pagination.
@@ -38,10 +39,17 @@ pub struct QueryResponse {
     pub rows: Vec<serde_json::Value>,
     pub total_scanned: u64,
     pub row_count: usize,
+    /// Requested transport page limit. `0` means no transport limit was applied.
     pub limit: usize,
     pub offset: usize,
     pub next_offset: Option<usize>,
+    /// Maximum accepted transport page limit. `0` means unlimited.
     pub max_limit: usize,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct QueryCancelResponse {
+    pub canceled: bool,
 }
 
 /// Error response.
@@ -61,12 +69,47 @@ pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> Response {
-    let storage = state.storage.read().await;
-    let head_block = storage.head_block();
-    let requested_limit = req.limit.unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
-    let page = SqlQueryPage::new(Some(requested_limit), req.offset);
-    let result = match logex_query::execute_sql_page(&req.sql, &storage, head_block, page).await {
+    let Some(query_guard) = state.query_control.start() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "another SQL query is already running; stop it before starting a new one"
+                    .to_owned(),
+            }),
+        )
+            .into_response();
+    };
+    let cancel_check = query_guard.cancel_check();
+    let (storage_snapshot, head_block) = {
+        let storage = state.storage.read().await;
+        (
+            logex_query::NativeStorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+        )
+    };
+    let requested_limit = req.limit;
+    let page = SqlQueryPage::new(requested_limit, req.offset);
+    let result = match logex_query::execute_sql_page_on_snapshot(
+        &req.sql,
+        storage_snapshot,
+        head_block,
+        page,
+        Some(cancel_check),
+    )
+    .await
+    {
         Ok(r) => r,
+        Err(SqlQueryError::DataFusion(e))
+            if query_guard.was_canceled() || e.to_string().contains("query canceled") =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "query canceled".to_owned(),
+                }),
+            )
+                .into_response();
+        }
         Err(SqlQueryError::DataFusion(e)) => {
             return ErrorResponse {
                 error: format!("query error: {e}"),
@@ -91,21 +134,27 @@ pub async fn handle_query(
     };
 
     let row_count = result.rows.len();
-    let next_offset = (requested_limit > 0
-        && row_count == requested_limit
-        && req.offset.saturating_add(row_count) < MAX_QUERY_LIMIT)
-        .then_some(req.offset + row_count);
+    let next_offset = requested_limit
+        .filter(|limit| *limit > 0 && row_count == *limit)
+        .map(|_| req.offset + row_count);
 
     Json(QueryResponse {
         rows: result.rows,
         total_scanned: result.total_scanned,
         row_count,
-        limit: requested_limit.min(MAX_QUERY_LIMIT.saturating_sub(req.offset)),
+        limit: requested_limit.unwrap_or(0),
         offset: req.offset,
         next_offset,
-        max_limit: MAX_QUERY_LIMIT,
+        max_limit: 0,
     })
     .into_response()
+}
+
+/// Handle POST /query/cancel — request cancellation for the active SQL query.
+pub async fn handle_query_cancel(State(state): State<Arc<AppState>>) -> Json<QueryCancelResponse> {
+    Json(QueryCancelResponse {
+        canceled: state.query_control.cancel_active(),
+    })
 }
 
 /// Handle GET /health.
@@ -403,6 +452,7 @@ mod tests {
     use axum::http::Request;
     use base64::Engine;
     use logex_index::IndexBuilder;
+    use logex_query::DEFAULT_QUERY_PAGE_SIZE;
     use logex_storage::{PartitionManager, PartitionManagerConfig};
     use logex_types::{
         ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
@@ -450,7 +500,28 @@ mod tests {
         ]
     }
 
-    fn setup_storage() -> (TempDir, PartitionManager) {
+    fn make_many_test_rows(count: usize) -> Vec<LogRow> {
+        (0..count)
+            .map(|index| LogRow {
+                block_number: index as u64,
+                block_hash: B256::repeat_byte((index % 251 + 1) as u8),
+                timestamp: 1_700_000_000 + index as u64,
+                tx_hash: B256::repeat_byte((index % 253 + 1) as u8),
+                tx_index: 0,
+                log_index: index as u32,
+                address: Address::repeat_byte(0xAA),
+                topic0: Some(B256::repeat_byte(0xDD)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: bytes!(""),
+                data_len: 0,
+                source: Source::Receipt,
+            })
+            .collect()
+    }
+
+    fn setup_storage_with_rows(rows: &[LogRow]) -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -458,9 +529,13 @@ mod tests {
             compaction_safety_margin_blocks: 2_048,
         };
         let mut mgr = PartitionManager::open(config).unwrap();
-        mgr.write_batch(&make_test_rows()).unwrap();
+        mgr.write_batch(rows).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
         (tmp, mgr)
+    }
+
+    fn setup_storage() -> (TempDir, PartitionManager) {
+        setup_storage_with_rows(&make_test_rows())
     }
 
     fn basic_auth_header(password: &str) -> String {
@@ -681,6 +756,91 @@ mod tests {
         let result: QueryResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.row_count, 2);
         assert_eq!(result.rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_cancel_endpoint_reports_active_query() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let active_query = state.query_control.start().unwrap();
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query/cancel")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
+        assert!(result.canceled);
+        assert!(active_query.was_canceled());
+    }
+
+    #[tokio::test]
+    async fn test_post_query_without_transport_limit_returns_all_rows() {
+        let rows = make_many_test_rows(DEFAULT_QUERY_PAGE_SIZE + 25);
+        let (_tmp, storage) = setup_storage_with_rows(&rows);
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "SELECT block_number FROM logs ORDER BY block_number ASC"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result.row_count, DEFAULT_QUERY_PAGE_SIZE + 25);
+        assert_eq!(result.rows.len(), DEFAULT_QUERY_PAGE_SIZE + 25);
+        assert_eq!(result.limit, 0);
+        assert_eq!(result.max_limit, 0);
+        assert_eq!(result.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn test_post_query_explicit_transport_limit_pages_results() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({
+            "sql": "SELECT block_number FROM logs ORDER BY block_number ASC",
+            "limit": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.limit, 1);
+        assert_eq!(result.next_offset, Some(1));
     }
 
     #[tokio::test]

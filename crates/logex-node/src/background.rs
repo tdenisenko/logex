@@ -1,10 +1,12 @@
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use logex_index::IndexBuilder;
+use logex_index::{IndexBuildProfile, IndexBuilder};
 use logex_server::AppState;
+use logex_storage::PartitionManager;
 use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -14,7 +16,9 @@ const ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 1_024;
 const ACTIVE_SYNC_COMPACTION_HIGH_BACKLOG: usize = 4_096;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
+const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 2;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
+const BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT: usize = 8;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVE_SYNC_BACKLOG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BYTES_PER_KIB: u64 = 1024;
@@ -34,6 +38,7 @@ pub async fn run_background_indexer(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut last_indexed: Option<HotIndexState> = None;
+    let mut sealed_index_scan_complete_for_max_id: Option<u64> = None;
     let mut last_active_backlog_refresh: Option<std::time::Instant> = None;
     let mut last_active_raw_backlog: Option<usize> = None;
     let mut ticker = tokio::time::interval(BACKGROUND_COMPACTION_INTERVAL);
@@ -203,8 +208,64 @@ pub async fn run_background_indexer(
             }
         }
 
-        if sync_is_active(&state) || historical_sync_is_incomplete(&state).await {
-            continue;
+        let active_sync = sync_is_active(&state) || historical_sync_is_incomplete(&state).await;
+        let sealed_index_limit = sealed_index_segment_limit(active_sync);
+
+        let (sealed_max_id, sealed_targets) = {
+            let storage = state.storage.read().await;
+            sealed_query_index_targets(&storage, sealed_index_limit)
+        };
+        if sealed_index_scan_complete_for_max_id != sealed_max_id {
+            if sealed_targets.is_empty() {
+                sealed_index_scan_complete_for_max_id = sealed_max_id;
+            } else {
+                let target_count = sealed_targets.len();
+                let result = tokio::task::spawn_blocking(move || -> io::Result<Vec<u64>> {
+                    let mut indexed = Vec::with_capacity(sealed_targets.len());
+                    for target in sealed_targets {
+                        IndexBuilder::build_missing_indexes(
+                            &target.path,
+                            IndexBuildProfile::Erc20Transfer,
+                        )?;
+                        indexed.push(target.segment_id);
+                    }
+                    Ok(indexed)
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(indexed_segment_ids)) => {
+                        let indexed = indexed_segment_ids.len();
+                        {
+                            let mut storage = state.storage.write().await;
+                            for segment_id in indexed_segment_ids {
+                                if let Err(e) = storage.refresh_segment_manifest(segment_id) {
+                                    tracing::warn!(
+                                        error = %e,
+                                        segment_id,
+                                        "failed to refresh segment manifest after sealed index build"
+                                    );
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            indexed,
+                            target_count,
+                            "built missing query indexes for sealed segments"
+                        );
+                        sealed_index_scan_complete_for_max_id = None;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to build missing sealed query indexes"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sealed query index task panicked");
+                    }
+                }
+            }
         }
 
         let current = {
@@ -289,7 +350,15 @@ fn update_compaction_status(state: &AppState, report: CompactionReport) {
 }
 
 fn should_defer_background_indexing(status: &SyncStatus) -> bool {
-    status.syncing || status.historical_eta_seconds.is_some()
+    status.historical_eta_seconds.is_some()
+}
+
+fn sealed_index_segment_limit(active_sync: bool) -> usize {
+    if active_sync {
+        ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT
+    } else {
+        BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
+    }
 }
 
 fn active_sync_compaction_limits(raw_backlog: usize, base_limit: usize) -> (usize, usize) {
@@ -396,6 +465,47 @@ fn should_rebuild_hot_indexes(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SealedIndexTarget {
+    segment_id: u64,
+    path: PathBuf,
+}
+
+fn sealed_query_index_targets(
+    storage: &PartitionManager,
+    limit: usize,
+) -> (Option<u64>, Vec<SealedIndexTarget>) {
+    let max_segment_id = storage
+        .sealed_partitions()
+        .iter()
+        .map(|partition| partition.meta.id)
+        .max();
+    if limit == 0 {
+        return (max_segment_id, Vec::new());
+    }
+
+    let targets = storage
+        .sealed_partitions()
+        .iter()
+        .filter(|partition| partition.meta.row_count > 0)
+        .filter(|partition| query_indexes_missing(&partition.meta.path))
+        .take(limit)
+        .map(|partition| SealedIndexTarget {
+            segment_id: partition.meta.id,
+            path: partition.meta.path.clone(),
+        })
+        .collect();
+
+    (max_segment_id, targets)
+}
+
+fn query_indexes_missing(path: &Path) -> bool {
+    let index_dir = path.join("indexes");
+    IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer)
+        .iter()
+        .any(|file_name| !index_dir.join(file_name).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,8 +563,8 @@ mod tests {
     }
 
     #[test]
-    fn defer_background_indexing_while_sync_is_active() {
-        let syncing = SyncStatus {
+    fn defer_background_indexing_only_while_historical_eta_is_active() {
+        let live_following = SyncStatus {
             syncing: true,
             ..Default::default()
         };
@@ -464,9 +574,35 @@ mod tests {
         };
         let idle = SyncStatus::default();
 
-        assert!(should_defer_background_indexing(&syncing));
+        assert!(!should_defer_background_indexing(&live_following));
         assert!(should_defer_background_indexing(&historical));
         assert!(!should_defer_background_indexing(&idle));
+    }
+
+    #[test]
+    fn sealed_query_indexing_continues_during_active_sync_at_lower_batch_size() {
+        assert_eq!(
+            sealed_index_segment_limit(true),
+            ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT
+        );
+        assert_eq!(
+            sealed_index_segment_limit(false),
+            BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
+        );
+        assert!(sealed_index_segment_limit(true) < sealed_index_segment_limit(false));
+    }
+
+    #[test]
+    fn query_index_missing_requires_every_common_erc20_event_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let indexes = tmp.path().join("indexes");
+        std::fs::create_dir_all(&indexes).unwrap();
+        assert!(query_indexes_missing(tmp.path()));
+
+        for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer) {
+            std::fs::write(indexes.join(file_name), []).unwrap();
+        }
+        assert!(!query_indexes_missing(tmp.path()));
     }
 
     #[test]

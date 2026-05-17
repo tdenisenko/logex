@@ -598,6 +598,8 @@ mod tests {
                 .join("segment.json"),
             min_block: Some(10),
             max_block: Some(29),
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_228),
             row_count: 20,
         };
         let dir = paths.segment_dir(descriptor.id);
@@ -634,6 +636,8 @@ mod tests {
                 .join("segment.json"),
             min_block: Some(10),
             max_block: Some(29),
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_228),
             row_count: 20,
         };
         let dir = paths.segment_dir(descriptor.id);

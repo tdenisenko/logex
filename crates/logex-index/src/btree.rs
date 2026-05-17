@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use roaring::RoaringBitmap;
@@ -9,15 +9,24 @@ use roaring::RoaringBitmap;
 const INDEX_MAGIC: &[u8; 4] = b"LXIX";
 
 /// Current index file format version.
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
+const INDEX_HEADER_LEN: usize = 20;
+const INDEX_V2_ENTRY_TRAILER_LEN: usize = 8 + 4;
 
 /// An in-memory B+ tree index mapping fixed-size byte keys to roaring bitmaps
 /// of row IDs. Used during index construction and for the hot partition.
 ///
-/// On disk, the format is:
+/// Version 1 on disk format:
 ///   [magic: 4B] [version: 4B] [key_size: 4B] [entry_count: u64]
 ///   For each entry:
 ///     [key: key_size bytes] [bitmap_len: u32] [bitmap: serialized RoaringBitmap]
+///
+/// Version 2 on disk format:
+///   [magic: 4B] [version: 4B] [key_size: 4B] [entry_count: u64]
+///   For each entry:
+///     [key: key_size bytes] [bitmap_offset: u64] [bitmap_len: u32]
+///   Then the serialized bitmap payloads. This keeps exact point lookups
+///   logarithmic without loading or scanning the whole file.
 ///
 /// Entries are sorted by key for binary search on read.
 #[derive(Debug)]
@@ -64,18 +73,29 @@ impl BTreeIndex {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
 
-        // Header
         w.write_all(INDEX_MAGIC)?;
         w.write_all(&INDEX_VERSION.to_le_bytes())?;
         w.write_all(&(self.key_size as u32).to_le_bytes())?;
         w.write_all(&(self.entries.len() as u64).to_le_bytes())?;
 
-        // Entries (already sorted by BTreeMap)
+        let table_len = self
+            .entries
+            .len()
+            .saturating_mul(self.key_size + INDEX_V2_ENTRY_TRAILER_LEN);
+        let mut bitmap_offset = (INDEX_HEADER_LEN + table_len) as u64;
+        let mut payloads = Vec::with_capacity(self.entries.len());
+
         for (key, bitmap) in &self.entries {
             w.write_all(key)?;
             let mut bitmap_buf = Vec::new();
             bitmap.serialize_into(&mut bitmap_buf)?;
+            w.write_all(&bitmap_offset.to_le_bytes())?;
             w.write_all(&(bitmap_buf.len() as u32).to_le_bytes())?;
+            bitmap_offset = bitmap_offset.saturating_add(bitmap_buf.len() as u64);
+            payloads.push(bitmap_buf);
+        }
+
+        for bitmap_buf in payloads {
             w.write_all(&bitmap_buf)?;
         }
 
@@ -110,7 +130,7 @@ impl BTreeIndexReader {
         }
 
         let parse_err = |msg| io::Error::new(io::ErrorKind::InvalidData, msg);
-        let _version = u32::from_le_bytes(
+        let version = u32::from_le_bytes(
             data[4..8]
                 .try_into()
                 .map_err(|_| parse_err("bad version"))?,
@@ -126,7 +146,14 @@ impl BTreeIndexReader {
                 .map_err(|_| parse_err("bad entry_count"))?,
         ) as usize;
 
-        let mut reader = BufReader::new(&data[20..]);
+        match version {
+            2 => Self::open_v2(data, key_size, entry_count),
+            _ => Self::open_v1(data, key_size, entry_count),
+        }
+    }
+
+    fn open_v1(data: Vec<u8>, key_size: usize, entry_count: usize) -> io::Result<Self> {
+        let mut reader = BufReader::new(&data[INDEX_HEADER_LEN..]);
         let mut entries = Vec::with_capacity(entry_count);
 
         for _ in 0..entry_count {
@@ -146,6 +173,159 @@ impl BTreeIndexReader {
         }
 
         Ok(Self { key_size, entries })
+    }
+
+    fn open_v2(data: Vec<u8>, key_size: usize, entry_count: usize) -> io::Result<Self> {
+        let entry_size = key_size + INDEX_V2_ENTRY_TRAILER_LEN;
+        let table_len = entry_count
+            .checked_mul(entry_size)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "index table too large"))?;
+        let table_end = INDEX_HEADER_LEN
+            .checked_add(table_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "index table too large"))?;
+        if data.len() < table_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index table truncated",
+            ));
+        }
+
+        let mut entries = Vec::with_capacity(entry_count);
+        for entry_index in 0..entry_count {
+            let entry_start = INDEX_HEADER_LEN + entry_index * entry_size;
+            let key = data[entry_start..entry_start + key_size].to_vec();
+            let offset_start = entry_start + key_size;
+            let bitmap_offset = u64::from_le_bytes(
+                data[offset_start..offset_start + 8]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad bitmap offset"))?,
+            ) as usize;
+            let len_start = offset_start + 8;
+            let bitmap_len = u32::from_le_bytes(
+                data[len_start..len_start + 4]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad bitmap length"))?,
+            ) as usize;
+            let bitmap_end = bitmap_offset.checked_add(bitmap_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "bitmap payload too large")
+            })?;
+            if bitmap_end > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bitmap payload truncated",
+                ));
+            }
+            let bitmap = RoaringBitmap::deserialize_from(&data[bitmap_offset..bitmap_end])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            entries.push((key, bitmap));
+        }
+
+        Ok(Self { key_size, entries })
+    }
+
+    /// Point lookup without loading the full index into memory.
+    ///
+    /// Version 2 indexes use a binary search over the fixed-width key table.
+    /// Version 1 indexes fall back to a linear key scan while skipping bitmap
+    /// payloads for earlier keys without deserializing them.
+    pub fn get_from_file(path: &Path, key: &[u8]) -> io::Result<Option<RoaringBitmap>> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if &magic != INDEX_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid index magic",
+            ));
+        }
+
+        let mut version_buf = [0u8; 4];
+        reader.read_exact(&mut version_buf)?;
+        let version = u32::from_le_bytes(version_buf);
+
+        let mut key_size_buf = [0u8; 4];
+        reader.read_exact(&mut key_size_buf)?;
+        let key_size = u32::from_le_bytes(key_size_buf) as usize;
+        if key.len() != key_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("lookup key has length {}, expected {key_size}", key.len()),
+            ));
+        }
+
+        let mut entry_count_buf = [0u8; 8];
+        reader.read_exact(&mut entry_count_buf)?;
+        let entry_count = u64::from_le_bytes(entry_count_buf);
+
+        if version == 2 {
+            return Self::get_v2_from_reader(reader, key_size, entry_count, key);
+        }
+
+        let mut current_key = vec![0u8; key_size];
+        for _ in 0..entry_count {
+            reader.read_exact(&mut current_key)?;
+
+            let mut len_buf = [0u8; 4];
+            reader.read_exact(&mut len_buf)?;
+            let bitmap_len = u32::from_le_bytes(len_buf) as usize;
+
+            match current_key.as_slice().cmp(key) {
+                std::cmp::Ordering::Less => {
+                    reader.seek(SeekFrom::Current(bitmap_len as i64))?;
+                }
+                std::cmp::Ordering::Equal => {
+                    let mut bitmap_buf = vec![0u8; bitmap_len];
+                    reader.read_exact(&mut bitmap_buf)?;
+                    let bitmap = RoaringBitmap::deserialize_from(&bitmap_buf[..])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    return Ok(Some(bitmap));
+                }
+                std::cmp::Ordering::Greater => return Ok(None),
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn get_v2_from_reader(
+        mut reader: BufReader<File>,
+        key_size: usize,
+        entry_count: u64,
+        key: &[u8],
+    ) -> io::Result<Option<RoaringBitmap>> {
+        let entry_size = key_size + INDEX_V2_ENTRY_TRAILER_LEN;
+        let mut lo = 0u64;
+        let mut hi = entry_count;
+        let mut current_key = vec![0u8; key_size];
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry_offset = INDEX_HEADER_LEN as u64 + mid * entry_size as u64;
+            reader.seek(SeekFrom::Start(entry_offset))?;
+            reader.read_exact(&mut current_key)?;
+
+            match current_key.as_slice().cmp(key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let mut offset_buf = [0u8; 8];
+                    reader.read_exact(&mut offset_buf)?;
+                    let bitmap_offset = u64::from_le_bytes(offset_buf);
+                    let mut len_buf = [0u8; 4];
+                    reader.read_exact(&mut len_buf)?;
+                    let bitmap_len = u32::from_le_bytes(len_buf) as usize;
+                    reader.seek(SeekFrom::Start(bitmap_offset))?;
+                    let mut bitmap_buf = vec![0u8; bitmap_len];
+                    reader.read_exact(&mut bitmap_buf)?;
+                    let bitmap = RoaringBitmap::deserialize_from(&bitmap_buf[..])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    return Ok(Some(bitmap));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Point lookup: find row IDs for an exact key.
@@ -252,6 +432,27 @@ mod tests {
         assert!(bitmap2.contains(75));
 
         assert!(reader.get(&[3u8; 20]).is_none());
+    }
+
+    #[test]
+    fn test_btree_reader_point_lookup_from_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bptree");
+
+        let mut idx = BTreeIndex::new(4);
+        idx.insert(&1u32.to_be_bytes(), 10);
+        idx.insert(&3u32.to_be_bytes(), 30);
+        idx.insert(&3u32.to_be_bytes(), 31);
+        idx.write_to_file(&path).unwrap();
+
+        let bitmap = BTreeIndexReader::get_from_file(&path, &3u32.to_be_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(bitmap.contains(30));
+        assert!(bitmap.contains(31));
+
+        let missing = BTreeIndexReader::get_from_file(&path, &2u32.to_be_bytes()).unwrap();
+        assert!(missing.is_none());
     }
 
     #[test]

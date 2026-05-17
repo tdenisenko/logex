@@ -99,7 +99,32 @@ fn main() {
                 dashboard_password,
             }));
         }
-        Command::BuildIndexes => commands::run_build_indexes(pm_config),
+        Command::BuildIndexes {
+            sealed,
+            hot,
+            profile,
+            missing_only,
+            limit,
+            jobs,
+            from_block,
+            to_block,
+            from_timestamp,
+            to_timestamp,
+        } => commands::run_build_indexes(
+            pm_config,
+            commands::BuildIndexesOptions {
+                sealed,
+                hot,
+                profile,
+                missing_only,
+                limit,
+                jobs,
+                from_block,
+                to_block,
+                from_timestamp,
+                to_timestamp,
+            },
+        ),
         Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
     }

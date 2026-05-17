@@ -65,6 +65,8 @@ impl PartitionManager {
                     id: 0,
                     min_block: u64::MAX,
                     max_block: 0,
+                    min_timestamp: None,
+                    max_timestamp: None,
                     row_count: 0,
                     sealed: false,
                     path: PathBuf::new(),
@@ -92,6 +94,12 @@ impl PartitionManager {
     /// Refresh manifest metadata after indexes are rebuilt externally.
     pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.inner.refresh_segment_indexes(segment_id)
+    }
+
+    /// Refresh manifest metadata after external index writes without compacting
+    /// or rewriting segment columns.
+    pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
+        self.inner.refresh_segment_manifest(segment_id)
     }
 
     /// Compact sealed segments that are safely behind the current head.

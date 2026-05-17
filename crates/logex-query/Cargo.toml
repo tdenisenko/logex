@@ -12,6 +12,7 @@ alloy-primitives = { workspace = true }
 async-trait = { workspace = true }
 datafusion = { workspace = true }
 hex = "0.4"
+num-bigint = "0.4"
 roaring = "0.10"
 serde_json = { workspace = true }
 thiserror = { workspace = true }

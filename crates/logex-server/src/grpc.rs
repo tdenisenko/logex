@@ -6,11 +6,11 @@ use alloy_primitives::{Address, B256};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, MAX_QUERY_LIMIT, SqlQueryError, SqlQueryPage};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, SqlQueryError, SqlQueryPage};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
-use crate::handler::AppState;
+use crate::handler::{AppState, MAX_LOG_FILTER_LIMIT};
 
 pub mod pb {
     tonic::include_proto!("logex");
@@ -53,8 +53,7 @@ impl LogExService for LogExGrpcService {
             .limit
             .map(usize::try_from)
             .transpose()
-            .map_err(|_| Status::invalid_argument("limit is too large"))?
-            .unwrap_or(DEFAULT_QUERY_PAGE_SIZE);
+            .map_err(|_| Status::invalid_argument("limit is too large"))?;
         let offset = query_request
             .offset
             .map(usize::try_from)
@@ -65,7 +64,7 @@ impl LogExService for LogExGrpcService {
             sql,
             &storage,
             head_block,
-            SqlQueryPage::new(Some(limit), offset),
+            SqlQueryPage::new(limit, offset),
         )
         .await
         {
@@ -82,10 +81,9 @@ impl LogExService for LogExGrpcService {
         };
 
         let row_count = result.rows.len() as u64;
-        let next_offset = (limit > 0
-            && row_count as usize == limit
-            && offset.saturating_add(row_count as usize) < MAX_QUERY_LIMIT)
-            .then_some((offset + row_count as usize) as u64);
+        let next_offset = limit
+            .filter(|limit| *limit > 0 && row_count as usize == *limit)
+            .map(|_| (offset + row_count as usize) as u64);
         let rows = result
             .rows
             .into_iter()
@@ -99,10 +97,10 @@ impl LogExService for LogExGrpcService {
             rows,
             total_scanned: result.total_scanned,
             row_count,
-            limit: limit.min(MAX_QUERY_LIMIT.saturating_sub(offset)) as u64,
+            limit: limit.unwrap_or(0) as u64,
             offset: offset as u64,
             next_offset,
-            max_limit: MAX_QUERY_LIMIT as u64,
+            max_limit: 0,
         }))
     }
 
@@ -212,9 +210,9 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
         })
         .transpose()?;
     if let Some(limit) = filter.limit {
-        if limit > MAX_QUERY_LIMIT {
+        if limit > MAX_LOG_FILTER_LIMIT {
             return Err(Box::new(Status::invalid_argument(format!(
-                "limit must be at most {MAX_QUERY_LIMIT}"
+                "limit must be at most {MAX_LOG_FILTER_LIMIT}"
             ))));
         }
     } else {
@@ -228,14 +226,14 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
         })
         .transpose()?
         .unwrap_or(0);
-    if filter.offset >= MAX_QUERY_LIMIT {
+    if filter.offset >= MAX_LOG_FILTER_LIMIT {
         return Err(Box::new(Status::invalid_argument(format!(
-            "offset must be less than {MAX_QUERY_LIMIT}"
+            "offset must be less than {MAX_LOG_FILTER_LIMIT}"
         ))));
     }
     filter.limit = filter
         .limit
-        .map(|limit| limit.min(MAX_QUERY_LIMIT - filter.offset));
+        .map(|limit| limit.min(MAX_LOG_FILTER_LIMIT - filter.offset));
 
     for (index, topic) in request.topics.iter().enumerate() {
         filter.topics[index] = parse_topic_constraint(topic, index)?;

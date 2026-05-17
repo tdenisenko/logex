@@ -57,6 +57,7 @@ pub fn build_router_with_config(state: Arc<AppState>, config: HttpServerConfig) 
         .route("/", root)
         .route("/status", get(rest::handle_status))
         .route("/query", post(rest::handle_query))
+        .route("/query/cancel", post(rest::handle_query_cancel))
         .route("/ws", get(ws::handle_ws_upgrade))
         .route_layer(middleware::from_fn_with_state(
             config.clone(),
@@ -87,11 +88,15 @@ pub async fn serve_with_config(
     shutdown: tokio::sync::watch::Receiver<bool>,
     config: HttpServerConfig,
 ) -> std::io::Result<()> {
-    let app = build_router_with_config(state, config);
+    let app = build_router_with_config(Arc::clone(&state), config);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "HTTP server listening");
+    let shutdown_state = Arc::clone(&state);
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown))
+        .with_graceful_shutdown(async move {
+            shutdown_signal(shutdown).await;
+            shutdown_state.query_control.cancel_active();
+        })
         .await
         .map_err(std::io::Error::other)
 }

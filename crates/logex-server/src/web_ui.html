@@ -435,6 +435,27 @@
     gap: 12px;
   }
 
+  .query-run-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .query-timer {
+    min-width: 92px;
+    padding: 7px 10px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 8px;
+    color: var(--text);
+    background: rgba(21, 27, 36, .78);
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-title);
+    font-weight: 760;
+    text-align: center;
+  }
+
   textarea {
     width: 100%;
     min-height: 132px;
@@ -463,6 +484,359 @@
     flex-wrap: wrap;
     color: var(--muted);
     font-size: var(--font-body);
+  }
+
+  .query-history-body {
+    gap: 12px;
+  }
+
+  .query-history-meta {
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .query-builder-body {
+    display: grid;
+    gap: 14px;
+  }
+
+  .builder-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .builder-control {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .builder-control span {
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .builder-control input, .builder-control select {
+    min-height: 42px;
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 12px;
+    outline: none;
+    color: var(--text);
+    background: #070a0e;
+    font-size: var(--font-body);
+  }
+
+  .builder-control input:focus, .builder-control select:focus {
+    border-color: var(--query);
+    box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
+  }
+
+  .builder-control input[readonly] {
+    color: var(--soft);
+    background: rgba(7, 10, 14, .72);
+  }
+
+  .builder-control input[type="datetime-local"] {
+    color-scheme: dark;
+    padding-right: 42px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23b28cff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v4'/%3E%3Cpath d='M16 2v4'/%3E%3Crect width='18' height='18' x='3' y='4' rx='2'/%3E%3Cpath d='M3 10h18'/%3E%3C/svg%3E");
+    background-position: right 12px center;
+    background-repeat: no-repeat;
+    background-size: 18px 18px;
+  }
+
+  .builder-control input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    height: 100%;
+    margin-right: -6px;
+    opacity: 0;
+    pointer-events: none;
+    width: 34px;
+  }
+
+  .builder-mode {
+    display: inline-flex;
+    width: 100%;
+    min-height: 42px;
+    padding: 3px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #070a0e;
+  }
+
+  .builder-mode button {
+    flex: 1;
+    min-height: 34px;
+    padding: 0 10px;
+    color: var(--muted);
+    background: transparent;
+    font-size: var(--font-small);
+  }
+
+  .builder-mode button.active {
+    color: var(--text);
+    background: rgba(178, 140, 255, .18);
+  }
+
+  .builder-address-groups {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+
+  .builder-address-panel {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 8px;
+    padding: 12px;
+    background: rgba(9, 13, 18, .72);
+  }
+
+  .builder-address-title {
+    color: var(--muted);
+    font-size: var(--font-small);
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .builder-address-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .builder-address-row input {
+    min-height: 42px;
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 12px;
+    min-width: 0;
+    outline: none;
+    color: var(--text);
+    background: #070a0e;
+    font-size: var(--font-body);
+  }
+
+  .builder-address-row input:focus {
+    border-color: var(--query);
+    box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
+  }
+
+  .builder-address-row button {
+    min-height: 42px;
+    padding: 0 12px;
+  }
+
+  .builder-address-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 8px;
+    min-height: 72px;
+    max-height: 108px;
+    overflow-y: auto;
+  }
+
+  .address-chip {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    min-height: 30px;
+    gap: 7px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    border-radius: 8px;
+    padding: 0 6px 0 10px;
+    color: var(--soft);
+    background: rgba(21, 27, 36, .78);
+    font-size: var(--font-small);
+  }
+
+  .address-chip span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .address-chip button {
+    width: 22px;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    color: var(--muted);
+    background: rgba(255, 255, 255, .06);
+    font-size: var(--font-small);
+  }
+
+  .builder-fields {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .field-toggle {
+    min-height: 36px;
+    padding: 0 10px;
+    border: 1px solid rgba(53, 70, 90, .72);
+    color: var(--soft);
+    background: rgba(21, 27, 36, .78);
+    font-size: var(--font-small);
+  }
+
+  .field-toggle.active {
+    border-color: rgba(178, 140, 255, .75);
+    color: var(--text);
+    background: rgba(178, 140, 255, .18);
+  }
+
+  .builder-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .builder-status {
+    color: var(--muted);
+    font-size: var(--font-body);
+  }
+
+  .history-table-wrap {
+    max-height: 320px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #070a0e;
+  }
+
+  .history-table-wrap table {
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  .history-table-wrap th, .history-row td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .history-table-wrap th:nth-child(1), .history-table-wrap td:nth-child(1) { width: 9%; }
+  .history-table-wrap th:nth-child(2), .history-table-wrap td:nth-child(2) { width: 14%; }
+  .history-table-wrap th:nth-child(3), .history-table-wrap td:nth-child(3) { width: 10%; }
+  .history-table-wrap th:nth-child(4), .history-table-wrap td:nth-child(4) { width: 20%; }
+  .history-table-wrap th:nth-child(5), .history-table-wrap td:nth-child(5) { width: 33%; }
+  .history-table-wrap th:nth-child(6), .history-table-wrap td:nth-child(6) { width: 14%; }
+
+  .copy-cell {
+    cursor: pointer;
+  }
+
+  .copy-cell:focus {
+    outline: 2px solid rgba(178, 140, 255, .70);
+    outline-offset: -2px;
+  }
+
+  .copy-cell.copied {
+    color: var(--text);
+    background: rgba(72, 214, 184, .16);
+  }
+
+  .history-row {
+    cursor: pointer;
+  }
+
+  .history-row.status-error td {
+    color: #ffd3d3;
+  }
+
+  .history-sql {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .history-sql code {
+    color: var(--soft);
+    white-space: nowrap;
+  }
+
+  .history-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+  }
+
+  .history-actions button {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: var(--font-small);
+  }
+
+  .history-detail td {
+    overflow: visible;
+    white-space: normal;
+    background: rgba(21, 27, 36, .50);
+  }
+
+  .history-detail pre {
+    margin: 0;
+    max-height: 180px;
+    overflow: auto;
+    color: var(--text);
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: var(--font-small);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .history-detail .history-error {
+    margin-top: 10px;
+    color: #ffd3d3;
+  }
+
+  .history-detail .history-result {
+    margin-top: 10px;
+    color: var(--muted);
+  }
+
+  .copy-toast {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 40;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity .18s ease, transform .18s ease;
+    border: 1px solid rgba(72, 214, 184, .35);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    background: rgba(16, 21, 28, .96);
+    box-shadow: 0 18px 54px rgba(0, 0, 0, .28);
+    font-size: var(--font-body);
+  }
+
+  .copy-toast.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .history-empty {
+    padding: 24px;
+    color: var(--muted);
+    text-align: center;
   }
 
   .button-row {
@@ -578,7 +952,7 @@
       justify-content: flex-start;
     }
 
-    .debug-grid, .mini-grid {
+    .debug-grid, .mini-grid, .builder-controls, .builder-fields, .builder-address-groups {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -593,7 +967,7 @@
       flex-direction: column;
     }
 
-    .debug-grid, .mini-grid, .charts-grid {
+    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups {
       grid-template-columns: 1fr;
     }
   }
@@ -714,6 +1088,78 @@
     </div>
   </details>
 
+  <details class="foldout query-builder" data-foldout-key="query-builder" open>
+    <summary>Query Builder</summary>
+    <div class="foldout-body query-builder-body">
+      <div class="builder-controls">
+        <label class="builder-control">
+          <span>Range</span>
+          <span class="builder-mode" role="group" aria-label="Range type">
+            <button type="button" class="active" data-builder-range-mode="block">Blocks</button>
+            <button type="button" data-builder-range-mode="time">Time</button>
+          </span>
+        </label>
+        <label class="builder-control">
+          <span id="builderFromLabel">From block</span>
+          <input type="number" id="builderFromBlock" min="0" step="1" inputmode="numeric">
+        </label>
+        <label class="builder-control">
+          <span id="builderToLabel">To block</span>
+          <input type="number" id="builderToBlock" min="0" step="1" inputmode="numeric">
+        </label>
+        <label class="builder-control">
+          <span>Token</span>
+          <select id="builderToken"></select>
+        </label>
+        <label class="builder-control" id="builderCustomTokenAddressControl">
+          <span>Token address</span>
+          <input type="text" id="builderCustomTokenAddress" spellcheck="false" readonly>
+        </label>
+        <label class="builder-control" id="builderCustomTokenDecimalsControl">
+          <span>Decimals</span>
+          <input type="number" id="builderCustomTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
+        </label>
+        <label class="builder-control">
+          <span>Event</span>
+          <input type="text" id="builderEvent" value="Transfer(address,address,uint256)" spellcheck="false">
+        </label>
+        <label class="builder-control">
+          <span>Amount min</span>
+          <input type="text" id="builderAmountMin" inputmode="decimal">
+        </label>
+        <label class="builder-control">
+          <span>Amount max</span>
+          <input type="text" id="builderAmountMax" inputmode="decimal">
+        </label>
+      </div>
+      <div class="builder-address-groups">
+        <div class="builder-address-panel" data-builder-address-panel="from">
+          <div class="builder-address-title">From addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="builderFromAddress" data-builder-address-input="from" placeholder="0x..." spellcheck="false" aria-label="From address">
+            <button type="button" class="secondary" data-add-builder-address="from">Add</button>
+            <button type="button" class="secondary" data-reset-builder-addresses="from">Reset</button>
+          </div>
+          <div class="builder-address-list" id="builderFromAddressList" data-builder-address-list="from"></div>
+        </div>
+        <div class="builder-address-panel" data-builder-address-panel="to">
+          <div class="builder-address-title">To addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="builderToAddress" data-builder-address-input="to" placeholder="0x..." spellcheck="false" aria-label="To address">
+            <button type="button" class="secondary" data-add-builder-address="to">Add</button>
+            <button type="button" class="secondary" data-reset-builder-addresses="to">Reset</button>
+          </div>
+          <div class="builder-address-list" id="builderToAddressList" data-builder-address-list="to"></div>
+        </div>
+      </div>
+      <div class="builder-fields" id="builderFields"></div>
+      <div class="builder-actions">
+        <span class="builder-status" id="builderStatus">Transfer logs from verified local blocks.</span>
+        <button type="button" class="primary" id="generateQueryBtn" onclick="generateBuilderQuery()">Generate SQL</button>
+      </div>
+    </div>
+  </details>
+
   <details class="foldout query-foldout" data-foldout-key="query-logs">
     <summary>Query Logs</summary>
     <div class="foldout-body query-body">
@@ -721,7 +1167,11 @@
         <div>
           <p id="queryScope">Queries scan the verified local range.</p>
         </div>
-        <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
+        <div class="query-run-controls">
+          <span class="query-timer" id="queryTimer">00:00:000</span>
+          <button type="button" class="primary" id="runBtn" onclick="runQuery()">Run Query</button>
+          <button type="button" class="secondary" id="stopQueryBtn" onclick="cancelRunningQuery()" disabled hidden>Stop</button>
+        </div>
       </div>
       <textarea id="sql">SELECT block_number, tx_hash, address, topic0, data_len, log_index FROM logs WHERE block_number = 0 ORDER BY block_number DESC, tx_index DESC, log_index DESC</textarea>
       <div class="query-actions">
@@ -742,24 +1192,150 @@
       <div class="error" id="queryError"></div>
     </div>
   </details>
+
+  <details class="foldout query-history" data-foldout-key="query-history" open>
+    <summary>Query History</summary>
+    <div class="foldout-body query-history-body">
+      <div class="query-history-meta" id="queryHistoryMeta">Browser-local history. Most recent queries appear first.</div>
+      <div class="history-table-wrap">
+        <table id="queryHistoryTable">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Time</th>
+              <th>Duration</th>
+              <th>Result</th>
+              <th>SQL</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queryHistoryBody"></tbody>
+        </table>
+        <div class="history-empty" id="queryHistoryEmpty">No query history yet.</div>
+      </div>
+    </div>
+  </details>
 </div>
+
+<div class="copy-toast" id="copyToast" role="status" aria-live="polite">Copied to clipboard</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
 <script>
 var QUERY_PAGE_SIZE = 50;
-var MAX_QUERY_LIMIT = 10000;
+var DEFAULT_QUERY_LIMIT = 500;
 var queryOffset = 0;
 var queryRows = [];
 var queryColumns = [];
-var queryWasCapped = false;
 var queryScannedRows = null;
 var lastStatusTimestamp = null;
 var chartHours = 1;
 var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
+var QUERY_HISTORY_STORAGE_KEY = 'logex.queryHistory.v1';
+var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
+var QUERY_BUILDER_STORAGE_KEY = 'logex.queryBuilder.v1';
+var QUERY_HISTORY_LIMIT = 50;
+var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
+var DEFAULT_TOKEN_DECIMALS = 18;
+var CUSTOM_TOKEN_VALUE = '__custom_erc20__';
+var MAX_TOKEN_DECIMALS = 36;
+var KECCAK_64_MASK = (1n << 64n) - 1n;
+var KECCAK_ROUND_CONSTANTS = [
+  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+  0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+  0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+  0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+  0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
+];
+var KECCAK_ROTATION_OFFSETS = [
+  [0, 36, 3, 41, 18],
+  [1, 44, 10, 45, 2],
+  [62, 6, 43, 15, 61],
+  [28, 55, 25, 21, 56],
+  [27, 20, 39, 8, 14]
+];
+var EVENT_SIGNATURE_BY_TOPIC = {};
+EVENT_SIGNATURE_BY_TOPIC[TRANSFER_TOPIC0] = TRANSFER_EVENT_SIGNATURE;
+var LOG_FIELDS = [
+  'block_number',
+  'block_hash',
+  'timestamp',
+  'tx_hash',
+  'tx_index',
+  'log_index',
+  'address',
+  'topic0',
+  'topic1',
+  'topic2',
+  'topic3',
+  'topics',
+  'data',
+  'data_len',
+  'source'
+];
+var DEFAULT_BUILDER_FIELDS = [
+  'block_number',
+  'tx_hash',
+  'address',
+  'topic0',
+  'topic1',
+  'topic2',
+  'data',
+  'log_index'
+];
+// Ethereum-platform tokens from CoinGecko market-cap order, refreshed May 2026.
+var ERC20_TOKENS = [
+  { symbol: 'USDT', name: 'Tether', address: '0xdac17f958d2ee523a2206206994597c13d831ec7', decimals: 6 },
+  { symbol: 'BNB', name: 'BNB', address: '0xb8c77482e45f1f44de1745f52c74426c631bdd52', decimals: 18 },
+  { symbol: 'USDC', name: 'USDC', address: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals: 6 },
+  { symbol: 'WBT', name: 'WhiteBIT Coin', address: '0x925206b8a707096ed26ae47c84747fe0bb734f59', decimals: 8 },
+  { symbol: 'USDS', name: 'USDS', address: '0xdc035d45d973e3ec169d2276ddab16f1e407384f', decimals: 18 },
+  { symbol: 'LEO', name: 'LEO Token', address: '0x2af5d2ad76741191d15dfe7bf6ac92d4bd912ca3', decimals: 18 },
+  { symbol: 'LINK', name: 'Chainlink', address: '0x514910771af9ca656af840dff83e8264ecf986ca', decimals: 18 },
+  { symbol: 'TON', name: 'Toncoin', address: '0x582d872a1b094fc48f5de31d3b73f2d9be47def1', decimals: 9 },
+  { symbol: 'USD1', name: 'USD1', address: '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d', decimals: 18 },
+  { symbol: 'DAI', name: 'Dai', address: '0x6b175474e89094c44da98b954eedeac495271d0f', decimals: 18 },
+  { symbol: 'USDE', name: 'Ethena USDe', address: '0x4c9edd5852cd905f086c759e8383e09bff1e68b3', decimals: 18 },
+  { symbol: 'SHIB', name: 'Shiba Inu', address: '0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce', decimals: 18 },
+  { symbol: 'PYUSD', name: 'PayPal USD', address: '0x6c3ea9036406852006290770bedfcaba0e23a0e8', decimals: 6 },
+  { symbol: 'CRO', name: 'Cronos', address: '0xa0b73e1ff0b80914ab6fe0444e65848c4c34450b', decimals: 8 },
+  { symbol: 'USDG', name: 'Global Dollar', address: '0xe343167631d89b6ffc58b88d6b7fb0228795491d', decimals: 6 },
+  { symbol: 'USYC', name: 'Circle USYC', address: '0x136471a34f6ef19fe571effc1ca711fdb8e49f2b', decimals: 6 },
+  { symbol: 'XAUT', name: 'Tether Gold', address: '0x68749665ff8d2d112fa859aa293f07a622782f38', decimals: 6 },
+  { symbol: 'BUIDL', name: 'BlackRock USD Institutional Digital Liquidity Fund', address: '0x7712c34205737192402172409a8f7ccef8aa2aec', decimals: 6 },
+  { symbol: 'UNI', name: 'Uniswap', address: '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984', decimals: 18 },
+  { symbol: 'DOT', name: 'Polkadot', address: '0x8d010bf9c26881788b4e6bf5fd1bdc358c8f90b8', decimals: 18 },
+  { symbol: 'MNT', name: 'Mantle', address: '0x3c3a81e81dc49a522a592e7622a7e711c06bf354', decimals: 18 },
+  { symbol: 'PAXG', name: 'PAX Gold', address: '0x45804880de22913dafe09f4980848ece6ecbaf78', decimals: 18 },
+  { symbol: 'WLFI', name: 'World Liberty Financial', address: '0xda5e1988097297dcdc1f90d4dfe7909e847cbef6', decimals: 18 },
+  { symbol: 'USDY', name: 'Ondo US Dollar Yield', address: '0x96f6ef951840721adbf46ac996b59e0235cb985c', decimals: 18 },
+  { symbol: 'OKB', name: 'OKB', address: '0x75231f58b43240c9718dd58b4967c5114342a86c', decimals: 18 },
+  { symbol: 'USDF', name: 'Falcon USD', address: '0xfa2b947eec368f42195f24f36d2af29f7c24cec2', decimals: 18 },
+  { symbol: 'HTX', name: 'HTX DAO', address: '0x61ec85ab89377db65762e234c946b5c25a56e99e', decimals: 18 },
+  { symbol: 'ONDO', name: 'Ondo', address: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3', decimals: 18 },
+  { symbol: 'SKY', name: 'Sky', address: '0x56072c95faa701256059aa122697b133aded9279', decimals: 18 },
+  { symbol: 'PEPE', name: 'Pepe', address: '0x6982508145454ce325ddbe47a25d4ec3d2311933', decimals: 18 }
+];
+var ERC20_TOKEN_BY_ADDRESS = ERC20_TOKENS.reduce(function(map, token) {
+  map[token.address.toLowerCase()] = token;
+  return map;
+}, {});
 var perfSamples = loadPerfSamples();
 var performanceCharts = {};
 var querySqlTouched = false;
+var defaultQueryApplied = false;
+var queryHistory = loadQueryHistory();
+var queryStartedAtMs = null;
+var queryTimerInterval = null;
+var queryAbortController = null;
+var queryRunning = false;
+var copyToastTimeout = null;
+var queryBuilderTouched = false;
+var builderRangeMode = 'block';
+var builderFromAddresses = [];
+var builderToAddresses = [];
 
 function byId(id) {
   return document.getElementById(id);
@@ -900,6 +1476,19 @@ function fmtCompletionTime(seconds) {
   });
 }
 
+function fmtDateTime(value) {
+  var date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '--';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  });
+}
+
 function fmtEtaWithCompletion(seconds) {
   var remaining = fmtEta(seconds);
   if (remaining === '--') return remaining;
@@ -929,6 +1518,10 @@ function blockWithAge(block, timestamp) {
   return fmt(block) + (age ? ' (' + age + ')' : '');
 }
 
+function sqlString(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
 function buildDefaultQuery(fromBlock, toBlock) {
   if (fromBlock == null || toBlock == null) return null;
   var to = Math.max(0, Math.round(toBlock));
@@ -938,15 +1531,769 @@ function buildDefaultQuery(fromBlock, toBlock) {
     'SELECT block_number, tx_hash, address, topic0, data_len, log_index',
     'FROM logs',
     'WHERE block_number = ' + to,
-    'ORDER BY block_number DESC, tx_index DESC, log_index DESC'
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC',
+    'LIMIT ' + DEFAULT_QUERY_LIMIT
   ].join('\n');
 }
 
 function updateDefaultQuery(fromBlock, toBlock) {
-  if (querySqlTouched) return;
+  if (querySqlTouched || defaultQueryApplied) return;
   var sql = buildDefaultQuery(fromBlock, toBlock);
   if (!sql) return;
   byId('sql').value = sql;
+  defaultQueryApplied = true;
+  saveQuerySql(sql);
+}
+
+function normalizeAddress(value) {
+  var text = String(value || '').trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(text)) return null;
+  return text.toLowerCase();
+}
+
+function rotateLeft64(value, offset) {
+  offset = BigInt(offset);
+  if (offset === 0n) return value & KECCAK_64_MASK;
+  return ((value << offset) | (value >> (64n - offset))) & KECCAK_64_MASK;
+}
+
+function keccakPermutation(state) {
+  for (var round = 0; round < KECCAK_ROUND_CONSTANTS.length; round++) {
+    var c = new Array(5);
+    var d = new Array(5);
+    for (var x = 0; x < 5; x++) {
+      c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+    }
+    for (var dx = 0; dx < 5; dx++) {
+      d[dx] = c[(dx + 4) % 5] ^ rotateLeft64(c[(dx + 1) % 5], 1);
+    }
+    for (var ax = 0; ax < 5; ax++) {
+      for (var ay = 0; ay < 5; ay++) {
+        state[ax + 5 * ay] = (state[ax + 5 * ay] ^ d[ax]) & KECCAK_64_MASK;
+      }
+    }
+
+    var b = new Array(25).fill(0n);
+    for (var bx = 0; bx < 5; bx++) {
+      for (var by = 0; by < 5; by++) {
+        var nextX = by;
+        var nextY = (2 * bx + 3 * by) % 5;
+        b[nextX + 5 * nextY] = rotateLeft64(
+          state[bx + 5 * by],
+          KECCAK_ROTATION_OFFSETS[bx][by]
+        );
+      }
+    }
+
+    for (var cx = 0; cx < 5; cx++) {
+      for (var cy = 0; cy < 5; cy++) {
+        state[cx + 5 * cy] = (
+          b[cx + 5 * cy] ^
+          ((~b[((cx + 1) % 5) + 5 * cy] & KECCAK_64_MASK) & b[((cx + 2) % 5) + 5 * cy])
+        ) & KECCAK_64_MASK;
+      }
+    }
+
+    state[0] = (state[0] ^ KECCAK_ROUND_CONSTANTS[round]) & KECCAK_64_MASK;
+  }
+}
+
+function keccak256AsciiHex(text) {
+  var rate = 136;
+  var bytes = Array.prototype.map.call(String(text), function(char) {
+    return char.charCodeAt(0) & 0xff;
+  });
+  bytes.push(0x01);
+  while (bytes.length % rate !== rate - 1) bytes.push(0);
+  bytes.push(0x80);
+
+  var state = new Array(25).fill(0n);
+  for (var offset = 0; offset < bytes.length; offset += rate) {
+    for (var lane = 0; lane < rate / 8; lane++) {
+      var laneValue = 0n;
+      for (var byteIndex = 0; byteIndex < 8; byteIndex++) {
+        laneValue |= BigInt(bytes[offset + lane * 8 + byteIndex]) << BigInt(8 * byteIndex);
+      }
+      state[lane] ^= laneValue;
+    }
+    keccakPermutation(state);
+  }
+
+  var out = [];
+  for (var outLane = 0; out.length < 32; outLane++) {
+    var value = state[outLane];
+    for (var outByte = 0; outByte < 8 && out.length < 32; outByte++) {
+      out.push(Number((value >> BigInt(8 * outByte)) & 0xffn));
+    }
+  }
+  return out.map(function(byte) {
+    return byte.toString(16).padStart(2, '0');
+  }).join('');
+}
+
+function toChecksumAddress(address) {
+  var normalized = normalizeAddress(address);
+  if (!normalized) return null;
+  var hex = normalized.slice(2);
+  var hash = keccak256AsciiHex(hex);
+  var checksummed = '';
+  for (var index = 0; index < hex.length; index++) {
+    var char = hex[index];
+    checksummed += parseInt(hash[index], 16) >= 8 ? char.toUpperCase() : char;
+  }
+  return '0x' + checksummed;
+}
+
+function parseChecksummedAddress(value, label) {
+  var text = String(value || '').trim();
+  var normalized = normalizeAddress(text);
+  if (!normalized) {
+    throw new Error(label + ' must be a 20-byte 0x address.');
+  }
+  var body = text.slice(2);
+  var hasLower = /[a-f]/.test(body);
+  var hasUpper = /[A-F]/.test(body);
+  var checksummed = toChecksumAddress(normalized);
+  if (hasLower && hasUpper && text !== checksummed) {
+    throw new Error(label + ' has an invalid EIP-55 checksum.');
+  }
+  return checksummed;
+}
+
+function tokenDisplayName(token) {
+  return token.name === token.symbol ? token.symbol : token.name + ' (' + token.symbol + ')';
+}
+
+function parseTokenDecimals(value, label) {
+  var text = String(value == null ? '' : value).trim();
+  if (!/^\d+$/.test(text)) {
+    throw new Error(label + ' must be a whole number between 0 and ' + MAX_TOKEN_DECIMALS + '.');
+  }
+  var decimals = Number(text);
+  if (!Number.isSafeInteger(decimals) || decimals < 0 || decimals > MAX_TOKEN_DECIMALS) {
+    throw new Error(label + ' must be between 0 and ' + MAX_TOKEN_DECIMALS + '.');
+  }
+  return decimals;
+}
+
+function customBuilderToken(strict) {
+  var selector = byId('builderToken');
+  if (!selector || selector.value !== CUSTOM_TOKEN_VALUE) return null;
+  var addressInput = byId('builderCustomTokenAddress');
+  var decimalsInput = byId('builderCustomTokenDecimals');
+  var address;
+  try {
+    address = parseChecksummedAddress(addressInput ? addressInput.value : '', 'Custom token');
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+  var decimals;
+  try {
+    decimals = parseTokenDecimals(decimalsInput ? decimalsInput.value : '', 'Custom token decimals');
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+  return { symbol: 'CUSTOM', name: 'Custom ERC20', address: address, decimals: decimals, custom: true };
+}
+
+function tokenForAddress(address) {
+  var normalized = normalizeAddress(address);
+  if (!normalized) return null;
+  var custom = customBuilderToken(false);
+  if (custom && custom.address === normalized) return custom;
+  return ERC20_TOKEN_BY_ADDRESS[normalized] || null;
+}
+
+function displayAddressValue(address) {
+  var normalized = normalizeAddress(address);
+  if (!normalized) return String(address || '');
+  var token = tokenForAddress(normalized);
+  return token ? tokenDisplayName(token) : toChecksumAddress(normalized) || normalized;
+}
+
+function normalizeTopicHash(value) {
+  var text = String(value || '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(text)) return null;
+  return text.toLowerCase();
+}
+
+function decodeTopicAddress(value) {
+  var topic = normalizeTopicHash(value);
+  if (!topic || topic.slice(2, 26) !== '000000000000000000000000') return null;
+  return '0x' + topic.slice(26);
+}
+
+function decodeUint256BigInt(value) {
+  var topic = normalizeTopicHash(value);
+  if (!topic) return null;
+  try {
+    return BigInt(topic);
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatTokenAmount(value, token) {
+  var decoded = decodeUint256BigInt(value);
+  if (decoded == null) return null;
+  if (!token) return decoded.toString(10);
+  var decimals = Number(token.decimals);
+  if (!Number.isSafeInteger(decimals) || decimals < 0 || decimals > MAX_TOKEN_DECIMALS) {
+    return decoded.toString(10);
+  }
+  if (decimals === 0) {
+    return decoded.toString(10) + (token.symbol ? ' ' + token.symbol : '');
+  }
+  var scale = 10n ** BigInt(decimals);
+  var whole = decoded / scale;
+  var remainder = decoded % scale;
+  var formatted = whole.toString(10);
+  if (remainder > 0n) {
+    formatted += '.' + remainder.toString(10).padStart(decimals, '0').replace(/0+$/, '');
+  }
+  return formatted + (token.symbol ? ' ' + token.symbol : '');
+}
+
+function formatUnixTimestampLocal(value) {
+  var raw = formatCell(value).trim();
+  if (!/^\d+$/.test(raw)) return null;
+  var seconds = Number(raw);
+  if (!Number.isFinite(seconds)) return null;
+  var date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return null;
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')
+  ].join('-') + ' ' + [
+    String(date.getHours()).padStart(2, '0'),
+    String(date.getMinutes()).padStart(2, '0'),
+    String(date.getSeconds()).padStart(2, '0')
+  ].join(':');
+}
+
+function displayTopicValue(column, value) {
+  var raw = formatCell(value);
+  var topic = normalizeTopicHash(raw);
+  if (!topic) return raw;
+  if (column === 'topic0' && EVENT_SIGNATURE_BY_TOPIC[topic]) {
+    return EVENT_SIGNATURE_BY_TOPIC[topic];
+  }
+  var decodedAddress = decodeTopicAddress(topic);
+  return decodedAddress ? displayAddressValue(decodedAddress) : topic;
+}
+
+function tokenForResultRow(row) {
+  if (row && row.address) return tokenForAddress(row.address);
+  return selectedBuilderToken(false);
+}
+
+function displayCellValue(column, value, row) {
+  var raw = formatCell(value);
+  if (column === 'timestamp') return formatUnixTimestampLocal(raw) || raw;
+  if (column === 'address') return displayAddressValue(raw);
+  if (/^topic[0-3]$/.test(column)) return displayTopicValue(column, value);
+  if (column === 'topics' && Array.isArray(value)) {
+    return value.map(function(topic, index) {
+      return displayTopicValue('topic' + index, topic);
+    }).join(', ');
+  }
+  if (column === 'data' && resultHasTransferContext(row ? [row] : null)) {
+    return formatTokenAmount(raw, tokenForResultRow(row)) || raw;
+  }
+  return raw;
+}
+
+function resultHasTransferContext(rows) {
+  if (Array.isArray(rows) && rows.some(function(row) {
+    return normalizeTopicHash(row.topic0) === TRANSFER_TOPIC0;
+  })) {
+    return true;
+  }
+  var sql = byId('sql') ? byId('sql').value : '';
+  return sql.indexOf(TRANSFER_EVENT_SIGNATURE) !== -1 || sql.toLowerCase().indexOf(TRANSFER_TOPIC0) !== -1;
+}
+
+function columnTitle(column, rows) {
+  var transfer = resultHasTransferContext(rows);
+  if (column === 'timestamp') return 'timestamp (local)';
+  if (column === 'topic0') return transfer ? 'topic0 (Transfer)' : 'topic0 (event)';
+  if (transfer && column === 'topic1') return 'topic1 (from)';
+  if (transfer && column === 'topic2') return 'topic2 (to)';
+  if (transfer && column === 'data') return 'data (amount)';
+  return column;
+}
+
+function renderQueryBuilder() {
+  var tokenSelect = byId('builderToken');
+  var fields = byId('builderFields');
+  if (!tokenSelect || !fields) return;
+
+  tokenSelect.innerHTML = '<option value="">Any ERC20 token</option>' + ERC20_TOKENS.map(function(token) {
+    return '<option value="' + escapeHtml(token.address) + '">' + escapeHtml(tokenDisplayName(token)) + '</option>';
+  }).join('') + '<option value="' + CUSTOM_TOKEN_VALUE + '">Custom ERC20 token</option>';
+
+  fields.innerHTML = LOG_FIELDS.map(function(field) {
+    var selected = DEFAULT_BUILDER_FIELDS.indexOf(field) !== -1;
+    return '<button type="button" class="field-toggle' + (selected ? ' active' : '') + '" data-builder-field="' + escapeHtml(field) + '" aria-pressed="' + (selected ? 'true' : 'false') + '">' + escapeHtml(field) + '</button>';
+  }).join('');
+  renderBuilderAddressLists();
+  updateBuilderTokenControls();
+  applySavedQueryBuilderState();
+}
+
+function setBuilderStatus(message, isError) {
+  var status = byId('builderStatus');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = isError ? '#ffd3d3' : '';
+}
+
+function parseBuilderBlock(id) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  var number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error('Block range values must be non-negative whole numbers.');
+  }
+  return number;
+}
+
+function parseBuilderTimestamp(id, label) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  var match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
+  if (!match) {
+    throw new Error(label + ' must be a valid local time.');
+  }
+  var year = Number(match[1]);
+  var month = Number(match[2]);
+  var day = Number(match[3]);
+  var hour = Number(match[4]);
+  var minute = Number(match[5]);
+  var second = match[6] == null ? 0 : Number(match[6]);
+  var millisecond = match[7] == null ? 0 : Number(match[7].padEnd(3, '0'));
+  var date = new Date(year, month - 1, day, hour, minute, second, millisecond);
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hour ||
+    date.getMinutes() !== minute ||
+    date.getSeconds() !== second
+  ) {
+    throw new Error(label + ' must be a valid local time.');
+  }
+  return Math.floor(date.getTime() / 1000);
+}
+
+function normalizeEventSignature(value) {
+  var text = String(value || '').trim().replace(/\s+/g, '');
+  var match = text.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\((.*)\)$/);
+  if (!match) {
+    throw new Error('Event must use the format Transfer(address,address,uint256).');
+  }
+  var args = match[2];
+  if (args === '') return match[1] + '()';
+  var types = args.split(',');
+  if (!types.every(function(type) {
+    return /^[A-Za-z][A-Za-z0-9_]*(\[[0-9]*\])*$/.test(type);
+  })) {
+    throw new Error('Event argument types must be canonical ABI types without names.');
+  }
+  return match[1] + '(' + types.join(',') + ')';
+}
+
+function selectedBuilderToken(strict) {
+  var selector = byId('builderToken');
+  if (!selector) return null;
+  if (selector.value === CUSTOM_TOKEN_VALUE) {
+    return customBuilderToken(!!strict);
+  }
+  var address = normalizeAddress(selector.value);
+  if (!address) return null;
+  return ERC20_TOKEN_BY_ADDRESS[address] || null;
+}
+
+function builderHasAmountFilter() {
+  return byId('builderAmountMin').value.trim() !== '' || byId('builderAmountMax').value.trim() !== '';
+}
+
+function updateBuilderTokenControls() {
+  var selector = byId('builderToken');
+  var addressInput = byId('builderCustomTokenAddress');
+  var decimalsInput = byId('builderCustomTokenDecimals');
+  if (!selector || !addressInput || !decimalsInput) return;
+
+  var isCustom = selector.value === CUSTOM_TOKEN_VALUE;
+  var token = selectedBuilderToken(false);
+  var wasReadOnly = addressInput.readOnly;
+  addressInput.readOnly = !isCustom;
+  decimalsInput.readOnly = !isCustom;
+  if (token && !isCustom) {
+    addressInput.value = toChecksumAddress(token.address) || token.address;
+    decimalsInput.value = String(token.decimals);
+    return;
+  }
+  if (!isCustom) {
+    addressInput.value = '';
+    decimalsInput.value = '';
+    return;
+  }
+  if (wasReadOnly) {
+    addressInput.value = '';
+    decimalsInput.value = String(DEFAULT_TOKEN_DECIMALS);
+    return;
+  }
+  if (decimalsInput.value.trim() === '') {
+    decimalsInput.value = String(DEFAULT_TOKEN_DECIMALS);
+  }
+}
+
+function parseBuilderAmount(id, label, decimals) {
+  var value = byId(id).value.trim();
+  if (value === '') return null;
+  if (!/^\d+(\.\d+)?$/.test(value)) {
+    throw new Error(label + ' must be a non-negative decimal amount.');
+  }
+  decimals = parseTokenDecimals(decimals, 'Token decimals');
+  var parts = value.split('.');
+  var fractional = parts[1] || '';
+  if (fractional.length > decimals) {
+    throw new Error(label + ' supports up to ' + decimals + ' decimal places for the selected token.');
+  }
+  var scale = 10n ** BigInt(decimals);
+  var parsed = BigInt(parts[0] || '0') * scale
+    + BigInt((fractional + '0'.repeat(decimals)).slice(0, decimals) || '0');
+  var max = (1n << 256n) - 1n;
+  if (parsed > max) {
+    throw new Error(label + ' must fit in uint256.');
+  }
+  return parsed;
+}
+
+function uint256SqlHex(value) {
+  return '0x' + value.toString(16).padStart(64, '0');
+}
+
+function selectedBuilderFields() {
+  return Array.prototype.map.call(document.querySelectorAll('[data-builder-field].active'), function(button) {
+    return button.getAttribute('data-builder-field');
+  }).filter(function(field) {
+    return LOG_FIELDS.indexOf(field) !== -1;
+  });
+}
+
+function loadQueryBuilderState() {
+  try {
+    var raw = localStorage.getItem(QUERY_BUILDER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveQueryBuilderState() {
+  try {
+    localStorage.setItem(QUERY_BUILDER_STORAGE_KEY, JSON.stringify({
+      rangeMode: builderRangeMode,
+      fromRange: byId('builderFromBlock').value,
+      toRange: byId('builderToBlock').value,
+      tokenValue: byId('builderToken').value,
+      tokenAddress: byId('builderCustomTokenAddress').value,
+      tokenDecimals: byId('builderCustomTokenDecimals').value,
+      event: byId('builderEvent').value,
+      amountMin: byId('builderAmountMin').value,
+      amountMax: byId('builderAmountMax').value,
+      pendingFromAddress: byId('builderFromAddress').value,
+      pendingToAddress: byId('builderToAddress').value,
+      fromAddresses: builderFromAddresses,
+      toAddresses: builderToAddresses,
+      fields: selectedBuilderFields()
+    }));
+  } catch (_) {}
+}
+
+function sanitizeBuilderAddresses(values) {
+  if (!Array.isArray(values)) return [];
+  var addresses = [];
+  values.forEach(function(value) {
+    try {
+      var address = parseChecksummedAddress(value, 'Address');
+      if (addresses.indexOf(address) === -1) addresses.push(address);
+    } catch (_) {}
+  });
+  return addresses;
+}
+
+function applySavedQueryBuilderState() {
+  var state = loadQueryBuilderState();
+  if (!state || typeof state !== 'object') return;
+
+  setBuilderRangeMode(state.rangeMode === 'time' ? 'time' : 'block');
+  byId('builderFromBlock').value = state.fromRange || '';
+  byId('builderToBlock').value = state.toRange || '';
+
+  var tokenSelect = byId('builderToken');
+  var tokenValue = String(state.tokenValue || '');
+  tokenSelect.value = Array.prototype.some.call(tokenSelect.options, function(option) {
+    return option.value === tokenValue;
+  }) ? tokenValue : '';
+  updateBuilderTokenControls();
+  if (tokenSelect.value === CUSTOM_TOKEN_VALUE) {
+    byId('builderCustomTokenAddress').value = state.tokenAddress || '';
+    byId('builderCustomTokenDecimals').value = state.tokenDecimals || String(DEFAULT_TOKEN_DECIMALS);
+  }
+
+  byId('builderEvent').value = state.event || TRANSFER_EVENT_SIGNATURE;
+  byId('builderAmountMin').value = state.amountMin || '';
+  byId('builderAmountMax').value = state.amountMax || '';
+  byId('builderFromAddress').value = state.pendingFromAddress || '';
+  byId('builderToAddress').value = state.pendingToAddress || '';
+
+  if (Array.isArray(state.fields)) {
+    var selected = state.fields.filter(function(field) {
+      return LOG_FIELDS.indexOf(field) !== -1;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-builder-field]'), function(button) {
+      var active = selected.indexOf(button.getAttribute('data-builder-field')) !== -1;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  builderFromAddresses = sanitizeBuilderAddresses(state.fromAddresses);
+  builderToAddresses = sanitizeBuilderAddresses(state.toAddresses);
+  renderBuilderAddressLists();
+  queryBuilderTouched = true;
+}
+
+function builderAddressList(kind) {
+  return kind === 'from' ? builderFromAddresses : builderToAddresses;
+}
+
+function builderAddressInputId(kind) {
+  return kind === 'from' ? 'builderFromAddress' : 'builderToAddress';
+}
+
+function builderAddressListId(kind) {
+  return kind === 'from' ? 'builderFromAddressList' : 'builderToAddressList';
+}
+
+function renderBuilderAddressLists() {
+  ['from', 'to'].forEach(function(kind) {
+    var list = byId(builderAddressListId(kind));
+    if (!list) return;
+    var addresses = builderAddressList(kind);
+    list.innerHTML = addresses.map(function(address, index) {
+      return '<div class="address-chip" data-builder-address-kind="' + kind + '" data-builder-address-index="' + index + '">' +
+        '<span title="' + escapeHtml(address) + '">' + escapeHtml(displayAddressValue(address)) + '</span>' +
+        '<button type="button" aria-label="Remove address" data-remove-builder-address>x</button>' +
+        '</div>';
+    }).join('');
+  });
+}
+
+function addBuilderAddress(kind) {
+  var input = byId(builderAddressInputId(kind));
+  var label = kind === 'from' ? 'From address' : 'To address';
+  var address;
+  try {
+    address = parseChecksummedAddress(input.value, label);
+  } catch (err) {
+    setBuilderStatus(err.message || label + ' is invalid.', true);
+    return;
+  }
+  var addresses = builderAddressList(kind);
+  if (addresses.indexOf(address) === -1) {
+    addresses.push(address);
+  }
+  input.value = '';
+  renderBuilderAddressLists();
+  markQueryBuilderTouched();
+  setBuilderStatus((kind === 'from' ? 'From' : 'To') + ' address added.');
+}
+
+function removeBuilderAddress(kind, index) {
+  var addresses = builderAddressList(kind);
+  if (index >= 0 && index < addresses.length) {
+    addresses.splice(index, 1);
+    renderBuilderAddressLists();
+    markQueryBuilderTouched();
+  }
+}
+
+function resetBuilderAddresses(kind) {
+  if (kind === 'from') {
+    builderFromAddresses = [];
+  } else {
+    builderToAddresses = [];
+  }
+  renderBuilderAddressLists();
+  markQueryBuilderTouched();
+  setBuilderStatus((kind === 'from' ? 'From' : 'To') + ' addresses reset.');
+}
+
+function builderAddressSqlList(addresses) {
+  return addresses.map(function(address) {
+    return 'address' + sqlString(address);
+  }).join(', ');
+}
+
+function buildQueryFromBuilder() {
+  var selectedFields = selectedBuilderFields();
+  if (!selectedFields.length) throw new Error('Select at least one field.');
+
+  var eventSignature = normalizeEventSignature(byId('builderEvent').value);
+  var rangeColumn = builderRangeMode === 'time' ? 'timestamp' : 'block_number';
+  var fromRange = builderRangeMode === 'time'
+    ? parseBuilderTimestamp('builderFromBlock', 'From time')
+    : parseBuilderBlock('builderFromBlock');
+  var toRange = builderRangeMode === 'time'
+    ? parseBuilderTimestamp('builderToBlock', 'To time')
+    : parseBuilderBlock('builderToBlock');
+  if (fromRange != null && toRange != null && fromRange > toRange) {
+    throw new Error(builderRangeMode === 'time'
+      ? 'From time must be before or equal to to time.'
+      : 'From block must be less than or equal to to block.');
+  }
+
+  var selectedToken = selectedBuilderToken(byId('builderToken').value === CUSTOM_TOKEN_VALUE || builderHasAmountFilter());
+  if (builderHasAmountFilter() && !selectedToken) {
+    throw new Error('Select a known token or enter a custom token before using amount filters.');
+  }
+  var tokenDecimals = selectedToken ? selectedToken.decimals : DEFAULT_TOKEN_DECIMALS;
+  var minAmount = parseBuilderAmount('builderAmountMin', 'Amount min', tokenDecimals);
+  var maxAmount = parseBuilderAmount('builderAmountMax', 'Amount max', tokenDecimals);
+  if (minAmount != null && maxAmount != null && minAmount > maxAmount) {
+    throw new Error('Amount min must be less than or equal to amount max.');
+  }
+
+  var conditions = ['topic0 = event' + sqlString(eventSignature)];
+  if (selectedToken) conditions.push('address = ' + sqlString(selectedToken.address));
+  if (builderFromAddresses.length) {
+    conditions.push('topic1 IN (' + builderAddressSqlList(builderFromAddresses) + ')');
+  }
+  if (builderToAddresses.length) {
+    conditions.push('topic2 IN (' + builderAddressSqlList(builderToAddresses) + ')');
+  }
+  if (fromRange != null && toRange != null) {
+    conditions.push(rangeColumn + ' BETWEEN ' + fromRange + ' AND ' + toRange);
+  } else if (fromRange != null) {
+    conditions.push(rangeColumn + ' >= ' + fromRange);
+  } else if (toRange != null) {
+    conditions.push(rangeColumn + ' <= ' + toRange);
+  }
+  if (minAmount != null || maxAmount != null) {
+    conditions.push('data_len = 32');
+  }
+  if (minAmount != null) {
+    conditions.push('data >= ' + sqlString(uint256SqlHex(minAmount)));
+  }
+  if (maxAmount != null) {
+    conditions.push('data <= ' + sqlString(uint256SqlHex(maxAmount)));
+  }
+
+  return [
+    'SELECT ' + selectedFields.join(', '),
+    'FROM logs',
+    'WHERE ' + conditions.join('\n  AND '),
+    'ORDER BY block_number DESC, tx_index DESC, log_index DESC',
+    'LIMIT ' + DEFAULT_QUERY_LIMIT
+  ].join('\n');
+}
+
+function generateBuilderQuery() {
+  try {
+    var sql = buildQueryFromBuilder();
+    byId('sql').value = sql;
+    querySqlTouched = true;
+    saveQuerySql(sql);
+    var queryFoldout = document.querySelector('details[data-foldout-key="query-logs"]');
+    if (queryFoldout) queryFoldout.open = true;
+    setBuilderStatus('SQL generated.');
+    byId('sql').focus();
+  } catch (err) {
+    setBuilderStatus(err.message || 'Could not generate SQL.', true);
+  }
+}
+
+function markQueryBuilderTouched() {
+  queryBuilderTouched = true;
+  saveQueryBuilderState();
+}
+
+function setBuilderRangeMode(mode) {
+  builderRangeMode = mode === 'time' ? 'time' : 'block';
+  Array.prototype.forEach.call(document.querySelectorAll('[data-builder-range-mode]'), function(button) {
+    button.classList.toggle('active', button.getAttribute('data-builder-range-mode') === builderRangeMode);
+  });
+  var fromInput = byId('builderFromBlock');
+  var toInput = byId('builderToBlock');
+  var isTime = builderRangeMode === 'time';
+  fromInput.style.cursor = '';
+  toInput.style.cursor = '';
+  byId('builderFromLabel').textContent = isTime ? 'From time' : 'From block';
+  byId('builderToLabel').textContent = isTime ? 'To time' : 'To block';
+  fromInput.value = '';
+  toInput.value = '';
+  fromInput.placeholder = '';
+  toInput.placeholder = '';
+  fromInput.type = isTime ? 'datetime-local' : 'number';
+  toInput.type = isTime ? 'datetime-local' : 'number';
+  if (isTime) {
+    fromInput.removeAttribute('min');
+    toInput.removeAttribute('min');
+    fromInput.removeAttribute('step');
+    toInput.removeAttribute('step');
+    fromInput.removeAttribute('inputmode');
+    toInput.removeAttribute('inputmode');
+  } else {
+    fromInput.setAttribute('min', '0');
+    toInput.setAttribute('min', '0');
+    fromInput.setAttribute('step', '1');
+    toInput.setAttribute('step', '1');
+    fromInput.setAttribute('inputmode', 'numeric');
+    toInput.setAttribute('inputmode', 'numeric');
+  }
+}
+
+function isDateTimePickerArea(input, event) {
+  if (!input || input.type !== 'datetime-local') return false;
+  var rect = input.getBoundingClientRect();
+  var pickerWidth = 46;
+  return document.dir === 'rtl'
+    ? event.clientX <= rect.left + pickerWidth
+    : event.clientX >= rect.right - pickerWidth;
+}
+
+function updateDateTimePickerCursor(input, event) {
+  if (!input || input.type !== 'datetime-local') return;
+  input.style.cursor = isDateTimePickerArea(input, event) ? 'pointer' : '';
+}
+
+function maybeOpenDateTimePicker(input, event) {
+  if (!isDateTimePickerArea(input, event) || typeof input.showPicker !== 'function') return;
+  try {
+    input.showPicker();
+  } catch (_) {}
+}
+
+function maybeApplyBuilderRange(fromBlock, toBlock) {
+  var fromInput = byId('builderFromBlock');
+  var toInput = byId('builderToBlock');
+  if (!fromInput || !toInput || queryBuilderTouched) return;
+  if (builderRangeMode !== 'block') return;
+  if (toBlock == null) return;
+  fromInput.value = String(toBlock);
+  toInput.value = String(toBlock);
+  if (fromBlock != null) {
+    fromInput.placeholder = String(fromBlock);
+  }
+  toInput.placeholder = String(toBlock);
 }
 
 function shortHash(value) {
@@ -1000,6 +2347,8 @@ function updateStatus(data) {
   var anchorTimeValue = historicalAnchor && historicalAnchor.timestamp != null ? numberOrNull(historicalAnchor.timestamp) : null;
   var queryFrom = numberOrNull(query.verified_from_block);
   var queryTo = numberOrNull(query.verified_to_block);
+  var storedLogFrom = numberOrNull(query.stored_log_from_block);
+  var storedLogTo = numberOrNull(query.stored_log_to_block);
   var latestBlock = numberOrNull(query.latest_block) || numberOrNull(data.head_block) || numberOrNull(data.target_block);
   var latestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
   var syncedBlock = numberOrNull(data.current_block) || numberOrNull(data.head_block);
@@ -1127,7 +2476,8 @@ function updateStatus(data) {
   setText('debugStoredRows', fmt(data.total_rows));
   setText('debugSegments', fmt(data.sealed_partitions));
   setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
-  updateDefaultQuery(queryFrom, queryTo);
+  updateDefaultQuery(storedLogFrom == null ? queryFrom : storedLogFrom, storedLogTo == null ? queryTo : storedLogTo);
+  maybeApplyBuilderRange(storedLogFrom == null ? queryFrom : storedLogFrom, storedLogTo == null ? queryTo : storedLogTo);
 
   addPerfSample({
     ts: Date.now(),
@@ -1178,6 +2528,28 @@ function savePerfSamples() {
   try {
     localStorage.setItem(PERF_SAMPLE_STORAGE_KEY, JSON.stringify(perfSamples));
   } catch (_) {}
+}
+
+function loadQuerySql() {
+  try {
+    return localStorage.getItem(QUERY_SQL_STORAGE_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveQuerySql(sql) {
+  try {
+    localStorage.setItem(QUERY_SQL_STORAGE_KEY, sql);
+  } catch (_) {}
+}
+
+function initQuerySql() {
+  var saved = loadQuerySql();
+  if (saved === null) return;
+  byId('sql').value = saved;
+  querySqlTouched = true;
+  defaultQueryApplied = true;
 }
 
 function loadFoldoutState() {
@@ -1410,11 +2782,13 @@ function renderTable(rows, emptyMessage) {
 
   var keys = Object.keys(rows[0]);
   thead.innerHTML = '<tr>' + keys.map(function(key) {
-    return '<th>' + escapeHtml(key) + '</th>';
+    return '<th>' + escapeHtml(columnTitle(key, rows)) + '</th>';
   }).join('') + '</tr>';
   tbody.innerHTML = rows.map(function(row) {
     return '<tr>' + keys.map(function(key) {
-      return '<td>' + escapeHtml(formatCell(row[key])) + '</td>';
+      var rawText = formatCell(row[key]);
+      var displayText = displayCellValue(key, row[key], row);
+      return '<td class="copy-cell" tabindex="0" title="Click to copy raw field text" data-copy-value="' + escapeHtml(rawText) + '">' + escapeHtml(displayText) + '</td>';
     }).join('') + '</tr>';
   }).join('');
   empty.style.display = 'none';
@@ -1445,6 +2819,245 @@ function csvCell(value) {
   return text;
 }
 
+function fallbackCopyText(text) {
+  return new Promise(function(resolve, reject) {
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      if (document.execCommand('copy')) {
+        resolve();
+      } else {
+        reject(new Error('Copy failed.'));
+      }
+    } catch (err) {
+      reject(err);
+    } finally {
+      textarea.remove();
+    }
+  });
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(function() {
+      return fallbackCopyText(text);
+    });
+  }
+  return fallbackCopyText(text);
+}
+
+function markCopiedCell(cell) {
+  showCopyToast('Copied to clipboard');
+  cell.classList.add('copied');
+  cell.setAttribute('title', 'Copied');
+  setTimeout(function() {
+    cell.classList.remove('copied');
+    cell.setAttribute('title', 'Click to copy');
+  }, 900);
+}
+
+function showCopyToast(message) {
+  var toast = byId('copyToast');
+  if (!toast) return;
+  toast.textContent = message || 'Copied to clipboard';
+  toast.classList.add('visible');
+  if (copyToastTimeout != null) clearTimeout(copyToastTimeout);
+  copyToastTimeout = setTimeout(function() {
+    toast.classList.remove('visible');
+    copyToastTimeout = null;
+  }, 1200);
+}
+
+function copyResultCell(cell) {
+  if (!cell) return;
+  copyText(cell.getAttribute('data-copy-value') || '').then(function() {
+    markCopiedCell(cell);
+  }).catch(function() {
+    showQueryError('Could not copy field text to clipboard.');
+  });
+}
+
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function pad3(value) {
+  return String(value).padStart(3, '0');
+}
+
+function formatQueryDuration(durationMs) {
+  var totalMs = Math.max(0, Math.floor(Number(durationMs) || 0));
+  var minutes = Math.floor(totalMs / 60000);
+  var seconds = Math.floor((totalMs % 60000) / 1000);
+  var millis = totalMs % 1000;
+  return pad2(minutes) + ':' + pad2(seconds) + ':' + pad3(millis);
+}
+
+function updateQueryTimer() {
+  if (queryStartedAtMs == null) return;
+  setText('queryTimer', formatQueryDuration(performance.now() - queryStartedAtMs));
+}
+
+function setQueryRunning(running) {
+  queryRunning = running;
+  byId('runBtn').disabled = running;
+  byId('stopQueryBtn').disabled = !running;
+  byId('stopQueryBtn').hidden = !running;
+}
+
+function startQueryTimer() {
+  stopQueryTimer();
+  queryStartedAtMs = performance.now();
+  setText('queryTimer', '00:00:000');
+  queryTimerInterval = setInterval(updateQueryTimer, 31);
+}
+
+function stopQueryTimer() {
+  if (queryStartedAtMs == null) {
+    if (queryTimerInterval != null) {
+      clearInterval(queryTimerInterval);
+      queryTimerInterval = null;
+    }
+    return 0;
+  }
+  var durationMs = performance.now() - queryStartedAtMs;
+  if (queryTimerInterval != null) {
+    clearInterval(queryTimerInterval);
+    queryTimerInterval = null;
+  }
+  queryStartedAtMs = null;
+  setText('queryTimer', formatQueryDuration(durationMs));
+  return durationMs;
+}
+
+function loadQueryHistory() {
+  try {
+    var parsed = JSON.parse(localStorage.getItem(QUERY_HISTORY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(function(entry) {
+      return entry && typeof entry.sql === 'string';
+    }).slice(0, QUERY_HISTORY_LIMIT);
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveQueryHistory() {
+  try {
+    localStorage.setItem(QUERY_HISTORY_STORAGE_KEY, JSON.stringify(queryHistory.slice(0, QUERY_HISTORY_LIMIT)));
+  } catch (_) {}
+}
+
+function queryHistoryId() {
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function addQueryHistory(entry) {
+  queryHistory.unshift(Object.assign({
+    id: queryHistoryId(),
+    executedAt: new Date().toISOString()
+  }, entry));
+  queryHistory = queryHistory.slice(0, QUERY_HISTORY_LIMIT);
+  saveQueryHistory();
+  renderQueryHistory();
+}
+
+function queryHistorySummary(entry) {
+  if (entry.ok) {
+    return fmt(entry.rowCount) + ' returned; ' + fmt(entry.scannedRows) + ' scanned';
+  }
+  return 'Failed';
+}
+
+function renderQueryHistory() {
+  var tbody = byId('queryHistoryBody');
+  var empty = byId('queryHistoryEmpty');
+  var meta = byId('queryHistoryMeta');
+  if (!tbody || !empty) return;
+
+  if (!queryHistory.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    if (meta) meta.textContent = 'Browser-local history. Most recent queries appear first.';
+    return;
+  }
+
+  empty.style.display = 'none';
+  if (meta) meta.textContent = fmt(queryHistory.length) + ' saved queries in this browser. Most recent appears first.';
+  tbody.innerHTML = queryHistory.map(function(entry) {
+    var status = entry.ok ? 'Success' : 'Failed';
+    var statusClass = entry.ok ? 'status-success' : 'status-error';
+    var detailId = 'history-detail-' + entry.id;
+    return '<tr class="history-row ' + statusClass + '" data-history-id="' + escapeHtml(entry.id) + '" aria-controls="' + escapeHtml(detailId) + '">' +
+      '<td>' + status + '</td>' +
+      '<td>' + escapeHtml(fmtDateTime(entry.executedAt)) + '</td>' +
+      '<td>' + escapeHtml(formatQueryDuration(entry.durationMs)) + '</td>' +
+      '<td>' + escapeHtml(queryHistorySummary(entry)) + '</td>' +
+      '<td class="history-sql"><code>' + escapeHtml(entry.sql) + '</code></td>' +
+      '<td><div class="history-actions">' +
+      '<button type="button" class="secondary" data-history-action="use" data-history-id="' + escapeHtml(entry.id) + '">Use</button>' +
+      '<button type="button" class="secondary" data-history-action="export" data-history-id="' + escapeHtml(entry.id) + '">.sql</button>' +
+      '</div></td>' +
+      '</tr>' +
+      '<tr class="history-detail" id="' + escapeHtml(detailId) + '" data-history-detail-id="' + escapeHtml(entry.id) + '" hidden>' +
+      '<td colspan="6"><pre>' + escapeHtml(entry.sql) + '</pre>' +
+      '<div class="history-result">Result: ' + escapeHtml(queryHistorySummary(entry)) + '</div>' +
+      (entry.ok ? '' : '<div class="history-error">Error: ' + escapeHtml(entry.error || 'Query failed') + '</div>') +
+      '</td></tr>';
+  }).join('');
+}
+
+function findQueryHistoryEntry(id) {
+  return queryHistory.find(function(entry) { return entry.id === id; }) || null;
+}
+
+function useQueryHistoryEntry(id) {
+  var entry = findQueryHistoryEntry(id);
+  if (!entry) return;
+  byId('sql').value = entry.sql;
+  querySqlTouched = true;
+  saveQuerySql(entry.sql);
+  var queryFoldout = document.querySelector('details[data-foldout-key="query-logs"]');
+  if (queryFoldout) queryFoldout.open = true;
+  byId('sql').focus();
+}
+
+function exportQueryHistoryEntry(id) {
+  var entry = findQueryHistoryEntry(id);
+  if (!entry) return;
+  downloadSql(entry.sql, 'logex-query-' + safeFileTimestamp(entry.executedAt || new Date().toISOString()) + '.sql');
+}
+
+function toggleQueryHistoryDetail(id) {
+  var row = Array.prototype.find.call(document.querySelectorAll('[data-history-detail-id]'), function(candidate) {
+    return candidate.getAttribute('data-history-detail-id') === id;
+  });
+  if (row) row.hidden = !row.hidden;
+}
+
+function downloadSql(sql, filename) {
+  var blob = new Blob([sql.trim() + '\n'], { type: 'application/sql;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileTimestamp(value) {
+  var date = new Date(value);
+  if (!Number.isFinite(date.getTime())) date = new Date();
+  return date.toISOString().replace(/[:.]/g, '-');
+}
+
 function queryPageRows() {
   return queryRows.slice(queryOffset, queryOffset + QUERY_PAGE_SIZE);
 }
@@ -1457,7 +3070,7 @@ function updateQueryButtons() {
 
 function renderQueryPage() {
   if (queryRows.length === 0) {
-    renderTable([], 'Query returned no rows.');
+    renderTable([], 'No matching logs were found in the verified local range.');
     setText('resultCount', '0 rows returned; ' + fmt(queryScannedRows) + ' rows scanned.');
     updateQueryButtons();
     return;
@@ -1469,9 +3082,8 @@ function renderQueryPage() {
 
   var start = queryOffset + 1;
   var end = Math.min(queryOffset + QUERY_PAGE_SIZE, queryRows.length);
-  var cap = queryWasCapped ? '; capped at ' + fmt(MAX_QUERY_LIMIT) + ' rows' : '';
   setText('resultCount',
-    fmt(queryRows.length) + ' rows loaded' + cap + '; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
+    fmt(queryRows.length) + ' rows loaded; showing ' + fmt(start) + '-' + fmt(end) + '; ' + fmt(queryScannedRows) + ' rows scanned.');
   updateQueryButtons();
 }
 
@@ -1484,28 +3096,48 @@ function runQueryPage(direction) {
   renderQueryPage();
 }
 
+function cancelRunningQuery() {
+  if (!queryRunning) return;
+  setText('resultCount', 'Stopping query...');
+  fetch('/query/cancel', {
+    method: 'POST',
+    credentials: 'same-origin'
+  }).catch(function() {});
+  if (queryAbortController) {
+    queryAbortController.abort();
+  }
+}
+
 function runQuery() {
+  if (queryRunning) {
+    showQueryError('A query is already running. Stop it before starting another one.');
+    return;
+  }
   var sql = byId('sql').value.trim();
   queryOffset = 0;
   queryRows = [];
   queryColumns = [];
-  queryWasCapped = false;
   queryScannedRows = null;
   updateQueryButtons();
   showQueryError('');
   if (!sql) {
     showQueryError('Enter a SQL query.');
+    stopQueryTimer();
+    setText('queryTimer', '00:00:000');
     return;
   }
 
-  byId('runBtn').disabled = true;
+  startQueryTimer();
+  setQueryRunning(true);
+  queryAbortController = new AbortController();
   setText('resultCount', 'Running query...');
   renderTable([], 'Running query...');
   fetch('/query', {
     method: 'POST',
     credentials: 'same-origin',
+    signal: queryAbortController.signal,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql: sql, limit: MAX_QUERY_LIMIT, offset: 0 })
+    body: JSON.stringify({ sql: sql, offset: 0 })
   })
     .then(function(response) {
       return response.text().then(function(text) {
@@ -1526,22 +3158,41 @@ function runQuery() {
       }
       queryRows = Array.isArray(result.data.rows) ? result.data.rows : [];
       queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
-      queryWasCapped = result.data.next_offset != null || queryRows.length >= MAX_QUERY_LIMIT;
       queryScannedRows = result.data.total_scanned;
+      var durationMs = stopQueryTimer();
       renderQueryPage();
+      addQueryHistory({
+        ok: true,
+        sql: sql,
+        durationMs: durationMs,
+        rowCount: queryRows.length,
+        scannedRows: queryScannedRows
+      });
     })
     .catch(function(err) {
-      showQueryError(err.message || 'Query failed.');
-      setText('resultCount', 'Query failed.');
+      var wasCanceled = err && err.name === 'AbortError';
+      var errorMessage = wasCanceled ? 'Query canceled.' : (err.message || 'Query failed.');
+      var durationMs = stopQueryTimer();
+      showQueryError(errorMessage);
+      setText('resultCount', wasCanceled ? 'Query canceled.' : 'Query failed.');
       queryRows = [];
       queryColumns = [];
-      queryWasCapped = false;
       queryScannedRows = null;
       updateQueryButtons();
-      renderTable([], 'Query failed.');
+      renderTable([], wasCanceled ? 'Query canceled.' : 'Query failed.');
+      addQueryHistory({
+        ok: false,
+        sql: sql,
+        durationMs: durationMs,
+        rowCount: 0,
+        scannedRows: null,
+        error: errorMessage
+      });
     })
     .finally(function() {
-      byId('runBtn').disabled = false;
+      stopQueryTimer();
+      queryAbortController = null;
+      setQueryRunning(false);
     });
 }
 
@@ -1577,9 +3228,110 @@ byId('sql').addEventListener('keydown', function(event) {
 
 byId('sql').addEventListener('input', function() {
   querySqlTouched = true;
+  saveQuerySql(byId('sql').value);
 });
 
+byId('builderFields').addEventListener('click', function(event) {
+  var button = event.target.closest('[data-builder-field]');
+  if (!button) return;
+  button.classList.toggle('active');
+  button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
+  markQueryBuilderTouched();
+});
+
+document.querySelector('.builder-mode').addEventListener('click', function(event) {
+  var button = event.target.closest('[data-builder-range-mode]');
+  if (!button) return;
+  setBuilderRangeMode(button.getAttribute('data-builder-range-mode'));
+  markQueryBuilderTouched();
+});
+
+['builderFromBlock', 'builderToBlock', 'builderCustomTokenAddress', 'builderCustomTokenDecimals', 'builderEvent', 'builderAmountMin', 'builderAmountMax', 'builderFromAddress', 'builderToAddress'].forEach(function(id) {
+  byId(id).addEventListener('input', markQueryBuilderTouched);
+  byId(id).addEventListener('change', markQueryBuilderTouched);
+});
+
+['builderFromBlock', 'builderToBlock'].forEach(function(id) {
+  byId(id).addEventListener('click', function(event) {
+    maybeOpenDateTimePicker(event.currentTarget, event);
+  });
+  byId(id).addEventListener('mousemove', function(event) {
+    updateDateTimePickerCursor(event.currentTarget, event);
+  });
+  byId(id).addEventListener('mouseleave', function(event) {
+    event.currentTarget.style.cursor = '';
+  });
+});
+
+byId('builderToken').addEventListener('change', function() {
+  updateBuilderTokenControls();
+  markQueryBuilderTouched();
+});
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-add-builder-address]'), function(button) {
+  button.addEventListener('click', function() {
+    addBuilderAddress(button.getAttribute('data-add-builder-address'));
+  });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-reset-builder-addresses]'), function(button) {
+  button.addEventListener('click', function() {
+    resetBuilderAddresses(button.getAttribute('data-reset-builder-addresses'));
+  });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-builder-address-input]'), function(input) {
+  input.addEventListener('keydown', function(event) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    addBuilderAddress(input.getAttribute('data-builder-address-input'));
+  });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-builder-address-list]'), function(list) {
+  list.addEventListener('click', function(event) {
+    var button = event.target.closest('[data-remove-builder-address]');
+    if (!button) return;
+    var chip = button.closest('[data-builder-address-kind]');
+    if (!chip) return;
+    removeBuilderAddress(
+      chip.getAttribute('data-builder-address-kind'),
+      Number(chip.getAttribute('data-builder-address-index'))
+    );
+  });
+});
+
+byId('queryHistoryTable').addEventListener('click', function(event) {
+  var actionButton = event.target.closest('[data-history-action]');
+  if (actionButton) {
+    event.stopPropagation();
+    var action = actionButton.getAttribute('data-history-action');
+    var id = actionButton.getAttribute('data-history-id');
+    if (action === 'use') useQueryHistoryEntry(id);
+    if (action === 'export') exportQueryHistoryEntry(id);
+    return;
+  }
+
+  var row = event.target.closest('[data-history-id]');
+  if (row) toggleQueryHistoryDetail(row.getAttribute('data-history-id'));
+});
+
+byId('resultsTable').addEventListener('click', function(event) {
+  copyResultCell(event.target.closest('td[data-copy-value]'));
+});
+
+byId('resultsTable').addEventListener('keydown', function(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  var cell = event.target.closest('td[data-copy-value]');
+  if (!cell) return;
+  event.preventDefault();
+  copyResultCell(cell);
+});
+
+renderQueryBuilder();
 initFoldouts();
+initQuerySql();
+renderQueryHistory();
 fetchStatus();
 renderChart();
 setInterval(fetchStatus, 2000);

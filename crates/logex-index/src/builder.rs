@@ -5,6 +5,14 @@ use logex_storage::SegmentReader;
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
+use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBuildProfile {
+    All,
+    LogQuery,
+    Erc20Transfer,
+}
 
 /// Builds per-partition indexes from column data.
 pub struct IndexBuilder;
@@ -12,8 +20,143 @@ pub struct IndexBuilder;
 impl IndexBuilder {
     /// Build all indexes (primary + composite) for a partition.
     pub fn build_all_indexes(partition_dir: &Path) -> std::io::Result<()> {
-        Self::build_primary_indexes(partition_dir)?;
-        CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
+        Self::build_indexes(partition_dir, IndexBuildProfile::All)
+    }
+
+    /// Build indexes for a partition using the requested index profile.
+    pub fn build_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> std::io::Result<()> {
+        match profile {
+            IndexBuildProfile::All => {
+                Self::build_primary_indexes(partition_dir)?;
+                CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
+                let index_dir = partition_dir.join("indexes");
+                Erc20EventBloom::build(partition_dir, &index_dir)?;
+            }
+            IndexBuildProfile::LogQuery => {
+                Self::build_log_query_primary_indexes(partition_dir)?;
+                let index_dir = partition_dir.join("indexes");
+                CompositeIndexBuilder::build_log_query_indexes(partition_dir, &index_dir)?;
+            }
+            IndexBuildProfile::Erc20Transfer => {
+                let index_dir = partition_dir.join("indexes");
+                fs::create_dir_all(&index_dir)?;
+                Erc20EventBloom::build(partition_dir, &index_dir)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Build only the missing index files for the requested profile.
+    pub fn build_missing_indexes(
+        partition_dir: &Path,
+        profile: IndexBuildProfile,
+    ) -> std::io::Result<()> {
+        let index_dir = partition_dir.join("indexes");
+        fs::create_dir_all(&index_dir)?;
+
+        match profile {
+            IndexBuildProfile::All => {
+                Self::build_missing_primary_indexes(partition_dir, &index_dir, true)?;
+                Self::build_missing_log_query_composites(partition_dir, &index_dir)?;
+            }
+            IndexBuildProfile::LogQuery => {
+                Self::build_missing_primary_indexes(partition_dir, &index_dir, false)?;
+                Self::build_missing_log_query_composites(partition_dir, &index_dir)?;
+            }
+            IndexBuildProfile::Erc20Transfer => {
+                Self::build_missing_erc20_transfer_indexes(partition_dir, &index_dir)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn required_index_files(profile: IndexBuildProfile) -> &'static [&'static str] {
+        match profile {
+            IndexBuildProfile::All => &[
+                "address.bptree",
+                "topic0.bptree",
+                "block_number.bptree",
+                "timestamp.bptree",
+                "block_hash.bptree",
+                "address_topic0.bptree",
+                "address_topic0_block.bptree",
+                "topic0_topic1.bptree",
+                "address_topic0_topic1.bptree",
+                "address_topic0_topic2.bptree",
+                ERC20_EVENTS_BLOOM_FILE,
+            ],
+            IndexBuildProfile::LogQuery => &[
+                "block_number.bptree",
+                "timestamp.bptree",
+                "address_topic0.bptree",
+                "address_topic0_block.bptree",
+                "topic0_topic1.bptree",
+                "address_topic0_topic1.bptree",
+                "address_topic0_topic2.bptree",
+                ERC20_EVENTS_BLOOM_FILE,
+            ],
+            IndexBuildProfile::Erc20Transfer => &[ERC20_EVENTS_BLOOM_FILE],
+        }
+    }
+
+    /// Build the primary indexes needed by common log-query access paths.
+    pub fn build_log_query_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
+        let index_dir = partition_dir.join("indexes");
+        fs::create_dir_all(&index_dir)?;
+
+        Self::build_block_number_index(partition_dir, &index_dir)?;
+        Self::build_timestamp_index(partition_dir, &index_dir)?;
+
+        Ok(())
+    }
+
+    fn build_missing_primary_indexes(
+        partition_dir: &Path,
+        index_dir: &Path,
+        include_full_primary: bool,
+    ) -> std::io::Result<()> {
+        if include_full_primary && !index_dir.join("address.bptree").is_file() {
+            Self::build_address_index(partition_dir, index_dir)?;
+        }
+        if include_full_primary && !index_dir.join("topic0.bptree").is_file() {
+            Self::build_topic0_index(partition_dir, index_dir)?;
+        }
+        if !index_dir.join("block_number.bptree").is_file() {
+            Self::build_block_number_index(partition_dir, index_dir)?;
+        }
+        if !index_dir.join("timestamp.bptree").is_file() {
+            Self::build_timestamp_index(partition_dir, index_dir)?;
+        }
+        if include_full_primary && !index_dir.join("block_hash.bptree").is_file() {
+            Self::build_block_hash_index(partition_dir, index_dir)?;
+        }
+        Ok(())
+    }
+
+    fn build_missing_log_query_composites(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        if !index_dir.join("address_topic0.bptree").is_file() {
+            CompositeIndexBuilder::build_address_topic0(partition_dir, index_dir)?;
+        }
+        if !index_dir.join("address_topic0_block.bptree").is_file() {
+            CompositeIndexBuilder::build_address_topic0_block(partition_dir, index_dir)?;
+        }
+        if !index_dir.join("topic0_topic1.bptree").is_file() {
+            CompositeIndexBuilder::build_topic0_topic1(partition_dir, index_dir)?;
+        }
+        Self::build_missing_erc20_transfer_indexes(partition_dir, index_dir)
+    }
+
+    fn build_missing_erc20_transfer_indexes(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        if !index_dir.join(ERC20_EVENTS_BLOOM_FILE).is_file() {
+            Erc20EventBloom::build(partition_dir, index_dir)?;
+        }
         Ok(())
     }
 
@@ -25,6 +168,7 @@ impl IndexBuilder {
         Self::build_address_index(partition_dir, &index_dir)?;
         Self::build_topic0_index(partition_dir, &index_dir)?;
         Self::build_block_number_index(partition_dir, &index_dir)?;
+        Self::build_timestamp_index(partition_dir, &index_dir)?;
         Self::build_block_hash_index(partition_dir, &index_dir)?;
 
         Ok(())
@@ -76,6 +220,22 @@ impl IndexBuilder {
 
         index.write_to_file(&index_dir.join("block_number.bptree"))?;
         tracing::debug!(keys = index.key_count(), "built block_number index");
+        Ok(())
+    }
+
+    /// Build timestamp index: u64 as big-endian 8 bytes -> RoaringBitmap of row IDs.
+    /// Uses big-endian so lexicographic ordering matches numeric ordering (for range scans).
+    fn build_timestamp_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
+        let reader = SegmentReader::open(partition_dir)?;
+        let timestamps = reader.read_u64("timestamp", None)?;
+        let mut index = BTreeIndex::new(8);
+
+        for (row_id, &timestamp) in timestamps.iter().enumerate() {
+            index.insert(&timestamp.to_be_bytes(), row_id as u32);
+        }
+
+        index.write_to_file(&index_dir.join("timestamp.bptree"))?;
+        tracing::debug!(keys = index.key_count(), "built timestamp index");
         Ok(())
     }
 
@@ -200,6 +360,19 @@ mod tests {
         let b200 = block_idx.get(&200u64.to_be_bytes()).unwrap();
         assert!(b200.contains(2));
         assert_eq!(b200.len(), 1);
+
+        // Verify timestamp index
+        let timestamp_idx = BTreeIndexReader::open(&dir.join("indexes/timestamp.bptree")).unwrap();
+        assert_eq!(timestamp_idx.key_count(), 2);
+
+        let t0 = timestamp_idx.get(&1_700_000_000u64.to_be_bytes()).unwrap();
+        assert!(t0.contains(0));
+        assert!(t0.contains(1));
+        assert_eq!(t0.len(), 2);
+
+        let t1 = timestamp_idx.get(&1_700_001_200u64.to_be_bytes()).unwrap();
+        assert!(t1.contains(2));
+        assert_eq!(t1.len(), 1);
 
         // Verify block_hash index
         let hash_idx = BTreeIndexReader::open(&dir.join("indexes/block_hash.bptree")).unwrap();
