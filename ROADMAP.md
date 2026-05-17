@@ -8,9 +8,10 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 ## Completed Since Last Run
 
-- Changed the live transfer Connect button to show `Connecting...` while opening and `Connected` after the subscription acknowledgement.
-- Made live transfer token, sender, recipient, and transaction cells copy their raw values with the same copy affordance as query results.
-- Added an Etherscan open button next to each live transfer transaction hash.
+- Added server-backed live ERC20 transfer sessions so dashboard subscriptions can resume after refresh with retained notifications.
+- Added dashboard heartbeat and inactivity handling so browser-created live subscriptions expire after one minute without a visible tab.
+- Added protected HTTP endpoints for non-dashboard ERC20 transfer service subscriptions that persist until explicit deletion or process restart.
+- Documented the live transfer service subscription API in the README.
 
 ## Remaining TODOs
 
@@ -35,6 +36,8 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - WebSocket transfer hooks are live-only. Historical data remains available through SQL and JSON-RPC, but backfill does not replay as alert traffic.
 - Dashboard amount bounds are entered in token units and converted to raw uint256 values before subscription. If amount bounds are used with token filters, all selected tokens must share the same decimals to avoid ambiguous comparisons.
 - ERC20 transfer hooks require at least one filter dimension: wallet addresses, token addresses, or both. Token-only subscriptions intentionally mean every transfer for the selected token contracts.
+- Dashboard-created ERC20 transfer sessions are in-memory, browser-id scoped, and expire after one minute without a visible-tab heartbeat; service-created sessions are in-memory and persist until delete or process restart.
+- Retained live-transfer notifications are bounded in memory to avoid OOM risk from broad token subscriptions.
 
 ## Challenges and Resolutions
 
@@ -83,6 +86,9 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Challenge: The transaction cell needed both row-cell copy behavior and a nested external-link action.
   - Resolution: Kept the cell copyable, added a scoped Etherscan link styled as a compact button, and handled link clicks before the table-level copy handler.
 
+- Challenge: Refresh-resumable live transfer notifications require state outside the browser, but unbounded in-memory retention can exhaust smaller machines.
+  - Resolution: Moved live transfer notification retention into server-backed sessions with a bounded history, dashboard heartbeat expiry, and explicit service-subscription endpoints.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -94,6 +100,8 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
 - Rechecked the live transfer WebSocket and dashboard paths for obsolete empty-filter assumptions.
 - Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
+- Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
+- Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
 
 ## Git Workflow
 

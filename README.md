@@ -118,6 +118,7 @@ The query engine exposes:
 - LogSQL over HTTP: `POST /query`
 - Ethereum-compatible JSON-RPC log queries: `POST /` with `eth_getLogs`
 - WebSocket live log subscriptions: `GET /ws`
+- Persistent live ERC20 subscription management: `/live/erc20-transfers/subscriptions`
 - gRPC: `LogExService.Query`, `GetLogs`, `StreamLogs`, `GetHeadBlock`
 - Dashboard and metrics: `GET /status`
 - Health check: `GET /health`
@@ -392,6 +393,8 @@ WebSocket ERC20 transfer hook:
 ```json
 {
   "type": "erc20Transfers",
+  "subscriptionScope": "dashboard",
+  "subscriptionId": "browser-session-id",
   "addresses": ["0xE6c031F4C63e76e453d9A0aAe566D06236d11F95"],
   "tokenAddresses": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
   "minAmount": "0x0000000000000000000000000000000000000000000000000000000005f5e100",
@@ -409,6 +412,29 @@ token, sender, recipient, raw amount, timestamp, block, transaction, and log
 index fields. WebSocket subscriptions are for live ingested blocks; historical
 backfill remains queryable through SQL and JSON-RPC rather than replayed as
 alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } }`.
+
+Dashboard live-transfer sessions send `subscriptionScope: "dashboard"` and a
+browser-generated `subscriptionId`. They retain recent notifications in server
+memory across page refreshes and expire after about one minute without a visible
+browser heartbeat. Non-dashboard services can create process-lifetime
+subscriptions over HTTP:
+
+```bash
+curl -u logex:YOUR_PASSWORD \
+  -H 'content-type: application/json' \
+  http://127.0.0.1:8577/live/erc20-transfers/subscriptions \
+  -d '{
+    "subscriptionId": "service-usdc-watch",
+    "addresses": ["0xE6c031F4C63e76e453d9A0aAe566D06236d11F95"],
+    "tokenAddresses": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"]
+  }'
+```
+
+Use `GET /live/erc20-transfers/subscriptions/{id}` to read retained
+notifications, `POST /live/erc20-transfers/subscriptions/{id}/clear` to clear
+them, and `DELETE /live/erc20-transfers/subscriptions/{id}` to remove the
+subscription. Retained live-transfer notifications are bounded in memory and are
+cleared when the LogEx process restarts.
 
 Useful SQL columns:
 

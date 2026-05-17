@@ -1426,7 +1426,9 @@ var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
 var QUERY_BUILDER_STORAGE_KEY = 'logex.queryBuilder.v1';
 var LIVE_TRANSFER_STORAGE_KEY = 'logex.liveErc20Transfers.v1';
 var QUERY_HISTORY_LIMIT = 50;
-var LIVE_TRANSFER_LIMIT = 100;
+var LIVE_TRANSFER_LIMIT = 10000;
+var LIVE_TRANSFER_INACTIVE_MS = 60000;
+var LIVE_TRANSFER_HEARTBEAT_MS = 20000;
 var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
 var DEFAULT_TOKEN_DECIMALS = 18;
@@ -1533,6 +1535,10 @@ var liveTransferTokens = [];
 var liveTransferRows = [];
 var liveTransferSocket = null;
 var liveTransferManualDisconnect = false;
+var liveTransferActive = false;
+var liveTransferClientId = null;
+var liveTransferHeartbeatTimer = null;
+var liveTransferInactiveTimer = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -2427,9 +2433,27 @@ function loadLiveTransferState() {
   }
 }
 
+function liveTransferSessionId() {
+  if (liveTransferClientId) return liveTransferClientId;
+  var state = loadLiveTransferState();
+  if (state && typeof state.clientId === 'string' && state.clientId.trim() !== '') {
+    liveTransferClientId = state.clientId;
+    return liveTransferClientId;
+  }
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    liveTransferClientId = window.crypto.randomUUID();
+  } else {
+    liveTransferClientId = 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+  return liveTransferClientId;
+}
+
 function saveLiveTransferState() {
   try {
     localStorage.setItem(LIVE_TRANSFER_STORAGE_KEY, JSON.stringify({
+      clientId: liveTransferSessionId(),
+      active: liveTransferActive,
+      lastSeenAt: Date.now(),
       wallets: liveWalletAddresses,
       tokens: liveTransferTokens,
       pendingWallet: byId('liveWalletAddress').value,
@@ -2488,11 +2512,16 @@ function renderLiveTransferControls() {
   renderLiveWallets();
   renderLiveTokens();
   renderLiveTransfers();
+  maybeResumeLiveTransfers();
 }
 
 function applySavedLiveTransferState() {
   var state = loadLiveTransferState();
   if (!state || typeof state !== 'object') return;
+  if (typeof state.clientId === 'string' && state.clientId.trim() !== '') {
+    liveTransferClientId = state.clientId;
+  }
+  liveTransferActive = !!state.active;
   liveWalletAddresses = sanitizeBuilderAddresses(state.wallets);
   liveTransferTokens = Array.isArray(state.tokens) ? state.tokens.map(function(token) {
     try {
@@ -2516,6 +2545,19 @@ function applySavedLiveTransferState() {
     byId('liveTokenAddress').value = state.tokenAddress || '';
     byId('liveTokenDecimals').value = state.tokenDecimals || String(DEFAULT_TOKEN_DECIMALS);
   }
+}
+
+function maybeResumeLiveTransfers() {
+  var state = loadLiveTransferState();
+  if (!state || !state.active) return;
+  var lastSeenAt = Number(state.lastSeenAt || 0);
+  if (lastSeenAt > 0 && Date.now() - lastSeenAt > LIVE_TRANSFER_INACTIVE_MS) {
+    liveTransferActive = false;
+    saveLiveTransferState();
+    setLiveTransferStatus('Previous live subscription expired after browser inactivity.');
+    return;
+  }
+  connectLiveTransfers({ resuming: true });
 }
 
 function selectedLiveToken(strict) {
@@ -2683,6 +2725,8 @@ function buildLiveTransferPayload() {
   }
   var payload = {
     type: 'erc20Transfers',
+    subscriptionId: liveTransferSessionId(),
+    subscriptionScope: 'dashboard',
     addresses: liveWalletAddresses,
     tokenAddresses: liveTransferTokens.map(function(token) { return token.address; })
   };
@@ -2711,7 +2755,42 @@ function setLiveTransferConnected(connected, label) {
   byId('liveDisconnectBtn').disabled = !connected;
 }
 
-function connectLiveTransfers() {
+function startLiveTransferHeartbeat() {
+  stopLiveTransferHeartbeat();
+  liveTransferHeartbeatTimer = setInterval(function() {
+    if (!liveTransferSocket || liveTransferSocket.readyState !== WebSocket.OPEN || document.hidden) return;
+    liveTransferSocket.send(JSON.stringify({
+      type: 'heartbeat',
+      subscriptionId: liveTransferSessionId()
+    }));
+    saveLiveTransferState();
+  }, LIVE_TRANSFER_HEARTBEAT_MS);
+}
+
+function stopLiveTransferHeartbeat() {
+  if (liveTransferHeartbeatTimer != null) {
+    clearInterval(liveTransferHeartbeatTimer);
+    liveTransferHeartbeatTimer = null;
+  }
+}
+
+function clearLiveTransferInactiveTimer() {
+  if (liveTransferInactiveTimer != null) {
+    clearTimeout(liveTransferInactiveTimer);
+    liveTransferInactiveTimer = null;
+  }
+}
+
+function liveTransferSessionUrl(suffix) {
+  return '/live/erc20-transfers/subscriptions/' + encodeURIComponent(liveTransferSessionId()) + (suffix || '');
+}
+
+function setLiveTransferActive(active) {
+  liveTransferActive = !!active;
+  saveLiveTransferState();
+}
+
+function connectLiveTransfers(options) {
   var payload;
   try {
     payload = buildLiveTransferPayload();
@@ -2726,13 +2805,15 @@ function connectLiveTransfers() {
   }
 
   liveTransferManualDisconnect = false;
+  clearLiveTransferInactiveTimer();
   var socket = new WebSocket(websocketUrl());
   liveTransferSocket = socket;
   setLiveTransferConnected(true, 'Connecting...');
-  setLiveTransferStatus('Connecting...');
+  setLiveTransferStatus(options && options.resuming ? 'Reconnecting...' : 'Connecting...');
 
   socket.onopen = function() {
     socket.send(JSON.stringify(payload));
+    startLiveTransferHeartbeat();
     saveLiveTransferState();
   };
   socket.onmessage = function(event) {
@@ -2746,6 +2827,7 @@ function connectLiveTransfers() {
   socket.onclose = function() {
     if (liveTransferSocket !== socket) return;
     liveTransferSocket = null;
+    stopLiveTransferHeartbeat();
     setLiveTransferConnected(false);
     setLiveTransferStatus(liveTransferManualDisconnect ? 'Disconnected.' : 'Disconnected from live transfers.', !liveTransferManualDisconnect);
     liveTransferManualDisconnect = false;
@@ -2753,8 +2835,14 @@ function connectLiveTransfers() {
 }
 
 function disconnectLiveTransfers() {
-  if (!liveTransferSocket) return;
+  if (!liveTransferSocket) {
+    setLiveTransferActive(false);
+    return;
+  }
   liveTransferManualDisconnect = true;
+  setLiveTransferActive(false);
+  stopLiveTransferHeartbeat();
+  clearLiveTransferInactiveTimer();
   liveTransferSocket.close();
 }
 
@@ -2770,6 +2858,14 @@ function handleLiveTransferMessage(raw) {
     return;
   }
   if (data && data.status === 'subscribed') {
+    if (data.subscriptionId) {
+      liveTransferClientId = String(data.subscriptionId);
+    }
+    if (Array.isArray(data.notifications)) {
+      liveTransferRows = data.notifications.slice(0, LIVE_TRANSFER_LIMIT);
+      renderLiveTransfers();
+    }
+    setLiveTransferActive(true);
     setLiveTransferConnected(true, 'Connected');
     setLiveTransferStatus('Subscribed.');
     return;
@@ -2844,6 +2940,12 @@ function clearLiveTransfers() {
   liveTransferRows = [];
   renderLiveTransfers();
   setLiveTransferStatus('Notifications cleared.');
+  if (liveTransferClientId) {
+    fetch(liveTransferSessionUrl('/clear'), {
+      method: 'POST',
+      credentials: 'same-origin'
+    }).catch(function() {});
+  }
 }
 
 function markQueryBuilderTouched() {
@@ -3933,6 +4035,32 @@ byId('liveTransferTable').addEventListener('keydown', function(event) {
   if (!cell) return;
   event.preventDefault();
   copyResultCell(cell);
+});
+
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) {
+    if (liveTransferSocket) {
+      clearLiveTransferInactiveTimer();
+      liveTransferInactiveTimer = setTimeout(function() {
+        setLiveTransferStatus('Disconnected after browser inactivity.');
+        disconnectLiveTransfers();
+      }, LIVE_TRANSFER_INACTIVE_MS);
+    }
+    saveLiveTransferState();
+    return;
+  }
+  clearLiveTransferInactiveTimer();
+  if (liveTransferSocket && liveTransferSocket.readyState === WebSocket.OPEN) {
+    liveTransferSocket.send(JSON.stringify({
+      type: 'heartbeat',
+      subscriptionId: liveTransferSessionId()
+    }));
+  }
+  saveLiveTransferState();
+});
+
+window.addEventListener('beforeunload', function() {
+  saveLiveTransferState();
 });
 
 byId('liveWalletList').addEventListener('click', function(event) {

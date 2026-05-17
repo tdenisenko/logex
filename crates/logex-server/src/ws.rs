@@ -1,10 +1,14 @@
-use std::collections::HashSet;
-use std::sync::{Arc, LazyLock};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256, keccak256};
-use axum::extract::State;
+use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -15,33 +19,179 @@ use crate::handler::AppState;
 
 /// Capacity of the broadcast channel for new logs.
 const BROADCAST_CAPACITY: usize = 4096;
+const LIVE_TRANSFER_CHANNEL_CAPACITY: usize = 1024;
+const LIVE_TRANSFER_HISTORY_LIMIT: usize = 10_000;
+const DASHBOARD_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+const DASHBOARD_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 static ERC20_TRANSFER_TOPIC: LazyLock<B256> =
     LazyLock::new(|| keccak256(b"Transfer(address,address,uint256)"));
 
 /// Manages WebSocket subscriptions for live log streaming.
 #[derive(Clone)]
 pub struct SubscriptionManager {
+    inner: Arc<SubscriptionManagerInner>,
+}
+
+struct SubscriptionManagerInner {
     sender: broadcast::Sender<Arc<Vec<LogRow>>>,
+    live_transfers: Mutex<LiveTransferSessions>,
+    next_session_id: AtomicU64,
+}
+
+#[derive(Default)]
+struct LiveTransferSessions {
+    sessions: HashMap<String, LiveTransferSession>,
+}
+
+struct LiveTransferSession {
+    subscription: Erc20TransferSubscription,
+    scope: LiveSubscriptionScope,
+    notifications: VecDeque<Erc20TransferNotification>,
+    sender: broadcast::Sender<Arc<Vec<Erc20TransferNotification>>>,
+    active_connections: usize,
+    expires_at: Option<Instant>,
+    dropped_notifications: u64,
 }
 
 impl SubscriptionManager {
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self { sender }
+        Self {
+            inner: Arc::new(SubscriptionManagerInner {
+                sender,
+                live_transfers: Mutex::new(LiveTransferSessions::default()),
+                next_session_id: AtomicU64::new(1),
+            }),
+        }
     }
 
     /// Notify all subscribers of new logs. Called by the ingestion pipeline.
     pub fn notify(&self, rows: &[LogRow]) {
-        if rows.is_empty() || self.sender.receiver_count() == 0 {
+        if rows.is_empty() {
             return;
         }
-        // Ignore send errors — they just mean no active receivers
-        let _ = self.sender.send(Arc::new(rows.to_vec()));
+        // Ignore send errors — they just mean no active raw-log receivers.
+        if self.inner.sender.receiver_count() > 0 {
+            let _ = self.inner.sender.send(Arc::new(rows.to_vec()));
+        }
+        self.notify_live_transfer_sessions(rows);
     }
 
     /// Create a new receiver for the broadcast channel.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<LogRow>>> {
-        self.sender.subscribe()
+        self.inner.sender.subscribe()
+    }
+
+    fn notify_live_transfer_sessions(&self, rows: &[LogRow]) {
+        let now = Instant::now();
+        let mut sessions = self.live_transfers();
+        sessions.sweep_expired(now);
+
+        for session in sessions.sessions.values_mut() {
+            let matching: Vec<Erc20TransferNotification> = rows
+                .iter()
+                .filter_map(|row| session.subscription.notification_for(row))
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            session.push_notifications(&matching);
+            let _ = session.sender.send(Arc::new(matching));
+        }
+    }
+
+    fn live_transfers(&self) -> std::sync::MutexGuard<'_, LiveTransferSessions> {
+        self.inner
+            .live_transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn next_subscription_id(&self) -> String {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let sequence = self.inner.next_session_id.fetch_add(1, Ordering::Relaxed);
+        format!("live-{millis:x}-{sequence:x}")
+    }
+
+    fn upsert_live_transfer_session(
+        &self,
+        requested_id: Option<String>,
+        scope: LiveSubscriptionScope,
+        subscription: Erc20TransferSubscription,
+        attach: bool,
+    ) -> LiveTransferSessionAttachment {
+        let id = requested_id
+            .and_then(normalize_subscription_id)
+            .unwrap_or_else(|| self.next_subscription_id());
+        let mut sessions = self.live_transfers();
+        sessions.sweep_expired(Instant::now());
+        let session = sessions
+            .sessions
+            .entry(id.clone())
+            .or_insert_with(|| LiveTransferSession::new(subscription.clone(), scope));
+        session.subscription = subscription;
+        session.scope = scope;
+        if attach {
+            session.active_connections = session.active_connections.saturating_add(1);
+            session.expires_at = None;
+        } else if scope == LiveSubscriptionScope::Dashboard && session.active_connections == 0 {
+            session.expires_at = Some(Instant::now() + DASHBOARD_SESSION_TIMEOUT);
+        } else {
+            session.expires_at = None;
+        }
+        let snapshot = session.snapshot(&id);
+        let receiver = session.sender.subscribe();
+        LiveTransferSessionAttachment {
+            id,
+            snapshot,
+            receiver,
+        }
+    }
+
+    fn live_transfer_session(&self, id: &str) -> Option<LiveTransferSessionSnapshot> {
+        let mut sessions = self.live_transfers();
+        sessions.sweep_expired(Instant::now());
+        let id = normalize_subscription_id(id.to_string())?;
+        sessions
+            .sessions
+            .get(&id)
+            .map(|session| session.snapshot(&id))
+    }
+
+    fn clear_live_transfer_session(&self, id: &str) -> Option<LiveTransferSessionSnapshot> {
+        let mut sessions = self.live_transfers();
+        sessions.sweep_expired(Instant::now());
+        let id = normalize_subscription_id(id.to_string())?;
+        let session = sessions.sessions.get_mut(&id)?;
+        session.notifications.clear();
+        session.dropped_notifications = 0;
+        Some(session.snapshot(&id))
+    }
+
+    fn remove_live_transfer_session(&self, id: &str) -> bool {
+        let mut sessions = self.live_transfers();
+        let Some(id) = normalize_subscription_id(id.to_string()) else {
+            return false;
+        };
+        sessions.sessions.remove(&id).is_some()
+    }
+
+    fn detach_live_transfer_session(&self, id: &str) {
+        let Some(id) = normalize_subscription_id(id.to_string()) else {
+            return;
+        };
+        let mut sessions = self.live_transfers();
+        if let Some(session) = sessions.sessions.get_mut(&id) {
+            session.active_connections = session.active_connections.saturating_sub(1);
+            let should_expire = session.scope == LiveSubscriptionScope::Dashboard
+                && session.active_connections == 0;
+            if should_expire {
+                session.expires_at = Some(Instant::now() + DASHBOARD_SESSION_TIMEOUT);
+            }
+        }
     }
 }
 
@@ -54,7 +204,7 @@ impl Default for SubscriptionManager {
 /// Subscription request sent by the client over WebSocket.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SubscribeRequest {
+pub(crate) struct SubscribeRequest {
     /// Subscription mode. Defaults to the existing raw log stream.
     #[serde(default, rename = "type")]
     subscription_type: SubscriptionKind,
@@ -73,6 +223,15 @@ struct SubscribeRequest {
     /// Optional raw uint256 upper bound for ERC20 transfer amount data.
     #[serde(default, alias = "maxAmountRaw", deserialize_with = "amount_bound")]
     max_amount: Option<[u8; 32]>,
+    /// Optional id used to resume server-backed ERC20 transfer sessions.
+    #[serde(default, alias = "clientId")]
+    subscription_id: Option<String>,
+    /// Session lifetime. Dashboard sessions expire after browser inactivity; service sessions do not.
+    #[serde(default, alias = "subscriptionScope")]
+    scope: LiveSubscriptionScope,
+    /// Backward-compatible way for non-UI clients to request a service session.
+    #[serde(default)]
+    persistent: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -83,13 +242,22 @@ enum SubscriptionKind {
     Erc20Transfers,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum LiveSubscriptionScope {
+    #[default]
+    Ephemeral,
+    Dashboard,
+    Service,
+}
+
 #[derive(Debug)]
 enum Subscription {
     Logs(EthFilter),
     Erc20Transfers(Erc20TransferSubscription),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Erc20TransferSubscription {
     wallet_topics: HashSet<B256>,
     token_addresses: HashSet<Address>,
@@ -97,7 +265,7 @@ struct Erc20TransferSubscription {
     max_amount: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Erc20TransferNotification {
     #[serde(rename = "type")]
@@ -115,17 +283,106 @@ struct Erc20TransferNotification {
     removed: bool,
 }
 
+struct LiveTransferSessionAttachment {
+    id: String,
+    snapshot: LiveTransferSessionSnapshot,
+    receiver: broadcast::Receiver<Arc<Vec<Erc20TransferNotification>>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveTransferSessionSnapshot {
+    status: &'static str,
+    #[serde(rename = "type")]
+    subscription_type: &'static str,
+    subscription_id: String,
+    scope: LiveSubscriptionScope,
+    active_connections: usize,
+    notifications: Vec<Erc20TransferNotification>,
+    dropped_notifications: u64,
+    history_limit: usize,
+    expires_in_seconds: Option<u64>,
+}
+
 impl SubscribeRequest {
     fn into_subscription(self) -> Result<Subscription, String> {
         match self.subscription_type {
             SubscriptionKind::Logs => Ok(Subscription::Logs(self.filter)),
-            SubscriptionKind::Erc20Transfers => Erc20TransferSubscription::new(
-                self.addresses,
-                self.token_addresses,
-                self.min_amount,
-                self.max_amount,
-            )
-            .map(Subscription::Erc20Transfers),
+            SubscriptionKind::Erc20Transfers => self
+                .into_erc20_transfer_subscription()
+                .map(Subscription::Erc20Transfers),
+        }
+    }
+
+    fn into_erc20_transfer_subscription(self) -> Result<Erc20TransferSubscription, String> {
+        Erc20TransferSubscription::new(
+            self.addresses,
+            self.token_addresses,
+            self.min_amount,
+            self.max_amount,
+        )
+    }
+
+    fn live_session_scope(&self) -> LiveSubscriptionScope {
+        if self.persistent && self.scope == LiveSubscriptionScope::Ephemeral {
+            LiveSubscriptionScope::Service
+        } else {
+            self.scope
+        }
+    }
+}
+
+impl LiveTransferSessions {
+    fn sweep_expired(&mut self, now: Instant) {
+        self.sessions.retain(
+            |_, session| !matches!(session.expires_at, Some(expires_at) if expires_at <= now),
+        );
+    }
+}
+
+impl LiveTransferSession {
+    fn new(subscription: Erc20TransferSubscription, scope: LiveSubscriptionScope) -> Self {
+        let (sender, _) = broadcast::channel(LIVE_TRANSFER_CHANNEL_CAPACITY);
+        Self {
+            subscription,
+            scope,
+            notifications: VecDeque::new(),
+            sender,
+            active_connections: 0,
+            expires_at: if scope == LiveSubscriptionScope::Dashboard {
+                Some(Instant::now() + DASHBOARD_SESSION_TIMEOUT)
+            } else {
+                None
+            },
+            dropped_notifications: 0,
+        }
+    }
+
+    fn push_notifications(&mut self, notifications: &[Erc20TransferNotification]) {
+        for notification in notifications.iter().rev() {
+            self.notifications.push_front(notification.clone());
+            while self.notifications.len() > LIVE_TRANSFER_HISTORY_LIMIT {
+                self.notifications.pop_back();
+                self.dropped_notifications = self.dropped_notifications.saturating_add(1);
+            }
+        }
+    }
+
+    fn snapshot(&self, id: &str) -> LiveTransferSessionSnapshot {
+        LiveTransferSessionSnapshot {
+            status: "subscribed",
+            subscription_type: "erc20Transfers",
+            subscription_id: id.to_string(),
+            scope: self.scope,
+            active_connections: self.active_connections,
+            notifications: self.notifications.iter().cloned().collect(),
+            dropped_notifications: self.dropped_notifications,
+            history_limit: LIVE_TRANSFER_HISTORY_LIMIT,
+            expires_in_seconds: self.expires_at.map(|expires_at| {
+                expires_at
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+            }),
         }
     }
 }
@@ -205,14 +462,100 @@ pub async fn handle_ws_upgrade(
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
-async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
-    // Wait for the client's subscription message
-    let subscription = match receive_subscription(&mut socket).await {
-        Some(subscription) => subscription,
-        None => return,
+/// Create or update a service-scoped ERC20 transfer subscription.
+///
+/// This endpoint is intended for non-dashboard clients that need a subscription to keep collecting
+/// matching live transfers while the LogEx process is running, even if no WebSocket is currently
+/// attached. Dashboard-created sessions use `/ws` and expire after browser inactivity.
+pub(crate) async fn handle_live_transfer_subscribe(
+    State(state): State<Arc<AppState>>,
+    Json(mut request): Json<SubscribeRequest>,
+) -> Response {
+    request.subscription_type = SubscriptionKind::Erc20Transfers;
+    request.scope = LiveSubscriptionScope::Service;
+    let requested_id = request.subscription_id.clone();
+    let subscription = match request.into_erc20_transfer_subscription() {
+        Ok(subscription) => subscription,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error),
+    };
+    let Some(subs) = state.subscriptions.as_ref() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscriptions are disabled",
+        );
     };
 
-    tracing::debug!(kind = subscription.kind(), "new WebSocket subscription");
+    let attachment = subs.upsert_live_transfer_session(
+        requested_id,
+        LiveSubscriptionScope::Service,
+        subscription,
+        false,
+    );
+    Json(attachment.snapshot).into_response()
+}
+
+/// Return a server-backed ERC20 transfer subscription and retained notifications.
+pub(crate) async fn handle_live_transfer_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(subs) = state.subscriptions.as_ref() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscriptions are disabled",
+        );
+    };
+    match subs.live_transfer_session(&id) {
+        Some(snapshot) => Json(snapshot).into_response(),
+        None => json_error(StatusCode::NOT_FOUND, "subscription not found"),
+    }
+}
+
+/// Clear retained notifications for a server-backed ERC20 transfer subscription.
+pub(crate) async fn handle_live_transfer_clear(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(subs) = state.subscriptions.as_ref() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscriptions are disabled",
+        );
+    };
+    match subs.clear_live_transfer_session(&id) {
+        Some(snapshot) => Json(snapshot).into_response(),
+        None => json_error(StatusCode::NOT_FOUND, "subscription not found"),
+    }
+}
+
+/// Delete a server-backed ERC20 transfer subscription.
+pub(crate) async fn handle_live_transfer_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(subs) = state.subscriptions.as_ref() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscriptions are disabled",
+        );
+    };
+    if subs.remove_live_transfer_session(&id) {
+        Json(serde_json::json!({"status": "deleted", "subscriptionId": id})).into_response()
+    } else {
+        json_error(StatusCode::NOT_FOUND, "subscription not found")
+    }
+}
+
+fn json_error(status: StatusCode, error: impl Into<String>) -> Response {
+    (status, Json(serde_json::json!({ "error": error.into() }))).into_response()
+}
+
+async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    // Wait for the client's subscription message
+    let request = match receive_subscription(&mut socket).await {
+        Some(request) => request,
+        None => return,
+    };
 
     let subs = match &state.subscriptions {
         Some(s) => s,
@@ -221,6 +564,25 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
+
+    if request.subscription_type == SubscriptionKind::Erc20Transfers {
+        let scope = request.live_session_scope();
+        if scope != LiveSubscriptionScope::Ephemeral || request.subscription_id.is_some() {
+            handle_live_transfer_ws(socket, subs.clone(), request, scope).await;
+            return;
+        }
+    }
+
+    let subscription = match request.into_subscription() {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            let err = serde_json::json!({"error": error});
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
+            return;
+        }
+    };
+
+    tracing::debug!(kind = subscription.kind(), "new WebSocket subscription");
 
     let mut receiver = subs.subscribe();
 
@@ -273,6 +635,101 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::debug!("WebSocket subscription closed");
 }
 
+async fn handle_live_transfer_ws(
+    mut socket: WebSocket,
+    subs: SubscriptionManager,
+    request: SubscribeRequest,
+    scope: LiveSubscriptionScope,
+) {
+    let requested_id = request.subscription_id.clone();
+    let subscription = match request.into_erc20_transfer_subscription() {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            let err = serde_json::json!({"error": error});
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
+            return;
+        }
+    };
+    let mut attachment = subs.upsert_live_transfer_session(requested_id, scope, subscription, true);
+
+    tracing::debug!(
+        kind = "erc20Transfers",
+        subscription_id = %attachment.id,
+        ?scope,
+        "new server-backed WebSocket subscription"
+    );
+
+    if socket
+        .send(Message::Text(
+            serde_json::to_string(&attachment.snapshot)
+                .unwrap_or_else(|_| r#"{"status":"subscribed","type":"erc20Transfers"}"#.into())
+                .into(),
+        ))
+        .await
+        .is_err()
+    {
+        subs.detach_live_transfer_session(&attachment.id);
+        return;
+    }
+
+    let mut last_dashboard_heartbeat = Instant::now();
+    let mut heartbeat_check = tokio::time::interval(DASHBOARD_HEARTBEAT_CHECK_INTERVAL);
+    heartbeat_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = heartbeat_check.tick(), if scope == LiveSubscriptionScope::Dashboard => {
+                if last_dashboard_heartbeat.elapsed() > DASHBOARD_SESSION_TIMEOUT {
+                    tracing::debug!(
+                        subscription_id = %attachment.id,
+                        "closing inactive dashboard live transfer subscription"
+                    );
+                    break;
+                }
+            }
+            result = attachment.receiver.recv() => {
+                match result {
+                    Ok(notifications) => {
+                        if notifications.is_empty() {
+                            continue;
+                        }
+                        if let Ok(json) = serde_json::to_string(&*notifications)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, subscription_id = %attachment.id, "server-backed WebSocket subscriber lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Ping(data)))
+                        if socket.send(Message::Pong(data.clone())).await.is_err() =>
+                    {
+                        break;
+                    }
+                    Some(Ok(Message::Text(text))) if is_live_transfer_heartbeat(&text, &attachment.id) => {
+                        last_dashboard_heartbeat = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    subs.detach_live_transfer_session(&attachment.id);
+    tracing::debug!(
+        subscription_id = %attachment.id,
+        "server-backed WebSocket subscription closed"
+    );
+}
+
 impl Subscription {
     fn kind(&self) -> &'static str {
         match self {
@@ -309,21 +766,14 @@ impl Subscription {
 }
 
 /// Receive and parse the initial subscription request from the client.
-async fn receive_subscription(socket: &mut WebSocket) -> Option<Subscription> {
+async fn receive_subscription(socket: &mut WebSocket) -> Option<SubscribeRequest> {
     // Give the client 10 seconds to send their subscription
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv()).await;
 
     match timeout {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<SubscribeRequest>(&text) {
-                Ok(req) => match req.into_subscription() {
-                    Ok(subscription) => Some(subscription),
-                    Err(e) => {
-                        let err = serde_json::json!({"error": e});
-                        let _ = socket.send(Message::Text(err.to_string().into())).await;
-                        None
-                    }
-                },
+                Ok(req) => Some(req),
                 Err(e) => {
                     let err = serde_json::json!({"error": format!("invalid subscription: {e}")});
                     let _ = socket.send(Message::Text(err.to_string().into())).await;
@@ -333,6 +783,39 @@ async fn receive_subscription(socket: &mut WebSocket) -> Option<Subscription> {
         }
         _ => None,
     }
+}
+
+fn is_live_transfer_heartbeat(text: &str, expected_id: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let is_heartbeat = value
+        .get("type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value == "heartbeat");
+    if !is_heartbeat {
+        return false;
+    }
+    value
+        .get("subscriptionId")
+        .or_else(|| value.get("clientId"))
+        .and_then(|value| value.as_str())
+        .and_then(|value| normalize_subscription_id(value.to_string()))
+        .is_some_and(|id| id == expected_id)
+}
+
+fn normalize_subscription_id(id: String) -> Option<String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn address_vec<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
@@ -553,6 +1036,93 @@ mod tests {
         assert!(rx.try_recv().is_err()); // Nothing sent
     }
 
+    #[test]
+    fn test_dashboard_live_transfer_session_replays_and_expires() {
+        let mgr = SubscriptionManager::new();
+        let tracked = Address::repeat_byte(0xA1);
+        let token = Address::repeat_byte(0xBB);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        let mut attachment = mgr.upsert_live_transfer_session(
+            Some("dashboard-1".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            true,
+        );
+
+        mgr.notify(&[make_transfer_log(
+            token,
+            Address::repeat_byte(0xC1),
+            tracked,
+            100,
+            10,
+        )]);
+
+        let live_batch = attachment.receiver.try_recv().unwrap();
+        assert_eq!(live_batch.len(), 1);
+        let snapshot = mgr.live_transfer_session("dashboard-1").unwrap();
+        assert_eq!(snapshot.notifications.len(), 1);
+        assert_eq!(snapshot.active_connections, 1);
+
+        mgr.detach_live_transfer_session("dashboard-1");
+        {
+            let mut sessions = mgr.live_transfers();
+            sessions.sessions.get_mut("dashboard-1").unwrap().expires_at =
+                Some(Instant::now() - Duration::from_secs(1));
+        }
+        mgr.notify(&[make_log(0xAA, 11)]);
+        assert!(mgr.live_transfer_session("dashboard-1").is_none());
+    }
+
+    #[test]
+    fn test_service_live_transfer_session_persists_without_socket() {
+        let mgr = SubscriptionManager::new();
+        let tracked = Address::repeat_byte(0xA1);
+        let token = Address::repeat_byte(0xBB);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        let attachment = mgr.upsert_live_transfer_session(
+            Some("service-1".into()),
+            LiveSubscriptionScope::Service,
+            subscription,
+            false,
+        );
+
+        assert_eq!(attachment.snapshot.active_connections, 0);
+        mgr.notify(&[make_transfer_log(
+            token,
+            tracked,
+            Address::repeat_byte(0xC1),
+            100,
+            10,
+        )]);
+
+        let snapshot = mgr.live_transfer_session("service-1").unwrap();
+        assert_eq!(snapshot.scope, LiveSubscriptionScope::Service);
+        assert_eq!(snapshot.notifications.len(), 1);
+        assert_eq!(snapshot.expires_in_seconds, None);
+    }
+
+    #[test]
+    fn test_live_transfer_heartbeat_requires_matching_id() {
+        assert!(is_live_transfer_heartbeat(
+            r#"{"type":"heartbeat","subscriptionId":"dashboard-1"}"#,
+            "dashboard-1"
+        ));
+        assert!(is_live_transfer_heartbeat(
+            r#"{"type":"heartbeat","clientId":"dashboard-1"}"#,
+            "dashboard-1"
+        ));
+        assert!(!is_live_transfer_heartbeat(
+            r#"{"type":"heartbeat","subscriptionId":"other"}"#,
+            "dashboard-1"
+        ));
+        assert!(!is_live_transfer_heartbeat(
+            r#"{"type":"erc20Transfers","subscriptionId":"dashboard-1"}"#,
+            "dashboard-1"
+        ));
+    }
+
     #[tokio::test]
     async fn test_subscription_filter_matching() {
         let mgr = SubscriptionManager::new();
@@ -713,6 +1283,8 @@ mod tests {
         let token = format!("0x{}", hex::encode(Address::repeat_byte(0xBB)));
         let request = serde_json::json!({
             "type": "erc20Transfers",
+            "subscriptionId": "dashboard-1",
+            "subscriptionScope": "dashboard",
             "walletAddresses": [tracked],
             "tokenAddresses": [token],
             "minAmount": "100",
@@ -735,6 +1307,14 @@ mod tests {
             subscription.max_amount,
             Some(parse_u256_bound("0xff").unwrap())
         );
+
+        let request: SubscribeRequest = serde_json::from_value(serde_json::json!({
+            "type": "erc20Transfers",
+            "persistent": true,
+            "walletAddresses": [format!("0x{}", hex::encode(Address::repeat_byte(0xA1)))]
+        }))
+        .unwrap();
+        assert_eq!(request.live_session_scope(), LiveSubscriptionScope::Service);
     }
 
     #[test]
