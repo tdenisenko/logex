@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use logex_cl::{CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS, MAINNET_CONSENSUS_CHAIN_SPEC};
 use serde::Deserialize;
 use thiserror::Error;
@@ -50,6 +51,23 @@ pub enum CheckpointSyncError {
         requested_root: String,
         resolved_root: String,
         resolved_slot: u64,
+    },
+    #[error(
+        "checkpoint-sync sources did not reach quorum {required}/{total}; successful={successful}; failures={failures}"
+    )]
+    InsufficientQuorum {
+        required: usize,
+        total: usize,
+        successful: usize,
+        failures: String,
+    },
+    #[error(
+        "checkpoint-sync sources disagreed; required quorum {required}/{total}; candidates={candidates}"
+    )]
+    SourceDisagreement {
+        required: usize,
+        total: usize,
+        candidates: String,
     },
 }
 
@@ -126,6 +144,7 @@ pub async fn resolve_checkpoint(
         return Ok(checkpoint);
     }
 
+    let sources = CheckpointSyncSources::new(checkpoint_sync_url)?;
     let client = reqwest::Client::builder()
         .timeout(CHECKPOINT_SYNC_TIMEOUT)
         .build()
@@ -133,42 +152,47 @@ pub async fn resolve_checkpoint(
             url: checkpoint_sync_url.to_owned(),
             source,
         })?;
-    let endpoint = CheckpointSyncEndpoint::new(checkpoint_sync_url)?;
-    let finalized = endpoint.fetch_header(&client, "finalized").await?;
+    let finalized = sources.fetch_finalized_headers(&client).await?;
+    let newest_finalized = finalized
+        .iter()
+        .map(|header| &header.header)
+        .max_by_key(|header| header.slot)
+        .expect("fetch_finalized_headers returns a quorum");
 
     match checkpoint {
         None => {
-            let checkpoint = finalized.inline_checkpoint();
+            let resolved = sources
+                .resolve_fresh_checkpoint(&client, &finalized)
+                .await?;
+            let checkpoint = resolved.header.inline_checkpoint();
             tracing::info!(
                 checkpoint = %checkpoint,
-                source = %endpoint.base_url,
-                "resolved weak-subjectivity checkpoint from checkpoint-sync endpoint"
+                sources = %resolved.sources.join(","),
+                "resolved weak-subjectivity checkpoint from checkpoint-sync source quorum"
             );
             Ok(Some(checkpoint))
         }
         Some(_) => {
             let parsed = parsed_checkpoint.expect("inline checkpoint parsed before endpoint fetch");
-
-            let resolved = match parsed.slot {
-                Some(slot) => endpoint.fetch_header(&client, &slot.to_string()).await?,
-                None => endpoint.fetch_header(&client, &parsed.root).await?,
-            };
+            let resolved = sources
+                .resolve_requested_checkpoint(&client, &parsed)
+                .await?;
             let requested_root = normalize_root(&parsed.root);
-            if normalize_root(&resolved.root) != requested_root {
+            if normalize_root(&resolved.header.root) != requested_root {
                 return Err(CheckpointSyncError::RootMismatch {
                     requested_root,
-                    resolved_root: resolved.root,
-                    resolved_slot: resolved.slot,
+                    resolved_root: resolved.header.root,
+                    resolved_slot: resolved.header.slot,
                 });
             }
 
-            reject_stale_checkpoint(&resolved, &finalized)?;
-            let checkpoint = resolved.inline_checkpoint();
+            reject_stale_checkpoint(&resolved.header, newest_finalized)?;
+            let checkpoint = resolved.header.inline_checkpoint();
             tracing::info!(
                 checkpoint = %checkpoint,
-                finalized_slot = finalized.slot,
-                source = %endpoint.base_url,
-                "validated weak-subjectivity checkpoint against checkpoint-sync endpoint"
+                finalized_slot = newest_finalized.slot,
+                sources = %resolved.sources.join(","),
+                "validated weak-subjectivity checkpoint against checkpoint-sync source quorum"
             );
             Ok(Some(checkpoint))
         }
@@ -206,6 +230,235 @@ impl BeaconHeader {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SourceBeaconHeader {
+    endpoint: String,
+    header: BeaconHeader,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSourceCheckpoint {
+    header: BeaconHeader,
+    sources: Vec<String>,
+}
+
+struct CheckpointSyncSources {
+    endpoints: Vec<CheckpointSyncEndpoint>,
+}
+
+impl CheckpointSyncSources {
+    fn new(urls: &str) -> Result<Self, CheckpointSyncError> {
+        let mut endpoints = Vec::new();
+        for raw_url in urls.split(',') {
+            let url = raw_url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            let endpoint = CheckpointSyncEndpoint::new(url)?;
+            if !endpoints
+                .iter()
+                .any(|existing: &CheckpointSyncEndpoint| existing.base_url == endpoint.base_url)
+            {
+                endpoints.push(endpoint);
+            }
+        }
+        if endpoints.is_empty() {
+            return Err(CheckpointSyncError::InvalidUrl(urls.to_owned()));
+        }
+        Ok(Self { endpoints })
+    }
+
+    fn quorum_threshold(&self) -> usize {
+        if self.endpoints.len() == 1 {
+            1
+        } else {
+            self.endpoints.len() / 2 + 1
+        }
+    }
+
+    async fn fetch_finalized_headers(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<Vec<SourceBeaconHeader>, CheckpointSyncError> {
+        let outcomes = self.fetch_headers(client, "finalized").await;
+        self.require_min_successes(outcomes)
+    }
+
+    async fn resolve_fresh_checkpoint(
+        &self,
+        client: &reqwest::Client,
+        finalized: &[SourceBeaconHeader],
+    ) -> Result<ResolvedSourceCheckpoint, CheckpointSyncError> {
+        if self.endpoints.len() == 1 {
+            return Ok(ResolvedSourceCheckpoint {
+                header: finalized[0].header.clone(),
+                sources: vec![finalized[0].endpoint.clone()],
+            });
+        }
+
+        let lowest_finalized_slot = finalized
+            .iter()
+            .map(|header| header.header.slot)
+            .min()
+            .expect("fresh checkpoint resolution requires finalized headers");
+        let outcomes = self
+            .fetch_headers(client, &lowest_finalized_slot.to_string())
+            .await;
+        let headers = self.require_min_successes(outcomes)?;
+        select_quorum_checkpoint(headers, self.quorum_threshold(), self.endpoints.len())
+    }
+
+    async fn resolve_requested_checkpoint(
+        &self,
+        client: &reqwest::Client,
+        checkpoint: &InlineCheckpoint,
+    ) -> Result<ResolvedSourceCheckpoint, CheckpointSyncError> {
+        let block_id = checkpoint
+            .slot
+            .map(|slot| slot.to_string())
+            .unwrap_or_else(|| checkpoint.root.clone());
+        let outcomes = self.fetch_headers(client, &block_id).await;
+        let headers = self.require_min_successes(outcomes)?;
+        let requested_root = normalize_root(&checkpoint.root);
+        let matching = headers
+            .iter()
+            .filter(|header| normalize_root(&header.header.root) == requested_root)
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching.len() < self.quorum_threshold() {
+            return Err(CheckpointSyncError::RootMismatch {
+                requested_root,
+                resolved_root: format_header_candidates(&headers),
+                resolved_slot: checkpoint.slot.unwrap_or(0),
+            });
+        }
+        select_quorum_checkpoint(matching, self.quorum_threshold(), self.endpoints.len())
+    }
+
+    async fn fetch_headers(
+        &self,
+        client: &reqwest::Client,
+        block_id: &str,
+    ) -> Vec<Result<SourceBeaconHeader, CheckpointSyncError>> {
+        let mut requests = FuturesUnordered::new();
+        for endpoint in &self.endpoints {
+            requests.push(async move {
+                let header = endpoint.fetch_header(client, block_id).await?;
+                Ok(SourceBeaconHeader {
+                    endpoint: endpoint.base_url.clone(),
+                    header,
+                })
+            });
+        }
+
+        let mut outcomes = Vec::with_capacity(self.endpoints.len());
+        while let Some(outcome) = requests.next().await {
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    fn require_min_successes(
+        &self,
+        outcomes: Vec<Result<SourceBeaconHeader, CheckpointSyncError>>,
+    ) -> Result<Vec<SourceBeaconHeader>, CheckpointSyncError> {
+        let mut headers = Vec::new();
+        let mut failures = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                Ok(header) => headers.push(header),
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        let required = self.quorum_threshold();
+        if headers.len() < required {
+            return Err(CheckpointSyncError::InsufficientQuorum {
+                required,
+                total: self.endpoints.len(),
+                successful: headers.len(),
+                failures: failures.join("; "),
+            });
+        }
+        Ok(headers)
+    }
+}
+
+fn select_quorum_checkpoint(
+    headers: Vec<SourceBeaconHeader>,
+    required: usize,
+    total: usize,
+) -> Result<ResolvedSourceCheckpoint, CheckpointSyncError> {
+    let mut groups: Vec<ResolvedSourceCheckpoint> = Vec::new();
+    for header in headers {
+        let root = normalize_root(&header.header.root);
+        if let Some(group) = groups.iter_mut().find(|group| {
+            group.header.slot == header.header.slot && normalize_root(&group.header.root) == root
+        }) {
+            group.sources.push(header.endpoint);
+        } else {
+            groups.push(ResolvedSourceCheckpoint {
+                header: BeaconHeader {
+                    slot: header.header.slot,
+                    root,
+                },
+                sources: vec![header.endpoint],
+            });
+        }
+    }
+
+    groups.sort_by(|left, right| {
+        right
+            .sources
+            .len()
+            .cmp(&left.sources.len())
+            .then_with(|| right.header.slot.cmp(&left.header.slot))
+            .then_with(|| left.header.root.cmp(&right.header.root))
+    });
+    if let Some(group) = groups.first()
+        && group.sources.len() >= required
+    {
+        return Ok(group.clone());
+    }
+
+    Err(CheckpointSyncError::SourceDisagreement {
+        required,
+        total,
+        candidates: format_resolved_candidates(&groups),
+    })
+}
+
+fn format_header_candidates(headers: &[SourceBeaconHeader]) -> String {
+    headers
+        .iter()
+        .map(|header| {
+            format!(
+                "{}@{} from {}",
+                header.header.slot,
+                normalize_root(&header.header.root),
+                header.endpoint
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_resolved_candidates(groups: &[ResolvedSourceCheckpoint]) -> String {
+    groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{}@{} from {} source(s): {}",
+                group.header.slot,
+                normalize_root(&group.header.root),
+                group.sources.len(),
+                group.sources.join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[derive(Debug, Clone)]
 struct CheckpointSyncEndpoint {
     base_url: String,
 }
@@ -450,6 +703,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_comma_separated_checkpoint_sources_and_quorum() {
+        let sources = CheckpointSyncSources::new(
+            " https://a.example/ ,https://b.example,,https://a.example ",
+        )
+        .unwrap();
+
+        assert_eq!(sources.endpoints.len(), 2);
+        assert_eq!(sources.endpoints[0].base_url, "https://a.example");
+        assert_eq!(sources.endpoints[1].base_url, "https://b.example");
+        assert_eq!(sources.quorum_threshold(), 2);
+
+        let single = CheckpointSyncSources::new("https://a.example,https://a.example/").unwrap();
+        assert_eq!(single.endpoints.len(), 1);
+        assert_eq!(single.quorum_threshold(), 1);
+    }
+
+    #[test]
+    fn checkpoint_source_quorum_selects_matching_candidate() {
+        let selected = select_quorum_checkpoint(
+            vec![
+                source_header("https://a.example", 64, "0xaa"),
+                source_header("https://b.example", 64, "0xaa"),
+                source_header("https://c.example", 64, "0xbb"),
+            ],
+            2,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(selected.header.slot, 64);
+        assert_eq!(selected.header.root, "0xaa");
+        assert_eq!(
+            selected.sources,
+            vec![
+                "https://a.example".to_owned(),
+                "https://b.example".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoint_source_quorum_rejects_disagreement() {
+        assert!(matches!(
+            select_quorum_checkpoint(
+                vec![
+                    source_header("https://a.example", 64, "0xaa"),
+                    source_header("https://b.example", 64, "0xbb"),
+                    source_header("https://c.example", 64, "0xcc"),
+                ],
+                2,
+                3,
+            ),
+            Err(CheckpointSyncError::SourceDisagreement { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_checkpoint_older_than_endpoint_finality_window() {
         let checkpoint = BeaconHeader {
             slot: 32,
@@ -490,5 +800,15 @@ mod tests {
             root.data.root,
             "0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c"
         );
+    }
+
+    fn source_header(endpoint: &str, slot: u64, root: &str) -> SourceBeaconHeader {
+        SourceBeaconHeader {
+            endpoint: endpoint.to_owned(),
+            header: BeaconHeader {
+                slot,
+                root: root.to_owned(),
+            },
+        }
     }
 }

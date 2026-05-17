@@ -4,21 +4,18 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain unmerged until the query workbench is approved.
+Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the next PR covers checkpoint-source hardening.
 
 ## Completed Since Last Run
 
-- Added a native `COUNT(*)` / `COUNT(1)` aggregate path with `GROUP BY source` support so common count queries avoid DataFusion row materialization.
-- Validated a broad real-data query matrix on the full remote data set, including introspection, latest rows, bounded Transfer queries, Approval queries, timestamp predicates, exact `SUM(data)` balance queries, distinct values, grouped counts, and empty matches.
-- Reduced the recent `GROUP BY source` validation query from ~26s to ~0.3s on the full remote data set.
+- Merged the query workbench PR after CI passed.
+- Added comma-separated checkpoint-sync source support so operators can require a quorum of Beacon API/checkpoint-sync endpoints before trusting a resolved checkpoint.
+- Fresh checkpoint resolution now uses the lowest finalized slot visible across successful sources, then verifies that the same slot/root reaches quorum.
+- User-supplied inline checkpoints are validated against the configured source quorum, and freshness is checked against the newest finalized slot returned by successful sources.
 
 ## Remaining TODOs
 
-1. Replace the temporary checkpoint source.
-   - Reason: Weak-subjectivity safety needs a first-party recent-checkpoint flow.
-   - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
-
-2. Complete release hardening.
+1. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
    - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, and exposed listener policy.
 
@@ -31,6 +28,7 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 - `SUM(data)` uses a native exact aggregate path because Ethereum event `data` is hex-encoded `uint256`; results are returned as exact decimal strings.
 - `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
 - Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
+- Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
 
 ## Challenges and Resolutions
 
@@ -52,26 +50,30 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 - Challenge: A low-space sealed symlink volume stopped the server even though the active write path still had headroom.
   - Resolution: The low-disk guard now probes writable storage roots, not every sealed segment target.
 
+- Challenge: A single checkpoint-sync endpoint remained a central trust assumption for fresh starts.
+  - Resolution: Added a multi-source quorum resolver. With multiple configured URLs, LogEx resolves or validates a checkpoint only after enough sources agree on the same slot/root.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
 - Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
-- Searched query execution, index building, background indexing, HTTP shutdown, and disk guard paths for debug-only or superseded code.
-- No debug-only code is intentionally left in the query path.
+- Searched checkpoint resolution, query execution, index building, background indexing, HTTP shutdown, and disk guard paths for debug-only or superseded code.
+- No debug-only code is intentionally left in the checkpoint or query path.
 
 ## Git Workflow
 
-- Current branch: `feature/query-workbench`
-- New branch created this run: no
+- Current branch: `feature/checkpoint-source-hardening`
+- New branch created this run: yes
 - Commits made during this run: pending
-- Pull request status: draft PR #82 remains open
+- Pull request status: pending
 - Merge status: intentionally not merged
-- Blockers: PR remains draft until the query workbench is approved.
+- Blockers: none currently.
 
 ## Known Issues or Risks
 
 - Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
 - Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
+- Single checkpoint-sync URL mode remains available for compatibility and has the same trust assumption as before; use comma-separated URLs for quorum-based checkpoint resolution until LogEx operates a first-party checkpoint source.
 - HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
 - Verification-critical security review is still required before a production-ready release.
