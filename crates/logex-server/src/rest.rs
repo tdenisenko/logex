@@ -222,10 +222,11 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
                 .map(|anchor| anchor.block_number),
         )
         .map(|(top, finalized)| top.saturating_sub(finalized));
+    let historical_sync_disabled = sync.historical_sync_disabled;
     let historical_floor = historical_floor.or(sync.historical_execution_floor);
     let historical_anchor = historical_anchor.or(sync.historical_execution_anchor);
-    let historical_incomplete =
-        historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
+    let historical_incomplete = !historical_sync_disabled
+        && historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
     let logs_per_sec =
         effective_historical_rate(sync.logs_per_sec, sync.logs_rate_updated_at_unix_ms);
     let historical_blocks_per_sec = if historical_incomplete {
@@ -244,14 +245,23 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     } else {
         0.0
     };
-    let historical_log_estimate_top_block = historical_anchor
-        .map(|anchor| anchor.block_number)
-        .or(canonical_top_block);
+    let historical_log_estimate_top_block = (!historical_sync_disabled)
+        .then(|| {
+            historical_anchor
+                .map(|anchor| anchor.block_number)
+                .or(canonical_top_block)
+        })
+        .flatten();
     let historical_total_logs_estimate =
         estimated_total_logs_through_block(historical_log_estimate_top_block);
-    let historical_remaining_logs_estimate =
-        historical_total_logs_estimate.map(|estimated| (estimated - total_rows as f64).max(0.0));
-    let historical_eta_seconds =
+    let historical_remaining_logs_estimate = (!historical_sync_disabled)
+        .then(|| {
+            historical_total_logs_estimate.map(|estimated| (estimated - total_rows as f64).max(0.0))
+        })
+        .flatten();
+    let historical_eta_seconds = if historical_sync_disabled {
+        None
+    } else {
         rest_historical_log_eta(historical_remaining_logs_estimate, historical_logs_per_sec)
             .or_else(|| {
                 rest_historical_eta(
@@ -259,7 +269,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
                     sync.historical_target_block,
                     historical_blocks_per_sec,
                 )
-            });
+            })
+    };
     let verified_from_block = historical_floor
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
@@ -306,6 +317,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "cpu_utilization_raw_pct": storage_metrics.cpu_utilization_raw_pct,
         "cpu_logical_cores": storage_metrics.cpu_logical_cores,
         "eta_seconds": sync.eta_seconds,
+        "historical_sync_disabled": historical_sync_disabled,
         "historical_execution_floor": historical_floor,
         "historical_execution_anchor": historical_anchor,
         "historical_target_block": sync.historical_target_block,
@@ -659,6 +671,48 @@ mod tests {
 
         let eta = status["historical_eta_seconds"].as_f64().unwrap();
         assert!((eta - ((estimated_total - 2.0) / 7_330.0)).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_suppresses_historical_eta_when_disabled() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                historical_sync_disabled: true,
+                historical_execution_floor: Some(ExecutionBlockMarker {
+                    block_number: 1_000,
+                    block_hash: B256::repeat_byte(0x11),
+                    timestamp: 1_700_000_000,
+                }),
+                historical_target_block: 0,
+                historical_blocks_per_sec: 500.0,
+                historical_logs_per_sec: 7_330.0,
+                historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                ..Default::default()
+            },
+        ));
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["historical_sync_disabled"], true);
+        assert_eq!(status["historical_blocks_per_sec"], 0.0);
+        assert_eq!(status["historical_logs_per_sec"], 0.0);
+        assert!(status["historical_eta_seconds"].is_null());
+        assert!(status["historical_remaining_logs_estimate"].is_null());
     }
 
     #[tokio::test]
@@ -1073,6 +1127,7 @@ mod tests {
                 logs_rate_updated_at_unix_ms: Some(unix_time_millis()),
                 logs_ingested: 42,
                 eta_seconds: Some(125.0),
+                historical_sync_disabled: false,
                 historical_execution_floor: None,
                 historical_execution_anchor: None,
                 historical_target_block: logex_types::EXECUTION_HISTORY_TARGET_BLOCK,

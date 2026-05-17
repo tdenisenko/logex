@@ -205,6 +205,14 @@ Security:
         /// private network because the gRPC API itself is not authenticated.
         #[arg(long)]
         allow_public_grpc: bool,
+
+        /// Disable reverse historical execution sync for a fresh data directory.
+        ///
+        /// This mode only follows verified consensus anchors forward from the
+        /// checkpoint pivot. It can only be enabled before the data directory is
+        /// initialized; restart without this flag to resume normal historical sync.
+        #[arg(long)]
+        disable_historical_sync: bool,
     },
 
     /// Build or rebuild query indexes.
@@ -380,6 +388,21 @@ mod tests {
     }
 
     #[test]
+    fn sync_accepts_disable_historical_sync_flag() {
+        let cli = Cli::try_parse_from(["logex", "sync", "--disable-historical-sync"]).unwrap();
+
+        let Command::Sync {
+            disable_historical_sync,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert!(disable_historical_sync);
+    }
+
+    #[test]
     fn help_documents_public_listener_controls() {
         let mut command = Cli::command();
         let sync = command
@@ -393,6 +416,8 @@ mod tests {
         assert!(help.contains("Public gRPC requires --allow-public-grpc"));
         assert!(help.contains("--dashboard-password <PASSWORD>"));
         assert!(help.contains("--allow-public-grpc"));
+        assert!(help.contains("--disable-historical-sync"));
+        assert!(help.contains("only follows verified consensus anchors forward"));
     }
 
     #[test]

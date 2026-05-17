@@ -246,6 +246,8 @@ pub struct SyncStatus {
     pub logs_ingested: u64,
     /// Estimated seconds remaining to reach target.
     pub eta_seconds: Option<f64>,
+    /// Whether reverse historical execution sync was disabled for this run.
+    pub historical_sync_disabled: bool,
     /// Lowest execution block verified by the EL reverse backfill path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_execution_floor: Option<ExecutionBlockMarker>,

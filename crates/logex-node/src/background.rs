@@ -400,6 +400,15 @@ fn linux_available_memory_bytes() -> Option<u64> {
 }
 
 async fn historical_sync_is_incomplete(state: &AppState) -> bool {
+    let historical_sync_disabled = state
+        .sync_status
+        .lock()
+        .expect("sync status mutex poisoned")
+        .historical_sync_disabled;
+    if historical_sync_disabled {
+        return false;
+    }
+
     let storage = state.storage.read().await;
     should_defer_for_historical_floor(storage.historical_floor().map(|marker| marker.block_number))
 }
