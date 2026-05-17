@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn query_index_missing_requires_every_erc20_transfer_index() {
+    fn query_index_missing_requires_every_common_erc20_event_index() {
         let tmp = tempfile::TempDir::new().unwrap();
         let indexes = tmp.path().join("indexes");
         std::fs::create_dir_all(&indexes).unwrap();

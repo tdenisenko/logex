@@ -5,7 +5,8 @@ use alloy_primitives::{Address, B256};
 use roaring::RoaringBitmap;
 
 use logex_index::{
-    BTreeIndexReader, CompositeQuery, TRANSFER_BLOOM_FILE, TransferBloomReader, transfer_topic0,
+    BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, Erc20EventBloomReader,
+    TRANSFER_BLOOM_FILE, TransferBloomReader, is_common_erc20_event_topic0, transfer_topic0,
 };
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
@@ -156,11 +157,11 @@ fn candidate_row_ids_inner(
     dir: &Path,
     filter: &NativeLogFilter,
     use_indexes: bool,
-    transfer_bloom_prechecked: bool,
+    event_bloom_prechecked: bool,
 ) -> std::io::Result<Vec<u32>> {
     if use_indexes
-        && !transfer_bloom_prechecked
-        && erc20_transfer_bloom_excludes(&dir.join("indexes"), filter)?
+        && !event_bloom_prechecked
+        && erc20_event_bloom_excludes(&dir.join("indexes"), filter)?
     {
         return Ok(Vec::new());
     }
@@ -235,6 +236,13 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
     }
     if let Some(data_max) = &filter.data_max
         && row.data.as_ref() > data_max.as_slice()
+    {
+        return false;
+    }
+    if filter
+        .data_not_equals
+        .iter()
+        .any(|value| row.data.as_ref() == value.as_slice())
     {
         return false;
     }
@@ -474,32 +482,83 @@ fn build_candidate_bitmap(
     Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
 }
 
-fn erc20_transfer_bloom_excludes(index_dir: &Path, filter: &NativeLogFilter) -> io::Result<bool> {
-    let bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if !bloom_path.is_file() {
-        return Ok(false);
+fn erc20_event_bloom_excludes(index_dir: &Path, filter: &NativeLogFilter) -> io::Result<bool> {
+    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
+    if common_bloom_path.is_file() {
+        let mut reader = Erc20EventBloomReader::open(&common_bloom_path)?;
+        return erc20_event_bloom_reader_excludes(&mut reader, filter);
     }
-    let mut reader = TransferBloomReader::open(&bloom_path)?;
-    erc20_transfer_bloom_reader_excludes(&mut reader, filter)
+
+    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
+    if legacy_transfer_bloom_path.is_file() {
+        let mut reader = TransferBloomReader::open(&legacy_transfer_bloom_path)?;
+        return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
+    }
+
+    Ok(false)
 }
 
-pub(crate) fn erc20_transfer_bloom_exclusions(
+pub(crate) fn erc20_event_bloom_exclusions(
     index_dir: &Path,
     filters: &[NativeLogFilter],
 ) -> io::Result<Option<Vec<bool>>> {
-    let bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if !bloom_path.is_file() {
-        return Ok(None);
+    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
+    if common_bloom_path.is_file() {
+        let mut reader = Erc20EventBloomReader::open(&common_bloom_path)?;
+        return filters
+            .iter()
+            .map(|filter| erc20_event_bloom_reader_excludes(&mut reader, filter))
+            .collect::<io::Result<Vec<_>>>()
+            .map(Some);
     }
-    let mut reader = TransferBloomReader::open(&bloom_path)?;
-    filters
-        .iter()
-        .map(|filter| erc20_transfer_bloom_reader_excludes(&mut reader, filter))
-        .collect::<io::Result<Vec<_>>>()
-        .map(Some)
+
+    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
+    if legacy_transfer_bloom_path.is_file() {
+        let mut reader = TransferBloomReader::open(&legacy_transfer_bloom_path)?;
+        return filters
+            .iter()
+            .map(|filter| legacy_transfer_bloom_reader_excludes(&mut reader, filter))
+            .collect::<io::Result<Vec<_>>>()
+            .map(Some);
+    }
+
+    Ok(None)
 }
 
-fn erc20_transfer_bloom_reader_excludes(
+fn erc20_event_bloom_reader_excludes(
+    reader: &mut Erc20EventBloomReader,
+    filter: &NativeLogFilter,
+) -> io::Result<bool> {
+    let (Some(address), Some(topic0)) = (
+        single_address(&filter.addresses),
+        single_topic(&filter.topics[0]),
+    ) else {
+        return Ok(false);
+    };
+    let topic0 = B256::from(topic0);
+    if !is_common_erc20_event_topic0(&topic0) {
+        return Ok(false);
+    }
+    let address = Address::from(address);
+    for topic_index in [1usize, 2usize] {
+        let Some(topics) = topic_values(&filter.topics[topic_index]) else {
+            continue;
+        };
+        let mut any_present = false;
+        for topic in topics {
+            if reader.may_contain(&topic0, &address, topic_index, &B256::from(topic))? {
+                any_present = true;
+                break;
+            }
+        }
+        if !any_present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn legacy_transfer_bloom_reader_excludes(
     reader: &mut TransferBloomReader,
     filter: &NativeLogFilter,
 ) -> io::Result<bool> {
@@ -627,7 +686,8 @@ fn refine_candidate_bitmap_from_columns(
         }
     }
 
-    if filter.data_min.is_some() || filter.data_max.is_some() {
+    if filter.data_min.is_some() || filter.data_max.is_some() || !filter.data_not_equals.is_empty()
+    {
         let row_ids = row_ids_from_bitmap(result.as_ref());
         let values = reader.read_var_bytes("data", row_ids.as_deref())?;
         result = Some(bitmap_from_values(
@@ -643,6 +703,10 @@ fn refine_candidate_bitmap_from_columns(
                         .data_max
                         .as_ref()
                         .is_none_or(|max| data.as_ref() <= max.as_slice())
+                    && !filter
+                        .data_not_equals
+                        .iter()
+                        .any(|value| data.as_ref() == value.as_slice())
             },
         ));
     }

@@ -5,7 +5,7 @@ use logex_storage::SegmentReader;
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
-use crate::transfer_bloom::{TRANSFER_BLOOM_FILE, TransferBloom};
+use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexBuildProfile {
@@ -29,6 +29,8 @@ impl IndexBuilder {
             IndexBuildProfile::All => {
                 Self::build_primary_indexes(partition_dir)?;
                 CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
+                let index_dir = partition_dir.join("indexes");
+                Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
             IndexBuildProfile::LogQuery => {
                 Self::build_log_query_primary_indexes(partition_dir)?;
@@ -38,7 +40,7 @@ impl IndexBuilder {
             IndexBuildProfile::Erc20Transfer => {
                 let index_dir = partition_dir.join("indexes");
                 fs::create_dir_all(&index_dir)?;
-                TransferBloom::build(partition_dir, &index_dir)?;
+                Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
         }
         Ok(())
@@ -82,6 +84,7 @@ impl IndexBuilder {
                 "topic0_topic1.bptree",
                 "address_topic0_topic1.bptree",
                 "address_topic0_topic2.bptree",
+                ERC20_EVENTS_BLOOM_FILE,
             ],
             IndexBuildProfile::LogQuery => &[
                 "block_number.bptree",
@@ -91,8 +94,9 @@ impl IndexBuilder {
                 "topic0_topic1.bptree",
                 "address_topic0_topic1.bptree",
                 "address_topic0_topic2.bptree",
+                ERC20_EVENTS_BLOOM_FILE,
             ],
-            IndexBuildProfile::Erc20Transfer => &[TRANSFER_BLOOM_FILE],
+            IndexBuildProfile::Erc20Transfer => &[ERC20_EVENTS_BLOOM_FILE],
         }
     }
 
@@ -150,8 +154,8 @@ impl IndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        if !index_dir.join(TRANSFER_BLOOM_FILE).is_file() {
-            TransferBloom::build(partition_dir, index_dir)?;
+        if !index_dir.join(ERC20_EVENTS_BLOOM_FILE).is_file() {
+            Erc20EventBloom::build(partition_dir, index_dir)?;
         }
         Ok(())
     }

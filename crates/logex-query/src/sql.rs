@@ -38,7 +38,7 @@ use logex_storage::{PartitionManager, SegmentReader};
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_row_ids, candidate_row_ids_after_bloom_prefilter,
-    erc20_transfer_bloom_exclusions, matches_native_filter, partition_matches_filter,
+    erc20_event_bloom_exclusions, matches_native_filter, partition_matches_filter,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -221,6 +221,7 @@ fn has_native_constraints(filter: &NativeLogFilter) -> bool {
         || filter.data_len.is_some()
         || filter.data_min.is_some()
         || filter.data_max.is_some()
+        || !filter.data_not_equals.is_empty()
         || !filter.addresses.is_empty()
         || filter
             .topics
@@ -626,9 +627,14 @@ fn sort_native_rows(rows: &mut [logex_types::LogRow], order: logex_storage::nati
 }
 
 struct NativeSqlQuery {
-    columns: Vec<String>,
+    columns: Vec<NativeProjectionColumn>,
     filter: NativeLogFilter,
     sql_limit: Option<usize>,
+}
+
+struct NativeProjectionColumn {
+    source: String,
+    output: String,
 }
 
 struct NativeDataSumQuery {
@@ -1194,8 +1200,7 @@ fn scan_native_data_sum_partition(
     }
     let mut states = initial_native_sum_states(sum_inputs);
     let mut row_bitmap = RoaringBitmap::new();
-    let bloom_exclusions =
-        erc20_transfer_bloom_exclusions(&path.join("indexes"), candidate_filters)?;
+    let bloom_exclusions = erc20_event_bloom_exclusions(&path.join("indexes"), candidate_filters)?;
     for (index, candidate_filter) in candidate_filters.iter().enumerate() {
         let row_ids = if bloom_exclusions
             .as_ref()
@@ -1513,13 +1518,32 @@ fn select_has_logs_from(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]
     }
 }
 
-fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<String>> {
+fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<NativeProjectionColumn>> {
     let mut columns = Vec::new();
     for item in projection {
         match item {
-            SelectItem::Wildcard(_) => return Some(all_log_columns()),
-            SelectItem::UnnamedExpr(expr) => columns.push(sql_identifier(expr)?),
-            SelectItem::ExprWithAlias { expr, .. } => columns.push(sql_identifier(expr)?),
+            SelectItem::Wildcard(_) => {
+                return Some(
+                    all_log_columns()
+                        .into_iter()
+                        .map(|column| NativeProjectionColumn {
+                            source: column.clone(),
+                            output: column,
+                        })
+                        .collect(),
+                );
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                let column = sql_identifier(expr)?;
+                columns.push(NativeProjectionColumn {
+                    source: column.clone(),
+                    output: column,
+                });
+            }
+            SelectItem::ExprWithAlias { expr, alias } => columns.push(NativeProjectionColumn {
+                source: sql_identifier(expr)?,
+                output: alias.value.clone(),
+            }),
             SelectItem::QualifiedWildcard(_, _) => return None,
         }
     }
@@ -1739,6 +1763,7 @@ fn apply_sql_binary_filter(
             };
             match operator {
                 SqlBinaryOperator::Eq => apply_data_constraint(filter, Operator::Eq, value),
+                SqlBinaryOperator::NotEq => apply_data_constraint(filter, Operator::NotEq, value),
                 SqlBinaryOperator::GtEq => apply_data_constraint(filter, Operator::GtEq, value),
                 SqlBinaryOperator::LtEq => apply_data_constraint(filter, Operator::LtEq, value),
                 _ => return Ok(false),
@@ -1837,10 +1862,10 @@ fn sql_usize(expr: &SqlAstExpr) -> Option<usize> {
     sql_u64(expr).and_then(|value| usize::try_from(value).ok())
 }
 
-fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[String]) -> Value {
+fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[NativeProjectionColumn]) -> Value {
     let mut out = Map::with_capacity(columns.len());
     for column in columns {
-        let value = match column.as_str() {
+        let value = match column.source.as_str() {
             "block_number" => Value::Number(row.block_number.into()),
             "block_hash" => Value::String(to_hex_hash(row.block_hash)),
             "timestamp" => Value::Number(row.timestamp.into()),
@@ -1864,7 +1889,7 @@ fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[String]) -> Valu
             "source" => Value::Number((row.source as u8 as u64).into()),
             _ => Value::Null,
         };
-        out.insert(column.clone(), value);
+        out.insert(column.output.clone(), value);
     }
     Value::Object(out)
 }
@@ -2688,8 +2713,10 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
             matches!(binary.op, Operator::Eq) && numeric_scalar(literal).is_some()
         }
         "data" if !reversed => {
-            matches!(binary.op, Operator::Eq | Operator::GtEq | Operator::LtEq)
-                && parse_bytes_scalar(literal).is_some()
+            matches!(
+                binary.op,
+                Operator::Eq | Operator::NotEq | Operator::GtEq | Operator::LtEq
+            ) && parse_bytes_scalar(literal).is_some()
         }
         "block_hash" if !reversed => {
             matches!(binary.op, Operator::Eq) && parse_b256_scalar(literal).is_some()
@@ -3067,6 +3094,9 @@ fn apply_data_constraint(filter: &mut NativeLogFilter, operator: Operator, value
                 Some(current) => current.min(value),
                 None => value,
             });
+        }
+        Operator::NotEq => {
+            filter.data_not_equals.push(value);
         }
         _ => {}
     }
@@ -3633,6 +3663,8 @@ mod tests {
                 transfer_row(25_000_002, token, target, target, 20),
                 transfer_row(25_000_003, token, other, target, 5),
                 transfer_row(24_999_999, token, other, target, 1_000),
+                approval_row(25_000_004, token, target, other, 55),
+                approval_row(25_000_005, token, target, target, 0),
             ])
             .unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
@@ -3678,6 +3710,33 @@ mod tests {
             topic0: Some(keccak256(b"Transfer(address,address,uint256)")),
             topic1: Some(from),
             topic2: Some(to),
+            topic3: None,
+            data: data.into(),
+            data_len: 32,
+            source: Source::Receipt,
+        }
+    }
+
+    fn approval_row(
+        block_number: u64,
+        token: Address,
+        owner: B256,
+        spender: B256,
+        amount: u64,
+    ) -> LogRow {
+        let mut data = [0u8; 32];
+        data[24..].copy_from_slice(&amount.to_be_bytes());
+        LogRow {
+            block_number,
+            block_hash: B256::repeat_byte((block_number % 255) as u8),
+            timestamp: 1_700_000_000 + block_number,
+            tx_hash: B256::repeat_byte((block_number % 251) as u8),
+            tx_index: 0,
+            log_index: 0,
+            address: token,
+            topic0: Some(keccak256(b"Approval(address,address,uint256)")),
+            topic1: Some(owner),
+            topic2: Some(spender),
             topic3: None,
             data: data.into(),
             data_len: 32,
@@ -4155,6 +4214,7 @@ mod tests {
         let (_tmp, storage) = setup_transfer_balance_storage();
         let token = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
         let target = "0xE6c031F4C63e76e453d9A0aAe566D06236d11F95";
+        let spender = padded_address_topic("0x99C7ec507e16489F901214aB4ed558737B5e9BDe");
 
         let token_wide = execute_sql_page(
             &format!(
@@ -4239,6 +4299,33 @@ mod tests {
         assert_eq!(balance.rows[0]["received"], "125");
         assert_eq!(balance.rows[0]["sent"], "50");
         assert_eq!(balance.total_scanned, 4);
+
+        let approval = execute_sql_page(
+            &format!(
+                "SELECT block_number, tx_hash, topic2 AS spender, data AS approved_amount
+                 FROM logs
+                 WHERE topic0 = event'Approval(address,address,uint256)'
+                   AND address = '{token}'
+                   AND topic1 = address'{target}'
+                   AND data_len = 32
+                   AND data != '0x0000000000000000000000000000000000000000000000000000000000000000'
+                   AND block_number BETWEEN 12000000 AND 25108000
+                 ORDER BY block_number DESC, tx_index DESC, log_index DESC"
+            ),
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(50), 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approval.rows.len(), 1);
+        assert_eq!(approval.rows[0]["block_number"], 25_000_004);
+        assert_eq!(approval.rows[0]["spender"], format!("{spender:#x}"));
+        assert_eq!(
+            approval.rows[0]["approved_amount"],
+            "0x0000000000000000000000000000000000000000000000000000000000000037"
+        );
+        assert_eq!(approval.total_scanned, 1);
     }
 
     #[test]
@@ -4255,6 +4342,29 @@ mod tests {
                AND data <= '0x00000000000000000000000000000000000000000000000000000002540be400'
              ORDER BY block_number DESC, tx_index DESC, log_index DESC
              LIMIT 500",
+            25_100_000,
+        )
+        .unwrap();
+
+        assert!(parse_native_select_query(&sql).unwrap().is_some());
+    }
+
+    #[test]
+    fn parses_approval_query_shape_for_native_execution() {
+        let sql = rewrite_legacy_sql(
+            "SELECT
+               block_number,
+               tx_hash,
+               topic2 AS spender,
+               data AS approved_amount
+             FROM logs
+             WHERE topic0 = '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925'
+               AND address = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+               AND topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+               AND data_len = 32
+               AND data != '0x0000000000000000000000000000000000000000000000000000000000000000'
+               AND block_number BETWEEN 12000000 AND 25108000
+             ORDER BY block_number DESC, tx_index DESC, log_index DESC",
             25_100_000,
         )
         .unwrap();

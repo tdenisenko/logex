@@ -27,6 +27,7 @@ pub struct NativeLogFilter {
     pub data_len: Option<u32>,
     pub data_min: Option<Vec<u8>>,
     pub data_max: Option<Vec<u8>>,
+    pub data_not_equals: Vec<Vec<u8>>,
     pub canonical_only: bool,
     pub order: LogOrder,
     pub limit: Option<usize>,

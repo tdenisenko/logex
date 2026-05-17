@@ -88,11 +88,15 @@ pub async fn serve_with_config(
     shutdown: tokio::sync::watch::Receiver<bool>,
     config: HttpServerConfig,
 ) -> std::io::Result<()> {
-    let app = build_router_with_config(state, config);
+    let app = build_router_with_config(Arc::clone(&state), config);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "HTTP server listening");
+    let shutdown_state = Arc::clone(&state);
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown))
+        .with_graceful_shutdown(async move {
+            shutdown_signal(shutdown).await;
+            shutdown_state.query_control.cancel_active();
+        })
         .await
         .map_err(std::io::Error::other)
 }
