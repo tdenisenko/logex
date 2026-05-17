@@ -31,6 +31,7 @@ pub struct Cli {
     pub checkpoint: Option<String>,
 
     /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
+    /// Use comma-separated URLs to require multi-source checkpoint agreement.
     #[arg(long, global = true)]
     pub checkpoint_sync_url: Option<String>,
 
