@@ -8,10 +8,9 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 
 ## Completed Since Last Run
 
-- Extended the compact ERC20 skip index from Transfer-only to common ERC20 events, currently Transfer and Approval, while keeping the old `erc20-transfer` build profile name for CLI compatibility.
-- Kept `data != ...` predicates on the native query path and preserved projection aliases such as `topic2 AS spender`.
-- Canceled active SQL queries when HTTP shutdown starts so long-running queries do not hold shutdown open indefinitely.
-- Backfilled common ERC20 event blooms on the remote full-sync data set, removed obsolete legacy Transfer-only bloom files there, and validated the Approval query in ~6-8s with 21 verified rows scanned.
+- Added a native `COUNT(*)` / `COUNT(1)` aggregate path with `GROUP BY source` support so common count queries avoid DataFusion row materialization.
+- Validated a broad real-data query matrix on the full remote data set, including introspection, latest rows, bounded Transfer queries, Approval queries, timestamp predicates, exact `SUM(data)` balance queries, distinct values, grouped counts, and empty matches.
+- Reduced the recent `GROUP BY source` validation query from ~26s to ~0.3s on the full remote data set.
 
 ## Remaining TODOs
 
@@ -20,8 +19,8 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
    - Completion criteria: LogEx has its own recent-checkpoint source or verified multi-source flow, and stale checkpoints force a fresh checkpointed resync.
 
 2. Complete release hardening.
-   - Reason: Production readiness depends on verification safety, query behavior, graceful shutdown, and deployment safety.
-   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, query cancellation, auth, and exposed listener policy.
+   - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
+   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, and exposed listener policy.
 
 ## Design Decisions
 
@@ -30,6 +29,7 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 - Bounded log queries prune whole segments with metadata first, then use indexes where available, then apply row-level checks for correctness.
 - Common ERC20 Transfer and Approval topic filtering uses compact per-segment bloom indexes by default instead of large exact composite indexes; this keeps storage growth practical while preserving correctness through row rechecks.
 - `SUM(data)` uses a native exact aggregate path because Ethereum event `data` is hex-encoded `uint256`; results are returned as exact decimal strings.
+- `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
 - Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
 
 ## Challenges and Resolutions
@@ -45,6 +45,9 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 
 - Challenge: A slow HTTP query kept the old remote process deactivating during restart.
   - Resolution: HTTP shutdown now marks the active query as canceled before graceful shutdown waits for open requests to finish.
+
+- Challenge: `COUNT(*) ... GROUP BY source` over a recent dense range scanned millions of rows through the generic SQL engine.
+  - Resolution: Added a native count aggregate path that uses segment pruning and only reads the `source` column when grouping. The real-data grouped count query now completes in under a second.
 
 - Challenge: A low-space sealed symlink volume stopped the server even though the active write path still had headroom.
   - Resolution: The low-disk guard now probes writable storage roots, not every sealed segment target.
@@ -68,7 +71,7 @@ Active branch: `feature/query-workbench`. Draft PR #82 is open and must remain u
 ## Known Issues or Risks
 
 - Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
-- Very wide queries can still spend noticeable time checking thousands of segment-level skip indexes; exact full-history indexes would be faster but require substantially more storage.
+- Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
 - HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
 - Verification-critical security review is still required before a production-ready release.

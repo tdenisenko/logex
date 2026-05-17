@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -415,6 +416,11 @@ pub async fn execute_sql_page_on_snapshot(
         return Ok(result);
     }
     validate_supported_tables(&sql)?;
+    if let Some(result) =
+        try_execute_native_count_aggregate(&sql, &snapshot, page, cancel_check.clone())?
+    {
+        return Ok(result);
+    }
     if let Some(result) = try_execute_native_data_sum(&sql, &snapshot, page, cancel_check.clone())?
     {
         return Ok(result);
@@ -646,6 +652,25 @@ struct NativeDataSumQuery {
     sql_limit: Option<usize>,
 }
 
+struct NativeCountQuery {
+    projections: Vec<NativeCountProjection>,
+    group_by: NativeCountGroupBy,
+    filter: NativeLogFilter,
+    sql_limit: Option<usize>,
+    order_descending: bool,
+}
+
+enum NativeCountProjection {
+    Source(String),
+    Count(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeCountGroupBy {
+    None,
+    Source,
+}
+
 struct NativeAggregateProjection {
     output_column: String,
     expr: NativeAggregateExpr,
@@ -744,6 +769,378 @@ fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQue
         filter,
         sql_limit,
     }))
+}
+
+fn try_execute_native_count_aggregate(
+    sql: &str,
+    snapshot: &StorageSnapshot,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<Option<SqlQueryResult>, SqlQueryError> {
+    let Some(native_query) = parse_native_count_query(sql)? else {
+        return Ok(None);
+    };
+
+    if native_query.sql_limit == Some(0) || page.limit == Some(0) {
+        return Ok(Some(SqlQueryResult {
+            rows: Vec::new(),
+            total_scanned: 0,
+        }));
+    }
+
+    let (counts, total_scanned) = execute_native_count_aggregate(
+        snapshot,
+        &native_query.filter,
+        native_query.group_by,
+        cancel_check.as_ref(),
+    )?;
+    let mut rows = native_count_rows(&native_query, counts);
+    apply_json_page(&mut rows, page);
+
+    Ok(Some(SqlQueryResult {
+        rows,
+        total_scanned,
+    }))
+}
+
+fn parse_native_count_query(sql: &str) -> Result<Option<NativeCountQuery>, SqlQueryError> {
+    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return Ok(None);
+    };
+    let SqlStatement::Query(query) = statement.as_ref() else {
+        return Ok(None);
+    };
+    if query.with.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.pipe_operators.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(None);
+    };
+    if select.distinct.is_some()
+        || select.top.is_some()
+        || select.into.is_some()
+        || !select.lateral_views.is_empty()
+        || select.prewhere.is_some()
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+        || select.connect_by.is_some()
+        || !select_has_logs_from(&select.from)
+    {
+        return Ok(None);
+    }
+
+    let Some(group_by) = native_count_group_by(&select.group_by) else {
+        return Ok(None);
+    };
+    let Some(projections) = native_count_projections(&select.projection, group_by) else {
+        return Ok(None);
+    };
+    let Some(order_descending) =
+        native_count_order_descending(query.order_by.as_ref(), &projections, group_by)
+    else {
+        return Ok(None);
+    };
+    let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
+        return Ok(None);
+    };
+
+    let mut filter = NativeLogFilter::new();
+    if let Some(selection) = &select.selection
+        && !apply_sql_ast_filter(&mut filter, selection)?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(NativeCountQuery {
+        projections,
+        group_by,
+        filter,
+        sql_limit,
+        order_descending,
+    }))
+}
+
+fn native_count_group_by(group_by: &GroupByExpr) -> Option<NativeCountGroupBy> {
+    let GroupByExpr::Expressions(exprs, modifiers) = group_by else {
+        return None;
+    };
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match exprs.as_slice() {
+        [] => Some(NativeCountGroupBy::None),
+        [expr] if sql_identifier(expr).is_some_and(|column| column == "source") => {
+            Some(NativeCountGroupBy::Source)
+        }
+        _ => None,
+    }
+}
+
+fn native_count_projections(
+    projection: &[SelectItem],
+    group_by: NativeCountGroupBy,
+) -> Option<Vec<NativeCountProjection>> {
+    let mut projections = Vec::with_capacity(projection.len());
+    let mut has_source = false;
+    let mut has_count = false;
+    for item in projection {
+        let projection = match item {
+            SelectItem::UnnamedExpr(expr) if is_count_all_expr(expr) => {
+                has_count = true;
+                NativeCountProjection::Count("count".to_owned())
+            }
+            SelectItem::ExprWithAlias { expr, alias } if is_count_all_expr(expr) => {
+                has_count = true;
+                NativeCountProjection::Count(alias.value.clone())
+            }
+            SelectItem::UnnamedExpr(expr)
+                if sql_identifier(expr).is_some_and(|column| column == "source") =>
+            {
+                has_source = true;
+                NativeCountProjection::Source("source".to_owned())
+            }
+            SelectItem::ExprWithAlias { expr, alias }
+                if sql_identifier(expr).is_some_and(|column| column == "source") =>
+            {
+                has_source = true;
+                NativeCountProjection::Source(alias.value.clone())
+            }
+            _ => return None,
+        };
+        projections.push(projection);
+    }
+
+    match group_by {
+        NativeCountGroupBy::None if has_count && !has_source && projections.len() == 1 => {
+            Some(projections)
+        }
+        NativeCountGroupBy::Source if has_count && has_source && projections.len() == 2 => {
+            Some(projections)
+        }
+        _ => None,
+    }
+}
+
+fn is_count_all_expr(expr: &SqlAstExpr) -> bool {
+    let SqlAstExpr::Function(function) = expr else {
+        return false;
+    };
+    if !function.name.to_string().eq_ignore_ascii_case("count")
+        || !matches!(&function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return false;
+    }
+    let FunctionArguments::List(args) = &function.args else {
+        return false;
+    };
+    if matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct))
+        || !args.clauses.is_empty()
+        || args.args.len() != 1
+    {
+        return false;
+    }
+    match &args.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => true,
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => sql_u64(expr).is_some(),
+        _ => false,
+    }
+}
+
+fn native_count_order_descending(
+    order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
+    projections: &[NativeCountProjection],
+    group_by: NativeCountGroupBy,
+) -> Option<bool> {
+    let Some(order_by) = order_by else {
+        return Some(false);
+    };
+    if group_by != NativeCountGroupBy::Source {
+        return None;
+    }
+    let OrderByKind::Expressions(expressions) = &order_by.kind else {
+        return None;
+    };
+    let [expression] = expressions.as_slice() else {
+        return None;
+    };
+    if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
+        return None;
+    }
+    let order_column = sql_identifier(&expression.expr)?;
+    let source_output = projections.iter().find_map(|projection| match projection {
+        NativeCountProjection::Source(output) => Some(output.as_str()),
+        NativeCountProjection::Count(_) => None,
+    })?;
+    if order_column != "source" && !order_column.eq_ignore_ascii_case(source_output) {
+        return None;
+    }
+    Some(!expression.options.asc.unwrap_or(true))
+}
+
+fn execute_native_count_aggregate(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    group_by: NativeCountGroupBy,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<(BTreeMap<u8, u64>, u64), SqlQueryError> {
+    check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+    let partitions: Vec<_> = snapshot
+        .partitions_in_order(filter.order)
+        .into_iter()
+        .filter(|partition| partition_matches_filter(partition, filter))
+        .collect();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8);
+    let window_size = worker_count.saturating_mul(4).max(1);
+    let mut counts = BTreeMap::new();
+    let mut total_scanned = 0u64;
+
+    for chunk in partitions.chunks(window_size) {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        let chunk_results = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for partition in chunk {
+                let path = partition.path.clone();
+                let filter = filter.clone();
+                let cancel_check = cancel_check.cloned();
+                handles.push(scope.spawn(move || {
+                    scan_native_count_partition(&path, &filter, group_by, cancel_check.as_ref())
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for result in chunk_results {
+            let (partition_counts, partition_scanned) =
+                result.map_err(map_native_query_io_error)?;
+            for (source, count) in partition_counts {
+                *counts.entry(source).or_insert(0) += count;
+            }
+            total_scanned += partition_scanned;
+        }
+    }
+
+    if group_by == NativeCountGroupBy::None {
+        counts.insert(0, total_scanned);
+    }
+
+    Ok((counts, total_scanned))
+}
+
+fn scan_native_count_partition(
+    path: &std::path::Path,
+    filter: &NativeLogFilter,
+    group_by: NativeCountGroupBy,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> std::io::Result<(BTreeMap<u8, u64>, u64)> {
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
+    let row_ids = candidate_row_ids(path, filter, true)?;
+    if row_ids.is_empty() {
+        return Ok((BTreeMap::new(), 0));
+    }
+    if group_by == NativeCountGroupBy::None {
+        return Ok((BTreeMap::new(), row_ids.len() as u64));
+    }
+
+    let reader = SegmentReader::open(path)?;
+    let sources = reader.read_u8("source", Some(&row_ids))?;
+    let mut counts = BTreeMap::new();
+    for source in sources {
+        *counts.entry(source).or_insert(0) += 1;
+    }
+    Ok((counts, row_ids.len() as u64))
+}
+
+fn native_count_rows(query: &NativeCountQuery, counts: BTreeMap<u8, u64>) -> Vec<Value> {
+    match query.group_by {
+        NativeCountGroupBy::None => {
+            let count = counts.get(&0).copied().unwrap_or(0);
+            vec![native_count_row(&query.projections, None, count)]
+        }
+        NativeCountGroupBy::Source => {
+            let iter: Box<dyn Iterator<Item = (u8, u64)>> = if query.order_descending {
+                Box::new(counts.into_iter().rev())
+            } else {
+                Box::new(counts.into_iter())
+            };
+            let mut rows: Vec<_> = iter
+                .map(|(source, count)| native_count_row(&query.projections, Some(source), count))
+                .collect();
+            if let Some(limit) = query.sql_limit {
+                rows.truncate(limit);
+            }
+            rows
+        }
+    }
+}
+
+fn native_count_row(
+    projections: &[NativeCountProjection],
+    source: Option<u8>,
+    count: u64,
+) -> Value {
+    let mut row = Map::with_capacity(projections.len());
+    for projection in projections {
+        match projection {
+            NativeCountProjection::Source(output) => {
+                row.insert((*output).clone(), Value::Number(source.unwrap_or(0).into()));
+            }
+            NativeCountProjection::Count(output) => {
+                row.insert((*output).clone(), Value::Number(count.into()));
+            }
+        }
+    }
+    Value::Object(row)
+}
+
+fn apply_json_page(rows: &mut Vec<Value>, page: SqlQueryPage) {
+    if page.offset > 0 {
+        if page.offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows.drain(0..page.offset);
+        }
+    }
+    if let Some(limit) = page.limit
+        && rows.len() > limit
+    {
+        rows.truncate(limit);
+    }
 }
 
 fn try_execute_native_data_sum(
@@ -3589,6 +3986,24 @@ mod tests {
         (tmp, storage)
     }
 
+    fn setup_source_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        let mut rows = make_test_rows();
+        rows[1].source = Source::Trace;
+        storage.write_batch(&rows).unwrap();
+        IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        storage
+            .refresh_segment_indexes(storage.hot_partition().meta.id)
+            .unwrap();
+        (tmp, storage)
+    }
+
     fn setup_amount_storage() -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -4188,6 +4603,44 @@ mod tests {
         assert_eq!(aggregates.rows[0]["min_block"], 100);
         assert_eq!(aggregates.rows[0]["max_block"], 200);
         assert_eq!(aggregates.rows[0]["avg_len"].as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn native_counts_and_groups_by_source() {
+        let (_tmp, storage) = setup_source_storage();
+
+        let count = execute_sql_page(
+            "SELECT COUNT(1) AS total
+             FROM logs
+             WHERE block_number BETWEEN 100 AND 200",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count.rows.len(), 1);
+        assert_eq!(count.rows[0]["total"], 2);
+        assert_eq!(count.total_scanned, 2);
+
+        let grouped = execute_sql_page(
+            "SELECT source AS provenance, COUNT(*) AS total
+             FROM logs
+             WHERE block_number BETWEEN 100 AND 200
+             GROUP BY source
+             ORDER BY provenance DESC",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(grouped.rows.len(), 2);
+        assert_eq!(grouped.rows[0]["provenance"], Source::Trace as u8 as u64);
+        assert_eq!(grouped.rows[0]["total"], 1);
+        assert_eq!(grouped.rows[1]["provenance"], Source::Receipt as u8 as u64);
+        assert_eq!(grouped.rows[1]["total"], 1);
+        assert_eq!(grouped.total_scanned, 2);
     }
 
     #[tokio::test]
