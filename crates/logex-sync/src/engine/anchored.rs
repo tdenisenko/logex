@@ -129,7 +129,6 @@ async fn validate_extract_and_write_historical_blocks_streaming(
     hashes: &[B256],
     blocks: Vec<SourcedBodyReceipts>,
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
 ) -> Result<
     std::result::Result<
         (HistoricalIngestOutcome, Vec<PeerId>, u64, u64, Duration),
@@ -160,7 +159,7 @@ async fn validate_extract_and_write_historical_blocks_streaming(
 
     let mut pending_chunks = BTreeMap::new();
     let mut next_chunk_index = 0usize;
-    let mut writer = super::ingest::HistoricalBatchWriter::new(storage, subscriptions);
+    let mut writer = super::ingest::HistoricalBatchWriter::new(storage);
     let mut peer_notes = Vec::new();
     let mut validation_elapsed = Duration::ZERO;
     let mut lowest_block = u64::MAX;
@@ -724,11 +723,9 @@ fn validate_historical_block(
 fn spawn_historical_prepare_task(
     batch: HistoricalFetchedBatch,
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
 ) -> HistoricalPrepareTask {
     let next_child_header = historical_batch_next_child_header(&batch);
-    let handle =
-        tokio::spawn(async move { process_historical_batch(batch, storage, subscriptions).await });
+    let handle = tokio::spawn(async move { process_historical_batch(batch, storage).await });
 
     HistoricalPrepareTask {
         next_child_header,
@@ -739,7 +736,6 @@ fn spawn_historical_prepare_task(
 async fn process_historical_batch(
     batch: HistoricalFetchedBatch,
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
 ) -> Result<std::result::Result<WrittenHistoricalBatch, Box<HistoricalValidationFailure>>> {
     let HistoricalFetchedBatch {
         header_peer,
@@ -755,11 +751,7 @@ async fn process_historical_batch(
     let processing_started = std::time::Instant::now();
     let (outcome, mut block_peer_notes, lowest_block, highest_block, validation_elapsed) =
         match validate_extract_and_write_historical_blocks_streaming(
-            &headers,
-            &hashes,
-            blocks,
-            storage,
-            subscriptions,
+            &headers, &hashes, blocks, storage,
         )
         .await?
         {
@@ -1343,11 +1335,7 @@ impl SyncEngine {
                 .ingest_historical_backfill_batch_sequential(child_header)
                 .await;
         };
-        let task = spawn_historical_prepare_task(
-            batch,
-            Arc::clone(&self.storage),
-            self.subscriptions.clone(),
-        );
+        let task = spawn_historical_prepare_task(batch, Arc::clone(&self.storage));
 
         self.ingest_historical_prepared_task(task, prefetched).await
     }
@@ -2165,7 +2153,6 @@ impl SyncEngine {
             let block_count = validated.len();
             let outcome = super::ingest::write_validated_historical_blocks(
                 Arc::clone(&self.storage),
-                self.subscriptions.clone(),
                 validated,
             )
             .await?;

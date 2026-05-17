@@ -168,7 +168,7 @@ impl<'de> Deserialize<'de> for TopicFilter {
     }
 }
 
-fn parse_address(s: &str) -> Result<Address, String> {
+pub(crate) fn parse_address(s: &str) -> Result<Address, String> {
     let hex = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(hex).map_err(|e| format!("invalid address hex: {e}"))?;
     if bytes.len() != 20 {
