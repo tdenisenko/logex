@@ -55,21 +55,6 @@ impl CompositeIndexBuilder {
         Ok(())
     }
 
-    /// Build the minimal composites needed for ERC20 Transfer queries that
-    /// constrain token address plus indexed `from` or `to` address.
-    pub fn build_erc20_transfer_indexes(
-        partition_dir: &Path,
-        index_dir: &Path,
-    ) -> std::io::Result<()> {
-        fs::create_dir_all(index_dir)?;
-
-        Self::build_address_topic0(partition_dir, index_dir)?;
-        Self::build_address_topic0_topic1(partition_dir, index_dir)?;
-        Self::build_address_topic0_topic2(partition_dir, index_dir)?;
-
-        Ok(())
-    }
-
     /// Build (address, topic0) composite index.
     /// Only indexes rows where topic0 is present.
     pub(crate) fn build_address_topic0(

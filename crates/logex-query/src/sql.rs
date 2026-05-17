@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,7 +37,8 @@ use logex_storage::{PartitionManager, SegmentReader};
 
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids, matches_native_filter, partition_matches_filter,
+    StorageSnapshot, candidate_row_ids, candidate_row_ids_after_bloom_prefilter,
+    erc20_transfer_bloom_exclusions, matches_native_filter, partition_matches_filter,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -408,6 +410,10 @@ pub async fn execute_sql_page_on_snapshot(
     }
     let sql = rewrite_legacy_sql(sql, head_block)?;
     enforce_read_only_sql(&sql)?;
+    if let Some(result) = try_execute_introspection(&sql, page)? {
+        return Ok(result);
+    }
+    validate_supported_tables(&sql)?;
     if let Some(result) = try_execute_native_data_sum(&sql, &snapshot, page, cancel_check.clone())?
     {
         return Ok(result);
@@ -1085,72 +1091,61 @@ fn execute_native_data_sum(
     cancel_check: Option<&QueryCancelCheck>,
 ) -> Result<(Vec<Option<BigInt>>, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-    let mut states = sum_inputs
-        .iter()
-        .cloned()
-        .map(|expr| NativeSumState {
-            expr,
-            sum: BigInt::default(),
-            count: 0,
-        })
-        .collect::<Vec<_>>();
+    let mut states = initial_native_sum_states(sum_inputs);
     let data_only = selection.is_none()
         && sum_inputs
             .iter()
             .all(|expr| matches!(expr, NativeRowValueExpr::Data));
+    let partitions: Vec<_> = snapshot
+        .partitions_in_order(filter.order)
+        .into_iter()
+        .filter(|partition| partition_matches_filter(partition, filter))
+        .collect();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8);
+    let window_size = worker_count.saturating_mul(4).max(1);
     let mut total_scanned = 0u64;
 
-    for partition in snapshot.partitions_in_order(filter.order) {
+    for chunk in partitions.chunks(window_size) {
         check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-        if !partition_matches_filter(&partition, filter) {
-            continue;
-        }
-        let mut row_bitmap = RoaringBitmap::new();
-        for candidate_filter in candidate_filters {
-            if !partition_matches_filter(&partition, candidate_filter) {
-                continue;
+        let chunk_results = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for partition in chunk {
+                let path = partition.path.clone();
+                let filter = filter.clone();
+                let candidate_filters = candidate_filters.to_vec();
+                let selection = selection.cloned();
+                let sum_inputs = sum_inputs.to_vec();
+                let cancel_check = cancel_check.cloned();
+                handles.push(scope.spawn(move || {
+                    scan_native_data_sum_partition(
+                        &path,
+                        &filter,
+                        &candidate_filters,
+                        selection.as_ref(),
+                        &sum_inputs,
+                        data_only,
+                        cancel_check.as_ref(),
+                    )
+                }));
             }
-            let row_ids = candidate_row_ids(&partition.path, candidate_filter, true)
-                .map_err(map_native_query_io_error)?;
-            row_bitmap.extend(row_ids);
-        }
-        let row_ids = row_bitmap.iter().collect::<Vec<_>>();
-        if row_ids.is_empty() {
-            continue;
-        }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
+                })
+                .collect::<Vec<_>>()
+        });
 
-        let reader = SegmentReader::open(&partition.path).map_err(map_native_query_io_error)?;
-        if data_only {
-            let values = reader
-                .read_var_bytes("data", Some(&row_ids))
-                .map_err(map_native_query_io_error)?;
-            for value in values {
-                let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
-                for state in &mut states {
-                    state.sum += value.clone();
-                    state.count += 1;
-                }
-            }
-            total_scanned += row_ids.len() as u64;
-            continue;
-        }
-
-        let rows = reader
-            .read_log_rows(Some(&row_ids))
-            .map_err(map_native_query_io_error)?;
-        for row in rows {
-            if let Some(selection) = selection
-                && !eval_sql_predicate(&row, selection)
-            {
-                continue;
-            }
-            for state in &mut states {
-                if let Some(value) = eval_native_row_value(&row, &state.expr) {
-                    state.sum += value;
-                    state.count += 1;
-                }
-            }
-            total_scanned += 1;
+        for result in chunk_results {
+            let (partition_states, partition_scanned) =
+                result.map_err(map_native_query_io_error)?;
+            merge_native_sum_states(&mut states, partition_states);
+            total_scanned += partition_scanned;
         }
     }
 
@@ -1161,6 +1156,98 @@ fn execute_native_data_sum(
             .collect(),
         total_scanned,
     ))
+}
+
+fn initial_native_sum_states(sum_inputs: &[NativeRowValueExpr]) -> Vec<NativeSumState> {
+    sum_inputs
+        .iter()
+        .cloned()
+        .map(|expr| NativeSumState {
+            expr,
+            sum: BigInt::default(),
+            count: 0,
+        })
+        .collect()
+}
+
+fn merge_native_sum_states(states: &mut [NativeSumState], partial_states: Vec<NativeSumState>) {
+    for (state, partial) in states.iter_mut().zip(partial_states) {
+        state.sum += partial.sum;
+        state.count += partial.count;
+    }
+}
+
+fn scan_native_data_sum_partition(
+    path: &std::path::Path,
+    filter: &NativeLogFilter,
+    candidate_filters: &[NativeLogFilter],
+    selection: Option<&SqlAstExpr>,
+    sum_inputs: &[NativeRowValueExpr],
+    data_only: bool,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> std::io::Result<(Vec<NativeSumState>, u64)> {
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
+    let mut states = initial_native_sum_states(sum_inputs);
+    let mut row_bitmap = RoaringBitmap::new();
+    let bloom_exclusions =
+        erc20_transfer_bloom_exclusions(&path.join("indexes"), candidate_filters)?;
+    for (index, candidate_filter) in candidate_filters.iter().enumerate() {
+        let row_ids = if bloom_exclusions
+            .as_ref()
+            .is_some_and(|exclusions| exclusions.get(index).copied().unwrap_or(false))
+        {
+            Vec::new()
+        } else if bloom_exclusions.is_some() {
+            candidate_row_ids_after_bloom_prefilter(path, candidate_filter, true)?
+        } else {
+            candidate_row_ids(path, candidate_filter, true)?
+        };
+        row_bitmap.extend(row_ids);
+    }
+    let row_ids = row_bitmap.iter().collect::<Vec<_>>();
+    if row_ids.is_empty() {
+        return Ok((states, 0));
+    }
+
+    let reader = SegmentReader::open(path)?;
+    let mut total_scanned = 0u64;
+    if data_only {
+        let values = reader.read_var_bytes("data", Some(&row_ids))?;
+        for value in values {
+            let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
+            for state in &mut states {
+                state.sum += value.clone();
+                state.count += 1;
+            }
+        }
+        return Ok((states, row_ids.len() as u64));
+    }
+
+    let rows = reader.read_log_rows(Some(&row_ids))?;
+    for row in rows {
+        if let Some(selection) = selection
+            && !eval_sql_predicate(&row, selection)
+        {
+            continue;
+        }
+        if !matches_native_filter(&row, filter) {
+            continue;
+        }
+        for state in &mut states {
+            if let Some(value) = eval_native_row_value(&row, &state.expr) {
+                state.sum += value;
+                state.count += 1;
+            }
+        }
+        total_scanned += 1;
+    }
+
+    Ok((states, total_scanned))
 }
 
 fn eval_native_aggregate_expr(
@@ -1786,6 +1873,547 @@ fn optional_topic_to_json(topic: Option<B256>) -> Value {
     topic
         .map(|topic| Value::String(to_hex_hash(topic)))
         .unwrap_or(Value::Null)
+}
+
+#[derive(Clone)]
+struct IntrospectionRow {
+    values: Vec<(&'static str, Value)>,
+}
+
+impl IntrospectionRow {
+    fn get(&self, column: &str) -> Option<&Value> {
+        self.values
+            .iter()
+            .find_map(|(name, value)| name.eq_ignore_ascii_case(column).then_some(value))
+    }
+
+    fn project_all(&self) -> Value {
+        let mut out = Map::with_capacity(self.values.len());
+        for (name, value) in &self.values {
+            out.insert((*name).to_owned(), value.clone());
+        }
+        Value::Object(out)
+    }
+}
+
+fn try_execute_introspection(
+    sql: &str,
+    page: SqlQueryPage,
+) -> Result<Option<SqlQueryResult>, SqlQueryError> {
+    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return Ok(None);
+    };
+    let SqlStatement::Query(query) = statement.as_ref() else {
+        return Ok(None);
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(None);
+    };
+    let Some(table_name) = select_single_from_table(select) else {
+        return Ok(None);
+    };
+    let table_name = table_name.to_ascii_lowercase();
+    if !table_name.starts_with("information_schema.") {
+        return Ok(None);
+    }
+
+    if query.with.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.pipe_operators.is_empty()
+        || select.distinct.is_some()
+        || select.top.is_some()
+        || select.into.is_some()
+        || !select.lateral_views.is_empty()
+        || select.prewhere.is_some()
+        || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty())
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+        || select.connect_by.is_some()
+    {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+            "information_schema supports simple SELECT queries only".to_owned(),
+        )));
+    }
+
+    let mut rows = match table_name.as_str() {
+        "information_schema.tables" => introspection_table_rows(),
+        "information_schema.columns" => introspection_column_rows(),
+        _ => {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "unsupported information_schema table: {table_name}"
+            ))));
+        }
+    };
+
+    if let Some(selection) = &select.selection {
+        let mut filtered = Vec::with_capacity(rows.len());
+        for row in rows {
+            if eval_introspection_predicate(&row, selection)? {
+                filtered.push(row);
+            }
+        }
+        rows = filtered;
+    }
+    sort_introspection_rows(&mut rows, query.order_by.as_ref())?;
+    let total_scanned = rows.len() as u64;
+
+    let (sql_limit, sql_offset) = limit_offset(query.limit_clause.as_ref())?;
+    rows = apply_row_limit_offset(rows, sql_limit, sql_offset);
+    rows = apply_row_limit_offset(rows, page.limit, page.offset);
+
+    let rows = rows
+        .iter()
+        .map(|row| project_introspection_row(row, &select.projection))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(SqlQueryResult {
+        rows,
+        total_scanned,
+    }))
+}
+
+fn select_single_from_table(select: &datafusion::sql::sqlparser::ast::Select) -> Option<String> {
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return None;
+    }
+    match &select.from[0].relation {
+        TableFactor::Table {
+            name,
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+            ..
+        } if args.is_none()
+            && with_hints.is_empty()
+            && version.is_none()
+            && !*with_ordinality
+            && partitions.is_empty()
+            && json_path.is_none()
+            && sample.is_none()
+            && index_hints.is_empty() =>
+        {
+            Some(name.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn introspection_table_rows() -> Vec<IntrospectionRow> {
+    vec![IntrospectionRow {
+        values: vec![
+            ("table_catalog", Value::String("logex".to_owned())),
+            ("table_schema", Value::String("public".to_owned())),
+            ("table_name", Value::String("logs".to_owned())),
+            ("table_type", Value::String("BASE TABLE".to_owned())),
+        ],
+    }]
+}
+
+fn introspection_column_rows() -> Vec<IntrospectionRow> {
+    log_rows_schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| IntrospectionRow {
+            values: vec![
+                ("table_catalog", Value::String("logex".to_owned())),
+                ("table_schema", Value::String("public".to_owned())),
+                ("table_name", Value::String("logs".to_owned())),
+                (
+                    "column_name",
+                    Value::String(field.name().to_ascii_lowercase()),
+                ),
+                (
+                    "ordinal_position",
+                    Value::Number(((index + 1) as u64).into()),
+                ),
+                ("column_default", Value::Null),
+                (
+                    "is_nullable",
+                    Value::String(if field.is_nullable() { "YES" } else { "NO" }.to_owned()),
+                ),
+                (
+                    "data_type",
+                    Value::String(information_schema_data_type(field.data_type()).to_owned()),
+                ),
+                (
+                    "udt_name",
+                    Value::String(information_schema_udt_name(field.data_type()).to_owned()),
+                ),
+            ],
+        })
+        .collect()
+}
+
+fn information_schema_data_type(data_type: &DataType) -> &'static str {
+    match data_type {
+        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32 => "bigint",
+        DataType::Utf8 | DataType::LargeUtf8 => "text",
+        DataType::Boolean => "boolean",
+        DataType::Float64 => "double precision",
+        DataType::List(_) => "ARRAY",
+        _ => "text",
+    }
+}
+
+fn information_schema_udt_name(data_type: &DataType) -> &'static str {
+    match data_type {
+        DataType::UInt64 | DataType::Int64 => "int8",
+        DataType::UInt32 | DataType::Int32 => "int4",
+        DataType::Utf8 | DataType::LargeUtf8 => "text",
+        DataType::Boolean => "bool",
+        DataType::Float64 => "float8",
+        DataType::List(_) => "_text",
+        _ => "text",
+    }
+}
+
+fn eval_introspection_predicate(
+    row: &IntrospectionRow,
+    expr: &SqlAstExpr,
+) -> Result<bool, SqlQueryError> {
+    match expr {
+        SqlAstExpr::Nested(expr) => eval_introspection_predicate(row, expr),
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
+            Ok(eval_introspection_predicate(row, left)?
+                && eval_introspection_predicate(row, right)?)
+        }
+        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
+            Ok(eval_introspection_predicate(row, left)?
+                || eval_introspection_predicate(row, right)?)
+        }
+        SqlAstExpr::BinaryOp { left, op, right } => {
+            let Some((column, literal, reversed)) = normalize_sql_binary(left, right) else {
+                return unsupported_introspection_predicate(expr);
+            };
+            let Some(cell) = row.get(&column) else {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                    "unsupported information_schema column: {column}"
+                ))));
+            };
+            let Some(literal) = introspection_literal(literal) else {
+                return unsupported_introspection_predicate(expr);
+            };
+            Ok(compare_introspection_values(
+                cell,
+                &literal,
+                op.clone(),
+                reversed,
+            ))
+        }
+        SqlAstExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let Some(column) = sql_identifier(expr) else {
+                return unsupported_introspection_predicate(expr);
+            };
+            let Some(cell) = row.get(&column) else {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                    "unsupported information_schema column: {column}"
+                ))));
+            };
+            let (Some(low), Some(high)) = (introspection_literal(low), introspection_literal(high))
+            else {
+                return unsupported_introspection_predicate(expr);
+            };
+            let matches = compare_introspection_values(cell, &low, SqlBinaryOperator::GtEq, false)
+                && compare_introspection_values(cell, &high, SqlBinaryOperator::LtEq, false);
+            Ok(if *negated { !matches } else { matches })
+        }
+        SqlAstExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let Some(column) = sql_identifier(expr) else {
+                return unsupported_introspection_predicate(expr);
+            };
+            let Some(cell) = row.get(&column) else {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                    "unsupported information_schema column: {column}"
+                ))));
+            };
+            let mut matches = false;
+            for item in list {
+                let Some(literal) = introspection_literal(item) else {
+                    return unsupported_introspection_predicate(expr);
+                };
+                if compare_introspection_values(cell, &literal, SqlBinaryOperator::Eq, false) {
+                    matches = true;
+                    break;
+                }
+            }
+            Ok(if *negated { !matches } else { matches })
+        }
+        _ => unsupported_introspection_predicate(expr),
+    }
+}
+
+fn unsupported_introspection_predicate<T>(expr: &SqlAstExpr) -> Result<T, SqlQueryError> {
+    Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+        "unsupported information_schema predicate: {expr}"
+    ))))
+}
+
+fn introspection_literal(expr: &SqlAstExpr) -> Option<Value> {
+    if let Some(value) = sql_string(expr) {
+        return Some(Value::String(value.to_owned()));
+    }
+    if let Some(value) = sql_u64(expr) {
+        return Some(Value::Number(value.into()));
+    }
+    match expr {
+        SqlAstExpr::Value(value) => match &value.value {
+            SqlValue::Null => Some(Value::Null),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn compare_introspection_values(
+    left: &Value,
+    right: &Value,
+    operator: SqlBinaryOperator,
+    reversed: bool,
+) -> bool {
+    if reversed {
+        return compare_introspection_values(right, left, operator, false);
+    }
+    let ordering = compare_json_scalars(left, right);
+    match operator {
+        SqlBinaryOperator::Eq => ordering == Some(CmpOrdering::Equal),
+        SqlBinaryOperator::NotEq => ordering != Some(CmpOrdering::Equal),
+        SqlBinaryOperator::Gt => ordering == Some(CmpOrdering::Greater),
+        SqlBinaryOperator::GtEq => {
+            matches!(ordering, Some(CmpOrdering::Greater | CmpOrdering::Equal))
+        }
+        SqlBinaryOperator::Lt => ordering == Some(CmpOrdering::Less),
+        SqlBinaryOperator::LtEq => {
+            matches!(ordering, Some(CmpOrdering::Less | CmpOrdering::Equal))
+        }
+        _ => false,
+    }
+}
+
+fn compare_json_scalars(left: &Value, right: &Value) -> Option<CmpOrdering> {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => left.as_u64()?.partial_cmp(&right.as_u64()?),
+        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
+        (Value::Null, Value::Null) => Some(CmpOrdering::Equal),
+        _ => None,
+    }
+}
+
+fn sort_introspection_rows(
+    rows: &mut [IntrospectionRow],
+    order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
+) -> Result<(), SqlQueryError> {
+    let Some(order_by) = order_by else {
+        return Ok(());
+    };
+    let OrderByKind::Expressions(expressions) = &order_by.kind else {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+            "information_schema ORDER BY supports column expressions only".to_owned(),
+        )));
+    };
+    for expression in expressions.iter().rev() {
+        let Some(column) = sql_identifier(&expression.expr) else {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                "information_schema ORDER BY supports column names only".to_owned(),
+            )));
+        };
+        let descending = !expression.options.asc.unwrap_or(true);
+        if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                "information_schema ORDER BY does not support NULLS or WITH FILL options"
+                    .to_owned(),
+            )));
+        }
+        rows.sort_by(|left, right| {
+            let order = match (left.get(&column), right.get(&column)) {
+                (Some(left), Some(right)) => {
+                    compare_json_scalars(left, right).unwrap_or(CmpOrdering::Equal)
+                }
+                _ => CmpOrdering::Equal,
+            };
+            if descending { order.reverse() } else { order }
+        });
+    }
+    Ok(())
+}
+
+fn project_introspection_row(
+    row: &IntrospectionRow,
+    projection: &[SelectItem],
+) -> Result<Value, SqlQueryError> {
+    let mut out = Map::new();
+    for item in projection {
+        match item {
+            SelectItem::Wildcard(_) => return Ok(row.project_all()),
+            SelectItem::UnnamedExpr(expr) => {
+                let Some(column) = sql_identifier(expr) else {
+                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                        "information_schema projections must be column names".to_owned(),
+                    )));
+                };
+                let Some(value) = row.get(&column) else {
+                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                        "unsupported information_schema column: {column}"
+                    ))));
+                };
+                out.insert(column, value.clone());
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let Some(column) = sql_identifier(expr) else {
+                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                        "information_schema projections must be column names".to_owned(),
+                    )));
+                };
+                let Some(value) = row.get(&column) else {
+                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                        "unsupported information_schema column: {column}"
+                    ))));
+                };
+                out.insert(alias.value.clone(), value.clone());
+            }
+            SelectItem::QualifiedWildcard(_, _) => {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                    "information_schema does not support qualified wildcards".to_owned(),
+                )));
+            }
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn limit_offset(
+    limit_clause: Option<&LimitClause>,
+) -> Result<(Option<usize>, usize), SqlQueryError> {
+    let Some(limit_clause) = limit_clause else {
+        return Ok((None, 0));
+    };
+    match limit_clause {
+        LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        } if limit_by.is_empty() => {
+            let limit = match limit {
+                Some(limit) => Some(sql_usize(limit).ok_or_else(|| {
+                    SqlQueryError::DataFusion(DataFusionError::Plan(
+                        "LIMIT must be a non-negative integer".to_owned(),
+                    ))
+                })?),
+                None => None,
+            };
+            let offset = match offset {
+                Some(offset) => sql_usize(&offset.value).ok_or_else(|| {
+                    SqlQueryError::DataFusion(DataFusionError::Plan(
+                        "OFFSET must be a non-negative integer".to_owned(),
+                    ))
+                })?,
+                None => 0,
+            };
+            Ok((limit, offset))
+        }
+        LimitClause::OffsetCommaLimit { offset, limit } => Ok((
+            Some(sql_usize(limit).ok_or_else(|| {
+                SqlQueryError::DataFusion(DataFusionError::Plan(
+                    "LIMIT must be a non-negative integer".to_owned(),
+                ))
+            })?),
+            sql_usize(offset).ok_or_else(|| {
+                SqlQueryError::DataFusion(DataFusionError::Plan(
+                    "OFFSET must be a non-negative integer".to_owned(),
+                ))
+            })?,
+        )),
+        _ => Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+            "unsupported LIMIT clause".to_owned(),
+        ))),
+    }
+}
+
+fn apply_row_limit_offset(
+    mut rows: Vec<IntrospectionRow>,
+    limit: Option<usize>,
+    offset: usize,
+) -> Vec<IntrospectionRow> {
+    if offset > 0 {
+        if offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows.drain(..offset);
+        }
+    }
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    rows
+}
+
+fn validate_supported_tables(sql: &str) -> Result<(), SqlQueryError> {
+    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return Ok(());
+    };
+    let SqlStatement::Query(query) = statement.as_ref() else {
+        return Ok(());
+    };
+    validate_supported_query_tables(query)
+}
+
+fn validate_supported_query_tables(
+    query: &datafusion::sql::sqlparser::ast::Query,
+) -> Result<(), SqlQueryError> {
+    if let SetExpr::Select(select) = query.body.as_ref() {
+        for table in &select.from {
+            validate_supported_table_factor(&table.relation)?;
+            for join in &table.joins {
+                validate_supported_table_factor(&join.relation)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_supported_table_factor(table: &TableFactor) -> Result<(), SqlQueryError> {
+    let TableFactor::Table { name, .. } = table else {
+        return Ok(());
+    };
+    let table_name = name.to_string().to_ascii_lowercase();
+    if matches!(
+        table_name.as_str(),
+        "logs" | "information_schema.tables" | "information_schema.columns"
+    ) {
+        return Ok(());
+    }
+    Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+        "unsupported table '{table_name}'; LogEx exposes logs, information_schema.tables, and information_schema.columns"
+    ))))
 }
 
 fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
@@ -3186,6 +3814,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lists_supported_tables_through_information_schema() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT table_name, table_type
+             FROM information_schema.tables
+             WHERE table_schema = 'public'
+             ORDER BY table_name",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["table_name"], "logs");
+        assert_eq!(result.rows[0]["table_type"], "BASE TABLE");
+    }
+
+    #[tokio::test]
+    async fn lists_log_columns_through_information_schema() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT column_name, data_type, is_nullable, ordinal_position
+             FROM information_schema.columns
+             WHERE table_name = 'logs'
+               AND column_name IN ('block_number', 'topic2', 'data')
+             ORDER BY ordinal_position",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0]["column_name"], "block_number");
+        assert_eq!(result.rows[0]["data_type"], "bigint");
+        assert_eq!(result.rows[0]["is_nullable"], "NO");
+        assert_eq!(result.rows[1]["column_name"], "topic2");
+        assert_eq!(result.rows[1]["is_nullable"], "YES");
+        assert_eq!(result.rows[2]["column_name"], "data");
+        assert_eq!(result.total_scanned, 3);
+    }
+
+    #[tokio::test]
+    async fn supports_information_schema_aliases_limit_and_offset() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql_page(
+            "SELECT column_name AS name
+             FROM information_schema.columns
+             WHERE table_name = 'logs'
+               AND column_name IN ('block_number', 'data')
+             ORDER BY ordinal_position DESC
+             LIMIT 1 OFFSET 1",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["name"], "block_number");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_information_schema_tables() {
+        let (_tmp, storage) = setup_storage();
+        let error = execute_sql(
+            "SELECT * FROM information_schema.views",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .expect_err("unsupported information_schema tables should fail deterministically");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported information_schema table")
+        );
+    }
+
+    #[tokio::test]
     async fn supports_regular_sql_order_by_desc() {
         let (_tmp, storage) = setup_storage();
         let result = execute_sql(
@@ -3332,6 +4045,200 @@ mod tests {
         assert_eq!(result.rows[0]["block_number"], 200);
         assert_eq!(result.rows[0]["data"], "0xcafe");
         assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn covers_postgres_style_log_query_shapes() {
+        let (_tmp, storage) = setup_storage();
+
+        let projection = execute_sql_page(
+            "SELECT block_number AS block, address
+             FROM logs
+             WHERE block_number BETWEEN 100 AND 200
+               AND timestamp >= 1700000000
+             ORDER BY block_number ASC, tx_index ASC, log_index ASC
+             LIMIT 1 OFFSET 1",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(projection.rows.len(), 1);
+        assert_eq!(projection.rows[0]["block"], 200);
+
+        let unbounded = execute_sql_page(
+            "SELECT block_number FROM logs",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unbounded.rows.len(), 2);
+
+        let distinct = execute_sql_page(
+            "SELECT DISTINCT address FROM logs ORDER BY address",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(distinct.rows.len(), 2);
+
+        let grouped = execute_sql_page(
+            "SELECT source, COUNT(*) AS total
+             FROM logs
+             GROUP BY source
+             ORDER BY source",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(grouped.rows.len(), 1);
+        assert_eq!(grouped.rows[0]["total"], 2);
+
+        let nulls = execute_sql_page(
+            "SELECT COUNT(*) AS total
+             FROM logs
+             WHERE topic2 IS NULL",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(nulls.rows[0]["total"], 2);
+
+        let aggregates = execute_sql_page(
+            "SELECT COUNT(*) AS total,
+                    MIN(block_number) AS min_block,
+                    MAX(block_number) AS max_block,
+                    AVG(data_len) AS avg_len
+             FROM logs",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aggregates.rows[0]["total"], 2);
+        assert_eq!(aggregates.rows[0]["min_block"], 100);
+        assert_eq!(aggregates.rows[0]["max_block"], 200);
+        assert_eq!(aggregates.rows[0]["avg_len"].as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_sql_and_unsupported_tables_deterministically() {
+        let (_tmp, storage) = setup_storage();
+
+        let invalid = execute_sql("SELECT * FROM", &storage, storage.head_block())
+            .await
+            .expect_err("invalid SQL should fail");
+        assert!(invalid.to_string().contains("sql error"));
+
+        let unsupported = execute_sql("SELECT * FROM receipts", &storage, storage.head_block())
+            .await
+            .expect_err("unsupported tables should fail");
+        assert!(
+            unsupported
+                .to_string()
+                .contains("unsupported table 'receipts'")
+        );
+    }
+
+    #[tokio::test]
+    async fn covers_common_erc20_transfer_query_shapes() {
+        let (_tmp, storage) = setup_transfer_balance_storage();
+        let token = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let target = "0xE6c031F4C63e76e453d9A0aAe566D06236d11F95";
+
+        let token_wide = execute_sql_page(
+            &format!(
+                "SELECT block_number, tx_hash, log_index, address, topic0, topic1, topic2, data
+                 FROM logs
+                 WHERE topic0 = event'Transfer(address,address,uint256)'
+                   AND address = '{token}'
+                   AND block_number BETWEEN 25000000 AND 25108000
+                 ORDER BY block_number DESC, tx_index DESC, log_index DESC
+                 LIMIT 500"
+            ),
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token_wide.rows.len(), 4);
+        assert_eq!(token_wide.total_scanned, 4);
+
+        let sender_filtered = execute_sql_page(
+            &format!(
+                "SELECT block_number, topic1, data
+                 FROM logs
+                 WHERE topic0 = event'Transfer(address,address,uint256)'
+                   AND address = '{token}'
+                   AND topic1 IN (address'{target}')
+                   AND data_len = 32
+                   AND data >= '0x000000000000000000000000000000000000000000000000000000000000000a'
+                 ORDER BY block_number DESC, tx_index DESC, log_index DESC
+                 LIMIT 500"
+            ),
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sender_filtered.rows.len(), 2);
+        assert_eq!(sender_filtered.total_scanned, 2);
+
+        let receiver_time_and_amount = execute_sql_page(
+            &format!(
+                "SELECT block_number, topic2, data
+                 FROM logs
+                 WHERE topic0 = event'Transfer(address,address,uint256)'
+                   AND address = '{token}'
+                   AND topic2 IN (address'{target}')
+                   AND timestamp BETWEEN 1725000000 AND 1725108003
+                   AND data_len = 32
+                   AND data <= '0x0000000000000000000000000000000000000000000000000000000000000064'
+                 ORDER BY block_number DESC, tx_index DESC, log_index DESC
+                 LIMIT 500"
+            ),
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver_time_and_amount.rows.len(), 3);
+        assert_eq!(receiver_time_and_amount.total_scanned, 3);
+
+        let balance = execute_sql_page(
+            &format!(
+                "SELECT
+                   SUM(CASE WHEN topic2 = address'{target}' THEN data ELSE 0 END) AS received,
+                   SUM(CASE WHEN topic1 = address'{target}' THEN data ELSE 0 END) AS sent
+                 FROM logs
+                 WHERE topic0 = event'Transfer(address,address,uint256)'
+                   AND address = '{token}'
+                   AND (topic2 = address'{target}' OR topic1 = address'{target}')
+                   AND block_number BETWEEN 25000000 AND 25108000
+                   AND data_len = 32"
+            ),
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(balance.rows[0]["received"], "125");
+        assert_eq!(balance.rows[0]["sent"], "50");
+        assert_eq!(balance.total_scanned, 4);
     }
 
     #[test]

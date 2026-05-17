@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::cli::IndexProfile;
 use logex_cl::ConsensusStore;
@@ -13,6 +15,7 @@ pub struct BuildIndexesOptions {
     pub profile: IndexProfile,
     pub missing_only: bool,
     pub limit: Option<usize>,
+    pub jobs: usize,
     pub from_block: Option<u64>,
     pub to_block: Option<u64>,
     pub from_timestamp: Option<u64>,
@@ -58,32 +61,19 @@ pub fn run_build_indexes(config: PartitionManagerConfig, options: BuildIndexesOp
         return;
     }
 
-    let mut indexed = 0usize;
-    for target in targets {
-        tracing::info!(
-            segment_id = target.segment_id,
-            kind = target.kind,
-            rows = target.row_count,
-            min_block = target.min_block,
-            max_block = target.max_block,
-            min_timestamp = target.min_timestamp,
-            max_timestamp = target.max_timestamp,
-            profile = ?profile,
-            "building segment indexes"
-        );
-        let result = if options.missing_only {
-            IndexBuilder::build_missing_indexes(&target.path, profile)
-        } else {
-            IndexBuilder::build_indexes(&target.path, profile)
-        };
-        if let Err(e) = result {
+    let indexed_segments = match build_index_targets(&targets, profile, options) {
+        Ok(indexed) => indexed,
+        Err((target, error)) => {
             tracing::error!(
-                error = %e,
+                error = %error,
                 segment_id = target.segment_id,
                 "failed to build indexes"
             );
             std::process::exit(1);
         }
+    };
+
+    for target in &indexed_segments {
         if let Err(e) = storage.refresh_segment_manifest(target.segment_id) {
             tracing::error!(
                 error = %e,
@@ -92,9 +82,97 @@ pub fn run_build_indexes(config: PartitionManagerConfig, options: BuildIndexesOp
             );
             std::process::exit(1);
         }
-        indexed += 1;
     }
+    let indexed = indexed_segments.len();
     println!("Indexed {indexed} segment(s)");
+}
+
+fn build_index_targets(
+    targets: &[IndexTarget],
+    profile: IndexBuildProfile,
+    options: BuildIndexesOptions,
+) -> Result<Vec<IndexTarget>, (IndexTarget, std::io::Error)> {
+    let jobs = options.jobs.max(1).min(targets.len()).min(
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+    );
+    if jobs <= 1 {
+        let mut indexed = Vec::with_capacity(targets.len());
+        for target in targets {
+            build_index_target(target, profile, options.missing_only)?;
+            indexed.push(target.clone());
+        }
+        return Ok(indexed);
+    }
+
+    let targets = Arc::new(targets.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let indexed = Arc::new(Mutex::new(Vec::with_capacity(targets.len())));
+    let error = Arc::new(Mutex::new(None::<(IndexTarget, std::io::Error)>));
+
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            let targets = Arc::clone(&targets);
+            let next_index = Arc::clone(&next_index);
+            let indexed = Arc::clone(&indexed);
+            let error = Arc::clone(&error);
+            scope.spawn(move || {
+                loop {
+                    if error.lock().expect("index error mutex poisoned").is_some() {
+                        break;
+                    }
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    let Some(target) = targets.get(index) else {
+                        break;
+                    };
+                    match build_index_target(target, profile, options.missing_only) {
+                        Ok(()) => indexed
+                            .lock()
+                            .expect("indexed segments mutex poisoned")
+                            .push(target.clone()),
+                        Err((_, err)) => {
+                            *error.lock().expect("index error mutex poisoned") =
+                                Some((target.clone(), err));
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(error) = error.lock().expect("index error mutex poisoned").take() {
+        return Err(error);
+    }
+    Ok(Arc::try_unwrap(indexed)
+        .expect("all index worker references should be dropped")
+        .into_inner()
+        .expect("indexed segments mutex poisoned"))
+}
+
+fn build_index_target(
+    target: &IndexTarget,
+    profile: IndexBuildProfile,
+    missing_only: bool,
+) -> Result<(), (IndexTarget, std::io::Error)> {
+    tracing::info!(
+        segment_id = target.segment_id,
+        kind = target.kind,
+        rows = target.row_count,
+        min_block = target.min_block,
+        max_block = target.max_block,
+        min_timestamp = target.min_timestamp,
+        max_timestamp = target.max_timestamp,
+        profile = ?profile,
+        "building segment indexes"
+    );
+    let result = if missing_only {
+        IndexBuilder::build_missing_indexes(&target.path, profile)
+    } else {
+        IndexBuilder::build_indexes(&target.path, profile)
+    };
+    result.map_err(|error| (target.clone(), error))
 }
 
 fn index_targets(storage: &PartitionManager, options: BuildIndexesOptions) -> Vec<IndexTarget> {

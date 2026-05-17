@@ -569,31 +569,7 @@ async fn wait_for_low_disk_space(path: PathBuf) -> LowDiskSpace {
 fn disk_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
     let mut probes = BTreeSet::new();
     insert_disk_space_probe_path(&mut probes, data_dir.to_path_buf());
-
-    let segments_dir = data_dir.join("segments");
-    insert_disk_space_probe_path(&mut probes, segments_dir.clone());
-
-    if let Ok(entries) = std::fs::read_dir(&segments_dir) {
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_symlink() {
-                continue;
-            }
-
-            let Ok(target) = std::fs::read_link(entry.path()) else {
-                continue;
-            };
-            let target = if target.is_absolute() {
-                target
-            } else {
-                segments_dir.join(target)
-            };
-            let probe = target.parent().map(Path::to_path_buf).unwrap_or(target);
-            insert_disk_space_probe_path(&mut probes, probe);
-        }
-    }
+    insert_disk_space_probe_path(&mut probes, data_dir.join("segments"));
 
     probes.into_iter().collect()
 }
@@ -672,7 +648,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn disk_space_probe_paths_include_segment_symlink_targets() {
+    fn disk_space_probe_paths_track_writable_storage_roots_not_sealed_segment_targets() {
         let base =
             std::env::temp_dir().join(format!("logex-node-disk-probes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -688,7 +664,7 @@ mod tests {
 
         assert!(probes.contains(&data_dir.canonicalize().unwrap()));
         assert!(probes.contains(&segments_dir.canonicalize().unwrap()));
-        assert!(probes.contains(&extra_segments_dir.canonicalize().unwrap()));
+        assert!(!probes.contains(&extra_segments_dir.canonicalize().unwrap()));
 
         std::fs::remove_dir_all(&base).unwrap();
     }

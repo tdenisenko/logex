@@ -5,6 +5,7 @@ use logex_storage::SegmentReader;
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
+use crate::transfer_bloom::{TRANSFER_BLOOM_FILE, TransferBloom};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexBuildProfile {
@@ -36,7 +37,8 @@ impl IndexBuilder {
             }
             IndexBuildProfile::Erc20Transfer => {
                 let index_dir = partition_dir.join("indexes");
-                CompositeIndexBuilder::build_erc20_transfer_indexes(partition_dir, &index_dir)?;
+                fs::create_dir_all(&index_dir)?;
+                TransferBloom::build(partition_dir, &index_dir)?;
             }
         }
         Ok(())
@@ -60,7 +62,7 @@ impl IndexBuilder {
                 Self::build_missing_log_query_composites(partition_dir, &index_dir)?;
             }
             IndexBuildProfile::Erc20Transfer => {
-                Self::build_missing_erc20_transfer_composites(partition_dir, &index_dir)?;
+                Self::build_missing_erc20_transfer_indexes(partition_dir, &index_dir)?;
             }
         }
 
@@ -90,11 +92,7 @@ impl IndexBuilder {
                 "address_topic0_topic1.bptree",
                 "address_topic0_topic2.bptree",
             ],
-            IndexBuildProfile::Erc20Transfer => &[
-                "address_topic0.bptree",
-                "address_topic0_topic1.bptree",
-                "address_topic0_topic2.bptree",
-            ],
+            IndexBuildProfile::Erc20Transfer => &[TRANSFER_BLOOM_FILE],
         }
     }
 
@@ -145,21 +143,15 @@ impl IndexBuilder {
         if !index_dir.join("topic0_topic1.bptree").is_file() {
             CompositeIndexBuilder::build_topic0_topic1(partition_dir, index_dir)?;
         }
-        Self::build_missing_erc20_transfer_composites(partition_dir, index_dir)
+        Self::build_missing_erc20_transfer_indexes(partition_dir, index_dir)
     }
 
-    fn build_missing_erc20_transfer_composites(
+    fn build_missing_erc20_transfer_indexes(
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        if !index_dir.join("address_topic0.bptree").is_file() {
-            CompositeIndexBuilder::build_address_topic0(partition_dir, index_dir)?;
-        }
-        if !index_dir.join("address_topic0_topic1.bptree").is_file() {
-            CompositeIndexBuilder::build_address_topic0_topic1(partition_dir, index_dir)?;
-        }
-        if !index_dir.join("address_topic0_topic2.bptree").is_file() {
-            CompositeIndexBuilder::build_address_topic0_topic2(partition_dir, index_dir)?;
+        if !index_dir.join(TRANSFER_BLOOM_FILE).is_file() {
+            TransferBloom::build(partition_dir, index_dir)?;
         }
         Ok(())
     }

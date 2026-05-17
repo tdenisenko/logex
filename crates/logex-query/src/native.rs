@@ -1,9 +1,12 @@
+use std::io;
 use std::path::Path;
 
 use alloy_primitives::{Address, B256};
 use roaring::RoaringBitmap;
 
-use logex_index::{BTreeIndexReader, CompositeQuery};
+use logex_index::{
+    BTreeIndexReader, CompositeQuery, TRANSFER_BLOOM_FILE, TransferBloomReader, transfer_topic0,
+};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
 use logex_types::{LogRow, PartitionMeta};
@@ -138,6 +141,30 @@ pub fn candidate_row_ids(
     filter: &NativeLogFilter,
     use_indexes: bool,
 ) -> std::io::Result<Vec<u32>> {
+    candidate_row_ids_inner(dir, filter, use_indexes, false)
+}
+
+pub(crate) fn candidate_row_ids_after_bloom_prefilter(
+    dir: &Path,
+    filter: &NativeLogFilter,
+    use_indexes: bool,
+) -> std::io::Result<Vec<u32>> {
+    candidate_row_ids_inner(dir, filter, use_indexes, true)
+}
+
+fn candidate_row_ids_inner(
+    dir: &Path,
+    filter: &NativeLogFilter,
+    use_indexes: bool,
+    transfer_bloom_prechecked: bool,
+) -> std::io::Result<Vec<u32>> {
+    if use_indexes
+        && !transfer_bloom_prechecked
+        && erc20_transfer_bloom_excludes(&dir.join("indexes"), filter)?
+    {
+        return Ok(Vec::new());
+    }
+
     let reader = SegmentReader::open(dir)?;
     let row_count = reader.read_row_count()?;
     if row_count == 0 {
@@ -246,6 +273,7 @@ fn build_candidate_bitmap(
     let mut result: Option<RoaringBitmap> = None;
     let mut covered_addresses = false;
     let mut covered_topics = [false; 4];
+    let mut covered_block_range = false;
 
     if let Some(block_hash) = filter.block_hash {
         let block_hash_path = index_dir.join("block_hash.bptree");
@@ -338,6 +366,7 @@ fn build_candidate_bitmap(
                 result = Some(intersect_optional(result, bitmap));
                 covered_addresses = true;
                 covered_topics[0] = true;
+                covered_block_range = true;
             }
         }
         (Some(address), Some(topic0), _, _) => {
@@ -409,7 +438,7 @@ fn build_candidate_bitmap(
         result = Some(intersect_optional(result, topic_bitmap));
     }
 
-    if result.is_none() && (filter.from_block.is_some() || filter.to_block.is_some()) {
+    if !covered_block_range && (filter.from_block.is_some() || filter.to_block.is_some()) {
         let block_path = index_dir.join("block_number.bptree");
         if block_path.exists() {
             let reader = BTreeIndexReader::open(&block_path)?;
@@ -417,10 +446,13 @@ fn build_candidate_bitmap(
             let to_exclusive = filter.to_block.unwrap_or(u64::MAX - 1).saturating_add(1);
             let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
             result = Some(intersect_optional(result, bitmap));
+            if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+                return Ok(RoaringBitmap::new());
+            }
         }
     }
 
-    if result.is_none() && (filter.from_timestamp.is_some() || filter.to_timestamp.is_some()) {
+    if filter.from_timestamp.is_some() || filter.to_timestamp.is_some() {
         let timestamp_path = index_dir.join("timestamp.bptree");
         if timestamp_path.exists() {
             let reader = BTreeIndexReader::open(&timestamp_path)?;
@@ -431,12 +463,72 @@ fn build_candidate_bitmap(
                 .saturating_add(1);
             let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
             result = Some(intersect_optional(result, bitmap));
+            if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+                return Ok(RoaringBitmap::new());
+            }
         }
     }
 
     result = refine_candidate_bitmap_from_columns(segment_reader, filter, row_count, result)?;
 
     Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
+}
+
+fn erc20_transfer_bloom_excludes(index_dir: &Path, filter: &NativeLogFilter) -> io::Result<bool> {
+    let bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
+    if !bloom_path.is_file() {
+        return Ok(false);
+    }
+    let mut reader = TransferBloomReader::open(&bloom_path)?;
+    erc20_transfer_bloom_reader_excludes(&mut reader, filter)
+}
+
+pub(crate) fn erc20_transfer_bloom_exclusions(
+    index_dir: &Path,
+    filters: &[NativeLogFilter],
+) -> io::Result<Option<Vec<bool>>> {
+    let bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
+    if !bloom_path.is_file() {
+        return Ok(None);
+    }
+    let mut reader = TransferBloomReader::open(&bloom_path)?;
+    filters
+        .iter()
+        .map(|filter| erc20_transfer_bloom_reader_excludes(&mut reader, filter))
+        .collect::<io::Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn erc20_transfer_bloom_reader_excludes(
+    reader: &mut TransferBloomReader,
+    filter: &NativeLogFilter,
+) -> io::Result<bool> {
+    let (Some(address), Some(topic0)) = (
+        single_address(&filter.addresses),
+        single_topic(&filter.topics[0]),
+    ) else {
+        return Ok(false);
+    };
+    if B256::from(topic0) != transfer_topic0() {
+        return Ok(false);
+    }
+    let address = Address::from(address);
+    for topic_index in [1usize, 2usize] {
+        let Some(topics) = topic_values(&filter.topics[topic_index]) else {
+            continue;
+        };
+        let mut any_present = false;
+        for topic in topics {
+            if reader.may_contain(&address, topic_index, &B256::from(topic))? {
+                any_present = true;
+                break;
+            }
+        }
+        if !any_present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn refine_candidate_bitmap_from_columns(

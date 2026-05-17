@@ -161,6 +161,10 @@ pub enum Command {
         #[arg(long)]
         limit: Option<usize>,
 
+        /// Number of segment index builds to run concurrently.
+        #[arg(long, default_value = "1")]
+        jobs: usize,
+
         /// Only index segments whose block range overlaps this lower bound.
         #[arg(long)]
         from_block: Option<u64>,
