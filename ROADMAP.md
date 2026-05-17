@@ -108,7 +108,7 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 - Current branch: `fix/live-transfer-hook-controls`
 - New branch created this run: no
-- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`
+- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`, `9a51b97 fix: keep live hooks active in background tabs`
 - Pull request status: draft PR #88 is open and updated.
 - Merge status: blocked by user approval; this branch must not be merged until confirmed final.
 - Blockers: none currently.
