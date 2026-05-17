@@ -25,7 +25,6 @@ pub(super) struct HistoricalExtractedChunk {
 
 pub(super) struct HistoricalBatchWriter {
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
     write_buffer: Option<HistoricalWriteBuffer>,
     write_elapsed: Duration,
     floor: Option<ExecutionBlockMarker>,
@@ -111,13 +110,9 @@ impl HistoricalWriteBuffer {
 }
 
 impl HistoricalBatchWriter {
-    pub(super) fn new(
-        storage: Arc<RwLock<PartitionManager>>,
-        subscriptions: Option<SubscriptionManager>,
-    ) -> Self {
+    pub(super) fn new(storage: Arc<RwLock<PartitionManager>>) -> Self {
         Self {
             storage,
-            subscriptions,
             write_buffer: None,
             write_elapsed: Duration::ZERO,
             floor: None,
@@ -196,12 +191,8 @@ impl HistoricalBatchWriter {
         };
         let chunk = buffer.into_chunk();
 
-        let chunk_outcome = write_extracted_historical_chunk(
-            Arc::clone(&self.storage),
-            self.subscriptions.clone(),
-            chunk,
-        )
-        .await?;
+        let chunk_outcome =
+            write_extracted_historical_chunk(Arc::clone(&self.storage), chunk).await?;
         self.write_elapsed += chunk_outcome.write_elapsed;
         self.floor = chunk_outcome.floor;
         self.anchor = chunk_outcome.anchor;
@@ -300,11 +291,10 @@ impl SyncEngine {
 
 pub(super) async fn write_validated_historical_blocks(
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
     blocks: Vec<HistoricalValidatedBlock>,
 ) -> Result<HistoricalIngestOutcome> {
     let extracted = extract_validated_historical_blocks(blocks).await?;
-    write_extracted_historical_batch(storage, subscriptions, extracted).await
+    write_extracted_historical_batch(storage, extracted).await
 }
 
 pub(super) async fn extract_validated_historical_blocks(
@@ -360,10 +350,9 @@ pub(super) async fn extract_validated_historical_blocks(
 
 pub(super) async fn write_extracted_historical_batch(
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
     extracted: HistoricalExtractedBatch,
 ) -> Result<HistoricalIngestOutcome> {
-    let mut writer = HistoricalBatchWriter::new(storage, subscriptions);
+    let mut writer = HistoricalBatchWriter::new(storage);
     let write_chunks = coalesce_historical_write_chunks(extracted.chunks);
     for chunk in write_chunks {
         writer.push_chunk(chunk).await?;
@@ -436,7 +425,6 @@ fn next_historical_extract_task(
 
 async fn write_extracted_historical_chunk(
     storage: Arc<RwLock<PartitionManager>>,
-    subscriptions: Option<SubscriptionManager>,
     extracted: HistoricalExtractedChunk,
 ) -> Result<HistoricalChunkWriteOutcome> {
     tokio::task::spawn_blocking(move || -> Result<HistoricalChunkWriteOutcome> {
@@ -446,10 +434,6 @@ async fn write_extracted_historical_chunk(
             storage
                 .write_historical_batch(&extracted.rows)
                 .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
-
-            if let Some(ref subs) = subscriptions {
-                subs.notify(&extracted.rows);
-            }
         }
 
         storage

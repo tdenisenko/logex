@@ -387,6 +387,27 @@ curl -u logex:YOUR_PASSWORD \
   }'
 ```
 
+WebSocket ERC20 transfer hook:
+
+```json
+{
+  "type": "erc20Transfers",
+  "addresses": ["0xE6c031F4C63e76e453d9A0aAe566D06236d11F95"],
+  "tokenAddresses": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+  "minAmount": "0x0000000000000000000000000000000000000000000000000000000005f5e100",
+  "maxAmount": "0x000000000000000000000000000000000000000000000000000000003b9aca00"
+}
+```
+
+`addresses` are wallet addresses and match either ERC20 `from` or `to`.
+`tokenAddresses` is optional; omit it to watch matching transfers across all
+token contracts. `minAmount` and `maxAmount` are optional raw uint256 base-unit
+bounds. Matching notifications are streamed as JSON arrays containing token,
+sender, recipient, raw amount, timestamp, block, transaction, and log index
+fields. WebSocket subscriptions are for live ingested blocks; historical
+backfill remains queryable through SQL and JSON-RPC rather than replayed as
+alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } }`.
+
 Useful SQL columns:
 
 ```sql

@@ -4,13 +4,18 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `docs/cli-reference-help`. The current branch updates operator-facing CLI documentation and help text.
+Active branch: `feature/erc20-transfer-websocket`. The current branch adds live WebSocket hooks for ERC20 transfer notifications and a dashboard tester for those subscriptions.
 
 ## Completed Since Last Run
 
-- Updated `README.md` with the current CLI parameters, defaults, config keys, and run/indexing examples.
-- Expanded `logex --help` and subcommand help text for listener binding, checkpoint resolution, data directories, peer ports, and index maintenance.
-- Added CLI-help regression tests for public listener and index-maintenance options.
+- Added a typed `erc20Transfers` WebSocket subscription mode with wallet, optional token contract, and raw uint256 min/max amount filters.
+- Added live ERC20 transfer notifications with token, sender, recipient, raw amount, block, timestamp, transaction, and log index fields.
+- Added a dashboard tester for live ERC20 transfer hooks with persisted wallet/token filters and human-unit amount bounds converted through token decimals.
+- Kept legacy raw log WebSocket subscriptions compatible.
+- Prevented historical backfill from broadcasting WebSocket notifications, so transfer hooks only alert on live ingested blocks.
+- Documented the new WebSocket subscription shape in `README.md`.
+- Added focused server tests for ERC20 matching, amount bounds, subscription parsing, and notification serialization.
+- Deployed the branch to the live remote node and verified an authenticated WebSocket subscription against real post-sync data with wallet, token, min amount, and max amount filters.
 
 ## Remaining TODOs
 
@@ -31,6 +36,9 @@ Active branch: `docs/cli-reference-help`. The current branch updates operator-fa
 - Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
 - Query APIs bind to loopback by default. Public HTTP listeners require Basic auth, and public gRPC listeners require an explicit operator opt-in because gRPC is unauthenticated.
 - CLI and README examples should show public HTTP as an explicit operator choice using `--http-host 0.0.0.0` plus `--dashboard-password`.
+- WebSocket ERC20 transfer hooks use a dedicated `type: "erc20Transfers"` subscription instead of overloading `eth_getLogs` filters; this keeps wallet/token/amount alert semantics explicit while preserving legacy log streams.
+- WebSocket transfer hooks are live-only. Historical data remains available through SQL and JSON-RPC, but backfill does not replay as alert traffic.
+- Dashboard amount bounds are entered in token units and converted to raw uint256 values before subscription. If amount bounds are used with token filters, all selected tokens must share the same decimals to avoid ambiguous comparisons.
 
 ## Challenges and Resolutions
 
@@ -64,16 +72,28 @@ Active branch: `docs/cli-reference-help`. The current branch updates operator-fa
 - Challenge: The README and generated help text lagged behind the current listener hardening and index-maintenance parameters.
   - Resolution: Rebuilt the CLI reference from the actual clap definitions and added help-output tests for the important operator controls.
 
+- Challenge: Live ERC20 hooks could accidentally flood subscribers with historical backfill if they reused the existing storage broadcast path unchanged.
+  - Resolution: Removed historical subscription broadcasting and kept WebSocket notifications tied to live block ingestion.
+
+- Challenge: Human amount filters are token-decimal dependent, but the server should not need token metadata for correctness.
+  - Resolution: The server accepts raw uint256 min/max bounds; the dashboard tester converts human token-unit values using known or custom token decimals before subscribing.
+
+- Challenge: WebSocket hooks needed validation against real live block ingestion rather than only historical query data.
+  - Resolution: Ran a live remote probe that selected active recent ERC20 counterparties, subscribed with token and amount bounds, and verified real notifications from newly ingested blocks.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
 - Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
 - Searched CLI definitions and README command references for stale or missing parameter documentation.
 - Replaced obsolete query row-cap documentation with the current unlimited SQL endpoint behavior and dashboard `LIMIT 500` default.
+- Removed obsolete historical WebSocket subscription plumbing from the EL historical ingest path.
+- Reused the existing Ethereum address parser for WebSocket subscriptions instead of adding a second parser.
+- Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
 
 ## Git Workflow
 
-- Current branch: `docs/cli-reference-help`
+- Current branch: `feature/erc20-transfer-websocket`
 - New branch created this run: yes
 - Commits made during this run: pending
 - Pull request status: pending
@@ -87,4 +107,6 @@ Active branch: `docs/cli-reference-help`. The current branch updates operator-fa
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
 - Single checkpoint-sync URL mode remains available for compatibility and has the same trust assumption as before; use comma-separated URLs for quorum-based checkpoint resolution until LogEx operates a first-party checkpoint source.
 - HTTP Basic auth is not transport encryption; public HTTP deployments still need firewalling, SSH tunneling, or TLS termination even though localhost binding is now the default.
+- WebSocket transfer hooks notify after verified live block ingestion, not pending mempool transfers.
+- WebSocket missed-event replay is not implemented; clients that disconnect should query historical logs for the missed range after reconnecting.
 - Verification-critical security review is still required before a production-ready release.
