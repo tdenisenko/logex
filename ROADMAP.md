@@ -4,13 +4,13 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `fix/grouped-balance-query`. PR #84 was merged; the current branch fixes grouped exact `SUM(data)` balance queries.
+Active branch: `docs/cli-reference-help`. The current branch updates operator-facing CLI documentation and help text.
 
 ## Completed Since Last Run
 
-- Merged the listener-policy hardening PR after CI passed.
-- Added native grouped exact `SUM(data)` support for ERC20 balance queries grouped by token contract, including `HAVING` and aggregate `ORDER BY`.
-- Added regression coverage for the failing grouped balance query shape.
+- Updated `README.md` with the current CLI parameters, defaults, config keys, and run/indexing examples.
+- Expanded `logex --help` and subcommand help text for listener binding, checkpoint resolution, data directories, peer ports, and index maintenance.
+- Added CLI-help regression tests for public listener and index-maintenance options.
 
 ## Remaining TODOs
 
@@ -30,6 +30,7 @@ Active branch: `fix/grouped-balance-query`. PR #84 was merged; the current branc
 - Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
 - Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
 - Query APIs bind to loopback by default. Public HTTP listeners require Basic auth, and public gRPC listeners require an explicit operator opt-in because gRPC is unauthenticated.
+- CLI and README examples should show public HTTP as an explicit operator choice using `--http-host 0.0.0.0` plus `--dashboard-password`.
 
 ## Challenges and Resolutions
 
@@ -60,16 +61,19 @@ Active branch: `fix/grouped-balance-query`. PR #84 was merged; the current branc
 - Challenge: Token balance queries using `GROUP BY address`, `HAVING`, and `ORDER BY` fell back to DataFusion, which cannot sum hex-encoded `data` as exact uint256 values.
   - Resolution: Extended the native exact aggregate path to group by token contract and apply aggregate filtering and ordering before pagination.
 
+- Challenge: The README and generated help text lagged behind the current listener hardening and index-maintenance parameters.
+  - Resolution: Rebuilt the CLI reference from the actual clap definitions and added help-output tests for the important operator controls.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
 - Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
-- Searched grouped aggregate parsing and execution paths for superseded fallbacks and debug-only code.
-- No debug-only code is intentionally left in the grouped balance query path.
+- Searched CLI definitions and README command references for stale or missing parameter documentation.
+- Replaced obsolete query row-cap documentation with the current unlimited SQL endpoint behavior and dashboard `LIMIT 500` default.
 
 ## Git Workflow
 
-- Current branch: `fix/grouped-balance-query`
+- Current branch: `docs/cli-reference-help`
 - New branch created this run: yes
 - Commits made during this run: pending
 - Pull request status: pending

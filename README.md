@@ -122,8 +122,10 @@ The query engine exposes:
 - Dashboard and metrics: `GET /status`
 - Health check: `GET /health`
 
-Query responses are capped at 10,000 rows. The default page size is 50 rows.
-Use `limit` and `offset` for pagination.
+The SQL endpoint has no hidden server-side row cap. Dashboard-generated queries
+default to `LIMIT 500`; remove or change the SQL `LIMIT` deliberately for
+larger exports. HTTP query requests can also use `limit` and `offset` for
+transport pagination.
 
 ## Comparison
 
@@ -185,13 +187,32 @@ A fresh mainnet data directory needs a recent weak-subjectivity checkpoint.
 You can provide one directly, or let LogEx resolve the latest finalized
 checkpoint from a trusted checkpoint-sync or Beacon API endpoint.
 
+Local-only dashboard and APIs:
+
 ```bash
 ./target/release/logex \
-  --data-dir ./logex-data \
-  --checkpoint-sync-url https://YOUR-CHECKPOINT-ENDPOINT \
+  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
+  sync
+```
+
+The default data directory is OS-specific:
+
+| OS | Default data directory |
+| --- | --- |
+| Linux | `$XDG_DATA_HOME/logex`, or `~/.local/share/logex` when `XDG_DATA_HOME` is unset |
+| macOS | `~/Library/Application Support/LogEx` |
+| Windows | `%APPDATA%\LogEx` |
+
+Server run with an explicit data directory and public dashboard:
+
+```bash
+./target/release/logex \
+  --data-dir /var/lib/logex/mainnet \
+  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
   sync \
-  --http-port 8577 \
-  --grpc-port 8578 \
+  --http-host 0.0.0.0 \
+  --http-port 18683 \
+  --dashboard-password 'use-a-long-random-password' \
   --discovery-port 30303 \
   --p2p-port 30303 \
   --cl-discovery-port 9000 \
@@ -206,61 +227,90 @@ Open the dashboard at:
 http://127.0.0.1:8577/
 ```
 
-For a public server, prefer binding behind a firewall, SSH tunnel, or reverse
-proxy with TLS. If exposing the dashboard or APIs outside localhost, set a
-password:
-
-```bash
-./target/release/logex \
-  --data-dir /var/lib/logex/mainnet \
-  --checkpoint-sync-url https://YOUR-CHECKPOINT-ENDPOINT \
-  sync \
-  --dashboard-password 'use-a-long-random-password'
-```
-
-Authenticated HTTP requests use Basic auth with username `logex`.
+When `--http-host 0.0.0.0` is used, open the dashboard at
+`http://SERVER_IP:PORT/`. Public HTTP listeners require
+`--dashboard-password`. Authenticated HTTP requests use Basic auth with username
+`logex`. Prefer firewalling, SSH tunneling, or TLS termination for public
+servers.
 
 ## CLI Reference
 
+Use `--help` at any level:
+
+```bash
+./target/release/logex --help
+./target/release/logex sync --help
+./target/release/logex build-indexes --help
+./target/release/logex compact --help
+```
+
 Global options:
 
-| Option | Use |
-| --- | --- |
-| `--data-dir <PATH>` | Storage directory. Defaults to the OS application data directory. Use an explicit path for servers. |
-| `--log-level <FILTER>` | Tracing filter. Examples: `info`, `debug`, `info,logex_sync=debug`. |
-| `--partition-target-rows <N>` | Rows per segment before sealing. Default is `1000000`; larger values reduce segment count, smaller values seal faster. |
-| `--config <PATH>` | Optional TOML config file. CLI flags override only where explicitly supplied by the command shape. |
-| `--checkpoint <ROOT>` | Weak-subjectivity checkpoint root, or `slot@root`, or a descriptor file path. Required for a fresh data dir unless `--checkpoint-sync-url` resolves one. |
-| `--checkpoint-sync-url <URL>` | Beacon/checkpoint endpoint used to fetch a finalized checkpoint or validate a user-supplied checkpoint for freshness. |
+| Option | Default | Use |
+| --- | --- | --- |
+| `--data-dir <PATH>` | OS app data directory | Storage directory. Use an explicit path for servers, backups, and systemd services. |
+| `--log-level <FILTER>` | `info` | Tracing filter. Examples: `debug`, `info,logex_sync=debug`, `info,discv5=error`. The effective default suppresses noisy discovery warnings. |
+| `--partition-target-rows <N>` | `1000000` | Target log rows per storage segment before sealing and compaction. Larger values reduce segment count; smaller values seal sooner. |
+| `--config <PATH>` | none | Optional TOML config file. Supported keys are listed below. |
+| `--checkpoint <CHECKPOINT>` | none | Weak-subjectivity checkpoint root, `slot@root`, or descriptor file path. Required for a fresh data directory unless `--checkpoint-sync-url` resolves one. |
+| `--checkpoint-sync-url <URLS>` | none | Beacon/checkpoint endpoint used to fetch or validate a recent finalized checkpoint. Use comma-separated URLs to require multi-source agreement. |
+| `--help` | n/a | Print help for the root command or selected subcommand. |
+| `--version` | n/a | Print the LogEx binary version. |
 
 `sync` options:
 
-| Option | Use |
-| --- | --- |
-| `--http-port <PORT>` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Default `8577`. |
-| `--grpc-port <PORT>` | gRPC server port. Default `8578`. |
-| `--discovery-port <PORT>` | EL discv4 UDP discovery port. Default `30303`. |
-| `--p2p-port <PORT>` | EL TCP listener port. Default `30303`. |
-| `--max-peers <N>` | Maximum EL peer sessions. Default `100`. Higher values help only if CPU, memory, and bandwidth can keep up. |
-| `--nat <MODE>` | Advertised EL external address. Use `extip:<ip>` or `extaddr:<domain>` on public servers for better inbound retention. |
-| `--cl-discovery-port <PORT>` | CL discv5 UDP discovery port. Default `9000`. |
-| `--cl-p2p-port <PORT>` | CL libp2p TCP port advertised in the local ENR. Default `9000`. |
-| `--cl-max-peers <N>` | Maximum retained CL peers. Default `32`. |
-| `--disable-dashboard` | Disable the HTML dashboard while leaving query APIs available. |
-| `--dashboard-password <PASSWORD>` | Protect dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes with Basic auth. |
+| Option | Default | Use |
+| --- | --- | --- |
+| `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
+| `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
+| `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
+| `--grpc-port <PORT>` | `8578` | gRPC server port for `LogExService.Query`, `GetLogs`, `StreamLogs`, and `GetHeadBlock`. |
+| `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port. |
+| `--p2p-port <PORT>` | `30303` | Execution-layer TCP listener port for the eth protocol. |
+| `--max-peers <N>` | `100` | Maximum EL peer sessions. Higher values help only if CPU, memory, bandwidth, and disk can keep up. |
+| `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
+| `--cl-discovery-port <PORT>` | `9000` | Consensus-layer discv5 UDP discovery port. |
+| `--cl-p2p-port <PORT>` | `9000` | Consensus-layer libp2p TCP port advertised in the local ENR. |
+| `--cl-max-peers <N>` | `32` | Maximum dialable CL peers retained from discovery. |
+| `--disable-dashboard` | false | Disable the embedded HTML dashboard while leaving HTTP query APIs available. |
+| `--dashboard-password <PASSWORD>` | none | Require HTTP Basic auth for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Username is `logex`. Required for public HTTP. |
+| `--allow-public-grpc` | false | Allow gRPC to bind to a non-loopback host. This only disables LogEx's startup guard; use a private network or firewall. |
 
-Storage commands:
+`build-indexes` options:
+
+| Option | Default | Use |
+| --- | --- | --- |
+| `--sealed` | false | Include sealed historical segments. |
+| `--hot` | implied when `--sealed` is absent | Include the active hot segment. When neither `--hot` nor `--sealed` is set, hot is implied. |
+| `--profile <PROFILE>` | `all` | Index profile to build. Values: `all`, `log-query`, `erc20-transfer`. |
+| `--missing-only` | false | Skip segments that already have every index required by the selected profile. |
+| `--limit <N>` | none | Maximum number of matching segments to index. |
+| `--jobs <N>` | `1` | Concurrent segment index builds, capped by available CPUs and matching segment count. |
+| `--from-block <N>` | none | Only index segments whose block range overlaps this lower bound. |
+| `--to-block <N>` | none | Only index segments whose block range overlaps this upper bound. |
+| `--from-timestamp <SECONDS>` | none | Only index segments whose timestamp range overlaps this lower UTC Unix timestamp. |
+| `--to-timestamp <SECONDS>` | none | Only index segments whose timestamp range overlaps this upper UTC Unix timestamp. |
+
+Other commands:
+
+| Command | Options | Use |
+| --- | --- | --- |
+| `compact` | `--limit <N>` | Compact eligible sealed storage segments. Omit `--limit` to compact all eligible segments. |
+| `info` | none | Show storage, checkpoint, and indexed coverage statistics for the data directory. |
+
+Command samples:
 
 ```bash
 ./target/release/logex --data-dir ./logex-data info
-./target/release/logex --data-dir ./logex-data build-indexes
+./target/release/logex --data-dir ./logex-data build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
+./target/release/logex --data-dir ./logex-data build-indexes --sealed --from-block 12000000 --to-block 25100000
 ./target/release/logex --data-dir ./logex-data compact --limit 20
 ```
 
-`info` prints storage and checkpoint state. `build-indexes` rebuilds indexes on
-the hot partition. `compact` rewrites eligible sealed segments into the current
-compression profile; normal historical sync already writes compacted sealed
-segments.
+Normal historical sync already writes compacted sealed segments and continuously
+builds the current query index profile. `build-indexes` is mainly for older data
+directories, interrupted indexing, or changed index profiles. `compact` is
+mainly for older data directories or changed compression profiles.
 
 ## Config File
 
@@ -272,9 +322,28 @@ log_level = "info"
 partition_target_rows = 1000000
 checkpoint_sync_url = "https://YOUR-CHECKPOINT-ENDPOINT"
 nat = "extip:203.0.113.10"
+http_host = "127.0.0.1"
+grpc_host = "127.0.0.1"
+allow_public_grpc = false
 dashboard_enabled = true
 dashboard_password = "use-a-long-random-password"
 ```
+
+Supported config keys:
+
+| Key | Type | Use |
+| --- | --- | --- |
+| `data_dir` | string path | Storage directory. |
+| `log_level` | string | Tracing filter. |
+| `partition_target_rows` | integer | Target rows per sealed segment. |
+| `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
+| `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
+| `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |
+| `http_host` | IP string | HTTP bind host. |
+| `grpc_host` | IP string | gRPC bind host. |
+| `allow_public_grpc` | boolean | Permit non-loopback gRPC binding. |
+| `dashboard_enabled` | boolean | Enable or disable the embedded dashboard. |
+| `dashboard_password` | string | HTTP Basic auth password for protected HTTP routes. |
 
 Run with:
 
