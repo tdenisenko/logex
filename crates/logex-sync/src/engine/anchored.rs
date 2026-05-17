@@ -937,7 +937,9 @@ impl SyncEngine {
                 } else {
                     self.set_runtime_state(NodeState::WaitingForConsensus);
                 }
-                if self.ingest_historical_backfill_batch().await? {
+                if !self.config.disable_historical_sync
+                    && self.ingest_historical_backfill_batch().await?
+                {
                     continue;
                 }
                 if cancelable(
@@ -954,11 +956,12 @@ impl SyncEngine {
 
             let forward_progressed = self.ingest_anchored_blocks(anchors).await?;
             let (current, target) = self.sync_cursor();
-            let historical_progressed = if should_run_historical_backfill(
-                current,
-                target,
-                LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD,
-            ) {
+            let historical_progressed = if !self.config.disable_historical_sync
+                && should_run_historical_backfill(
+                    current,
+                    target,
+                    LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD,
+                ) {
                 self.ingest_historical_backfill_batch().await?
             } else {
                 false

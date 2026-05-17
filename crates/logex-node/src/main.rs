@@ -69,6 +69,7 @@ fn main() {
             disable_dashboard,
             dashboard_password,
             allow_public_grpc,
+            disable_historical_sync,
         } => {
             let nat = if nat == "any" {
                 config_nat.unwrap_or(nat)
@@ -115,6 +116,7 @@ fn main() {
                 cl_max_peers,
                 dashboard_enabled,
                 dashboard_password,
+                disable_historical_sync,
             }));
         }
         Command::BuildIndexes {
