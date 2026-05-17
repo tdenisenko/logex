@@ -1428,7 +1428,7 @@ var LIVE_TRANSFER_STORAGE_KEY = 'logex.liveErc20Transfers.v1';
 var QUERY_HISTORY_LIMIT = 50;
 var LIVE_TRANSFER_LIMIT = 10000;
 var LIVE_TRANSFER_INACTIVE_MS = 60000;
-var LIVE_TRANSFER_HEARTBEAT_MS = 20000;
+var LIVE_TRANSFER_STATE_REFRESH_MS = 20000;
 var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
 var DEFAULT_TOKEN_DECIMALS = 18;
@@ -1537,8 +1537,7 @@ var liveTransferSocket = null;
 var liveTransferManualDisconnect = false;
 var liveTransferActive = false;
 var liveTransferClientId = null;
-var liveTransferHeartbeatTimer = null;
-var liveTransferInactiveTimer = null;
+var liveTransferStateRefreshTimer = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -2554,7 +2553,7 @@ function maybeResumeLiveTransfers() {
   if (lastSeenAt > 0 && Date.now() - lastSeenAt > LIVE_TRANSFER_INACTIVE_MS) {
     liveTransferActive = false;
     saveLiveTransferState();
-    setLiveTransferStatus('Previous live subscription expired after browser inactivity.');
+    setLiveTransferStatus('Previous live subscription expired after the browser connection was closed.');
     return;
   }
   connectLiveTransfers({ resuming: true });
@@ -2755,29 +2754,18 @@ function setLiveTransferConnected(connected, label) {
   byId('liveDisconnectBtn').disabled = !connected;
 }
 
-function startLiveTransferHeartbeat() {
-  stopLiveTransferHeartbeat();
-  liveTransferHeartbeatTimer = setInterval(function() {
-    if (!liveTransferSocket || liveTransferSocket.readyState !== WebSocket.OPEN || document.hidden) return;
-    liveTransferSocket.send(JSON.stringify({
-      type: 'heartbeat',
-      subscriptionId: liveTransferSessionId()
-    }));
+function startLiveTransferStateRefresh() {
+  stopLiveTransferStateRefresh();
+  liveTransferStateRefreshTimer = setInterval(function() {
+    if (!liveTransferSocket || liveTransferSocket.readyState !== WebSocket.OPEN) return;
     saveLiveTransferState();
-  }, LIVE_TRANSFER_HEARTBEAT_MS);
+  }, LIVE_TRANSFER_STATE_REFRESH_MS);
 }
 
-function stopLiveTransferHeartbeat() {
-  if (liveTransferHeartbeatTimer != null) {
-    clearInterval(liveTransferHeartbeatTimer);
-    liveTransferHeartbeatTimer = null;
-  }
-}
-
-function clearLiveTransferInactiveTimer() {
-  if (liveTransferInactiveTimer != null) {
-    clearTimeout(liveTransferInactiveTimer);
-    liveTransferInactiveTimer = null;
+function stopLiveTransferStateRefresh() {
+  if (liveTransferStateRefreshTimer != null) {
+    clearInterval(liveTransferStateRefreshTimer);
+    liveTransferStateRefreshTimer = null;
   }
 }
 
@@ -2805,7 +2793,6 @@ function connectLiveTransfers(options) {
   }
 
   liveTransferManualDisconnect = false;
-  clearLiveTransferInactiveTimer();
   var socket = new WebSocket(websocketUrl());
   liveTransferSocket = socket;
   setLiveTransferConnected(true, 'Connecting...');
@@ -2813,7 +2800,7 @@ function connectLiveTransfers(options) {
 
   socket.onopen = function() {
     socket.send(JSON.stringify(payload));
-    startLiveTransferHeartbeat();
+    startLiveTransferStateRefresh();
     saveLiveTransferState();
   };
   socket.onmessage = function(event) {
@@ -2827,7 +2814,7 @@ function connectLiveTransfers(options) {
   socket.onclose = function() {
     if (liveTransferSocket !== socket) return;
     liveTransferSocket = null;
-    stopLiveTransferHeartbeat();
+    stopLiveTransferStateRefresh();
     setLiveTransferConnected(false);
     setLiveTransferStatus(liveTransferManualDisconnect ? 'Disconnected.' : 'Disconnected from live transfers.', !liveTransferManualDisconnect);
     liveTransferManualDisconnect = false;
@@ -2841,8 +2828,7 @@ function disconnectLiveTransfers() {
   }
   liveTransferManualDisconnect = true;
   setLiveTransferActive(false);
-  stopLiveTransferHeartbeat();
-  clearLiveTransferInactiveTimer();
+  stopLiveTransferStateRefresh();
   liveTransferSocket.close();
 }
 
@@ -4038,24 +4024,6 @@ byId('liveTransferTable').addEventListener('keydown', function(event) {
 });
 
 document.addEventListener('visibilitychange', function() {
-  if (document.hidden) {
-    if (liveTransferSocket) {
-      clearLiveTransferInactiveTimer();
-      liveTransferInactiveTimer = setTimeout(function() {
-        setLiveTransferStatus('Disconnected after browser inactivity.');
-        disconnectLiveTransfers();
-      }, LIVE_TRANSFER_INACTIVE_MS);
-    }
-    saveLiveTransferState();
-    return;
-  }
-  clearLiveTransferInactiveTimer();
-  if (liveTransferSocket && liveTransferSocket.readyState === WebSocket.OPEN) {
-    liveTransferSocket.send(JSON.stringify({
-      type: 'heartbeat',
-      subscriptionId: liveTransferSessionId()
-    }));
-  }
   saveLiveTransferState();
 });
 

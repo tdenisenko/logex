@@ -22,7 +22,6 @@ const BROADCAST_CAPACITY: usize = 4096;
 const LIVE_TRANSFER_CHANNEL_CAPACITY: usize = 1024;
 const LIVE_TRANSFER_HISTORY_LIMIT: usize = 10_000;
 const DASHBOARD_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
-const DASHBOARD_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 static ERC20_TRANSFER_TOPIC: LazyLock<B256> =
     LazyLock::new(|| keccak256(b"Transfer(address,address,uint256)"));
 
@@ -226,7 +225,7 @@ pub(crate) struct SubscribeRequest {
     /// Optional id used to resume server-backed ERC20 transfer sessions.
     #[serde(default, alias = "clientId")]
     subscription_id: Option<String>,
-    /// Session lifetime. Dashboard sessions expire after browser inactivity; service sessions do not.
+    /// Session lifetime. Dashboard sessions expire after the browser WebSocket disconnects; service sessions do not.
     #[serde(default, alias = "subscriptionScope")]
     scope: LiveSubscriptionScope,
     /// Backward-compatible way for non-UI clients to request a service session.
@@ -466,7 +465,8 @@ pub async fn handle_ws_upgrade(
 ///
 /// This endpoint is intended for non-dashboard clients that need a subscription to keep collecting
 /// matching live transfers while the LogEx process is running, even if no WebSocket is currently
-/// attached. Dashboard-created sessions use `/ws` and expire after browser inactivity.
+/// attached. Dashboard-created sessions use `/ws` and expire after the browser WebSocket
+/// disconnects.
 pub(crate) async fn handle_live_transfer_subscribe(
     State(state): State<Arc<AppState>>,
     Json(mut request): Json<SubscribeRequest>,
@@ -672,21 +672,8 @@ async fn handle_live_transfer_ws(
         return;
     }
 
-    let mut last_dashboard_heartbeat = Instant::now();
-    let mut heartbeat_check = tokio::time::interval(DASHBOARD_HEARTBEAT_CHECK_INTERVAL);
-    heartbeat_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     loop {
         tokio::select! {
-            _ = heartbeat_check.tick(), if scope == LiveSubscriptionScope::Dashboard => {
-                if last_dashboard_heartbeat.elapsed() > DASHBOARD_SESSION_TIMEOUT {
-                    tracing::debug!(
-                        subscription_id = %attachment.id,
-                        "closing inactive dashboard live transfer subscription"
-                    );
-                    break;
-                }
-            }
             result = attachment.receiver.recv() => {
                 match result {
                     Ok(notifications) => {
@@ -713,9 +700,6 @@ async fn handle_live_transfer_ws(
                         if socket.send(Message::Pong(data.clone())).await.is_err() =>
                     {
                         break;
-                    }
-                    Some(Ok(Message::Text(text))) if is_live_transfer_heartbeat(&text, &attachment.id) => {
-                        last_dashboard_heartbeat = Instant::now();
                     }
                     _ => {}
                 }
@@ -783,25 +767,6 @@ async fn receive_subscription(socket: &mut WebSocket) -> Option<SubscribeRequest
         }
         _ => None,
     }
-}
-
-fn is_live_transfer_heartbeat(text: &str, expected_id: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return false;
-    };
-    let is_heartbeat = value
-        .get("type")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value == "heartbeat");
-    if !is_heartbeat {
-        return false;
-    }
-    value
-        .get("subscriptionId")
-        .or_else(|| value.get("clientId"))
-        .and_then(|value| value.as_str())
-        .and_then(|value| normalize_subscription_id(value.to_string()))
-        .is_some_and(|id| id == expected_id)
 }
 
 fn normalize_subscription_id(id: String) -> Option<String> {
@@ -1037,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dashboard_live_transfer_session_replays_and_expires() {
+    fn test_dashboard_live_transfer_session_replays_and_expires_after_detach() {
         let mgr = SubscriptionManager::new();
         let tracked = Address::repeat_byte(0xA1);
         let token = Address::repeat_byte(0xBB);
@@ -1063,6 +1028,7 @@ mod tests {
         let snapshot = mgr.live_transfer_session("dashboard-1").unwrap();
         assert_eq!(snapshot.notifications.len(), 1);
         assert_eq!(snapshot.active_connections, 1);
+        assert_eq!(snapshot.expires_in_seconds, None);
 
         mgr.detach_live_transfer_session("dashboard-1");
         {
@@ -1101,26 +1067,6 @@ mod tests {
         assert_eq!(snapshot.scope, LiveSubscriptionScope::Service);
         assert_eq!(snapshot.notifications.len(), 1);
         assert_eq!(snapshot.expires_in_seconds, None);
-    }
-
-    #[test]
-    fn test_live_transfer_heartbeat_requires_matching_id() {
-        assert!(is_live_transfer_heartbeat(
-            r#"{"type":"heartbeat","subscriptionId":"dashboard-1"}"#,
-            "dashboard-1"
-        ));
-        assert!(is_live_transfer_heartbeat(
-            r#"{"type":"heartbeat","clientId":"dashboard-1"}"#,
-            "dashboard-1"
-        ));
-        assert!(!is_live_transfer_heartbeat(
-            r#"{"type":"heartbeat","subscriptionId":"other"}"#,
-            "dashboard-1"
-        ));
-        assert!(!is_live_transfer_heartbeat(
-            r#"{"type":"erc20Transfers","subscriptionId":"dashboard-1"}"#,
-            "dashboard-1"
-        ));
     }
 
     #[tokio::test]

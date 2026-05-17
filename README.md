@@ -416,7 +416,8 @@ alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } 
 Dashboard live-transfer sessions send `subscriptionScope: "dashboard"` and a
 browser-generated `subscriptionId`. They retain recent notifications in server
 memory across page refreshes and expire after about one minute without a visible
-browser heartbeat. Non-dashboard services can create process-lifetime
+browser WebSocket connection. Background or unfocused tabs remain subscribed.
+Non-dashboard services can create process-lifetime
 subscriptions over HTTP:
 
 ```bash
