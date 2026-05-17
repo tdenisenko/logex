@@ -4,16 +4,13 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `hardening/release-readiness-smokes`. PR #82 and PR #83 were merged; the current PR covers release listener-policy hardening.
+Active branch: `fix/grouped-balance-query`. PR #84 was merged; the current branch fixes grouped exact `SUM(data)` balance queries.
 
 ## Completed Since Last Run
 
-- Merged the query workbench PR after CI passed.
-- Added comma-separated checkpoint-sync source support so operators can require a quorum of Beacon API/checkpoint-sync endpoints before trusting a resolved checkpoint.
-- Fresh checkpoint resolution now uses the lowest finalized slot visible across successful sources, then verifies that the same slot/root reaches quorum.
-- User-supplied inline checkpoints are validated against the configured source quorum, and freshness is checked against the newest finalized slot returned by successful sources.
-- Made HTTP and gRPC query listeners bind to loopback by default.
-- Added explicit public-listener guards: public HTTP requires dashboard auth, and public gRPC requires an explicit allow flag.
+- Merged the listener-policy hardening PR after CI passed.
+- Added native grouped exact `SUM(data)` support for ERC20 balance queries grouped by token contract, including `HAVING` and aggregate `ORDER BY`.
+- Added regression coverage for the failing grouped balance query shape.
 
 ## Remaining TODOs
 
@@ -28,6 +25,7 @@ Active branch: `hardening/release-readiness-smokes`. PR #82 and PR #83 were merg
 - Bounded log queries prune whole segments with metadata first, then use indexes where available, then apply row-level checks for correctness.
 - Common ERC20 Transfer and Approval topic filtering uses compact per-segment bloom indexes by default instead of large exact composite indexes; this keeps storage growth practical while preserving correctness through row rechecks.
 - `SUM(data)` uses a native exact aggregate path because Ethereum event `data` is hex-encoded `uint256`; results are returned as exact decimal strings.
+- Grouped `SUM(data)` balance queries stay on the native exact aggregate path when grouped by `address`, so token balances do not fall back to text-based SQL aggregation.
 - `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
 - Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
 - Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
@@ -59,16 +57,19 @@ Active branch: `hardening/release-readiness-smokes`. PR #82 and PR #83 were merg
 - Challenge: The dashboard and query APIs were easy to expose accidentally because listeners bound to all interfaces by default.
   - Resolution: Changed HTTP and gRPC defaults to loopback and added startup validation for intentionally public listeners.
 
+- Challenge: Token balance queries using `GROUP BY address`, `HAVING`, and `ORDER BY` fell back to DataFusion, which cannot sum hex-encoded `data` as exact uint256 values.
+  - Resolution: Extended the native exact aggregate path to group by token contract and apply aggregate filtering and ordering before pagination.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
 - Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
-- Searched checkpoint resolution, query execution, index building, background indexing, listener configuration, HTTP shutdown, and disk guard paths for debug-only or superseded code.
-- No debug-only code is intentionally left in the checkpoint or query path.
+- Searched grouped aggregate parsing and execution paths for superseded fallbacks and debug-only code.
+- No debug-only code is intentionally left in the grouped balance query path.
 
 ## Git Workflow
 
-- Current branch: `hardening/release-readiness-smokes`
+- Current branch: `fix/grouped-balance-query`
 - New branch created this run: yes
 - Commits made during this run: pending
 - Pull request status: pending
