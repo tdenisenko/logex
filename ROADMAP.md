@@ -12,6 +12,7 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Added dashboard heartbeat and inactivity handling so browser-created live subscriptions expire after one minute without a visible tab.
 - Added protected HTTP endpoints for non-dashboard ERC20 transfer service subscriptions that persist until explicit deletion or process restart.
 - Documented the live transfer service subscription API in the README.
+- Deployed the updated live transfer session behavior to the remote test node and verified refresh resume plus service-subscription retention on live data.
 
 ## Remaining TODOs
 
@@ -107,8 +108,8 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 - Current branch: `fix/live-transfer-hook-controls`
 - New branch created this run: no
-- Commits made during this run: pending
-- Pull request status: draft PR #88 is open and will be updated after commit/push.
+- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`
+- Pull request status: draft PR #88 is open and updated.
 - Merge status: blocked by user approval; this branch must not be merged until confirmed final.
 - Blockers: none currently.
 
