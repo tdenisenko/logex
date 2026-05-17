@@ -4,18 +4,14 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `feature/erc20-transfer-websocket`. The current branch adds live WebSocket hooks for ERC20 transfer notifications and a dashboard tester for those subscriptions.
+Active branch: `fix/live-transfer-hook-controls`. The current branch tightens the live ERC20 transfer hook controls before the feature is finalized.
 
 ## Completed Since Last Run
 
-- Added a typed `erc20Transfers` WebSocket subscription mode with wallet, optional token contract, and raw uint256 min/max amount filters.
-- Added live ERC20 transfer notifications with token, sender, recipient, raw amount, block, timestamp, transaction, and log index fields.
-- Added a dashboard tester for live ERC20 transfer hooks with persisted wallet/token filters and human-unit amount bounds converted through token decimals.
-- Kept legacy raw log WebSocket subscriptions compatible.
-- Prevented historical backfill from broadcasting WebSocket notifications, so transfer hooks only alert on live ingested blocks.
-- Documented the new WebSocket subscription shape in `README.md`.
-- Added focused server tests for ERC20 matching, amount bounds, subscription parsing, and notification serialization.
-- Deployed the branch to the live remote node and verified an authenticated WebSocket subscription against real post-sync data with wallet, token, min amount, and max amount filters.
+- Allowed ERC20 transfer WebSocket subscriptions to track all wallet addresses for selected token contracts.
+- Kept empty live transfer subscriptions invalid when both wallet and token filters are missing.
+- Moved the Live ERC20 Transfers panel after Query History.
+- Stabilized the live transfer action row and made amount min/max controls the same width.
 
 ## Remaining TODOs
 
@@ -39,6 +35,7 @@ Active branch: `feature/erc20-transfer-websocket`. The current branch adds live 
 - WebSocket ERC20 transfer hooks use a dedicated `type: "erc20Transfers"` subscription instead of overloading `eth_getLogs` filters; this keeps wallet/token/amount alert semantics explicit while preserving legacy log streams.
 - WebSocket transfer hooks are live-only. Historical data remains available through SQL and JSON-RPC, but backfill does not replay as alert traffic.
 - Dashboard amount bounds are entered in token units and converted to raw uint256 values before subscription. If amount bounds are used with token filters, all selected tokens must share the same decimals to avoid ambiguous comparisons.
+- ERC20 transfer hooks require at least one filter dimension: wallet addresses, token addresses, or both. Token-only subscriptions intentionally mean every transfer for the selected token contracts.
 
 ## Challenges and Resolutions
 
@@ -81,6 +78,9 @@ Active branch: `feature/erc20-transfer-websocket`. The current branch adds live 
 - Challenge: WebSocket hooks needed validation against real live block ingestion rather than only historical query data.
   - Resolution: Ran a live remote probe that selected active recent ERC20 counterparties, subscribed with token and amount bounds, and verified real notifications from newly ingested blocks.
 
+- Challenge: The live transfer status element reused the generic `.error` class, which hid it and caused the buttons to shift.
+  - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -90,14 +90,15 @@ Active branch: `feature/erc20-transfer-websocket`. The current branch adds live 
 - Removed obsolete historical WebSocket subscription plumbing from the EL historical ingest path.
 - Reused the existing Ethereum address parser for WebSocket subscriptions instead of adding a second parser.
 - Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
+- Rechecked the live transfer WebSocket and dashboard paths for obsolete empty-filter assumptions.
 
 ## Git Workflow
 
-- Current branch: `feature/erc20-transfer-websocket`
+- Current branch: `fix/live-transfer-hook-controls`
 - New branch created this run: yes
 - Commits made during this run: pending
 - Pull request status: pending
-- Merge status: pending
+- Merge status: blocked by user approval; this branch must not be merged until confirmed final.
 - Blockers: none currently.
 
 ## Known Issues or Risks

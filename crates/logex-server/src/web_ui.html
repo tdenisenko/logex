@@ -745,18 +745,23 @@
     box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
   }
 
-  .live-token-details, .live-transfer-filters {
+  .live-token-details {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr);
     gap: 12px;
   }
 
-  .live-transfer-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  .live-transfer-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
-    flex-wrap: wrap;
+  }
+
+  .live-transfer-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
   }
 
   .live-transfer-buttons {
@@ -768,9 +773,11 @@
   .live-transfer-status {
     color: var(--muted);
     font-size: var(--font-body);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
-  .live-transfer-status.error {
+  .live-transfer-status.is-error {
     color: #ffd3d3;
   }
 
@@ -1049,7 +1056,7 @@
       flex-direction: column;
     }
 
-    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups, .live-transfer-grid, .live-token-details, .live-transfer-filters {
+    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups, .live-transfer-grid, .live-token-details, .live-transfer-filters, .live-transfer-actions {
       grid-template-columns: 1fr;
     }
   }
@@ -1242,77 +1249,6 @@
     </div>
   </details>
 
-  <details class="foldout live-transfers" data-foldout-key="live-erc20-transfers" open>
-    <summary>Live ERC20 Transfers</summary>
-    <div class="foldout-body live-transfer-body">
-      <div class="live-transfer-grid">
-        <div class="builder-address-panel">
-          <div class="builder-address-title">Wallet addresses</div>
-          <div class="builder-address-row">
-            <input type="text" id="liveWalletAddress" placeholder="0x..." spellcheck="false" aria-label="Wallet address to watch">
-            <button type="button" class="secondary" id="liveAddWalletBtn">Add</button>
-            <button type="button" class="secondary" id="liveResetWalletsBtn">Reset</button>
-          </div>
-          <div class="builder-address-list" id="liveWalletList"></div>
-        </div>
-        <div class="builder-address-panel">
-          <div class="builder-address-title">Token addresses</div>
-          <div class="live-token-row">
-            <select id="liveTokenSelect" aria-label="Token address filter"></select>
-            <button type="button" class="secondary" id="liveAddTokenBtn">Add</button>
-            <button type="button" class="secondary" id="liveResetTokensBtn">Reset</button>
-          </div>
-          <div class="live-token-details">
-            <label class="builder-control">
-              <span>Token address</span>
-              <input type="text" id="liveTokenAddress" spellcheck="false" readonly>
-            </label>
-            <label class="builder-control">
-              <span>Decimals</span>
-              <input type="number" id="liveTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
-            </label>
-          </div>
-          <div class="builder-address-list" id="liveTokenList"></div>
-        </div>
-      </div>
-      <div class="live-transfer-filters">
-        <label class="builder-control">
-          <span>Amount min</span>
-          <input type="text" id="liveAmountMin" inputmode="decimal">
-        </label>
-        <label class="builder-control">
-          <span>Amount max</span>
-          <input type="text" id="liveAmountMax" inputmode="decimal">
-        </label>
-      </div>
-      <div class="live-transfer-actions">
-        <span class="live-transfer-status" id="liveTransferStatus">Add at least one wallet address, then connect.</span>
-        <div class="live-transfer-buttons">
-          <button type="button" class="primary" id="liveConnectBtn">Connect</button>
-          <button type="button" class="secondary" id="liveDisconnectBtn" disabled>Disconnect</button>
-          <button type="button" class="secondary" id="liveClearBtn">Clear</button>
-        </div>
-      </div>
-      <div class="live-transfer-table-wrap">
-        <table id="liveTransferTable" style="display:none">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Block</th>
-              <th>Token</th>
-              <th>From</th>
-              <th>To</th>
-              <th>Amount</th>
-              <th>Tx</th>
-            </tr>
-          </thead>
-          <tbody id="liveTransferBody"></tbody>
-        </table>
-        <div class="live-transfer-empty" id="liveTransferEmpty">No transfer notifications yet.</div>
-      </div>
-    </div>
-  </details>
-
   <details class="foldout query-foldout" data-foldout-key="query-logs">
     <summary>Query Logs</summary>
     <div class="foldout-body query-body">
@@ -1365,6 +1301,77 @@
           <tbody id="queryHistoryBody"></tbody>
         </table>
         <div class="history-empty" id="queryHistoryEmpty">No query history yet.</div>
+      </div>
+    </div>
+  </details>
+
+  <details class="foldout live-transfers" data-foldout-key="live-erc20-transfers" open>
+    <summary>Live ERC20 Transfers</summary>
+    <div class="foldout-body live-transfer-body">
+      <div class="live-transfer-grid">
+        <div class="builder-address-panel">
+          <div class="builder-address-title">Wallet addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="liveWalletAddress" placeholder="0x..." spellcheck="false" aria-label="Wallet address to watch">
+            <button type="button" class="secondary" id="liveAddWalletBtn">Add</button>
+            <button type="button" class="secondary" id="liveResetWalletsBtn">Reset</button>
+          </div>
+          <div class="builder-address-list" id="liveWalletList"></div>
+        </div>
+        <div class="builder-address-panel">
+          <div class="builder-address-title">Token addresses</div>
+          <div class="live-token-row">
+            <select id="liveTokenSelect" aria-label="Token address filter"></select>
+            <button type="button" class="secondary" id="liveAddTokenBtn">Add</button>
+            <button type="button" class="secondary" id="liveResetTokensBtn">Reset</button>
+          </div>
+          <div class="live-token-details">
+            <label class="builder-control">
+              <span>Token address</span>
+              <input type="text" id="liveTokenAddress" spellcheck="false" readonly>
+            </label>
+            <label class="builder-control">
+              <span>Decimals</span>
+              <input type="number" id="liveTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
+            </label>
+          </div>
+          <div class="builder-address-list" id="liveTokenList"></div>
+        </div>
+      </div>
+      <div class="live-transfer-filters">
+        <label class="builder-control">
+          <span>Amount min</span>
+          <input type="text" id="liveAmountMin" inputmode="decimal">
+        </label>
+        <label class="builder-control">
+          <span>Amount max</span>
+          <input type="text" id="liveAmountMax" inputmode="decimal">
+        </label>
+      </div>
+      <div class="live-transfer-actions">
+        <span class="live-transfer-status" id="liveTransferStatus">Add a wallet address or token filter, then connect.</span>
+        <div class="live-transfer-buttons">
+          <button type="button" class="primary" id="liveConnectBtn">Connect</button>
+          <button type="button" class="secondary" id="liveDisconnectBtn" disabled>Disconnect</button>
+          <button type="button" class="secondary" id="liveClearBtn">Clear</button>
+        </div>
+      </div>
+      <div class="live-transfer-table-wrap">
+        <table id="liveTransferTable" style="display:none">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Block</th>
+              <th>Token</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Amount</th>
+              <th>Tx</th>
+            </tr>
+          </thead>
+          <tbody id="liveTransferBody"></tbody>
+        </table>
+        <div class="live-transfer-empty" id="liveTransferEmpty">No transfer notifications yet.</div>
       </div>
     </div>
   </details>
@@ -2409,7 +2416,7 @@ function setLiveTransferStatus(message, isError) {
   var status = byId('liveTransferStatus');
   if (!status) return;
   status.textContent = message || '';
-  status.classList.toggle('error', !!isError);
+  status.classList.toggle('is-error', !!isError);
 }
 
 function liveTokenDisplay(token) {
@@ -2641,8 +2648,8 @@ function liveAmountDecimals() {
 }
 
 function buildLiveTransferPayload() {
-  if (!liveWalletAddresses.length) {
-    throw new Error('Add at least one wallet address before connecting.');
+  if (!liveWalletAddresses.length && !liveTransferTokens.length) {
+    throw new Error('Add at least one wallet address or token filter before connecting.');
   }
   var payload = {
     type: 'erc20Transfers',

@@ -137,8 +137,11 @@ impl Erc20TransferSubscription {
         min_amount: Option<[u8; 32]>,
         max_amount: Option<[u8; 32]>,
     ) -> Result<Self, String> {
-        if addresses.is_empty() {
-            return Err("erc20Transfers subscriptions require at least one wallet address".into());
+        if addresses.is_empty() && token_addresses.is_empty() {
+            return Err(
+                "erc20Transfers subscriptions require at least one wallet address or token address"
+                    .into(),
+            );
         }
         if let (Some(min), Some(max)) = (min_amount, max_amount)
             && min > max
@@ -163,7 +166,10 @@ impl Erc20TransferSubscription {
         }
         let from_topic = row.topic1?;
         let to_topic = row.topic2?;
-        if !self.wallet_topics.contains(&from_topic) && !self.wallet_topics.contains(&to_topic) {
+        if !self.wallet_topics.is_empty()
+            && !self.wallet_topics.contains(&from_topic)
+            && !self.wallet_topics.contains(&to_topic)
+        {
             return None;
         }
         let amount = amount_bytes(row)?;
@@ -596,6 +602,37 @@ mod tests {
     }
 
     #[test]
+    fn test_erc20_transfer_subscription_allows_token_only_filter() {
+        let token = Address::repeat_byte(0xBB);
+        let other_token = Address::repeat_byte(0xCC);
+        let subscription =
+            Erc20TransferSubscription::new(Vec::new(), vec![token], None, None).unwrap();
+
+        assert!(
+            subscription
+                .notification_for(&make_transfer_log(
+                    token,
+                    Address::repeat_byte(0xA1),
+                    Address::repeat_byte(0xA2),
+                    100,
+                    10
+                ))
+                .is_some()
+        );
+        assert!(
+            subscription
+                .notification_for(&make_transfer_log(
+                    other_token,
+                    Address::repeat_byte(0xA1),
+                    Address::repeat_byte(0xA2),
+                    100,
+                    10
+                ))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn test_erc20_transfer_subscription_filters_amount_bounds() {
         let tracked = Address::repeat_byte(0xA1);
         let token = Address::repeat_byte(0xBB);
@@ -701,10 +738,10 @@ mod tests {
     }
 
     #[test]
-    fn test_erc20_transfer_subscription_rejects_missing_addresses() {
+    fn test_erc20_transfer_subscription_rejects_empty_filters() {
         let err = Erc20TransferSubscription::new(Vec::new(), Vec::new(), None, None)
-            .expect_err("missing wallet addresses should fail");
-        assert!(err.contains("at least one wallet address"));
+            .expect_err("empty wallet and token filters should fail");
+        assert!(err.contains("at least one wallet address or token address"));
     }
 
     #[test]

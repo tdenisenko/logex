@@ -400,11 +400,13 @@ WebSocket ERC20 transfer hook:
 ```
 
 `addresses` are wallet addresses and match either ERC20 `from` or `to`.
-`tokenAddresses` is optional; omit it to watch matching transfers across all
-token contracts. `minAmount` and `maxAmount` are optional raw uint256 base-unit
-bounds. Matching notifications are streamed as JSON arrays containing token,
-sender, recipient, raw amount, timestamp, block, transaction, and log index
-fields. WebSocket subscriptions are for live ingested blocks; historical
+`tokenAddresses` filters token contracts. Either `addresses` or `tokenAddresses`
+must contain at least one entry; omit `tokenAddresses` to watch all token
+contracts for the wallets, or omit `addresses` to watch every transfer for the
+selected token contracts. `minAmount` and `maxAmount` are optional raw uint256
+base-unit bounds. Matching notifications are streamed as JSON arrays containing
+token, sender, recipient, raw amount, timestamp, block, transaction, and log
+index fields. WebSocket subscriptions are for live ingested blocks; historical
 backfill remains queryable through SQL and JSON-RPC rather than replayed as
 alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } }`.
 
