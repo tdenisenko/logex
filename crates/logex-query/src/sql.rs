@@ -644,12 +644,15 @@ struct NativeProjectionColumn {
 }
 
 struct NativeDataSumQuery {
-    projections: Vec<NativeAggregateProjection>,
+    projections: Vec<NativeDataSumProjection>,
     sums: Vec<NativeRowValueExpr>,
+    group_by: NativeDataSumGroupBy,
     filter: NativeLogFilter,
     candidate_filters: Vec<NativeLogFilter>,
     selection: Option<SqlAstExpr>,
+    having: Option<NativeAggregateHaving>,
     sql_limit: Option<usize>,
+    order: Option<NativeAggregateOrder>,
 }
 
 struct NativeCountQuery {
@@ -676,6 +679,34 @@ struct NativeAggregateProjection {
     expr: NativeAggregateExpr,
 }
 
+enum NativeDataSumProjection {
+    GroupColumn {
+        column: NativeDataSumGroupBy,
+        output_column: String,
+    },
+    Aggregate(NativeAggregateProjection),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeDataSumGroupBy {
+    None,
+    Address,
+}
+
+#[derive(Clone)]
+struct NativeAggregateHaving {
+    projection_index: usize,
+    operator: SqlBinaryOperator,
+    value: BigInt,
+    reversed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NativeAggregateOrder {
+    projection_index: usize,
+    descending: bool,
+}
+
 #[derive(Clone)]
 enum NativeAggregateExpr {
     Sum(usize),
@@ -697,6 +728,24 @@ struct NativeSumState {
     expr: NativeRowValueExpr,
     sum: BigInt,
     count: u64,
+}
+
+type NativeDataSumGroups = BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NativeGroupKey {
+    Address([u8; 20]),
+}
+
+#[derive(Clone)]
+struct NativeDataSumPartitionScan {
+    filter: NativeLogFilter,
+    candidate_filters: Vec<NativeLogFilter>,
+    selection: Option<SqlAstExpr>,
+    group_by: NativeDataSumGroupBy,
+    sum_inputs: Vec<NativeRowValueExpr>,
+    data_only: bool,
+    cancel_check: Option<QueryCancelCheck>,
 }
 
 fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQueryError> {
@@ -1153,34 +1202,30 @@ fn try_execute_native_data_sum(
         return Ok(None);
     };
 
-    if native_query.sql_limit == Some(0) || page.limit == Some(0) || page.offset > 0 {
+    if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
             rows: Vec::new(),
             total_scanned: 0,
         }));
     }
 
-    let (values, total_scanned) = execute_native_data_sum(
+    let (groups, total_scanned) = execute_native_data_sum(
         snapshot,
         &native_query.filter,
         &native_query.candidate_filters,
         native_query.selection.as_ref(),
-        &native_query.projections,
+        native_query.group_by,
         &native_query.sums,
         cancel_check.as_ref(),
     )?;
-    let mut row = Map::with_capacity(values.len());
-    for (projection, value) in native_query.projections.iter().zip(values) {
-        row.insert(
-            projection.output_column.clone(),
-            value
-                .map(|value| Value::String(value.to_string()))
-                .unwrap_or(Value::Null),
-        );
+    let mut rows = native_data_sum_rows(&native_query, groups);
+    if let Some(limit) = native_query.sql_limit {
+        rows.truncate(limit);
     }
+    apply_json_page(&mut rows, page);
 
     Ok(Some(SqlQueryResult {
-        rows: vec![Value::Object(row)],
+        rows,
         total_scanned,
     }))
 }
@@ -1197,7 +1242,6 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
         return Ok(None);
     };
     if query.with.is_some()
-        || query.order_by.is_some()
         || query.fetch.is_some()
         || !query.locks.is_empty()
         || query.for_clause.is_some()
@@ -1216,11 +1260,9 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
         || select.into.is_some()
         || !select.lateral_views.is_empty()
         || select.prewhere.is_some()
-        || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty())
         || !select.cluster_by.is_empty()
         || !select.distribute_by.is_empty()
         || !select.sort_by.is_empty()
-        || select.having.is_some()
         || !select.named_window.is_empty()
         || select.qualify.is_some()
         || select.value_table_mode.is_some()
@@ -1230,7 +1272,17 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
         return Ok(None);
     }
 
-    let Some((projections, sums)) = native_aggregate_projections(&select.projection) else {
+    let Some(group_by) = native_data_sum_group_by(&select.group_by) else {
+        return Ok(None);
+    };
+    let Some((projections, sums)) = native_data_sum_projections(&select.projection, group_by)
+    else {
+        return Ok(None);
+    };
+    let Some(having) = native_data_sum_having(select.having.as_ref(), &projections) else {
+        return Ok(None);
+    };
+    let Some(order) = native_data_sum_order(query.order_by.as_ref(), group_by, &projections) else {
         return Ok(None);
     };
     let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
@@ -1256,10 +1308,13 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
     Ok(Some(NativeDataSumQuery {
         projections,
         sums,
+        group_by,
         filter,
         candidate_filters,
         selection,
+        having,
         sql_limit,
+        order,
     }))
 }
 
@@ -1279,29 +1334,159 @@ fn apply_sql_ast_filter_conjuncts(
     Ok(())
 }
 
-fn native_aggregate_projections(
+fn native_data_sum_group_by(group_by: &GroupByExpr) -> Option<NativeDataSumGroupBy> {
+    let GroupByExpr::Expressions(exprs, modifiers) = group_by else {
+        return None;
+    };
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match exprs.as_slice() {
+        [] => Some(NativeDataSumGroupBy::None),
+        [expr] if sql_identifier(expr).is_some_and(|column| column == "address") => {
+            Some(NativeDataSumGroupBy::Address)
+        }
+        _ => None,
+    }
+}
+
+fn native_data_sum_projections(
     projection: &[SelectItem],
-) -> Option<(Vec<NativeAggregateProjection>, Vec<NativeRowValueExpr>)> {
+    group_by: NativeDataSumGroupBy,
+) -> Option<(Vec<NativeDataSumProjection>, Vec<NativeRowValueExpr>)> {
     let mut projections = Vec::with_capacity(projection.len());
     let mut sums = Vec::new();
+    let mut has_aggregate = false;
     for item in projection {
         match item {
             SelectItem::UnnamedExpr(expr) => {
-                projections.push(NativeAggregateProjection {
-                    output_column: native_aggregate_output_name(expr),
-                    expr: parse_native_aggregate_expr(expr, &mut sums)?,
-                });
+                if let Some(group_column) = native_data_sum_group_projection(expr, group_by) {
+                    projections.push(NativeDataSumProjection::GroupColumn {
+                        column: group_column,
+                        output_column: sql_identifier(expr)?,
+                    });
+                } else {
+                    has_aggregate = true;
+                    projections.push(NativeDataSumProjection::Aggregate(
+                        NativeAggregateProjection {
+                            output_column: native_aggregate_output_name(expr),
+                            expr: parse_native_aggregate_expr(expr, &mut sums)?,
+                        },
+                    ));
+                }
             }
             SelectItem::ExprWithAlias { expr, alias } => {
-                projections.push(NativeAggregateProjection {
-                    output_column: alias.value.clone(),
-                    expr: parse_native_aggregate_expr(expr, &mut sums)?,
-                });
+                if let Some(group_column) = native_data_sum_group_projection(expr, group_by) {
+                    projections.push(NativeDataSumProjection::GroupColumn {
+                        column: group_column,
+                        output_column: alias.value.clone(),
+                    });
+                } else {
+                    has_aggregate = true;
+                    projections.push(NativeDataSumProjection::Aggregate(
+                        NativeAggregateProjection {
+                            output_column: alias.value.clone(),
+                            expr: parse_native_aggregate_expr(expr, &mut sums)?,
+                        },
+                    ));
+                }
             }
             _ => return None,
         }
     }
-    (!projections.is_empty()).then_some((projections, sums))
+    (has_aggregate && !projections.is_empty()).then_some((projections, sums))
+}
+
+fn native_data_sum_group_projection(
+    expr: &SqlAstExpr,
+    group_by: NativeDataSumGroupBy,
+) -> Option<NativeDataSumGroupBy> {
+    match group_by {
+        NativeDataSumGroupBy::None => None,
+        NativeDataSumGroupBy::Address
+            if sql_identifier(expr).is_some_and(|column| column == "address") =>
+        {
+            Some(NativeDataSumGroupBy::Address)
+        }
+        NativeDataSumGroupBy::Address => None,
+    }
+}
+
+fn native_data_sum_having(
+    having: Option<&SqlAstExpr>,
+    projections: &[NativeDataSumProjection],
+) -> Option<Option<NativeAggregateHaving>> {
+    let Some(having) = having else {
+        return Some(None);
+    };
+    let SqlAstExpr::BinaryOp { left, op, right } = having else {
+        return None;
+    };
+    if !matches!(
+        op,
+        SqlBinaryOperator::Eq
+            | SqlBinaryOperator::NotEq
+            | SqlBinaryOperator::Gt
+            | SqlBinaryOperator::GtEq
+            | SqlBinaryOperator::Lt
+            | SqlBinaryOperator::LtEq
+    ) {
+        return None;
+    }
+    let (column, literal, reversed) = normalize_sql_binary(left, right)?;
+    let projection_index = native_aggregate_projection_index(projections, &column)?;
+    let value = sql_bigint_expr(literal)?;
+    Some(Some(NativeAggregateHaving {
+        projection_index,
+        operator: op.clone(),
+        value,
+        reversed,
+    }))
+}
+
+fn native_data_sum_order(
+    order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
+    group_by: NativeDataSumGroupBy,
+    projections: &[NativeDataSumProjection],
+) -> Option<Option<NativeAggregateOrder>> {
+    let Some(order_by) = order_by else {
+        return Some(None);
+    };
+    if group_by == NativeDataSumGroupBy::None {
+        return None;
+    }
+    let OrderByKind::Expressions(expressions) = &order_by.kind else {
+        return None;
+    };
+    let [expression] = expressions.as_slice() else {
+        return None;
+    };
+    if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
+        return None;
+    }
+    let order_column = sql_identifier(&expression.expr)?;
+    let projection_index = native_aggregate_projection_index(projections, &order_column)?;
+    Some(Some(NativeAggregateOrder {
+        projection_index,
+        descending: !expression.options.asc.unwrap_or(true),
+    }))
+}
+
+fn native_aggregate_projection_index(
+    projections: &[NativeDataSumProjection],
+    output_column: &str,
+) -> Option<usize> {
+    projections
+        .iter()
+        .enumerate()
+        .find_map(|(index, projection)| match projection {
+            NativeDataSumProjection::Aggregate(projection)
+                if projection.output_column.eq_ignore_ascii_case(output_column) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
 }
 
 fn native_aggregate_output_name(expr: &SqlAstExpr) -> String {
@@ -1489,13 +1674,14 @@ fn execute_native_data_sum(
     filter: &NativeLogFilter,
     candidate_filters: &[NativeLogFilter],
     selection: Option<&SqlAstExpr>,
-    projections: &[NativeAggregateProjection],
+    group_by: NativeDataSumGroupBy,
     sum_inputs: &[NativeRowValueExpr],
     cancel_check: Option<&QueryCancelCheck>,
-) -> Result<(Vec<Option<BigInt>>, u64), SqlQueryError> {
+) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-    let mut states = initial_native_sum_states(sum_inputs);
+    let mut groups = BTreeMap::new();
     let data_only = selection.is_none()
+        && group_by == NativeDataSumGroupBy::None
         && sum_inputs
             .iter()
             .all(|expr| matches!(expr, NativeRowValueExpr::Data));
@@ -1517,22 +1703,16 @@ fn execute_native_data_sum(
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
                 let path = partition.path.clone();
-                let filter = filter.clone();
-                let candidate_filters = candidate_filters.to_vec();
-                let selection = selection.cloned();
-                let sum_inputs = sum_inputs.to_vec();
-                let cancel_check = cancel_check.cloned();
-                handles.push(scope.spawn(move || {
-                    scan_native_data_sum_partition(
-                        &path,
-                        &filter,
-                        &candidate_filters,
-                        selection.as_ref(),
-                        &sum_inputs,
-                        data_only,
-                        cancel_check.as_ref(),
-                    )
-                }));
+                let scan = NativeDataSumPartitionScan {
+                    filter: filter.clone(),
+                    candidate_filters: candidate_filters.to_vec(),
+                    selection: selection.cloned(),
+                    group_by,
+                    sum_inputs: sum_inputs.to_vec(),
+                    data_only,
+                    cancel_check: cancel_check.cloned(),
+                };
+                handles.push(scope.spawn(move || scan_native_data_sum_partition(&path, scan)));
             }
             handles
                 .into_iter()
@@ -1545,20 +1725,18 @@ fn execute_native_data_sum(
         });
 
         for result in chunk_results {
-            let (partition_states, partition_scanned) =
+            let (partition_groups, partition_scanned) =
                 result.map_err(map_native_query_io_error)?;
-            merge_native_sum_states(&mut states, partition_states);
+            merge_native_sum_groups(&mut groups, partition_groups);
             total_scanned += partition_scanned;
         }
     }
 
-    Ok((
-        projections
-            .iter()
-            .map(|projection| eval_native_aggregate_expr(&projection.expr, &states))
-            .collect(),
-        total_scanned,
-    ))
+    if group_by == NativeDataSumGroupBy::None && groups.is_empty() {
+        groups.insert(None, initial_native_sum_states(sum_inputs));
+    }
+
+    Ok((groups, total_scanned))
 }
 
 fn initial_native_sum_states(sum_inputs: &[NativeRowValueExpr]) -> Vec<NativeSumState> {
@@ -1580,25 +1758,36 @@ fn merge_native_sum_states(states: &mut [NativeSumState], partial_states: Vec<Na
     }
 }
 
+fn merge_native_sum_groups(groups: &mut NativeDataSumGroups, partial_groups: NativeDataSumGroups) {
+    for (key, partial_states) in partial_groups {
+        match groups.get_mut(&key) {
+            Some(states) => merge_native_sum_states(states, partial_states),
+            None => {
+                groups.insert(key, partial_states);
+            }
+        }
+    }
+}
+
 fn scan_native_data_sum_partition(
     path: &std::path::Path,
-    filter: &NativeLogFilter,
-    candidate_filters: &[NativeLogFilter],
-    selection: Option<&SqlAstExpr>,
-    sum_inputs: &[NativeRowValueExpr],
-    data_only: bool,
-    cancel_check: Option<&QueryCancelCheck>,
-) -> std::io::Result<(Vec<NativeSumState>, u64)> {
-    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+    scan: NativeDataSumPartitionScan,
+) -> std::io::Result<(NativeDataSumGroups, u64)> {
+    if scan
+        .cancel_check
+        .as_ref()
+        .is_some_and(|is_canceled| is_canceled())
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "query canceled",
         ));
     }
-    let mut states = initial_native_sum_states(sum_inputs);
+    let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
     let mut row_bitmap = RoaringBitmap::new();
-    let bloom_exclusions = erc20_event_bloom_exclusions(&path.join("indexes"), candidate_filters)?;
-    for (index, candidate_filter) in candidate_filters.iter().enumerate() {
+    let bloom_exclusions =
+        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?;
+    for (index, candidate_filter) in scan.candidate_filters.iter().enumerate() {
         let row_ids = if bloom_exclusions
             .as_ref()
             .is_some_and(|exclusions| exclusions.get(index).copied().unwrap_or(false))
@@ -1613,34 +1802,41 @@ fn scan_native_data_sum_partition(
     }
     let row_ids = row_bitmap.iter().collect::<Vec<_>>();
     if row_ids.is_empty() {
-        return Ok((states, 0));
+        return Ok((groups, 0));
     }
 
     let reader = SegmentReader::open(path)?;
     let mut total_scanned = 0u64;
-    if data_only {
+    if scan.data_only {
+        let states = groups
+            .entry(None)
+            .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
         let values = reader.read_var_bytes("data", Some(&row_ids))?;
         for value in values {
             let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
-            for state in &mut states {
+            for state in states.iter_mut() {
                 state.sum += value.clone();
                 state.count += 1;
             }
         }
-        return Ok((states, row_ids.len() as u64));
+        return Ok((groups, row_ids.len() as u64));
     }
 
     let rows = reader.read_log_rows(Some(&row_ids))?;
     for row in rows {
-        if let Some(selection) = selection
+        if let Some(selection) = scan.selection.as_ref()
             && !eval_sql_predicate(&row, selection)
         {
             continue;
         }
-        if !matches_native_filter(&row, filter) {
+        if !matches_native_filter(&row, &scan.filter) {
             continue;
         }
-        for state in &mut states {
+        let key = native_group_key(&row, scan.group_by);
+        let states = groups
+            .entry(key)
+            .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
+        for state in states.iter_mut() {
             if let Some(value) = eval_native_row_value(&row, &state.expr) {
                 state.sum += value;
                 state.count += 1;
@@ -1649,7 +1845,159 @@ fn scan_native_data_sum_partition(
         total_scanned += 1;
     }
 
-    Ok((states, total_scanned))
+    Ok((groups, total_scanned))
+}
+
+fn native_group_key(
+    row: &logex_types::LogRow,
+    group_by: NativeDataSumGroupBy,
+) -> Option<NativeGroupKey> {
+    match group_by {
+        NativeDataSumGroupBy::None => None,
+        NativeDataSumGroupBy::Address => {
+            let mut bytes = [0u8; 20];
+            bytes.copy_from_slice(row.address.as_slice());
+            Some(NativeGroupKey::Address(bytes))
+        }
+    }
+}
+
+fn native_data_sum_rows(
+    query: &NativeDataSumQuery,
+    groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>>,
+) -> Vec<Value> {
+    let mut rows = groups
+        .into_iter()
+        .filter_map(|(group_key, states)| native_data_sum_result_row(query, group_key, &states))
+        .collect::<Vec<_>>();
+
+    if let Some(order) = query.order {
+        rows.sort_by(|left, right| {
+            let ordering = compare_optional_bigint(
+                left.values
+                    .get(order.projection_index)
+                    .and_then(|value| value.as_ref()),
+                right
+                    .values
+                    .get(order.projection_index)
+                    .and_then(|value| value.as_ref()),
+            );
+            if order.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+    }
+
+    rows.into_iter().map(|row| row.value).collect()
+}
+
+struct NativeDataSumResultRow {
+    value: Value,
+    values: Vec<Option<BigInt>>,
+}
+
+fn native_data_sum_result_row(
+    query: &NativeDataSumQuery,
+    group_key: Option<NativeGroupKey>,
+    states: &[NativeSumState],
+) -> Option<NativeDataSumResultRow> {
+    let values = query
+        .projections
+        .iter()
+        .map(|projection| match projection {
+            NativeDataSumProjection::GroupColumn { .. } => None,
+            NativeDataSumProjection::Aggregate(projection) => {
+                eval_native_aggregate_expr(&projection.expr, states)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(having) = &query.having {
+        let value = values
+            .get(having.projection_index)
+            .and_then(|value| value.as_ref())?;
+        if !compare_bigint(
+            value,
+            having.operator.clone(),
+            &having.value,
+            having.reversed,
+        ) {
+            return None;
+        }
+    }
+
+    let mut row = Map::with_capacity(query.projections.len());
+    for (projection_index, projection) in query.projections.iter().enumerate() {
+        match projection {
+            NativeDataSumProjection::GroupColumn {
+                column,
+                output_column,
+            } => {
+                row.insert(
+                    output_column.clone(),
+                    native_group_key_json(group_key, *column)?,
+                );
+            }
+            NativeDataSumProjection::Aggregate(projection) => {
+                row.insert(
+                    projection.output_column.clone(),
+                    values[projection_index]
+                        .as_ref()
+                        .map(|value| Value::String(value.to_string()))
+                        .unwrap_or(Value::Null),
+                );
+            }
+        }
+    }
+
+    Some(NativeDataSumResultRow {
+        value: Value::Object(row),
+        values,
+    })
+}
+
+fn native_group_key_json(
+    group_key: Option<NativeGroupKey>,
+    column: NativeDataSumGroupBy,
+) -> Option<Value> {
+    match (column, group_key) {
+        (NativeDataSumGroupBy::Address, Some(NativeGroupKey::Address(address))) => {
+            Some(Value::String(to_hex_address(&address)))
+        }
+        (NativeDataSumGroupBy::None, None) => Some(Value::Null),
+        _ => None,
+    }
+}
+
+fn compare_optional_bigint(left: Option<&BigInt>, right: Option<&BigInt>) -> CmpOrdering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (Some(_), None) => CmpOrdering::Greater,
+        (None, Some(_)) => CmpOrdering::Less,
+        (None, None) => CmpOrdering::Equal,
+    }
+}
+
+fn compare_bigint(
+    left: &BigInt,
+    operator: SqlBinaryOperator,
+    right: &BigInt,
+    reversed: bool,
+) -> bool {
+    if reversed {
+        return compare_bigint(right, operator, left, false);
+    }
+    match operator {
+        SqlBinaryOperator::Eq => left == right,
+        SqlBinaryOperator::NotEq => left != right,
+        SqlBinaryOperator::Gt => left > right,
+        SqlBinaryOperator::GtEq => left >= right,
+        SqlBinaryOperator::Lt => left < right,
+        SqlBinaryOperator::LtEq => left <= right,
+        _ => false,
+    }
 }
 
 fn eval_native_aggregate_expr(
@@ -1870,6 +2218,19 @@ fn sql_bigint_value(value: &datafusion::sql::sqlparser::ast::ValueWithSpan) -> O
         | SqlValue::DoubleQuotedString(value)
         | SqlValue::TripleSingleQuotedString(value)
         | SqlValue::TripleDoubleQuotedString(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn sql_bigint_expr(expr: &SqlAstExpr) -> Option<BigInt> {
+    match expr {
+        SqlAstExpr::Value(value) => sql_bigint_value(value),
+        SqlAstExpr::UnaryOp { op, expr }
+            if *op == datafusion::sql::sqlparser::ast::UnaryOperator::Minus =>
+        {
+            sql_bigint_expr(expr).map(|value| -value)
+        }
+        SqlAstExpr::Nested(expr) => sql_bigint_expr(expr),
         _ => None,
     }
 }
@@ -4062,6 +4423,8 @@ mod tests {
     fn setup_transfer_balance_storage() -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let token = parse_address("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let token_two = Address::repeat_byte(0x42);
+        let token_three = Address::repeat_byte(0x43);
         let target = padded_address_topic("0xE6c031F4C63e76e453d9A0aAe566D06236d11F95");
         let other = padded_address_topic("0x99C7ec507e16489F901214aB4ed558737B5e9BDe");
         let transfer = keccak256(b"Transfer(address,address,uint256)");
@@ -4078,6 +4441,9 @@ mod tests {
                 transfer_row(25_000_002, token, target, target, 20),
                 transfer_row(25_000_003, token, other, target, 5),
                 transfer_row(24_999_999, token, other, target, 1_000),
+                transfer_row(25_000_006, token_two, other, target, 9),
+                transfer_row(25_000_007, token_two, target, other, 4),
+                transfer_row(25_000_008, token_three, target, other, 100),
                 approval_row(25_000_004, token, target, other, 55),
                 approval_row(25_000_005, token, target, target, 0),
             ])
@@ -4285,6 +4651,48 @@ mod tests {
         assert_eq!(result.rows[0]["total_sent"], "50");
         assert_eq!(result.rows[0]["net_balance"], "70");
         assert_eq!(result.total_scanned, 3);
+    }
+
+    #[tokio::test]
+    async fn groups_transfer_balances_by_token_with_having_and_order() {
+        let (_tmp, storage) = setup_transfer_balance_storage();
+        let result = execute_sql_page(
+            "SELECT
+               address AS token_contract,
+               SUM(CASE WHEN topic2 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) -
+               SUM(CASE WHEN topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                        THEN data ELSE 0 END) AS raw_balance
+             FROM logs
+             WHERE topic0 = event'Transfer(address,address,uint256)'
+               AND (
+                 topic1 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+                 OR
+                 topic2 = address'0xE6c031F4C63e76e453d9A0aAe566D06236d11F95'
+               )
+               AND data_len = 32
+             GROUP BY address
+             HAVING raw_balance > 0
+             ORDER BY raw_balance DESC",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[0]["token_contract"],
+            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        );
+        assert_eq!(result.rows[0]["raw_balance"], "1075");
+        assert_eq!(
+            result.rows[1]["token_contract"],
+            "0x4242424242424242424242424242424242424242"
+        );
+        assert_eq!(result.rows[1]["raw_balance"], "5");
+        assert_eq!(result.total_scanned, 8);
     }
 
     #[tokio::test]
