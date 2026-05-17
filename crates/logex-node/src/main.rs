@@ -5,6 +5,7 @@ mod commands;
 mod runtime;
 
 use clap::Parser;
+use std::net::IpAddr;
 
 use cli::{Cli, Command, Config, default_data_dir};
 use logex_storage::PartitionManagerConfig;
@@ -54,7 +55,9 @@ fn main() {
 
     match cli.command {
         Command::Sync {
+            http_host,
             http_port,
+            grpc_host,
             grpc_port,
             discovery_port,
             p2p_port,
@@ -65,12 +68,16 @@ fn main() {
             cl_max_peers,
             disable_dashboard,
             dashboard_password,
+            allow_public_grpc,
         } => {
             let nat = if nat == "any" {
                 config_nat.unwrap_or(nat)
             } else {
                 nat
             };
+            let http_host = file_config.http_host.unwrap_or(http_host);
+            let grpc_host = file_config.grpc_host.unwrap_or(grpc_host);
+            let allow_public_grpc = file_config.allow_public_grpc.unwrap_or(allow_public_grpc);
             let dashboard_enabled =
                 file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
             let dashboard_password = dashboard_password.or(file_config.dashboard_password);
@@ -81,12 +88,23 @@ fn main() {
                 eprintln!("Error: dashboard password cannot be empty");
                 std::process::exit(1);
             }
+            if let Err(error) = validate_listener_policy(
+                http_host,
+                grpc_host,
+                dashboard_password.as_deref(),
+                allow_public_grpc,
+            ) {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
                 checkpoint,
                 checkpoint_sync_url,
+                http_host,
                 http_port,
+                grpc_host,
                 grpc_port,
                 discovery_port,
                 p2p_port,
@@ -147,9 +165,37 @@ fn normalize_info_log_filter(filter: String) -> String {
     }
 }
 
+fn validate_listener_policy(
+    http_host: IpAddr,
+    grpc_host: IpAddr,
+    dashboard_password: Option<&str>,
+    allow_public_grpc: bool,
+) -> Result<(), String> {
+    if is_public_listener(http_host) && dashboard_password.is_none() {
+        return Err(
+            "public HTTP listeners require --dashboard-password; use --http-host 127.0.0.1 for local-only access"
+                .to_owned(),
+        );
+    }
+
+    if is_public_listener(grpc_host) && !allow_public_grpc {
+        return Err(
+            "public gRPC listeners require --allow-public-grpc; use --grpc-host 127.0.0.1 for local-only access"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn is_public_listener(host: IpAddr) -> bool {
+    !host.is_loopback()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_LOG_FILTER, effective_log_filter};
+    use super::{DEFAULT_LOG_FILTER, effective_log_filter, validate_listener_policy};
+    use std::net::IpAddr;
 
     #[test]
     fn default_info_log_filter_suppresses_noisy_discovery_warnings() {
@@ -166,6 +212,71 @@ mod tests {
         assert_eq!(
             effective_log_filter("info", Some("info,discv5=warn".to_owned())),
             "info,discv5=warn"
+        );
+    }
+
+    #[test]
+    fn listener_policy_allows_loopback_without_auth() {
+        assert!(
+            validate_listener_policy(
+                IpAddr::from([127, 0, 0, 1]),
+                IpAddr::from([127, 0, 0, 1]),
+                None,
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn listener_policy_rejects_public_http_without_auth() {
+        let error = validate_listener_policy(
+            IpAddr::from([0, 0, 0, 0]),
+            IpAddr::from([127, 0, 0, 1]),
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("public HTTP listeners require --dashboard-password"));
+    }
+
+    #[test]
+    fn listener_policy_allows_public_http_with_auth() {
+        assert!(
+            validate_listener_policy(
+                IpAddr::from([0, 0, 0, 0]),
+                IpAddr::from([127, 0, 0, 1]),
+                Some("secret"),
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn listener_policy_rejects_public_grpc_without_explicit_allow() {
+        let error = validate_listener_policy(
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([0, 0, 0, 0]),
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("public gRPC listeners require --allow-public-grpc"));
+    }
+
+    #[test]
+    fn listener_policy_allows_public_grpc_with_explicit_allow() {
+        assert!(
+            validate_listener_policy(
+                IpAddr::from([127, 0, 0, 1]),
+                IpAddr::from([0, 0, 0, 0]),
+                None,
+                true,
+            )
+            .is_ok()
         );
     }
 }

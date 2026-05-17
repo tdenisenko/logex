@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -95,9 +96,17 @@ fn platform_app_dir_name() -> &'static str {
 pub enum Command {
     /// Start the node: sync blocks from the P2P network and serve queries.
     Sync {
+        /// HTTP server host for Web UI + SQL + JSON-RPC. Use 0.0.0.0 only with --dashboard-password.
+        #[arg(long, default_value = "127.0.0.1")]
+        http_host: IpAddr,
+
         /// HTTP server port (Web UI + SQL + JSON-RPC).
         #[arg(long, default_value = "8577")]
         http_port: u16,
+
+        /// gRPC server host. Public gRPC requires --allow-public-grpc.
+        #[arg(long, default_value = "127.0.0.1")]
+        grpc_host: IpAddr,
 
         /// gRPC server port.
         #[arg(long, default_value = "8578")]
@@ -138,6 +147,10 @@ pub enum Command {
         /// Require HTTP Basic authentication for dashboard, status, query, JSON-RPC, and WebSocket endpoints.
         #[arg(long, value_name = "PASSWORD")]
         dashboard_password: Option<String>,
+
+        /// Allow unauthenticated gRPC to listen on a non-loopback interface.
+        #[arg(long)]
+        allow_public_grpc: bool,
     },
 
     /// Build or rebuild query indexes.
@@ -217,6 +230,12 @@ pub struct Config {
     #[serde(default)]
     pub nat: Option<String>,
     #[serde(default)]
+    pub http_host: Option<IpAddr>,
+    #[serde(default)]
+    pub grpc_host: Option<IpAddr>,
+    #[serde(default)]
+    pub allow_public_grpc: Option<bool>,
+    #[serde(default)]
     pub dashboard_enabled: Option<bool>,
     #[serde(default)]
     pub dashboard_password: Option<String>,
@@ -227,5 +246,61 @@ impl Config {
         let contents =
             std::fs::read_to_string(path).map_err(|e| format!("failed to read config: {e}"))?;
         toml::from_str(&contents).map_err(|e| format!("failed to parse config: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    #[test]
+    fn sync_defaults_bind_query_apis_to_loopback() {
+        let cli = Cli::try_parse_from(["logex", "sync"]).unwrap();
+
+        let Command::Sync {
+            http_host,
+            grpc_host,
+            allow_public_grpc,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(http_host, IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(grpc_host, IpAddr::from([127, 0, 0, 1]));
+        assert!(!allow_public_grpc);
+    }
+
+    #[test]
+    fn sync_accepts_explicit_public_query_api_hosts() {
+        let cli = Cli::try_parse_from([
+            "logex",
+            "sync",
+            "--http-host",
+            "0.0.0.0",
+            "--grpc-host",
+            "0.0.0.0",
+            "--allow-public-grpc",
+        ])
+        .unwrap();
+
+        let Command::Sync {
+            http_host,
+            grpc_host,
+            allow_public_grpc,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(http_host, IpAddr::from([0, 0, 0, 0]));
+        assert_eq!(grpc_host, IpAddr::from([0, 0, 0, 0]));
+        assert!(allow_public_grpc);
     }
 }

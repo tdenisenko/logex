@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -37,7 +37,9 @@ pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
     pub checkpoint: Option<String>,
     pub checkpoint_sync_url: Option<String>,
+    pub http_host: IpAddr,
     pub http_port: u16,
+    pub grpc_host: IpAddr,
     pub grpc_port: u16,
     pub discovery_port: u16,
     pub p2p_port: u16,
@@ -55,7 +57,9 @@ pub async fn run_sync(options: RunSyncOptions) {
         pm_config,
         checkpoint,
         checkpoint_sync_url,
+        http_host,
         http_port,
+        grpc_host,
         grpc_port,
         discovery_port,
         p2p_port,
@@ -226,7 +230,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         None => None,
     };
 
-    let http_addr: SocketAddr = ([0, 0, 0, 0], http_port).into();
+    let http_addr = SocketAddr::new(http_host, http_port);
     let http_state = Arc::clone(&state);
     let http_shutdown = shutdown_rx.clone();
     let http_handle = tokio::spawn(async move {
@@ -242,7 +246,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         }
     });
 
-    let grpc_addr: SocketAddr = ([0, 0, 0, 0], grpc_port).into();
+    let grpc_addr = SocketAddr::new(grpc_host, grpc_port);
     let grpc_state = Arc::clone(&state);
     let grpc_shutdown = shutdown_rx.clone();
     let grpc_handle = tokio::spawn(async move {

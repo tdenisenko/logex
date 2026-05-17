@@ -4,7 +4,7 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
 
-Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the next PR covers checkpoint-source hardening.
+Active branch: `hardening/release-readiness-smokes`. PR #82 and PR #83 were merged; the current PR covers release listener-policy hardening.
 
 ## Completed Since Last Run
 
@@ -12,12 +12,14 @@ Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the nex
 - Added comma-separated checkpoint-sync source support so operators can require a quorum of Beacon API/checkpoint-sync endpoints before trusting a resolved checkpoint.
 - Fresh checkpoint resolution now uses the lowest finalized slot visible across successful sources, then verifies that the same slot/root reaches quorum.
 - User-supplied inline checkpoints are validated against the configured source quorum, and freshness is checked against the newest finalized slot returned by successful sources.
+- Made HTTP and gRPC query listeners bind to loopback by default.
+- Added explicit public-listener guards: public HTTP requires dashboard auth, and public gRPC requires an explicit allow flag.
 
 ## Remaining TODOs
 
 1. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
-   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, and exposed listener policy.
+   - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, exposed listener policy, and a live release-candidate run from a clean data directory.
 
 ## Design Decisions
 
@@ -29,6 +31,7 @@ Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the nex
 - `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
 - Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
 - Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
+- Query APIs bind to loopback by default. Public HTTP listeners require Basic auth, and public gRPC listeners require an explicit operator opt-in because gRPC is unauthenticated.
 
 ## Challenges and Resolutions
 
@@ -53,20 +56,23 @@ Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the nex
 - Challenge: A single checkpoint-sync endpoint remained a central trust assumption for fresh starts.
   - Resolution: Added a multi-source quorum resolver. With multiple configured URLs, LogEx resolves or validates a checkpoint only after enough sources agree on the same slot/root.
 
+- Challenge: The dashboard and query APIs were easy to expose accidentally because listeners bound to all interfaces by default.
+  - Resolution: Changed HTTP and gRPC defaults to loopback and added startup validation for intentionally public listeners.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
 - Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
-- Searched checkpoint resolution, query execution, index building, background indexing, HTTP shutdown, and disk guard paths for debug-only or superseded code.
+- Searched checkpoint resolution, query execution, index building, background indexing, listener configuration, HTTP shutdown, and disk guard paths for debug-only or superseded code.
 - No debug-only code is intentionally left in the checkpoint or query path.
 
 ## Git Workflow
 
-- Current branch: `feature/checkpoint-source-hardening`
+- Current branch: `hardening/release-readiness-smokes`
 - New branch created this run: yes
 - Commits made during this run: pending
 - Pull request status: pending
-- Merge status: intentionally not merged
+- Merge status: pending
 - Blockers: none currently.
 
 ## Known Issues or Risks
@@ -75,5 +81,5 @@ Active branch: `feature/checkpoint-source-hardening`. PR #82 was merged; the nex
 - Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
 - Single checkpoint-sync URL mode remains available for compatibility and has the same trust assumption as before; use comma-separated URLs for quorum-based checkpoint resolution until LogEx operates a first-party checkpoint source.
-- HTTP Basic auth is not transport encryption; public deployments need localhost binding, firewalling, SSH tunneling, or TLS termination.
+- HTTP Basic auth is not transport encryption; public HTTP deployments still need firewalling, SSH tunneling, or TLS termination even though localhost binding is now the default.
 - Verification-critical security review is still required before a production-ready release.
