@@ -59,6 +59,18 @@ pub fn build_router_with_config(state: Arc<AppState>, config: HttpServerConfig) 
         .route("/query", post(rest::handle_query))
         .route("/query/cancel", post(rest::handle_query_cancel))
         .route("/ws", get(ws::handle_ws_upgrade))
+        .route(
+            "/live/erc20-transfers/subscriptions",
+            post(ws::handle_live_transfer_subscribe),
+        )
+        .route(
+            "/live/erc20-transfers/subscriptions/{id}",
+            get(ws::handle_live_transfer_get).delete(ws::handle_live_transfer_delete),
+        )
+        .route(
+            "/live/erc20-transfers/subscriptions/{id}/clear",
+            post(ws::handle_live_transfer_clear),
+        )
         .route_layer(middleware::from_fn_with_state(
             config.clone(),
             require_dashboard_auth,

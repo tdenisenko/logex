@@ -745,18 +745,23 @@
     box-shadow: 0 0 0 4px rgba(178, 140, 255, .12);
   }
 
-  .live-token-details, .live-transfer-filters {
+  .live-token-details {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr);
     gap: 12px;
   }
 
-  .live-transfer-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  .live-transfer-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
-    flex-wrap: wrap;
+  }
+
+  .live-transfer-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
   }
 
   .live-transfer-buttons {
@@ -768,9 +773,11 @@
   .live-transfer-status {
     color: var(--muted);
     font-size: var(--font-body);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
-  .live-transfer-status.error {
+  .live-transfer-status.is-error {
     color: #ffd3d3;
   }
 
@@ -790,6 +797,36 @@
 
   .live-transfer-table-wrap table {
     min-width: 1120px;
+  }
+
+  .live-tx-cell {
+    white-space: nowrap;
+  }
+
+  .live-tx-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .live-tx-open {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 8px;
+    color: var(--soft);
+    background: var(--surface-3);
+    text-decoration: none;
+    font-size: var(--font-body);
+    font-weight: 760;
+    cursor: pointer;
+  }
+
+  .live-tx-open:hover {
+    filter: brightness(1.07);
   }
 
   .history-table-wrap {
@@ -1049,7 +1086,7 @@
       flex-direction: column;
     }
 
-    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups, .live-transfer-grid, .live-token-details, .live-transfer-filters {
+    .debug-grid, .mini-grid, .charts-grid, .builder-controls, .builder-fields, .builder-address-groups, .live-transfer-grid, .live-token-details, .live-transfer-filters, .live-transfer-actions {
       grid-template-columns: 1fr;
     }
   }
@@ -1242,77 +1279,6 @@
     </div>
   </details>
 
-  <details class="foldout live-transfers" data-foldout-key="live-erc20-transfers" open>
-    <summary>Live ERC20 Transfers</summary>
-    <div class="foldout-body live-transfer-body">
-      <div class="live-transfer-grid">
-        <div class="builder-address-panel">
-          <div class="builder-address-title">Wallet addresses</div>
-          <div class="builder-address-row">
-            <input type="text" id="liveWalletAddress" placeholder="0x..." spellcheck="false" aria-label="Wallet address to watch">
-            <button type="button" class="secondary" id="liveAddWalletBtn">Add</button>
-            <button type="button" class="secondary" id="liveResetWalletsBtn">Reset</button>
-          </div>
-          <div class="builder-address-list" id="liveWalletList"></div>
-        </div>
-        <div class="builder-address-panel">
-          <div class="builder-address-title">Token addresses</div>
-          <div class="live-token-row">
-            <select id="liveTokenSelect" aria-label="Token address filter"></select>
-            <button type="button" class="secondary" id="liveAddTokenBtn">Add</button>
-            <button type="button" class="secondary" id="liveResetTokensBtn">Reset</button>
-          </div>
-          <div class="live-token-details">
-            <label class="builder-control">
-              <span>Token address</span>
-              <input type="text" id="liveTokenAddress" spellcheck="false" readonly>
-            </label>
-            <label class="builder-control">
-              <span>Decimals</span>
-              <input type="number" id="liveTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
-            </label>
-          </div>
-          <div class="builder-address-list" id="liveTokenList"></div>
-        </div>
-      </div>
-      <div class="live-transfer-filters">
-        <label class="builder-control">
-          <span>Amount min</span>
-          <input type="text" id="liveAmountMin" inputmode="decimal">
-        </label>
-        <label class="builder-control">
-          <span>Amount max</span>
-          <input type="text" id="liveAmountMax" inputmode="decimal">
-        </label>
-      </div>
-      <div class="live-transfer-actions">
-        <span class="live-transfer-status" id="liveTransferStatus">Add at least one wallet address, then connect.</span>
-        <div class="live-transfer-buttons">
-          <button type="button" class="primary" id="liveConnectBtn">Connect</button>
-          <button type="button" class="secondary" id="liveDisconnectBtn" disabled>Disconnect</button>
-          <button type="button" class="secondary" id="liveClearBtn">Clear</button>
-        </div>
-      </div>
-      <div class="live-transfer-table-wrap">
-        <table id="liveTransferTable" style="display:none">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Block</th>
-              <th>Token</th>
-              <th>From</th>
-              <th>To</th>
-              <th>Amount</th>
-              <th>Tx</th>
-            </tr>
-          </thead>
-          <tbody id="liveTransferBody"></tbody>
-        </table>
-        <div class="live-transfer-empty" id="liveTransferEmpty">No transfer notifications yet.</div>
-      </div>
-    </div>
-  </details>
-
   <details class="foldout query-foldout" data-foldout-key="query-logs">
     <summary>Query Logs</summary>
     <div class="foldout-body query-body">
@@ -1368,6 +1334,77 @@
       </div>
     </div>
   </details>
+
+  <details class="foldout live-transfers" data-foldout-key="live-erc20-transfers" open>
+    <summary>Live ERC20 Transfers</summary>
+    <div class="foldout-body live-transfer-body">
+      <div class="live-transfer-grid">
+        <div class="builder-address-panel">
+          <div class="builder-address-title">Wallet addresses</div>
+          <div class="builder-address-row">
+            <input type="text" id="liveWalletAddress" placeholder="0x..." spellcheck="false" aria-label="Wallet address to watch">
+            <button type="button" class="secondary" id="liveAddWalletBtn">Add</button>
+            <button type="button" class="secondary" id="liveResetWalletsBtn">Reset</button>
+          </div>
+          <div class="builder-address-list" id="liveWalletList"></div>
+        </div>
+        <div class="builder-address-panel">
+          <div class="builder-address-title">Token addresses</div>
+          <div class="live-token-row">
+            <select id="liveTokenSelect" aria-label="Token address filter"></select>
+            <button type="button" class="secondary" id="liveAddTokenBtn">Add</button>
+            <button type="button" class="secondary" id="liveResetTokensBtn">Reset</button>
+          </div>
+          <div class="live-token-details">
+            <label class="builder-control">
+              <span>Token address</span>
+              <input type="text" id="liveTokenAddress" spellcheck="false" readonly>
+            </label>
+            <label class="builder-control">
+              <span>Decimals</span>
+              <input type="number" id="liveTokenDecimals" min="0" max="36" step="1" inputmode="numeric" readonly>
+            </label>
+          </div>
+          <div class="builder-address-list" id="liveTokenList"></div>
+        </div>
+      </div>
+      <div class="live-transfer-filters">
+        <label class="builder-control">
+          <span>Amount min</span>
+          <input type="text" id="liveAmountMin" inputmode="decimal">
+        </label>
+        <label class="builder-control">
+          <span>Amount max</span>
+          <input type="text" id="liveAmountMax" inputmode="decimal">
+        </label>
+      </div>
+      <div class="live-transfer-actions">
+        <span class="live-transfer-status" id="liveTransferStatus">Add a wallet address or token filter, then connect.</span>
+        <div class="live-transfer-buttons">
+          <button type="button" class="primary" id="liveConnectBtn">Connect</button>
+          <button type="button" class="secondary" id="liveDisconnectBtn" disabled>Disconnect</button>
+          <button type="button" class="secondary" id="liveClearBtn">Clear</button>
+        </div>
+      </div>
+      <div class="live-transfer-table-wrap">
+        <table id="liveTransferTable" style="display:none">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Block</th>
+              <th>Token</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Amount</th>
+              <th>Tx</th>
+            </tr>
+          </thead>
+          <tbody id="liveTransferBody"></tbody>
+        </table>
+        <div class="live-transfer-empty" id="liveTransferEmpty">No transfer notifications yet.</div>
+      </div>
+    </div>
+  </details>
 </div>
 
 <div class="copy-toast" id="copyToast" role="status" aria-live="polite">Copied to clipboard</div>
@@ -1389,7 +1426,9 @@ var QUERY_SQL_STORAGE_KEY = 'logex.querySql.v1';
 var QUERY_BUILDER_STORAGE_KEY = 'logex.queryBuilder.v1';
 var LIVE_TRANSFER_STORAGE_KEY = 'logex.liveErc20Transfers.v1';
 var QUERY_HISTORY_LIMIT = 50;
-var LIVE_TRANSFER_LIMIT = 100;
+var LIVE_TRANSFER_LIMIT = 10000;
+var LIVE_TRANSFER_INACTIVE_MS = 60000;
+var LIVE_TRANSFER_STATE_REFRESH_MS = 20000;
 var TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 var TRANSFER_EVENT_SIGNATURE = 'Transfer(address,address,uint256)';
 var DEFAULT_TOKEN_DECIMALS = 18;
@@ -1496,6 +1535,9 @@ var liveTransferTokens = [];
 var liveTransferRows = [];
 var liveTransferSocket = null;
 var liveTransferManualDisconnect = false;
+var liveTransferActive = false;
+var liveTransferClientId = null;
+var liveTransferStateRefreshTimer = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -2395,9 +2437,27 @@ function loadLiveTransferState() {
   }
 }
 
+function liveTransferSessionId() {
+  if (liveTransferClientId) return liveTransferClientId;
+  var state = loadLiveTransferState();
+  if (state && typeof state.clientId === 'string' && state.clientId.trim() !== '') {
+    liveTransferClientId = state.clientId;
+    return liveTransferClientId;
+  }
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    liveTransferClientId = window.crypto.randomUUID();
+  } else {
+    liveTransferClientId = 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+  return liveTransferClientId;
+}
+
 function saveLiveTransferState() {
   try {
     localStorage.setItem(LIVE_TRANSFER_STORAGE_KEY, JSON.stringify({
+      clientId: liveTransferSessionId(),
+      active: liveTransferActive,
+      lastSeenAt: Date.now(),
       wallets: liveWalletAddresses,
       tokens: liveTransferTokens,
       pendingWallet: byId('liveWalletAddress').value,
@@ -2414,7 +2474,7 @@ function setLiveTransferStatus(message, isError) {
   var status = byId('liveTransferStatus');
   if (!status) return;
   status.textContent = message || '';
-  status.classList.toggle('error', !!isError);
+  status.classList.toggle('is-error', !!isError);
 }
 
 function liveTokenDisplay(token) {
@@ -2456,11 +2516,16 @@ function renderLiveTransferControls() {
   renderLiveWallets();
   renderLiveTokens();
   renderLiveTransfers();
+  maybeResumeLiveTransfers();
 }
 
 function applySavedLiveTransferState() {
   var state = loadLiveTransferState();
   if (!state || typeof state !== 'object') return;
+  if (typeof state.clientId === 'string' && state.clientId.trim() !== '') {
+    liveTransferClientId = state.clientId;
+  }
+  liveTransferActive = !!state.active;
   liveWalletAddresses = sanitizeBuilderAddresses(state.wallets);
   liveTransferTokens = Array.isArray(state.tokens) ? state.tokens.map(function(token) {
     try {
@@ -2484,6 +2549,19 @@ function applySavedLiveTransferState() {
     byId('liveTokenAddress').value = state.tokenAddress || '';
     byId('liveTokenDecimals').value = state.tokenDecimals || String(DEFAULT_TOKEN_DECIMALS);
   }
+}
+
+function maybeResumeLiveTransfers() {
+  var state = loadLiveTransferState();
+  if (!state || !state.active) return;
+  var lastSeenAt = Number(state.lastSeenAt || 0);
+  if (lastSeenAt > 0 && Date.now() - lastSeenAt > LIVE_TRANSFER_INACTIVE_MS) {
+    liveTransferActive = false;
+    saveLiveTransferState();
+    setLiveTransferStatus('Previous live subscription expired after the browser connection was closed.');
+    return;
+  }
+  connectLiveTransfers({ resuming: true });
 }
 
 function selectedLiveToken(strict) {
@@ -2646,11 +2724,13 @@ function liveAmountDecimals() {
 }
 
 function buildLiveTransferPayload() {
-  if (!liveWalletAddresses.length) {
-    throw new Error('Add at least one wallet address before connecting.');
+  if (!liveWalletAddresses.length && !liveTransferTokens.length) {
+    throw new Error('Add at least one wallet address or token filter before connecting.');
   }
   var payload = {
     type: 'erc20Transfers',
+    subscriptionId: liveTransferSessionId(),
+    subscriptionScope: 'dashboard',
     addresses: liveWalletAddresses,
     tokenAddresses: liveTransferTokens.map(function(token) { return token.address; })
   };
@@ -2672,12 +2752,38 @@ function websocketUrl() {
   return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
 }
 
-function setLiveTransferConnected(connected) {
-  byId('liveConnectBtn').disabled = !!connected;
+function setLiveTransferConnected(connected, label) {
+  var connectButton = byId('liveConnectBtn');
+  connectButton.disabled = !!connected;
+  connectButton.textContent = label || (connected ? 'Connected' : 'Connect');
   byId('liveDisconnectBtn').disabled = !connected;
 }
 
-function connectLiveTransfers() {
+function startLiveTransferStateRefresh() {
+  stopLiveTransferStateRefresh();
+  liveTransferStateRefreshTimer = setInterval(function() {
+    if (!liveTransferSocket || liveTransferSocket.readyState !== WebSocket.OPEN) return;
+    saveLiveTransferState();
+  }, LIVE_TRANSFER_STATE_REFRESH_MS);
+}
+
+function stopLiveTransferStateRefresh() {
+  if (liveTransferStateRefreshTimer != null) {
+    clearInterval(liveTransferStateRefreshTimer);
+    liveTransferStateRefreshTimer = null;
+  }
+}
+
+function liveTransferSessionUrl(suffix) {
+  return '/live/erc20-transfers/subscriptions/' + encodeURIComponent(liveTransferSessionId()) + (suffix || '');
+}
+
+function setLiveTransferActive(active) {
+  liveTransferActive = !!active;
+  saveLiveTransferState();
+}
+
+function connectLiveTransfers(options) {
   var payload;
   try {
     payload = buildLiveTransferPayload();
@@ -2694,11 +2800,12 @@ function connectLiveTransfers() {
   liveTransferManualDisconnect = false;
   var socket = new WebSocket(websocketUrl());
   liveTransferSocket = socket;
-  setLiveTransferConnected(true);
-  setLiveTransferStatus('Connecting...');
+  setLiveTransferConnected(true, 'Connecting...');
+  setLiveTransferStatus(options && options.resuming ? 'Reconnecting...' : 'Connecting...');
 
   socket.onopen = function() {
     socket.send(JSON.stringify(payload));
+    startLiveTransferStateRefresh();
     saveLiveTransferState();
   };
   socket.onmessage = function(event) {
@@ -2712,6 +2819,7 @@ function connectLiveTransfers() {
   socket.onclose = function() {
     if (liveTransferSocket !== socket) return;
     liveTransferSocket = null;
+    stopLiveTransferStateRefresh();
     setLiveTransferConnected(false);
     setLiveTransferStatus(liveTransferManualDisconnect ? 'Disconnected.' : 'Disconnected from live transfers.', !liveTransferManualDisconnect);
     liveTransferManualDisconnect = false;
@@ -2719,8 +2827,13 @@ function connectLiveTransfers() {
 }
 
 function disconnectLiveTransfers() {
-  if (!liveTransferSocket) return;
+  if (!liveTransferSocket) {
+    setLiveTransferActive(false);
+    return;
+  }
   liveTransferManualDisconnect = true;
+  setLiveTransferActive(false);
+  stopLiveTransferStateRefresh();
   liveTransferSocket.close();
 }
 
@@ -2736,6 +2849,15 @@ function handleLiveTransferMessage(raw) {
     return;
   }
   if (data && data.status === 'subscribed') {
+    if (data.subscriptionId) {
+      liveTransferClientId = String(data.subscriptionId);
+    }
+    if (Array.isArray(data.notifications)) {
+      liveTransferRows = data.notifications.slice(0, LIVE_TRANSFER_LIMIT);
+      renderLiveTransfers();
+    }
+    setLiveTransferActive(true);
+    setLiveTransferConnected(true, 'Connected');
     setLiveTransferStatus('Subscribed.');
     return;
   }
@@ -2758,6 +2880,22 @@ function liveTokenLabelForAddress(address) {
   return token ? tokenDisplayName(token) : displayAddressValue(address);
 }
 
+function liveCopyCellHtml(value, displayHtml, title, extraClass) {
+  var raw = value || '';
+  var className = 'copy-cell' + (extraClass ? ' ' + extraClass : '');
+  return ' class="' + escapeHtml(className) + '" tabindex="0" title="' + escapeHtml(title || 'Click to copy raw field text') + '" data-copy-value="' + escapeHtml(raw) + '">' + displayHtml;
+}
+
+function liveCopyCell(value, display, title) {
+  return liveCopyCellHtml(value, escapeHtml(display || value || ''), title);
+}
+
+function etherscanTxUrl(txHash) {
+  var tx = String(txHash || '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return null;
+  return 'https://etherscan.io/tx/' + tx;
+}
+
 function renderLiveTransfers() {
   var table = byId('liveTransferTable');
   var empty = byId('liveTransferEmpty');
@@ -2770,14 +2908,19 @@ function renderLiveTransfers() {
     return;
   }
   body.innerHTML = liveTransferRows.map(function(row) {
+    var txHash = row.transactionHash || '';
+    var txUrl = etherscanTxUrl(txHash);
+    var txButton = txUrl
+      ? '<a class="live-tx-open" href="' + escapeHtml(txUrl) + '" target="_blank" rel="noopener noreferrer" title="Open transaction in Etherscan" aria-label="Open transaction in Etherscan" data-open-tx="' + escapeHtml(txHash) + '">Open</a>'
+      : '';
     return '<tr>' +
       '<td>' + escapeHtml(formatUnixTimestampLocal(row.timestamp) || '--') + '</td>' +
       '<td>' + escapeHtml(fmt(row.blockNumber)) + '</td>' +
-      '<td title="' + escapeHtml(row.tokenAddress) + '">' + escapeHtml(liveTokenLabelForAddress(row.tokenAddress)) + '</td>' +
-      '<td title="' + escapeHtml(row.from) + '">' + escapeHtml(toChecksumAddress(row.from) || row.from) + '</td>' +
-      '<td title="' + escapeHtml(row.to) + '">' + escapeHtml(toChecksumAddress(row.to) || row.to) + '</td>' +
+      '<td' + liveCopyCell(row.tokenAddress, liveTokenLabelForAddress(row.tokenAddress), 'Click to copy token address') + '</td>' +
+      '<td' + liveCopyCell(row.from, toChecksumAddress(row.from) || row.from, 'Click to copy sender address') + '</td>' +
+      '<td' + liveCopyCell(row.to, toChecksumAddress(row.to) || row.to, 'Click to copy recipient address') + '</td>' +
       '<td title="' + escapeHtml(row.rawAmount) + '">' + escapeHtml(formatLiveTransferAmount(row)) + '</td>' +
-      '<td title="' + escapeHtml(row.transactionHash) + '">' + escapeHtml(shortHash(row.transactionHash)) + '</td>' +
+      '<td' + liveCopyCellHtml(txHash, '<span class="live-tx-content"><span>' + escapeHtml(shortHash(txHash)) + '</span>' + txButton + '</span>', 'Click to copy transaction hash', 'live-tx-cell') + '</td>' +
       '</tr>';
   }).join('');
   empty.style.display = 'none';
@@ -2788,6 +2931,12 @@ function clearLiveTransfers() {
   liveTransferRows = [];
   renderLiveTransfers();
   setLiveTransferStatus('Notifications cleared.');
+  if (liveTransferClientId) {
+    fetch(liveTransferSessionUrl('/clear'), {
+      method: 'POST',
+      credentials: 'same-origin'
+    }).catch(function() {});
+  }
 }
 
 function markQueryBuilderTouched() {
@@ -3875,6 +4024,32 @@ byId('liveResetTokensBtn').addEventListener('click', resetLiveTokens);
 byId('liveConnectBtn').addEventListener('click', connectLiveTransfers);
 byId('liveDisconnectBtn').addEventListener('click', disconnectLiveTransfers);
 byId('liveClearBtn').addEventListener('click', clearLiveTransfers);
+
+byId('liveTransferTable').addEventListener('click', function(event) {
+  var txButton = event.target.closest('[data-open-tx]');
+  if (txButton) {
+    event.stopPropagation();
+    return;
+  }
+  copyResultCell(event.target.closest('td[data-copy-value]'));
+});
+
+byId('liveTransferTable').addEventListener('keydown', function(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('[data-open-tx]')) return;
+  var cell = event.target.closest('td[data-copy-value]');
+  if (!cell) return;
+  event.preventDefault();
+  copyResultCell(cell);
+});
+
+document.addEventListener('visibilitychange', function() {
+  saveLiveTransferState();
+});
+
+window.addEventListener('beforeunload', function() {
+  saveLiveTransferState();
+});
 
 byId('liveWalletList').addEventListener('click', function(event) {
   var button = event.target.closest('[data-remove-live-wallet]');

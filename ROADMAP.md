@@ -4,17 +4,16 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `feature/disable-historical-sync`. The branch adds an opt-in forward-only sync mode for fresh data directories.
+Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes live ERC20 transfer hook controls and has been merged with current `master` before PR #88 is merged.
 
 ## Completed Since Last Run
 
-- Added `sync --disable-historical-sync` to start a fresh data directory without reverse historical EL backfill.
-- Persisted forward-only mode in `sync-mode.json` so restarts preserve the mode only when the flag remains enabled.
-- Added startup validation that rejects enabling the flag on data directories already initialized with normal historical sync.
-- Allowed a data directory first started with the flag to convert back to normal historical sync when restarted without it.
-- Suppressed historical ETA/rate fields in `/status` and switched the dashboard to a forward-sync view while the flag is active.
-- Added focused unit tests for CLI parsing, mode transitions, progress state, and status output.
-- Validated the branch with formatting, focused affected-package tests, full workspace tests, and full workspace clippy.
+- Added server-backed live ERC20 transfer sessions so dashboard subscriptions can resume after refresh with retained notifications.
+- Adjusted dashboard live-transfer expiry so browser-created subscriptions stay active in unfocused/background tabs and expire only after the WebSocket disconnects for one minute.
+- Added protected HTTP endpoints for non-dashboard ERC20 transfer service subscriptions that persist until explicit deletion or process restart.
+- Documented the live transfer service subscription API in the README.
+- Deployed the updated live transfer session behavior to the remote test node and verified refresh resume plus service-subscription retention on live data.
+- Merged current `master` into this branch, including the already-merged forward-only sync mode, so PR #88 can merge cleanly.
 
 ## Remaining TODOs
 
@@ -42,6 +41,9 @@ Active branch: `feature/disable-historical-sync`. The branch adds an opt-in forw
 - WebSocket ERC20 transfer hooks use a dedicated `type: "erc20Transfers"` subscription instead of overloading `eth_getLogs` filters; this keeps wallet/token/amount alert semantics explicit while preserving legacy log streams.
 - WebSocket transfer hooks are live-only. Historical data remains available through SQL and JSON-RPC, but backfill does not replay as alert traffic.
 - Dashboard amount bounds are entered in token units and converted to raw uint256 values before subscription. If amount bounds are used with token filters, all selected tokens must share the same decimals to avoid ambiguous comparisons.
+- ERC20 transfer hooks require at least one filter dimension: wallet addresses, token addresses, or both. Token-only subscriptions intentionally mean every transfer for the selected token contracts.
+- Dashboard-created ERC20 transfer sessions are in-memory, browser-id scoped, and expire one minute after the browser WebSocket disconnects; service-created sessions are in-memory and persist until delete or process restart.
+- Retained live-transfer notifications are bounded in memory to avoid OOM risk from broad token subscriptions.
 
 ## Challenges and Resolutions
 
@@ -51,20 +53,37 @@ Active branch: `feature/disable-historical-sync`. The branch adds an opt-in forw
 - Challenge: Forward-only mode still needs a trustworthy pivot and resumable default conversion.
   - Resolution: Kept CL-authenticated forward anchor handling intact and only disabled the reverse historical backfill scheduler.
 
+- Challenge: The live transfer status element reused the generic `.error` class, which hid it and caused the buttons to shift.
+  - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
+
+- Challenge: The transaction cell needed both row-cell copy behavior and a nested external-link action.
+  - Resolution: Kept the cell copyable, added a scoped Etherscan link styled as a compact button, and handled link clicks before the table-level copy handler.
+
+- Challenge: Refresh-resumable live transfer notifications require state outside the browser, but unbounded in-memory retention can exhaust smaller machines.
+  - Resolution: Moved live transfer notification retention into server-backed sessions with a bounded history, one-minute post-disconnect dashboard expiry, and explicit service-subscription endpoints.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected historical sync scheduling, progress state, status serialization, and dashboard rendering paths touched by the new mode.
-- No obsolete production code was removed; the historical backfill path remains the default behavior and is still required.
-- No experimental debug code was left in the branch.
+- Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
+- Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
+- Searched CLI definitions and README command references for stale or missing parameter documentation.
+- Replaced obsolete query row-cap documentation with the current unlimited SQL endpoint behavior and dashboard `LIMIT 500` default.
+- Removed obsolete historical WebSocket subscription plumbing from the EL historical ingest path.
+- Reused the existing Ethereum address parser for WebSocket subscriptions instead of adding a second parser.
+- Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
+- Rechecked the live transfer WebSocket and dashboard paths for obsolete empty-filter assumptions.
+- Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
+- Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
+- Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
+- Inspected the forward-only sync scheduling, progress state, status serialization, and dashboard rendering paths merged from `master`; no obsolete code was removed from that already-merged work.
 
 ## Git Workflow
 
-- Current branch: `feature/disable-historical-sync`
-- Worktree: `/private/tmp/logex-disable-historical-sync`
-- New branch created this run: yes, from `master`
-- Commits made during this run: one commit, `feat: add forward-only sync mode`
-- Pull request status: draft PR #89 (`https://github.com/tdenisenko/logex/pull/89`)
-- Merge status: pending
+- Current branch: `fix/live-transfer-hook-controls`
+- New branch created this run: no
+- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`, `9a51b97 fix: keep live hooks active in background tabs`, plus the pending merge commit from `origin/master`.
+- Pull request status: PR #88 is ready for review and being updated with current `master`.
+- Merge status: user approved; pending validation and GitHub merge.
 - Blockers: none currently.
 
 ## Known Issues or Risks
