@@ -89,9 +89,10 @@ impl SyncEngine {
         }
         {
             let status = self.sync_status.lock().unwrap();
-            if status
-                .historical_execution_floor
-                .is_some_and(|floor| floor.block_number > status.historical_target_block)
+            if !status.historical_sync_disabled
+                && status
+                    .historical_execution_floor
+                    .is_some_and(|floor| floor.block_number > status.historical_target_block)
             {
                 return false;
             }

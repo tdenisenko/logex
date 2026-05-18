@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -25,6 +26,7 @@ use logex_types::SyncStatus;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
+use serde::{Deserialize, Serialize};
 
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::resolve_checkpoint;
@@ -32,6 +34,18 @@ use crate::checkpoint::resolve_checkpoint;
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoricalSyncMode {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SyncModeState {
+    historical_sync_disabled: bool,
+}
 
 pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
@@ -50,6 +64,7 @@ pub struct RunSyncOptions {
     pub cl_max_peers: usize,
     pub dashboard_enabled: bool,
     pub dashboard_password: Option<String>,
+    pub disable_historical_sync: bool,
 }
 
 pub async fn run_sync(options: RunSyncOptions) {
@@ -70,6 +85,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         cl_max_peers,
         dashboard_enabled,
         dashboard_password,
+        disable_historical_sync,
     } = options;
     let nat = match nat.parse::<NatResolver>() {
         Ok(nat) => nat,
@@ -104,6 +120,19 @@ pub async fn run_sync(options: RunSyncOptions) {
     };
 
     let sync_head = storage.sync_head();
+    let historical_sync_mode = match resolve_historical_sync_mode(
+        &data_dir,
+        &storage,
+        consensus_state_exists,
+        disable_historical_sync,
+    ) {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::error!(%error);
+            std::process::exit(1);
+        }
+    };
+    let historical_sync_disabled = historical_sync_mode == HistoricalSyncMode::Disabled;
     let head_block = storage.head_block().unwrap_or(0);
     let indexed_head_block = storage.indexed_head_block();
     let resume_block = sync_head
@@ -168,6 +197,7 @@ pub async fn run_sync(options: RunSyncOptions) {
             &storage_anchors,
             historical_floor,
             historical_anchor,
+            historical_sync_disabled,
             consensus.as_deref(),
         ),
     ));
@@ -288,6 +318,7 @@ pub async fn run_sync(options: RunSyncOptions) {
 
     let sync_config = SyncConfig {
         max_peers,
+        disable_historical_sync: historical_sync_disabled,
         ..Default::default()
     };
 
@@ -379,11 +410,13 @@ fn initial_sync_status(
     storage_anchors: &logex_types::ChainAnchors,
     historical_floor: Option<logex_types::ExecutionBlockMarker>,
     historical_anchor: Option<logex_types::ExecutionBlockMarker>,
+    historical_sync_disabled: bool,
     consensus: Option<&ConsensusStore>,
 ) -> SyncStatus {
     let mut status = SyncStatus {
         current_block: resume_block,
         target_block: 0,
+        historical_sync_disabled,
         historical_execution_floor: historical_floor,
         historical_execution_anchor: historical_anchor,
         historical_target_block: logex_sync::EXECUTION_HISTORY_TARGET_BLOCK,
@@ -408,6 +441,95 @@ fn initial_sync_status(
         }
     }
     status
+}
+
+fn resolve_historical_sync_mode(
+    data_dir: &Path,
+    storage: &PartitionManager,
+    consensus_state_exists: bool,
+    disable_historical_sync_requested: bool,
+) -> Result<HistoricalSyncMode, String> {
+    let state = read_sync_mode_state(data_dir)?;
+    match (
+        disable_historical_sync_requested,
+        state
+            .as_ref()
+            .is_some_and(|state| state.historical_sync_disabled),
+    ) {
+        (true, true) => Ok(HistoricalSyncMode::Disabled),
+        (true, false) => {
+            if storage_is_fresh_for_sync_mode(storage, consensus_state_exists) {
+                write_sync_mode_state(
+                    data_dir,
+                    &SyncModeState {
+                        historical_sync_disabled: true,
+                    },
+                )?;
+                Ok(HistoricalSyncMode::Disabled)
+            } else {
+                Err(
+                    "--disable-historical-sync can only be used with a fresh LogEx data directory. This data directory was already initialized without the flag; restart without --disable-historical-sync or use a new --data-dir."
+                        .to_owned(),
+                )
+            }
+        }
+        (false, true) => {
+            remove_sync_mode_state(data_dir)?;
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                "historical sync was previously disabled; restarting without --disable-historical-sync enables normal historical backfill"
+            );
+            Ok(HistoricalSyncMode::Enabled)
+        }
+        (false, false) => Ok(HistoricalSyncMode::Enabled),
+    }
+}
+
+fn storage_is_fresh_for_sync_mode(
+    storage: &PartitionManager,
+    consensus_state_exists: bool,
+) -> bool {
+    !consensus_state_exists
+        && storage.sync_head().is_none()
+        && storage.total_rows() == 0
+        && storage.head_block().is_none()
+        && storage.indexed_head_block().is_none()
+        && storage.historical_floor().is_none()
+        && storage.historical_anchor().is_none()
+}
+
+fn sync_mode_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(SYNC_MODE_FILE_NAME)
+}
+
+fn read_sync_mode_state(data_dir: &Path) -> Result<Option<SyncModeState>, String> {
+    let path = sync_mode_state_path(data_dir);
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+    }
+}
+
+fn write_sync_mode_state(data_dir: &Path, state: &SyncModeState) -> Result<(), String> {
+    fs::create_dir_all(data_dir)
+        .map_err(|error| format!("failed to create {}: {error}", data_dir.display()))?;
+    let path = sync_mode_state_path(data_dir);
+    let contents = serde_json::to_vec_pretty(state)
+        .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
+    fs::write(&path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn remove_sync_mode_state(data_dir: &Path) -> Result<(), String> {
+    let path = sync_mode_state_path(data_dir);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to remove {}: {error}", path.display())),
+    }
 }
 
 fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&ConsensusStore>) -> Head {
@@ -637,6 +759,7 @@ mod tests {
             &logex_types::ChainAnchors::default(),
             None,
             None,
+            false,
             None,
         );
 
@@ -671,5 +794,85 @@ mod tests {
         assert!(!probes.contains(&extra_segments_dir.canonicalize().unwrap()));
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn disable_historical_sync_initializes_fresh_data_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap();
+
+        let mode = resolve_historical_sync_mode(tmp.path(), &storage, false, true).unwrap();
+
+        assert_eq!(mode, HistoricalSyncMode::Disabled);
+        let state = read_sync_mode_state(tmp.path()).unwrap().unwrap();
+        assert!(state.historical_sync_disabled);
+    }
+
+    #[test]
+    fn disable_historical_sync_rejects_existing_default_data_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap();
+        storage
+            .record_sync_head(
+                12_345,
+                alloy_primitives::B256::repeat_byte(0x12),
+                1_700_000_000,
+            )
+            .unwrap();
+
+        let error = resolve_historical_sync_mode(tmp.path(), &storage, false, true).unwrap_err();
+
+        assert!(error.contains("--disable-historical-sync can only be used with a fresh"));
+    }
+
+    #[test]
+    fn disabling_historical_sync_can_resume_when_marker_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap();
+        write_sync_mode_state(
+            tmp.path(),
+            &SyncModeState {
+                historical_sync_disabled: true,
+            },
+        )
+        .unwrap();
+
+        let mode = resolve_historical_sync_mode(tmp.path(), &storage, false, true).unwrap();
+
+        assert_eq!(mode, HistoricalSyncMode::Disabled);
+    }
+
+    #[test]
+    fn omitted_disable_flag_converts_disabled_directory_to_historical_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap();
+        write_sync_mode_state(
+            tmp.path(),
+            &SyncModeState {
+                historical_sync_disabled: true,
+            },
+        )
+        .unwrap();
+
+        let mode = resolve_historical_sync_mode(tmp.path(), &storage, false, false).unwrap();
+
+        assert_eq!(mode, HistoricalSyncMode::Enabled);
+        assert!(read_sync_mode_state(tmp.path()).unwrap().is_none());
     }
 }

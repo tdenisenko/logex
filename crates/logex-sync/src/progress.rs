@@ -100,9 +100,7 @@ impl ProgressTracker {
     ) {
         let mut status = self.status.lock().unwrap();
         let previous_state = status.node_state;
-        let historical_incomplete = status
-            .historical_execution_floor
-            .is_some_and(|floor| floor.block_number > status.historical_target_block);
+        let historical_incomplete = historical_sync_is_incomplete(&status);
         let node_state = if historical_incomplete
             && matches!(
                 node_state,
@@ -210,11 +208,15 @@ impl ProgressTracker {
         status.historical_execution_floor = floor;
         status.historical_execution_anchor = anchor;
         status.historical_target_block = target_block;
-        status.historical_eta_seconds = historical_eta(
-            status.historical_execution_floor,
-            status.historical_target_block,
-            status.historical_blocks_per_sec,
-        );
+        status.historical_eta_seconds = if status.historical_sync_disabled {
+            None
+        } else {
+            historical_eta(
+                status.historical_execution_floor,
+                status.historical_target_block,
+                status.historical_blocks_per_sec,
+            )
+        };
     }
 
     pub fn record_historical_blocks(
@@ -299,10 +301,7 @@ impl ProgressTracker {
         status.syncing = false;
         status.target_block = status.current_block;
         status.eta_seconds = None;
-        if status
-            .historical_execution_floor
-            .is_none_or(|floor| floor.block_number <= status.historical_target_block)
-        {
+        if status.historical_sync_disabled || !historical_sync_is_incomplete(&status) {
             status.historical_blocks_per_sec = 0.0;
             status.historical_logs_per_sec = 0.0;
             status.historical_rate_updated_at_unix_ms = None;
@@ -330,6 +329,13 @@ fn historical_eta(
     }
 
     Some((floor.block_number - target_block) as f64 / blocks_per_sec)
+}
+
+fn historical_sync_is_incomplete(status: &SyncStatus) -> bool {
+    !status.historical_sync_disabled
+        && status
+            .historical_execution_floor
+            .is_some_and(|floor| floor.block_number > status.historical_target_block)
 }
 
 fn smoothed_historical_rate(previous: f64, recent: f64) -> f64 {
@@ -407,6 +413,27 @@ mod tests {
         let status = status.lock().unwrap().clone();
         assert!(status.syncing);
         assert_eq!(status.node_state, NodeState::Syncing);
+    }
+
+    #[test]
+    fn disabled_historical_sync_does_not_force_runtime_syncing_state() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            historical_sync_disabled: true,
+            historical_execution_floor: Some(ExecutionBlockMarker {
+                block_number: 10,
+                block_hash: B256::repeat_byte(0x10),
+                timestamp: 100,
+            }),
+            historical_target_block: 0,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Synced, 8, 8, 64);
+
+        let status = status.lock().unwrap().clone();
+        assert!(!status.syncing);
+        assert_eq!(status.node_state, NodeState::Synced);
     }
 
     #[test]

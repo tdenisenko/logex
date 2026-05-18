@@ -75,6 +75,13 @@ The two paths run concurrently. Live syncing does not wait for historical
 completion, and historical syncing keeps working while the node follows new
 blocks.
 
+For fresh data directories, `sync --disable-historical-sync` can run in
+forward-only mode from the checkpoint pivot. This is useful when an operator
+only wants verified live and recent logs. The flag cannot be added to a data
+directory that was already initialized with normal historical sync. If a data
+directory was first initialized with this flag, restarting without it converts
+the node back to normal historical sync and begins the reverse backfill path.
+
 The historical path validates all the way to block 0. Pre-Merge blocks are
 handled by execution-layer verification, not by consensus-layer historical
 sync. The CL is used to authenticate the starting pivot and ongoing canonical
@@ -276,6 +283,7 @@ Global options:
 | `--disable-dashboard` | false | Disable the embedded HTML dashboard while leaving HTTP query APIs available. |
 | `--dashboard-password <PASSWORD>` | none | Require HTTP Basic auth for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Username is `logex`. Required for public HTTP. |
 | `--allow-public-grpc` | false | Allow gRPC to bind to a non-loopback host. This only disables LogEx's startup guard; use a private network or firewall. |
+| `--disable-historical-sync` | false | Fresh-data-dir only. Follow verified CL anchors forward from the checkpoint pivot and skip reverse historical EL backfill. Restart later without the flag to resume normal historical sync. |
 
 `build-indexes` options:
 
@@ -303,6 +311,7 @@ Command samples:
 
 ```bash
 ./target/release/logex --data-dir ./logex-data info
+./target/release/logex --data-dir ./recent-only --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync --disable-historical-sync
 ./target/release/logex --data-dir ./logex-data build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
 ./target/release/logex --data-dir ./logex-data build-indexes --sealed --from-block 12000000 --to-block 25100000
 ./target/release/logex --data-dir ./logex-data compact --limit 20

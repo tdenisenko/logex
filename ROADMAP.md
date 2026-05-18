@@ -2,9 +2,9 @@
 
 ## Current Status
 
-LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, and gRPC.
+LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/live-transfer-hook-controls`. The current branch tightens the live ERC20 transfer hook controls before the feature is finalized.
+Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes live ERC20 transfer hook controls and has been merged with current `master` before PR #88 is merged.
 
 ## Completed Since Last Run
 
@@ -13,6 +13,7 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Added protected HTTP endpoints for non-dashboard ERC20 transfer service subscriptions that persist until explicit deletion or process restart.
 - Documented the live transfer service subscription API in the README.
 - Deployed the updated live transfer session behavior to the remote test node and verified refresh resume plus service-subscription retention on live data.
+- Merged current `master` into this branch, including the already-merged forward-only sync mode, so PR #88 can merge cleanly.
 
 ## Remaining TODOs
 
@@ -22,6 +23,10 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 ## Design Decisions
 
+- Forward-only sync is a fresh-data-dir mode because switching an existing historical data directory into partial-history mode would make coverage semantics ambiguous.
+- The mode marker lives at `sync-mode.json` in the data directory. It is intentionally separate from storage segments so startup can validate the mode before sync begins.
+- Restarting without `--disable-historical-sync` removes the marker and resumes default historical sync, preserving the existing pivot/floor metadata as the backfill start point.
+- The dashboard hides historical-only details when forward-only mode is active instead of showing zeroed reverse-sync metrics.
 - SQL responses no longer have a hidden server-side row cap; dashboard-generated queries default to `LIMIT 500`.
 - Dashboard query history and query-builder state remain browser-local only.
 - Bounded log queries prune whole segments with metadata first, then use indexes where available, then apply row-level checks for correctness.
@@ -42,44 +47,11 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 
 ## Challenges and Resolutions
 
-- Challenge: Exact ERC20 composite indexes gave good query speed but consumed too much storage.
-  - Resolution: Replaced the automatic Transfer profile with compact per-segment bloom indexes and removed obsolete composite backfill code from that profile.
+- Challenge: The main checkout had unrelated local work on another branch.
+  - Resolution: Created a separate worktree at `/private/tmp/logex-disable-historical-sync` and branched from `master`.
 
-- Challenge: The wide ERC20 balance query touched more than 11,000 segments.
-  - Resolution: Added Transfer bloom pruning, moved bloom checks before segment open, and parallelized native aggregate partition scans. The query now completes on real full-sync data instead of timing out.
-
-- Challenge: Approval queries still timed out after Transfer optimization.
-  - Resolution: Added a common ERC20 event bloom keyed by event topic, token address, indexed topic position, and indexed topic value. `data != ...` now stays on the native path, and the full-range USDC Approval query completes in seconds on the remote data set.
-
-- Challenge: A slow HTTP query kept the old remote process deactivating during restart.
-  - Resolution: HTTP shutdown now marks the active query as canceled before graceful shutdown waits for open requests to finish.
-
-- Challenge: `COUNT(*) ... GROUP BY source` over a recent dense range scanned millions of rows through the generic SQL engine.
-  - Resolution: Added a native count aggregate path that uses segment pruning and only reads the `source` column when grouping. The real-data grouped count query now completes in under a second.
-
-- Challenge: A low-space sealed symlink volume stopped the server even though the active write path still had headroom.
-  - Resolution: The low-disk guard now probes writable storage roots, not every sealed segment target.
-
-- Challenge: A single checkpoint-sync endpoint remained a central trust assumption for fresh starts.
-  - Resolution: Added a multi-source quorum resolver. With multiple configured URLs, LogEx resolves or validates a checkpoint only after enough sources agree on the same slot/root.
-
-- Challenge: The dashboard and query APIs were easy to expose accidentally because listeners bound to all interfaces by default.
-  - Resolution: Changed HTTP and gRPC defaults to loopback and added startup validation for intentionally public listeners.
-
-- Challenge: Token balance queries using `GROUP BY address`, `HAVING`, and `ORDER BY` fell back to DataFusion, which cannot sum hex-encoded `data` as exact uint256 values.
-  - Resolution: Extended the native exact aggregate path to group by token contract and apply aggregate filtering and ordering before pagination.
-
-- Challenge: The README and generated help text lagged behind the current listener hardening and index-maintenance parameters.
-  - Resolution: Rebuilt the CLI reference from the actual clap definitions and added help-output tests for the important operator controls.
-
-- Challenge: Live ERC20 hooks could accidentally flood subscribers with historical backfill if they reused the existing storage broadcast path unchanged.
-  - Resolution: Removed historical subscription broadcasting and kept WebSocket notifications tied to live block ingestion.
-
-- Challenge: Human amount filters are token-decimal dependent, but the server should not need token metadata for correctness.
-  - Resolution: The server accepts raw uint256 min/max bounds; the dashboard tester converts human token-unit values using known or custom token decimals before subscribing.
-
-- Challenge: WebSocket hooks needed validation against real live block ingestion rather than only historical query data.
-  - Resolution: Ran a live remote probe that selected active recent ERC20 counterparties, subscribed with token and amount bounds, and verified real notifications from newly ingested blocks.
+- Challenge: Forward-only mode still needs a trustworthy pivot and resumable default conversion.
+  - Resolution: Kept CL-authenticated forward anchor handling intact and only disabled the reverse historical backfill scheduler.
 
 - Challenge: The live transfer status element reused the generic `.error` class, which hid it and caused the buttons to shift.
   - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
@@ -103,18 +75,21 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch tightens th
 - Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
 - Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
+- Inspected the forward-only sync scheduling, progress state, status serialization, and dashboard rendering paths merged from `master`; no obsolete code was removed from that already-merged work.
 
 ## Git Workflow
 
 - Current branch: `fix/live-transfer-hook-controls`
 - New branch created this run: no
-- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`, `9a51b97 fix: keep live hooks active in background tabs`
-- Pull request status: draft PR #88 is open and updated.
-- Merge status: blocked by user approval; this branch must not be merged until confirmed final.
+- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`, `9a51b97 fix: keep live hooks active in background tabs`, plus the pending merge commit from `origin/master`.
+- Pull request status: PR #88 is ready for review and being updated with current `master`.
+- Merge status: user approved; pending validation and GitHub merge.
 - Blockers: none currently.
 
 ## Known Issues or Risks
 
+- Forward-only mode intentionally provides recent/live query coverage only until the operator restarts without the flag and completes historical backfill.
+- No remote runtime test was run because this task explicitly requested local testing only.
 - Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
 - Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
