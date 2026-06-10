@@ -4,16 +4,14 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes live ERC20 transfer hook controls and has been merged with current `master` before PR #88 is merged.
+Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard sync metric presentation for CPU charts, historical sync progress, and Consensus Layer peer visibility.
 
 ## Completed Since Last Run
 
-- Added server-backed live ERC20 transfer sessions so dashboard subscriptions can resume after refresh with retained notifications.
-- Adjusted dashboard live-transfer expiry so browser-created subscriptions stay active in unfocused/background tabs and expire only after the WebSocket disconnects for one minute.
-- Added protected HTTP endpoints for non-dashboard ERC20 transfer service subscriptions that persist until explicit deletion or process restart.
-- Documented the live transfer service subscription API in the README.
-- Deployed the updated live transfer session behavior to the remote test node and verified refresh resume plus service-subscription retention on live data.
-- Merged current `master` into this branch, including the already-merged forward-only sync mode, so PR #88 can merge cleanly.
+- Fixed the Historical Sync dashboard card so known zero progress and zero sync rates render as explicit values instead of blank placeholders.
+- Kept incomplete historical-sync estimates meaningful while the backend has not yet produced a historical rate.
+- Stabilized the CPU chart against a 100% utilization baseline while continuing to use normalized process CPU from the status endpoint.
+- Expanded Advanced Metrics with detailed Consensus Layer peer counters from the existing `consensus_network` status payload.
 
 ## Remaining TODOs
 
@@ -44,6 +42,8 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes l
 - ERC20 transfer hooks require at least one filter dimension: wallet addresses, token addresses, or both. Token-only subscriptions intentionally mean every transfer for the selected token contracts.
 - Dashboard-created ERC20 transfer sessions are in-memory, browser-id scoped, and expire one minute after the browser WebSocket disconnects; service-created sessions are in-memory and persist until delete or process restart.
 - Retained live-transfer notifications are bounded in memory to avoid OOM risk from broad token subscriptions.
+- Dashboard CPU charts use normalized process CPU (`raw process CPU / logical core capacity`) and keep a 100% baseline so multi-core hosts are interpreted consistently.
+- Historical sync progress displays `0.00%` and `0 logs/s` when those are known values; unknown telemetry still displays `--`.
 
 ## Challenges and Resolutions
 
@@ -62,6 +62,12 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes l
 - Challenge: Refresh-resumable live transfer notifications require state outside the browser, but unbounded in-memory retention can exhaust smaller machines.
   - Resolution: Moved live transfer notification retention into server-backed sessions with a bounded history, one-minute post-disconnect dashboard expiry, and explicit service-subscription endpoints.
 
+- Challenge: The Historical Sync card treated valid zero progress/rates as missing telemetry.
+  - Resolution: Updated the dashboard formatter and progress rendering so known zero values remain visible while unknown values still use placeholders.
+
+- Challenge: Consensus Layer peer data was available in `/status` but too compressed in Advanced Metrics.
+  - Resolution: Added separate CL peer rows for connected, dialing, discovered, dialable, routing, RPC-capable, and pending-RPC counts.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -75,15 +81,15 @@ Active branch: `fix/live-transfer-hook-controls`. The current branch finalizes l
 - Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
 - Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
-- Inspected the forward-only sync scheduling, progress state, status serialization, and dashboard rendering paths merged from `master`; no obsolete code was removed from that already-merged work.
+- Inspected the dashboard sync metric rendering and chart setup paths; no dead code was found in the touched UI-only branch.
 
 ## Git Workflow
 
-- Current branch: `fix/live-transfer-hook-controls`
-- New branch created this run: no
-- Commits made during this run: `0235e4b feat: persist live transfer subscriptions`, `9a51b97 fix: keep live hooks active in background tabs`, plus the pending merge commit from `origin/master`.
-- Pull request status: PR #88 is ready for review and being updated with current `master`.
-- Merge status: user approved; pending validation and GitHub merge.
+- Current branch: `fix/dashboard-sync-metrics`
+- New branch created this run: yes
+- Commits made during this run: `fix: clarify dashboard sync metrics`
+- Pull request status: pending push
+- Merge status: not merged
 - Blockers: none currently.
 
 ## Known Issues or Risks
