@@ -2858,7 +2858,7 @@ impl ConsensusNetwork {
             }
             (RpcRequestKind::BeaconBlocksByRange, Eth2RpcResponse::BeaconBlocksByRange(chunks)) => {
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
-                tracing::info!(
+                tracing::debug!(
                     %peer,
                     chunks = chunks.len(),
                     total_bytes,
@@ -2934,7 +2934,7 @@ impl ConsensusNetwork {
             }
             (RpcRequestKind::BeaconBlocksByRoot, Eth2RpcResponse::BeaconBlocksByRoot(chunks)) => {
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
-                tracing::info!(
+                tracing::debug!(
                     %peer,
                     chunks = chunks.len(),
                     total_bytes,

@@ -17,6 +17,9 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Tightened medium-density historical fetch windows so log-dense ranges no longer widen into long 5k-10k block plans.
 - Increased high-memory historical lookahead for medium-density ranges while preserving dense-range and low-memory caps.
 - Verified the remote run returned to the 200k+ logs/sec range after restart; samples reached about 300k-370k logs/sec with fewer than 20 serving peers and no storage/index backlog.
+- Reset the remote full-sync data directory while preserving known peers and discovery secrets, then restarted a fresh run on the external data volume.
+- Demoted per-response successful CL beacon block history logs from INFO to DEBUG to reduce avoidable runtime log IO and keep INFO focused on state changes, progress, and failures.
+- Tested a larger dense-range historical lookahead and reverted it after warmed remote samples were worse at comparable serving-peer counts.
 
 ## Remaining TODOs
 
@@ -82,6 +85,9 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Challenge: After shrinking batches, CPU remained low and throughput still dipped under 200k when body/receipt request latency varied.
   - Resolution: Raised the high-memory medium-density lookahead from 5 to 7. Dense ranges still cap depth to 4 or 3, and low-memory hosts still cap to 2 or 1.
 
+- Challenge: A follow-up dense-range lookahead increase appeared to target idle request gaps but could overload the useful peer set.
+  - Resolution: Tested it on the remote fresh run and reverted it because comparable warmed samples were slower than the known-good scheduler.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -97,20 +103,21 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
 - Inspected the historical fetch scheduler, body/receipt request pairing, storage append path, and background indexer. Kept only performance changes with measured benefit or direct hot-path reduction; no obsolete debug code was left in the branch.
 - Rechecked the adaptive historical fetch policy and kept only the density bounds that improved remote behavior without adding new runtime state or debug-only code.
+- Rechecked high-volume consensus networking logs and demoted only normal successful history responses; failure and invalid-response logs remain visible at INFO/WARN.
 
 ## Git Workflow
 
 - Current branch: `fix/historical-fetch-stalls`
-- New branch created this run: yes
-- Commits made during this run: `fix: reduce historical fetch stalls`, `fix: satisfy clippy on receipt count check`, `fix: adapt historical fetch windows by log density`, `fix: increase safe historical fetch lookahead`
-- Pull request status: PR #91 open; high-memory lookahead follow-up pending push
+- New branch created this run: no
+- Commits made during this run: `fix: reduce consensus history log noise`
+- Pull request status: PR #91 open; branch updated with the logging cleanup
 - Merge status: not merged
 - Blockers: none currently.
 
 ## Known Issues or Risks
 
 - Forward-only mode intentionally provides recent/live query coverage only until the operator restarts without the flag and completes historical backfill.
-- No remote runtime test was run because this task explicitly requested local testing only.
+- The current remote fresh run has enough free space for continued performance testing, but the external volume also contains unrelated large folders outside LogEx that may prevent a complete genesis run unless cleaned separately.
 - Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
 - Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
