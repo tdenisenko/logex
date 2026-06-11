@@ -4,22 +4,14 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/historical-fetch-stalls`. The current branch removes historical EL sync stalls by keeping body/receipt fetch windows short enough for medium peer counts, dynamically bounding medium-density windows by estimated rows, increasing safe high-memory lookahead, and deferring sealed historical query-index builds until backfill is no longer active.
+Active branch: `fix/historical-fetch-stalls`. The current branch removes historical EL sync stalls by decoupling reverse EL backfill from CL-gated forward head tracking after the checkpoint pivot is established.
 
 ## Completed Since Last Run
 
-- Merged the completed dashboard sync metric PR and deleted its remote branch.
-- Reduced the 8-47 serving-peer historical fetch window to avoid body/receipt timeout stalls seen with wider batches.
-- Increased low-peer historical lookahead while preserving a stricter low-memory cap.
-- Deferred sealed historical ERC20 query-index builds during active historical sync so backfill writes do not compete with index construction.
-- Avoided rebuilding the full sealed partition view after every historical batch append.
-- Reduced body/receipt pairing clones and preallocated receipt bloom caches in hot verification paths.
-- Tightened medium-density historical fetch windows so log-dense ranges no longer widen into long 5k-10k block plans.
-- Increased high-memory historical lookahead for medium-density ranges while preserving dense-range and low-memory caps.
-- Verified the remote run returned to the 200k+ logs/sec range after restart; samples reached about 300k-370k logs/sec with fewer than 20 serving peers and no storage/index backlog.
-- Reset the remote full-sync data directory while preserving known peers and discovery secrets, then restarted a fresh run on the external data volume.
-- Demoted per-response successful CL beacon block history logs from INFO to DEBUG to reduce avoidable runtime log IO and keep INFO focused on state changes, progress, and failures.
-- Tested a larger dense-range historical lookahead and reverted it after warmed remote samples were worse at comparable serving-peer counts.
+- Let historical EL backfill run before forward CL-anchor ingestion in each scheduler turn.
+- Allowed historical backfill to keep running when forward sync is temporarily waiting for fresh consensus anchors.
+- Kept forward sync and reorg handling CL-gated while using a small gas-aware body/receipt pipeline for forward blocks.
+- Deployed the release build to the remote Mac test host and verified forward sync stayed within a few blocks of head while historical backfill continued above 20 serving peers with no storage/index backlog.
 
 ## Remaining TODOs
 
@@ -52,6 +44,7 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Retained live-transfer notifications are bounded in memory to avoid OOM risk from broad token subscriptions.
 - Dashboard CPU charts use normalized process CPU (`raw process CPU / logical core capacity`) and keep a 100% baseline so multi-core hosts are interpreted consistently.
 - Historical sync progress displays `0.00%` and `0 logs/s` when those are known values; unknown telemetry still displays `--`.
+- Historical EL backfill is independent from live CL head tracking once the checkpoint pivot exists. Only forward EL ingestion waits for CL anchors and performs reorg reconciliation.
 
 ## Challenges and Resolutions
 
@@ -76,17 +69,11 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Challenge: Consensus Layer peer data was available in `/status` but too compressed in Advanced Metrics.
   - Resolution: Added separate CL peer rows for connected, dialing, discovered, dialable, routing, RPC-capable, and pending-RPC counts.
 
-- Challenge: Historical EL sync repeatedly ramped up, hit body/receipt request stalls, and dropped well below the previous 200k+ logs/sec range.
-  - Resolution: Reduced medium-peer fetch windows, increased safe low-peer lookahead, deferred sealed historical query-index builds during active backfill, and validated the remote run returning to the target range.
+- Challenge: Historical EL backfill could appear stalled when the scheduler spent the turn catching up CL-authenticated forward blocks.
+  - Resolution: Historical backfill now runs before forward anchor ingestion and can continue when forward sync is waiting for consensus. Forward reorg checks remain CL-gated.
 
-- Challenge: Medium-density historical ranges could still expand into wide fetch plans and amplify intermittent peer/request latency.
-  - Resolution: Bounded dense ranges to 1,024 blocks and changed the medium-density target from multi-million-row batches to about 350k rows so the client adapts batch size by observed log density.
-
-- Challenge: After shrinking batches, CPU remained low and throughput still dipped under 200k when body/receipt request latency varied.
-  - Resolution: Raised the high-memory medium-density lookahead from 5 to 7. Dense ranges still cap depth to 4 or 3, and low-memory hosts still cap to 2 or 1.
-
-- Challenge: A follow-up dense-range lookahead increase appeared to target idle request gaps but could overload the useful peer set.
-  - Resolution: Tested it on the remote fresh run and reverted it because comparable warmed samples were slower than the known-good scheduler.
+- Challenge: Forward catch-up still needed low-latency body and receipt ingestion without starving historical backfill.
+  - Resolution: Forward ingestion now uses a small gas-aware combined body/receipt request path with sequential fallback and partial-prefix acceptance.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -101,23 +88,22 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
 - Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
-- Inspected the historical fetch scheduler, body/receipt request pairing, storage append path, and background indexer. Kept only performance changes with measured benefit or direct hot-path reduction; no obsolete debug code was left in the branch.
-- Rechecked the adaptive historical fetch policy and kept only the density bounds that improved remote behavior without adding new runtime state or debug-only code.
-- Rechecked high-volume consensus networking logs and demoted only normal successful history responses; failure and invalid-response logs remain visible at INFO/WARN.
+- Rechecked the historical scheduler and forward body/receipt request path. No debug-only code or obsolete experimental files were left in the repository.
+- Removed an accidental stray source copy from the remote test checkout before rebuilding; no repository file was affected.
 
 ## Git Workflow
 
 - Current branch: `fix/historical-fetch-stalls`
 - New branch created this run: no
-- Commits made during this run: `fix: reduce consensus history log noise`
-- Pull request status: PR #91 open; branch updated with the logging cleanup
+- Commits made during this run: `fix: decouple historical sync from forward catch-up`
+- Pull request status: PR #91 open; branch updated with the scheduler fix
 - Merge status: not merged
 - Blockers: none currently.
 
 ## Known Issues or Risks
 
 - Forward-only mode intentionally provides recent/live query coverage only until the operator restarts without the flag and completes historical backfill.
-- The current remote fresh run has enough free space for continued performance testing, but the external volume also contains unrelated large folders outside LogEx that may prevent a complete genesis run unless cleaned separately.
+- The remote fresh run has enough free space for continued performance testing on the external volume.
 - Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
 - Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
 - Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
@@ -125,4 +111,5 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - HTTP Basic auth is not transport encryption; public HTTP deployments still need firewalling, SSH tunneling, or TLS termination even though localhost binding is now the default.
 - WebSocket transfer hooks notify after verified live block ingestion, not pending mempool transfers.
 - WebSocket missed-event replay is not implemented; clients that disconnect should query historical logs for the missed range after reconnecting.
+- Historical sync still has short zero-progress windows caused by peer/request latency, but the old structural stall behind CL-forward catch-up is resolved in current remote samples.
 - Verification-critical security review is still required before a production-ready release.

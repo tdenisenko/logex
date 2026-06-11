@@ -354,6 +354,36 @@ impl PeerManager {
             .map(|completion| completion.map(|completion| completion.blocks))
     }
 
+    /// Request bodies and matching receipts using header gas hints to size chunks.
+    pub(crate) async fn get_bodies_and_receipts_for_hashes_and_gas_prefer_peers(
+        &mut self,
+        hashes: Vec<B256>,
+        gas_used: Vec<u64>,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+    ) -> Result<Option<BodyReceiptRequestCompletion>> {
+        if hashes.is_empty() {
+            return Ok(Some(BodyReceiptRequestCompletion {
+                blocks: Vec::new(),
+                planned_return_blocks: 0,
+            }));
+        }
+
+        let Some(plan) = self
+            .prepare_bodies_and_receipts_request_for_hashes_and_gas(
+                hashes,
+                gas_used,
+                required_block,
+                preferred_peers,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let outcome = plan.execute().await;
+        self.complete_bodies_and_receipts_request(outcome)
+    }
+
     pub(crate) async fn prepare_bodies_and_receipts_request(
         &mut self,
         hashes: Vec<B256>,
@@ -424,7 +454,7 @@ impl PeerManager {
             &receipt_peer_ids,
             receipt_gas_used.as_deref(),
         );
-        if ranges.len() < 2 {
+        if ranges.is_empty() {
             return Ok(None);
         }
         let return_blocks = body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref());

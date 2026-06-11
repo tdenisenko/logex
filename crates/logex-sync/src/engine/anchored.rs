@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
-const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
+const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 64;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
 const HISTORICAL_VALIDATION_LOG_WORK_WEIGHT: u64 = 4;
@@ -910,15 +910,46 @@ impl SyncEngine {
                 self.refresh_connectivity_state();
             }
 
-            let current = self.current_block();
             self.refresh_consensus_status().await;
-            self.set_peer_head_from_consensus();
+            let forward_has_consensus = self.set_peer_head_from_consensus();
             self.refresh_historical_status().await;
-            if self.reconcile_consensus_reorg().await? {
+            if forward_has_consensus && self.reconcile_consensus_reorg().await? {
+                continue;
+            }
+
+            let (current, target) = self.sync_cursor();
+            let historical_progressed = if !self.config.disable_historical_sync
+                && should_run_historical_backfill(
+                    current,
+                    target,
+                    LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD,
+                ) {
+                self.ingest_historical_backfill_batch().await?
+            } else {
+                false
+            };
+
+            if !forward_has_consensus {
+                if historical_progressed {
+                    continue;
+                }
+                self.set_runtime_state(NodeState::WaitingForConsensus);
+                if cancelable(
+                    &mut self.shutdown,
+                    tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
+                )
+                .await
+                .is_none()
+                {
+                    return self.finish_shutdown();
+                }
                 continue;
             }
 
             let Some(consensus) = self.consensus.clone() else {
+                if historical_progressed {
+                    continue;
+                }
                 return Ok(());
             };
 
@@ -938,9 +969,7 @@ impl SyncEngine {
                 } else {
                     self.set_runtime_state(NodeState::WaitingForConsensus);
                 }
-                if !self.config.disable_historical_sync
-                    && self.ingest_historical_backfill_batch().await?
-                {
+                if historical_progressed {
                     continue;
                 }
                 if cancelable(
@@ -956,17 +985,6 @@ impl SyncEngine {
             };
 
             let forward_progressed = self.ingest_anchored_blocks(anchors).await?;
-            let (current, target) = self.sync_cursor();
-            let historical_progressed = if !self.config.disable_historical_sync
-                && should_run_historical_backfill(
-                    current,
-                    target,
-                    LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD,
-                ) {
-                self.ingest_historical_backfill_batch().await?
-            } else {
-                false
-            };
             if !(forward_progressed || historical_progressed)
                 && cancelable(
                     &mut self.shutdown,
@@ -1077,28 +1095,43 @@ impl SyncEngine {
                 .map(|header| header.number())
                 .unwrap_or(first_anchor.block_number);
 
-            let bodies = match cancelable(
+            let gas_used = chunk_headers
+                .iter()
+                .map(|header| header.gas_used())
+                .collect::<Vec<_>>();
+            let combined_blocks = match cancelable(
                 &mut self.shutdown,
-                self.peers.get_bodies_prefer_peers(
-                    chunk_hashes.clone(),
-                    required_block,
-                    &[header_peer],
-                ),
+                self.peers
+                    .get_bodies_and_receipts_for_hashes_and_gas_prefer_peers(
+                        chunk_hashes.clone(),
+                        gas_used,
+                        required_block,
+                        &[header_peer],
+                    ),
             )
             .await
             {
-                Some(Ok(bodies)) if bodies.len() == chunk_headers.len() => bodies,
-                Some(Ok(bodies)) => {
+                Some(Ok(Some(completion))) if completion.blocks.len() <= chunk_headers.len() => {
+                    completion.blocks
+                }
+                Some(Ok(Some(completion))) => {
                     tracing::warn!(
                         headers = chunk_headers.len(),
-                        bodies = bodies.len(),
-                        "anchored block body request returned an unexpected response"
+                        blocks = completion.blocks.len(),
+                        planned_return_blocks = completion.planned_return_blocks,
+                        "anchored pipelined body/receipt request returned too many blocks"
                     );
                     return Ok(progressed);
                 }
+                Some(Ok(None)) => Vec::new(),
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "anchored block body request failed");
-                    return Ok(progressed);
+                    tracing::debug!(
+                        %error,
+                        required_block,
+                        hashes = chunk_hashes.len(),
+                        "anchored pipelined body/receipt request failed; falling back to sequential requests"
+                    );
+                    Vec::new()
                 }
                 None => {
                     self.finish_shutdown()?;
@@ -1106,10 +1139,97 @@ impl SyncEngine {
                 }
             };
 
-            for (i, header) in chunk_headers.iter().enumerate() {
-                let block_number = header.number();
+            let body_receipts = if combined_blocks.is_empty() && !chunk_headers.is_empty() {
+                let bodies = match cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_bodies_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &[header_peer],
+                    ),
+                )
+                .await
+                {
+                    Some(Ok(bodies)) if bodies.len() == chunk_headers.len() => bodies,
+                    Some(Ok(bodies)) => {
+                        tracing::warn!(
+                            headers = chunk_headers.len(),
+                            bodies = bodies.len(),
+                            "anchored block body request returned an unexpected response"
+                        );
+                        return Ok(progressed);
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "anchored block body request failed");
+                        return Ok(progressed);
+                    }
+                    None => {
+                        self.finish_shutdown()?;
+                        return Ok(progressed);
+                    }
+                };
+
+                let expected_receipt_counts: Vec<usize> = bodies
+                    .iter()
+                    .map(|(_peer_id, body)| body.transaction_count())
+                    .collect();
+                let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
+                let (receipt_peer, receipts) = match cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_receipts_matching_counts_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &expected_receipt_counts,
+                        &receipt_peer_preference,
+                    ),
+                )
+                .await
+                {
+                    Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
+                        (peer_id, receipts)
+                    }
+                    Some(Ok((peer_id, receipts))) => {
+                        tracing::warn!(
+                            headers = chunk_headers.len(),
+                            receipt_peer = %peer_id,
+                            returned_receipt_sets = receipts.len(),
+                            "anchored receipt request returned an unexpected response"
+                        );
+                        return Ok(progressed);
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "anchored receipt request failed");
+                        return Ok(progressed);
+                    }
+                    None => {
+                        self.finish_shutdown()?;
+                        return Ok(progressed);
+                    }
+                };
+                bodies
+                    .into_iter()
+                    .zip(
+                        receipts
+                            .into_iter()
+                            .map(|receipts| (receipt_peer, receipts)),
+                    )
+                    .collect::<Vec<_>>()
+            } else {
+                combined_blocks
+            };
+
+            if body_receipts.is_empty() {
+                return Ok(progressed);
+            }
+
+            let returned_blocks = body_receipts.len();
+            let partial_prefix = returned_blocks < chunk_headers.len();
+            for (i, header) in chunk_headers.iter().take(returned_blocks).enumerate() {
+                let anchor = chunk_anchors[i];
                 let block_hash = chunk_hashes[i];
-                let (body_peer, body) = &bodies[i];
+                let block_number = header.number();
+                let ((body_peer, body), (receipt_peer, receipts)) = &body_receipts[i];
+
                 if let Err(error) = validate_block_pre_execution(header, block_hash, body) {
                     tracing::warn!(
                         block_number,
@@ -1122,67 +1242,22 @@ impl SyncEngine {
                         .report_invalid_block_data(*body_peer, "block bodies");
                     return Ok(progressed);
                 }
-            }
 
-            let expected_receipt_counts: Vec<usize> = bodies
-                .iter()
-                .map(|(_peer_id, body)| body.transaction_count())
-                .collect();
-            let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
-            let (receipt_peer, receipts) = match cancelable(
-                &mut self.shutdown,
-                self.peers.get_receipts_matching_counts_prefer_peers(
-                    chunk_hashes.clone(),
-                    required_block,
-                    &expected_receipt_counts,
-                    &receipt_peer_preference,
-                ),
-            )
-            .await
-            {
-                Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
-                    (peer_id, receipts)
-                }
-                Some(Ok((peer_id, receipts))) => {
-                    tracing::warn!(
-                        headers = chunk_headers.len(),
-                        receipt_peer = %peer_id,
-                        returned_receipt_sets = receipts.len(),
-                        "anchored receipt request returned an unexpected response"
-                    );
-                    return Ok(progressed);
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "anchored receipt request failed");
-                    return Ok(progressed);
-                }
-                None => {
-                    self.finish_shutdown()?;
-                    return Ok(progressed);
-                }
-            };
-
-            for (i, header) in chunk_headers.iter().enumerate() {
-                let anchor = chunk_anchors[i];
-                let block_hash = chunk_hashes[i];
-                let block_number = header.number();
-                let (body_peer, body) = &bodies[i];
-
-                if !receipts_match_transaction_count(body, &receipts[i]) {
+                if !receipts_match_transaction_count(body, receipts) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
                         receipt_peer = %receipt_peer,
                         transactions = body.transaction_count(),
-                        receipts = receipts[i].len(),
+                        receipts = receipts.len(),
                         "anchored block body / receipt count mismatch"
                     );
                     self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
+                        .report_invalid_block_data(*receipt_peer, "receipts");
                     return Ok(progressed);
                 }
 
-                if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                if let Err(error) = validate_receipts_for_header(header, receipts) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
@@ -1191,28 +1266,32 @@ impl SyncEngine {
                         "anchored receipt validation failed"
                     );
                     self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
+                        .report_invalid_block_data(*receipt_peer, "receipts");
                     return Ok(progressed);
                 }
 
-                let txs = assemble_txs(body, &receipts[i]);
+                let txs = assemble_txs(body, receipts);
                 if let Some(reorg) = self.head_tracker.track(header.clone()) {
                     self.handle_reorg(reorg).await?;
                 }
 
                 let recent_headers = self.head_tracker.snapshot();
                 self.peers
-                    .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
+                    .cache_canonical_block(header.clone(), body.clone(), receipts);
                 let log_count = self
                     .ingest_block(header, block_hash, &txs, &recent_headers, Some(&anchor))
                     .await?;
                 self.progress.record_block(block_number, log_count);
                 self.note_serving_peer(header_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);
-                self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
+                self.note_serving_peer(*receipt_peer, &mut newly_serving_peers);
                 last_validated_header = Some(header.clone());
                 last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
                 progressed = true;
+            }
+
+            if partial_prefix {
+                break;
             }
         }
 
