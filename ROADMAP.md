@@ -4,7 +4,7 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/historical-fetch-stalls`. The current branch removes historical EL sync stalls by keeping body/receipt fetch windows short enough for medium peer counts, increasing low-peer lookahead, and deferring sealed historical query-index builds until backfill is no longer active.
+Active branch: `fix/historical-fetch-stalls`. The current branch removes historical EL sync stalls by keeping body/receipt fetch windows short enough for medium peer counts, dynamically bounding medium-density windows by estimated rows, increasing low-peer lookahead, and deferring sealed historical query-index builds until backfill is no longer active.
 
 ## Completed Since Last Run
 
@@ -14,7 +14,8 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Deferred sealed historical ERC20 query-index builds during active historical sync so backfill writes do not compete with index construction.
 - Avoided rebuilding the full sealed partition view after every historical batch append.
 - Reduced body/receipt pairing clones and preallocated receipt bloom caches in hot verification paths.
-- Verified the remote run returned to the 200k+ logs/sec range; latest observed status was about 239k logs/sec with 24 serving peers and no storage/index backlog.
+- Tightened medium-density historical fetch windows so log-dense ranges no longer widen into long 5k-10k block plans.
+- Verified the remote run returned to the 200k+ logs/sec range after restart; samples reached about 260k-290k logs/sec with 20-30 serving peers and no storage/index backlog.
 
 ## Remaining TODOs
 
@@ -74,6 +75,9 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Challenge: Historical EL sync repeatedly ramped up, hit body/receipt request stalls, and dropped well below the previous 200k+ logs/sec range.
   - Resolution: Reduced medium-peer fetch windows, increased safe low-peer lookahead, deferred sealed historical query-index builds during active backfill, and validated the remote run returning to the target range.
 
+- Challenge: Medium-density historical ranges could still expand into wide fetch plans and amplify intermittent peer/request latency.
+  - Resolution: Bounded dense ranges to 1,024 blocks and changed the medium-density target from multi-million-row batches to about 350k rows so the client adapts batch size by observed log density.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -88,13 +92,14 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 - Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
 - Inspected the historical fetch scheduler, body/receipt request pairing, storage append path, and background indexer. Kept only performance changes with measured benefit or direct hot-path reduction; no obsolete debug code was left in the branch.
+- Rechecked the adaptive historical fetch policy and kept only the density bounds that improved remote behavior without adding new runtime state or debug-only code.
 
 ## Git Workflow
 
 - Current branch: `fix/historical-fetch-stalls`
 - New branch created this run: yes
-- Commits made during this run: `fix: reduce historical fetch stalls`, `fix: satisfy clippy on receipt count check`
-- Pull request status: pending validation/push
+- Commits made during this run: `fix: reduce historical fetch stalls`, `fix: satisfy clippy on receipt count check`, `fix: adapt historical fetch windows by log density`
+- Pull request status: PR #91 open; adaptive density follow-up pending push
 - Merge status: not merged
 - Blockers: none currently.
 

@@ -28,10 +28,10 @@ const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
-const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
+const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 1_024;
-const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 2_500_000.0;
-const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
+const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 350_000.0;
+const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 3;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
@@ -2609,7 +2609,7 @@ mod tests {
                 healthy_available,
                 Some(250.0),
             ),
-            Some(10_000)
+            Some(1_400)
         );
         assert_eq!(
             historical_density_fetch_window_boost(
@@ -2618,7 +2618,16 @@ mod tests {
                 healthy_available,
                 Some(400.0),
             ),
-            Some(6_250)
+            Some(HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS)
+        );
+        assert_eq!(
+            historical_density_fetch_window_boost(
+                HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS,
+                high_memory,
+                healthy_available,
+                Some(70.0),
+            ),
+            Some(HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_window_boost(
