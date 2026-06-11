@@ -1199,7 +1199,13 @@
           <div class="debug-item"><span class="k">Latest execution block</span><span class="v" id="debugLatestBlock">--</span></div>
           <div class="debug-item"><span class="k">Finalized execution block</span><span class="v" id="debugFinalizedBlock">--</span></div>
           <div class="debug-item"><span class="k">Checkpoint</span><span class="v" id="debugCheckpoint">--</span></div>
-          <div class="debug-item"><span class="k">Consensus peers</span><span class="v" id="debugConsensusPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus peers connected</span><span class="v" id="debugConsensusPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus peers dialing</span><span class="v" id="debugConsensusDialingPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus peers discovered</span><span class="v" id="debugConsensusDiscoveredPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus peers dialable</span><span class="v" id="debugConsensusDialablePeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus routing table</span><span class="v" id="debugConsensusRoutingPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus RPC capable</span><span class="v" id="debugConsensusRpcPeers">--</span></div>
+          <div class="debug-item"><span class="k">Consensus pending RPC</span><span class="v" id="debugConsensusPendingRpc">--</span></div>
           <div class="debug-item"><span class="k">Stored rows</span><span class="v" id="debugStoredRows">--</span></div>
           <div class="debug-item"><span class="k">Segments</span><span class="v" id="debugSegments">--</span></div>
         </div>
@@ -1601,7 +1607,8 @@ function fmtDecimal(value, digits) {
 
 function fmtRate(value) {
   var number = numberOrNull(value);
-  if (number === null || number <= 0) return '--';
+  if (number === null) return '--';
+  if (number <= 0) return '0/s';
   return fmtDecimal(number, number >= 100 ? 0 : 1) + '/s';
 }
 
@@ -1615,7 +1622,8 @@ function fmtLogMagnitude(value) {
 
 function fmtLogRate(value) {
   var number = numberOrNull(value);
-  if (number === null || number <= 0) return '--';
+  if (number === null) return '--';
+  if (number <= 0) return '0 logs/s';
   return fmtLogMagnitude(number) + ' logs/s';
 }
 
@@ -3108,6 +3116,7 @@ function updateStatus(data) {
   var connectedPeers = numberOrNull(data.connected_peers) || 0;
   var pendingPeers = numberOrNull(data.pending_peers) || 0;
   var consensusPeers = numberOrNull(consensusNetwork.connected_peer_sessions);
+  var consensusMaxPeers = numberOrNull(consensusNetwork.max_peers);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
 
   var displayState = state;
@@ -3121,8 +3130,13 @@ function updateStatus(data) {
   setText('nodeState', displayStateLabel);
   refreshLastUpdated();
 
+  var historicalEta = fmtEtaWithCompletion(data.historical_eta_seconds);
+  if (!historicalComplete && historicalEta === '--') {
+    historicalEta = floorBlock == null ? 'Waiting for history' : 'Calculating';
+  }
+
   setText('executionSyncTitle', historicalSyncDisabled ? 'Forward Sync' : 'Historical Sync');
-  setText('executionPercent', pct > 0 ? fmtDecimal(clamp(pct, 0, 100), 2) + '%' : '--');
+  setText('executionPercent', numberOrNull(pct) == null ? '--' : fmtDecimal(clamp(pct, 0, 100), 2) + '%');
   setText('executionSummary', historicalSyncDisabled
     ? (liveRemaining == null ? 'Waiting for the latest Execution Layer block.' : fmtBlocks(liveRemaining) + ' remaining to head.')
     : (historicalComplete
@@ -3148,7 +3162,7 @@ function updateStatus(data) {
   setText('executionRate', fmtLogRate(logRate));
   setText('executionEta', historicalSyncDisabled
     ? (liveRemaining != null && liveRemaining < 3 ? 'Synced' : fmtEtaWithCompletion(data.eta_seconds))
-    : (historicalComplete ? 'Historical sync complete' : fmtEtaWithCompletion(data.historical_eta_seconds)));
+    : (historicalComplete ? 'Historical sync complete' : historicalEta));
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
@@ -3205,7 +3219,18 @@ function updateStatus(data) {
   setText('debugLatestBlock', blockWithAge(optimisticBlock || latestBlock, optimisticTime || latestTime));
   setText('debugFinalizedBlock', blockWithAge(finalizedBlock, finalizedTime));
   setText('debugCheckpoint', data.checkpoint_root ? 'slot ' + fmt(checkpointSlot) + '; ' + shortHash(data.checkpoint_root) : '--');
-  setText('debugConsensusPeers', consensusPeers == null ? '--' : fmt(consensusPeers));
+  setText('debugConsensusPeers', consensusPeers == null
+    ? '--'
+    : fmt(consensusPeers) + (consensusMaxPeers == null ? '' : ' / ' + fmt(consensusMaxPeers)));
+  setText('debugConsensusDialingPeers', fmt(consensusNetwork.dialing_peer_sessions));
+  setText('debugConsensusDiscoveredPeers', fmt(consensusNetwork.discovered_peers));
+  setText('debugConsensusDialablePeers', fmt(consensusNetwork.dialable_peers));
+  setText('debugConsensusRoutingPeers', fmt(consensusNetwork.routing_table_peers));
+  setText('debugConsensusRpcPeers',
+    'status ' + fmt(consensusNetwork.status_capable_peers) +
+    '; finality ' + fmt(consensusNetwork.finality_update_capable_peers) +
+    '; blocks ' + fmt(consensusNetwork.beacon_blocks_by_range_capable_peers));
+  setText('debugConsensusPendingRpc', fmt(consensusNetwork.pending_rpc_requests));
   setText('debugStoredRows', fmt(data.total_rows));
   setText('debugSegments', fmt(data.sealed_partitions));
   setText('queryScope', queryFrom == null ? 'No verified local log range yet.' : 'Queries scan verified local logs across blocks ' + blockRange(queryFrom, queryTo) + '.');
@@ -3384,10 +3409,10 @@ function ensureCharts() {
   if (performanceCharts.blocks) return;
   performanceCharts.blocks = createLineChart('blocksChart', 'Logs/sec', '#48d6b8');
   performanceCharts.peers = createLineChart('peersChart', 'Serving peers', '#6aa7ff');
-  performanceCharts.cpu = createLineChart('cpuChart', 'CPU utilization (%)', '#f2b84b');
+  performanceCharts.cpu = createLineChart('cpuChart', 'CPU utilization (%)', '#f2b84b', 100);
 }
 
-function createLineChart(canvasId, yTitle, color) {
+function createLineChart(canvasId, yTitle, color, suggestedMax) {
   return new Chart(byId(canvasId), {
     type: 'line',
     data: {
@@ -3436,6 +3461,7 @@ function createLineChart(canvasId, yTitle, color) {
         },
         y: {
           beginAtZero: true,
+          suggestedMax: suggestedMax || undefined,
           title: { display: true, text: yTitle },
           ticks: { color: '#91a0ad' },
           grid: { color: 'rgba(53, 70, 90, .35)' }
