@@ -288,13 +288,16 @@ impl NativeStorage {
         Ok(())
     }
 
-    pub fn write_historical_batch(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {
+    pub fn write_historical_batch(
+        &mut self,
+        rows: &[logex_types::LogRow],
+    ) -> std::io::Result<Vec<PartitionMeta>> {
         if rows.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let target_rows = self.config.hot_target_rows.max(1) as usize;
-        let mut wrote_segment = false;
+        let mut appended = Vec::new();
         for chunk in rows.chunks(target_rows) {
             let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
             let segment_dir = self.paths.segment_dir(descriptor.id);
@@ -304,14 +307,14 @@ impl NativeStorage {
             let columns = write_compacted_rows(&segment_dir, chunk)?;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
             persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
+            appended.push(self.partition_meta(&descriptor));
             self.catalog.segments.push(descriptor);
-            wrote_segment = true;
         }
-        if wrote_segment {
+        if !appended.is_empty() {
             self.persist_catalog()?;
         }
 
-        Ok(())
+        Ok(appended)
     }
 
     fn commit_rows_to_segments(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {

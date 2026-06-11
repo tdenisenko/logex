@@ -21,6 +21,8 @@ const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_HIGH_GAS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_HIGH_GAS_PER_BLOCK_THRESHOLD: u128 = 20_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
@@ -850,16 +852,11 @@ impl BodyReceiptRequestPlan {
 
             let mut skip_fallback_receipt_peer = None;
             if let Some((receipt_peer, receipts)) = cached_receipts.take() {
-                match body_receipt_blocks_if_counts_match(
-                    &bodies,
-                    receipt_peer,
-                    receipts,
-                    hashes.len(),
-                ) {
-                    Ok(blocks) => {
+                match body_receipt_counts_match(&bodies, &receipts, hashes.len()) {
+                    Ok(()) => {
                         return BodyReceiptChunk {
                             start,
-                            blocks,
+                            blocks: body_receipt_blocks_from_parts(bodies, receipt_peer, receipts),
                             failures,
                             stats,
                         };
@@ -884,16 +881,15 @@ impl BodyReceiptRequestPlan {
                         receipts.len(),
                         receipt_elapsed,
                     ));
-                    match body_receipt_blocks_if_counts_match(
-                        &bodies,
-                        receipt_peer,
-                        receipts,
-                        hashes.len(),
-                    ) {
-                        Ok(blocks) => {
+                    match body_receipt_counts_match(&bodies, &receipts, hashes.len()) {
+                        Ok(()) => {
                             return BodyReceiptChunk {
                                 start,
-                                blocks,
+                                blocks: body_receipt_blocks_from_parts(
+                                    bodies,
+                                    receipt_peer,
+                                    receipts,
+                                ),
                                 failures,
                                 stats,
                             };
@@ -937,16 +933,15 @@ impl BodyReceiptRequestPlan {
                             receipts.len(),
                             started_at.elapsed(),
                         ));
-                        match body_receipt_blocks_if_counts_match(
-                            &bodies,
-                            receipt_peer,
-                            receipts,
-                            hashes.len(),
-                        ) {
-                            Ok(blocks) => {
+                        match body_receipt_counts_match(&bodies, &receipts, hashes.len()) {
+                            Ok(()) => {
                                 return BodyReceiptChunk {
                                     start,
-                                    blocks,
+                                    blocks: body_receipt_blocks_from_parts(
+                                        bodies,
+                                        receipt_peer,
+                                        receipts,
+                                    ),
                                     failures,
                                     stats,
                                 };
@@ -2765,12 +2760,11 @@ fn receipt_candidates_for_body_peer(
     candidates
 }
 
-fn body_receipt_blocks_if_counts_match(
+fn body_receipt_counts_match(
     bodies: &[SourcedBlockBody],
-    receipt_peer: PeerId,
-    receipts: ReceiptBatch,
+    receipts: &ReceiptBatch,
     requested: usize,
-) -> std::result::Result<Vec<SourcedBodyReceipts>, ReceiptCountMismatch> {
+) -> std::result::Result<(), ReceiptCountMismatch> {
     let expected_receipt_counts: Vec<usize> = bodies
         .iter()
         .map(|(_, body)| body.transaction_count())
@@ -2781,15 +2775,22 @@ fn body_receipt_blocks_if_counts_match(
         &receipts,
         Some(&expected_receipt_counts),
     )?;
-    Ok(bodies
-        .iter()
-        .cloned()
+    Ok(())
+}
+
+fn body_receipt_blocks_from_parts(
+    bodies: Vec<SourcedBlockBody>,
+    receipt_peer: PeerId,
+    receipts: ReceiptBatch,
+) -> Vec<SourcedBodyReceipts> {
+    bodies
+        .into_iter()
         .zip(
             receipts
                 .into_iter()
                 .map(|receipts| (receipt_peer, receipts)),
         )
-        .collect())
+        .collect()
 }
 
 fn contiguous_chunk_blocks<T>(chunks: &BTreeMap<usize, Vec<T>>) -> usize {
@@ -3167,6 +3168,17 @@ fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> 
         return PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS;
     };
 
+    let high_gas_limit = total_blocks.min(PIPELINED_BODY_RECEIPT_HIGH_GAS_RETURN_BLOCKS);
+    let high_gas_sum = gas_used
+        .iter()
+        .take(high_gas_limit)
+        .fold(0u128, |total, gas| total.saturating_add(u128::from(*gas)));
+    let high_gas_target =
+        PIPELINED_BODY_RECEIPT_HIGH_GAS_PER_BLOCK_THRESHOLD.saturating_mul(high_gas_limit as u128);
+    if high_gas_sum >= high_gas_target {
+        return high_gas_limit;
+    }
+
     let return_limit = total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS);
     let return_gas_target =
         PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET.saturating_mul(return_limit as u128);
@@ -3303,12 +3315,12 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_return_blocks_scales_dense_prefix_and_caps_sparse_windows() {
+    fn body_receipt_return_blocks_caps_high_gas_windows_and_keeps_sparse_windows_wide() {
         let dense = vec![30_000_000; 4096];
         let sparse = vec![0; 12_000];
 
         assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
-        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 4096);
+        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 1024);
         assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 6000);
         assert_eq!(body_receipt_return_blocks(12_000, Some(&sparse)), 10_000);
         assert_eq!(body_receipt_return_blocks(4096, None), 1024);

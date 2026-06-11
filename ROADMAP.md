@@ -4,14 +4,17 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard sync metric presentation for CPU charts, historical sync progress, and Consensus Layer peer visibility.
+Active branch: `fix/historical-fetch-stalls`. The current branch removes historical EL sync stalls by keeping body/receipt fetch windows short enough for medium peer counts, increasing low-peer lookahead, and deferring sealed historical query-index builds until backfill is no longer active.
 
 ## Completed Since Last Run
 
-- Fixed the Historical Sync dashboard card so known zero progress and zero sync rates render as explicit values instead of blank placeholders.
-- Kept incomplete historical-sync estimates meaningful while the backend has not yet produced a historical rate.
-- Stabilized the CPU chart against a 100% utilization baseline while continuing to use normalized process CPU from the status endpoint.
-- Expanded Advanced Metrics with detailed Consensus Layer peer counters from the existing `consensus_network` status payload.
+- Merged the completed dashboard sync metric PR and deleted its remote branch.
+- Reduced the 8-47 serving-peer historical fetch window to avoid body/receipt timeout stalls seen with wider batches.
+- Increased low-peer historical lookahead while preserving a stricter low-memory cap.
+- Deferred sealed historical ERC20 query-index builds during active historical sync so backfill writes do not compete with index construction.
+- Avoided rebuilding the full sealed partition view after every historical batch append.
+- Reduced body/receipt pairing clones and preallocated receipt bloom caches in hot verification paths.
+- Verified the remote run returned to the 200k+ logs/sec range; latest observed status was about 239k logs/sec with 24 serving peers and no storage/index backlog.
 
 ## Remaining TODOs
 
@@ -32,7 +35,7 @@ Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard 
 - `SUM(data)` uses a native exact aggregate path because Ethereum event `data` is hex-encoded `uint256`; results are returned as exact decimal strings.
 - Grouped `SUM(data)` balance queries stay on the native exact aggregate path when grouped by `address`, so token balances do not fall back to text-based SQL aggregation.
 - `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
-- Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
+- Background indexing defers sealed historical ERC20 query-index builds while historical sync is active, then catches up faster when the node is idle. Hot/live indexing remains separate so recent data can still be queried.
 - Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
 - Query APIs bind to loopback by default. Public HTTP listeners require Basic auth, and public gRPC listeners require an explicit operator opt-in because gRPC is unauthenticated.
 - CLI and README examples should show public HTTP as an explicit operator choice using `--http-host 0.0.0.0` plus `--dashboard-password`.
@@ -68,6 +71,9 @@ Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard 
 - Challenge: Consensus Layer peer data was available in `/status` but too compressed in Advanced Metrics.
   - Resolution: Added separate CL peer rows for connected, dialing, discovered, dialable, routing, RPC-capable, and pending-RPC counts.
 
+- Challenge: Historical EL sync repeatedly ramped up, hit body/receipt request stalls, and dropped well below the previous 200k+ logs/sec range.
+  - Resolution: Reduced medium-peer fetch windows, increased safe low-peer lookahead, deferred sealed historical query-index builds during active backfill, and validated the remote run returning to the target range.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
@@ -81,14 +87,14 @@ Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard 
 - Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
 - Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
 - Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
-- Inspected the dashboard sync metric rendering and chart setup paths; no dead code was found in the touched UI-only branch.
+- Inspected the historical fetch scheduler, body/receipt request pairing, storage append path, and background indexer. Kept only performance changes with measured benefit or direct hot-path reduction; no obsolete debug code was left in the branch.
 
 ## Git Workflow
 
-- Current branch: `fix/dashboard-sync-metrics`
+- Current branch: `fix/historical-fetch-stalls`
 - New branch created this run: yes
-- Commits made during this run: `fix: clarify dashboard sync metrics`
-- Pull request status: pending push
+- Commits made during this run: `fix: reduce historical fetch stalls`
+- Pull request status: pending validation/push
 - Merge status: not merged
 - Blockers: none currently.
 

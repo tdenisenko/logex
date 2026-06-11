@@ -17,14 +17,15 @@ const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
 const HISTORICAL_VALIDATION_LOG_WORK_WEIGHT: u64 = 4;
 const HISTORICAL_VALIDATION_TX_WORK_WEIGHT: u64 = 8;
-const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 2;
+const HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
+const HISTORICAL_LOW_MEMORY_FETCH_PIPELINE_DEPTH: usize = 2;
 const HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_DEEP_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_WIDE_FETCH_PIPELINE_DEPTH: usize = 8;
 const HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
-const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
-const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 5_000;
+const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 1_024;
+const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 1_024;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
@@ -345,7 +346,7 @@ fn historical_fetch_pipeline_depth_for_serving_peers(
     if historical_available_memory_is_critical(available_memory_bytes) {
         1
     } else if historical_available_memory_is_low(available_memory_bytes) {
-        depth.min(HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH)
+        depth.min(HISTORICAL_LOW_MEMORY_FETCH_PIPELINE_DEPTH)
     } else {
         depth
     }
@@ -2560,7 +2561,7 @@ mod tests {
         );
         assert_eq!(
             historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, low_available),
-            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+            HISTORICAL_LOW_MEMORY_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
             historical_fetch_pipeline_depth_for_serving_peers(40, total_memory, critical_available,),

@@ -16,7 +16,7 @@ const ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 1_024;
 const ACTIVE_SYNC_COMPACTION_HIGH_BACKLOG: usize = 4_096;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
-const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 2;
+const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 0;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT: usize = 8;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
@@ -589,11 +589,12 @@ mod tests {
     }
 
     #[test]
-    fn sealed_query_indexing_continues_during_active_sync_at_lower_batch_size() {
+    fn sealed_query_indexing_defers_during_active_sync() {
         assert_eq!(
             sealed_index_segment_limit(true),
             ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT
         );
+        assert_eq!(sealed_index_segment_limit(true), 0);
         assert_eq!(
             sealed_index_segment_limit(false),
             BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
