@@ -93,7 +93,7 @@ Active branch: `fix/historical-fetch-stalls`. The current branch removes histori
 
 - Current branch: `fix/historical-fetch-stalls`
 - New branch created this run: yes
-- Commits made during this run: `fix: reduce historical fetch stalls`
+- Commits made during this run: `fix: reduce historical fetch stalls`, `fix: satisfy clippy on receipt count check`
 - Pull request status: pending validation/push
 - Merge status: not merged
 - Blockers: none currently.

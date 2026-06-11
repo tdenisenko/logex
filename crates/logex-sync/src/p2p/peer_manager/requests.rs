@@ -2772,7 +2772,7 @@ fn body_receipt_counts_match(
     validate_receipt_response_counts(
         "receipts",
         requested,
-        &receipts,
+        receipts,
         Some(&expected_receipt_counts),
     )?;
     Ok(())
