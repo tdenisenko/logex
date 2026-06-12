@@ -16,8 +16,8 @@ const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
-const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 16;
-const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 2;
+const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
+const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
@@ -3358,21 +3358,25 @@ mod tests {
             Some((0..32, 0))
         );
         assert!(body_receipt_hedge_candidate(&mut in_flight, &chunks, 1024, start).is_none());
-        assert_eq!(
-            body_receipt_hedge_candidate(
-                &mut in_flight,
-                &chunks,
-                1024,
-                start + PIPELINED_BODY_RECEIPT_HEDGE_DELAY
-            ),
-            Some((0..32, 0))
-        );
+        for retry in 1..PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK {
+            assert_eq!(
+                body_receipt_hedge_candidate(
+                    &mut in_flight,
+                    &chunks,
+                    1024,
+                    start + (PIPELINED_BODY_RECEIPT_HEDGE_DELAY * retry as u32)
+                ),
+                Some((0..32, 0))
+            );
+        }
         assert!(
             body_receipt_hedge_candidate(
                 &mut in_flight,
                 &chunks,
                 1024,
-                start + (PIPELINED_BODY_RECEIPT_HEDGE_DELAY * 2)
+                start
+                    + (PIPELINED_BODY_RECEIPT_HEDGE_DELAY
+                        * PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK as u32)
             )
             .is_none()
         );
