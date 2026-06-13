@@ -6,12 +6,12 @@ use std::thread;
 
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
-use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, PartitionMeta};
+use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 use serde::{Deserialize, Serialize};
 
-use crate::SegmentReader;
 use crate::state::SyncHead;
 use crate::wal::WriteAheadLog;
+use crate::{ColumnFile, ColumnReader, SegmentReader};
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
@@ -124,6 +124,7 @@ impl NativeStorage {
         storage.repair_catalog_from_manifests()?;
         storage.ensure_active_hot_segment()?;
         storage.replay_wal()?;
+        storage.repair_recoverable_hot_segment_artifacts()?;
         storage.verify_integrity()?;
         Ok(storage)
     }
@@ -746,9 +747,142 @@ impl NativeStorage {
 
         tracing::info!(rows = rows.len(), "replaying WAL entries");
 
-        self.commit_rows_to_segments(&rows)?;
+        match self.commit_rows_to_segments(&rows) {
+            Ok(()) => {}
+            Err(error) => {
+                let recovered = self.recover_already_applied_wal_prefix(&rows)?;
+                if recovered == 0 {
+                    return Err(error);
+                }
+
+                tracing::warn!(
+                    rows = recovered,
+                    remaining_rows = rows.len().saturating_sub(recovered),
+                    "recovered WAL rows that were already present in the hot segment"
+                );
+                self.commit_rows_to_segments(&rows[recovered..])?;
+            }
+        }
         self.wal.truncate()?;
         Ok(())
+    }
+
+    fn recover_already_applied_wal_prefix(&mut self, rows: &[LogRow]) -> std::io::Result<usize> {
+        let Some(hot_id) = self.catalog.active_hot_segment else {
+            return Ok(0);
+        };
+        let Some(segment_index) = self
+            .catalog
+            .segments
+            .iter()
+            .position(|segment| segment.id == hot_id)
+        else {
+            return Ok(0);
+        };
+
+        let descriptor = self.catalog.segments[segment_index].clone();
+        let segment_dir = self.paths.segment_dir(hot_id);
+        let physical_rows = ColumnReader::read_row_count(&segment_dir)?;
+        if physical_rows <= descriptor.row_count {
+            return Ok(0);
+        }
+
+        let applied_rows = physical_rows.saturating_sub(descriptor.row_count);
+        let applied_len = usize::try_from(applied_rows).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("segment {hot_id} has too many uncommitted rows"),
+            )
+        })?;
+        if applied_len > rows.len() {
+            return Ok(0);
+        }
+
+        let row_ids = (descriptor.row_count..physical_rows)
+            .map(|row| {
+                u32::try_from(row).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("segment {hot_id} exceeds supported row addressing"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reader = SegmentReader::open(&segment_dir)?;
+        let tail = reader.read_log_rows(Some(&row_ids))?;
+        if tail != rows[..applied_len] {
+            return Ok(0);
+        }
+
+        {
+            let descriptor = &mut self.catalog.segments[segment_index];
+            apply_rows_to_descriptor(descriptor, &rows[..applied_len]);
+            ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
+            persist_segment_manifest(&self.paths, descriptor)?;
+        }
+        self.persist_catalog()?;
+
+        let should_seal =
+            self.catalog.segments[segment_index].row_count >= self.config.hot_target_rows.max(1);
+        if should_seal {
+            self.seal_hot_segment()?;
+        }
+
+        Ok(applied_len)
+    }
+
+    fn repair_recoverable_hot_segment_artifacts(&self) -> std::io::Result<()> {
+        let Some(hot_id) = self.catalog.active_hot_segment else {
+            return Ok(());
+        };
+        let Some(descriptor) = self
+            .catalog
+            .segments
+            .iter()
+            .find(|segment| segment.id == hot_id)
+        else {
+            return Ok(());
+        };
+        if descriptor.row_count == 0 {
+            return Ok(());
+        }
+
+        let segment_dir = self.paths.segment_dir(hot_id);
+        let physical_rows = ColumnReader::read_row_count(&segment_dir)?;
+        if physical_rows != descriptor.row_count {
+            return Ok(());
+        }
+
+        match SegmentReader::open(&segment_dir)?.read_canonical_len() {
+            Ok(canonical_len) if canonical_len == descriptor.row_count => Ok(()),
+            Ok(canonical_len) if canonical_len < descriptor.row_count => {
+                ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
+                tracing::warn!(
+                    segment_id = descriptor.id,
+                    canonical_rows = canonical_len,
+                    rows = descriptor.row_count,
+                    "repaired hot segment canonical bitmap length"
+                );
+                Ok(())
+            }
+            Ok(canonical_len) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {} canonical bitmap length exceeds rows: bitmap={canonical_len} rows={}",
+                    descriptor.id, descriptor.row_count
+                ),
+            )),
+            Err(error) => {
+                ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
+                tracing::warn!(
+                    segment_id = descriptor.id,
+                    rows = descriptor.row_count,
+                    error = %error,
+                    "repaired unreadable hot segment canonical bitmap"
+                );
+                Ok(())
+            }
+        }
     }
 
     fn partition_meta(&self, descriptor: &SegmentDescriptor) -> PartitionMeta {
@@ -1415,6 +1549,99 @@ mod tests {
             recovered.segments().last().map(|segment| segment.id),
             Some(2)
         );
+    }
+
+    #[test]
+    fn native_storage_replay_wal_is_idempotent_after_partial_hot_commit() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let initial_rows = make_rows(5, 100);
+        let wal_rows = make_rows(3, 200);
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&initial_rows).unwrap();
+
+            storage.wal.append(&wal_rows).unwrap();
+            let hot_id = storage.catalog.active_hot_segment.unwrap();
+            let descriptor = storage
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == hot_id)
+                .cloned()
+                .unwrap();
+            append_rows(
+                &storage.paths.segment_dir(hot_id),
+                descriptor.row_count,
+                &wal_rows,
+            )
+            .unwrap();
+            ColumnFile::write_canonical_bitmap(
+                &storage.paths.segment_dir(hot_id),
+                descriptor.row_count,
+            )
+            .unwrap();
+        }
+
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 8);
+        assert_eq!(recovered.hot_partition_meta().row_count, 8);
+
+        let hot = recovered.hot_partition_meta();
+        let reader = SegmentReader::open(&recovered.segment_path(hot.id)).unwrap();
+        let mut expected = initial_rows;
+        expected.extend(wal_rows);
+        assert_eq!(reader.read_log_rows(None).unwrap(), expected);
+        assert!(recovered.wal.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_storage_repairs_hot_canonical_bitmap_after_recovered_wal() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let initial_rows = make_rows(5, 100);
+        let applied_rows = make_rows(3, 200);
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&initial_rows).unwrap();
+
+            let hot_id = storage.catalog.active_hot_segment.unwrap();
+            let segment_index = storage
+                .catalog
+                .segments
+                .iter()
+                .position(|segment| segment.id == hot_id)
+                .unwrap();
+            let descriptor = storage.catalog.segments[segment_index].clone();
+            let segment_dir = storage.paths.segment_dir(hot_id);
+            append_rows(&segment_dir, descriptor.row_count, &applied_rows).unwrap();
+
+            {
+                let descriptor = &mut storage.catalog.segments[segment_index];
+                apply_rows_to_descriptor(descriptor, &applied_rows);
+                persist_segment_manifest(&storage.paths, descriptor).unwrap();
+            }
+            storage.persist_catalog().unwrap();
+            ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count).unwrap();
+            storage.wal.truncate().unwrap();
+        }
+
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 8);
+
+        let hot = recovered.hot_partition_meta();
+        let reader = SegmentReader::open(&recovered.segment_path(hot.id)).unwrap();
+        assert_eq!(reader.read_canonical_len().unwrap(), 8);
     }
 
     #[test]
