@@ -6,7 +6,7 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses shorter per-request body/receipt timeouts and macOS memory-aware sizing; broader fetch-depth, buffer-depth, and plan-timeout experiments were rejected after live tests.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses shorter per-request body/receipt timeouts, macOS memory-aware sizing, density-aware fetch windows, and a density-gated deeper fetch pipeline for dense-but-not-extreme ranges.
 
 Draft PR: https://github.com/tdenisenko/logex/pull/92
 
@@ -25,12 +25,16 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Added macOS memory probes for historical fetch/write sizing so the Mac mini test host uses real available-memory data instead of falling back to conservative unknown-memory behavior.
 - Reduced pipelined body/receipt chunk request timeout from the global request timeout to 6 seconds after live testing showed better progress at low serving-peer counts.
 - Benchmarked and rejected larger dial fanout, one-peer chunk attempts, larger completed-fetch buffering, and shorter body/receipt plan timeout because they increased residuals or stalls without sustained throughput improvement.
+- Capped medium-density fetch windows by target log count instead of allowing 5,000-block batches through dense ranges that repeatedly hit peer tail latency.
+- Lowered the dense-range threshold and enabled an 8-deep fetch pipeline only for dense-but-not-extreme ranges when memory and serving-peer counts are healthy.
+- Reworked residual repair to consume verified partial prefixes in a loop instead of falling back to large sequential body/receipt requests after a partial response.
+- Benchmarked and rejected speculative prefix hedging because it reduced some fetch timings but increased residual churn and did not improve sustained progress.
 
 ## Remaining TODOs
 
 1. Improve body/receipt peer-tail handling.
    - Reason: Historical sync is still limited by slow or timeout-prone peers delaying contiguous prefixes.
-   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained depth-6/no-reset pipeline without increasing validation risk, memory risk, or peer churn.
+   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained density-aware pipeline without increasing validation risk, memory risk, or peer churn.
 
 2. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
@@ -41,8 +45,8 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
 - Checkpoints are accepted only when they are recent relative to a checkpoint-sync endpoint. Persisted state that is too stale now requires a fresh recent checkpoint.
 - Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
-- Dense historical ranges use smaller 512-block fetch windows with more bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
-- Depth-6 is currently the retained high-memory downloader depth for this machine. Depth-8 was tested and rejected.
+- Dense historical ranges use smaller 512-block fetch windows with bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
+- Global depth-8 fetching was rejected, but density-gated depth-8 fetching is retained for dense-but-not-extreme ranges after live testing showed zero residual batches in the sampled window and better body/receipt p50 than the prior retained run.
 - Body/receipt chunk attempts still keep intra-chunk fallback peers, because one-peer chunk attempts returned failures faster but caused residual gaps and near-stalls.
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
@@ -56,7 +60,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
   - Resolution: Removed that reset path; only memory pressure can now force a healthy lookahead reset.
 
 - Challenge: Increasing active fetch depth to 8 looked promising but increased timeout churn and below-prefix failures.
-  - Resolution: Reverted to depth-6 after live comparison.
+  - Resolution: Reverted the broad depth-8 change, then retained a narrower density-gated depth-8 path for dense ranges where the 512-block cap keeps memory bounded.
 
 - Challenge: An older open performance PR contained a mix of obsolete downloader changes and useful small optimizations.
   - Resolution: Kept the storage metadata append optimization, receipt bloom cache preallocation, and CL log-level downgrade; rejected the stale downloader diff.
@@ -64,9 +68,12 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: Several plausible peer-tail mitigations improved one metric while hurting ordered progress.
   - Resolution: Reverted larger dial fanout, depth-8 fetches, one-peer chunk attempts, larger fetch buffers, and an 18-second plan timeout after live benchmarks showed worse residuals or stalls.
 
+- Challenge: Medium-density ranges still produced large partial body/receipt tails.
+  - Resolution: Capped medium-density batches by target row count, treated 300+ rows/block as dense, and changed residual repair to keep verified partial progress instead of restarting with sequential fetches.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected depth-8, dial-fanout, one-peer chunk, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
+- Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 
