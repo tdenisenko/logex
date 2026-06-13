@@ -34,6 +34,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Benchmarked and rejected one paired body/receipt chunk per peer; it slightly reduced fetch p50 but lowered active fetch utilization and did not improve sustained logs/sec.
 - Applied body/receipt peer success/failure accounting as soon as asynchronous historical fetch outcomes complete, so timed-out peers are paused, demoted, or quarantined before later queued results are consumed.
 - Benchmarked and rejected a deeper prepare lookahead and a 4-second body/receipt request timeout with a 2-second hedge delay; neither produced a sustained improvement over the accounting-only build.
+- Added a scoped clippy allowance around generated tonic protobuf code after GitHub nightly started flagging `tonic::Status` in generated service traits as `result_large_err`.
 
 ## Remaining TODOs
 
@@ -95,6 +96,9 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: Shorter body/receipt timeouts looked promising in isolated samples but made the run more bursty.
   - Resolution: Reverted the 4-second timeout and 2-second hedge delay after the larger sample regressed to 8.3s p50 and 18.3s p90 body/receipt latency.
 
+- Challenge: GitHub CI clippy failed on generated tonic code, not handwritten application code.
+  - Resolution: Added a module-scoped generated-code allowance for `clippy::result_large_err` at the protobuf include boundary.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
@@ -106,7 +110,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`
 - Pull request status: draft PR #92 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.

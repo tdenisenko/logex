@@ -13,6 +13,8 @@ use logex_types::LogRow;
 use crate::handler::{AppState, MAX_LOG_FILTER_LIMIT};
 
 pub mod pb {
+    #![allow(clippy::result_large_err)]
+
     tonic::include_proto!("logex");
 }
 
