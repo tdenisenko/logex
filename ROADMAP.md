@@ -31,6 +31,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Benchmarked and rejected speculative prefix hedging because it reduced some fetch timings but increased residual churn and did not improve sustained progress.
 - Added WAL replay recovery for the crash window where hot column files advanced but the manifest, canonical bitmap, or WAL truncation did not complete before shutdown.
 - Split active fetch depth from completed fetch buffering under healthy memory so completed batches do not prematurely throttle new body/receipt downloads.
+- Benchmarked and rejected one paired body/receipt chunk per peer; it slightly reduced fetch p50 but lowered active fetch utilization and did not improve sustained logs/sec.
 
 ## Remaining TODOs
 
@@ -51,6 +52,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Global depth-8 fetching was rejected, but density-gated depth-8 fetching is retained for dense-but-not-extreme ranges after live testing showed zero residual batches in the sampled window and better body/receipt p50 than the prior retained run.
 - Active downloads and completed fetch buffering are budgeted separately while available memory is healthy; low-memory mode still uses the conservative combined pending cap.
 - Body/receipt chunk attempts still keep intra-chunk fallback peers, because one-peer chunk attempts returned failures faster but caused residual gaps and near-stalls.
+- The paired body/receipt plan window still allows roughly two paired chunks per peer; a one-paired-chunk-per-peer policy was closer to geth's busy-peer model but did not improve sustained remote throughput in this workload.
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
@@ -80,9 +82,12 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: Completed fetch buffers could fill and throttle new downloads even when CPU, disk, and memory were healthy.
   - Resolution: Split the healthy-memory budget so active downloads can stay full while completed fetches wait to be ingested; low-memory mode keeps the previous combined cap.
 
+- Challenge: Reducing each body/receipt plan to one paired chunk per peer reduced some fetch-tail latency but also lowered active fetch utilization.
+  - Resolution: Reverted the experiment after remote samples failed to show a sustained logs/sec improvement.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
+- Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 - Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
@@ -91,7 +96,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`
 - Pull request status: draft PR #92 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
