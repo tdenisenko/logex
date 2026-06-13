@@ -45,10 +45,19 @@ pub struct LogexReceipt {
     pub logs: Vec<Log>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ReceiptBloomCache {
     address_blooms: FxHashMap<Address, Bloom>,
     topic_blooms: FxHashMap<B256, Bloom>,
+}
+
+impl Default for ReceiptBloomCache {
+    fn default() -> Self {
+        Self {
+            address_blooms: FxHashMap::with_capacity_and_hasher(256, Default::default()),
+            topic_blooms: FxHashMap::with_capacity_and_hasher(1_024, Default::default()),
+        }
+    }
 }
 
 impl ReceiptBloomCache {

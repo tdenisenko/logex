@@ -86,8 +86,9 @@ impl PartitionManager {
 
     /// Ingest immutable historical rows directly as sealed compacted segments.
     pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
-        self.inner.write_historical_batch(rows)?;
-        self.refresh_views();
+        let appended = self.inner.write_historical_batch(rows)?;
+        self.sealed_partitions
+            .extend(appended.into_iter().map(|meta| Partition { meta }));
         Ok(())
     }
 
@@ -355,6 +356,32 @@ mod tests {
         assert_eq!(mgr.sealed_count(), 1);
         assert_eq!(mgr.sealed_partitions()[0].meta.row_count, 100);
         assert_eq!(mgr.hot_partition().meta.row_count, 50);
+    }
+
+    #[test]
+    fn manager_appends_historical_partitions_without_rebuilding_existing_views() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        mgr.write_historical_batch(&make_test_rows(25, 1000))
+            .unwrap();
+        mgr.write_historical_batch(&make_test_rows(5, 900)).unwrap();
+
+        assert_eq!(mgr.total_rows(), 30);
+        assert_eq!(mgr.sealed_count(), 4);
+        assert_eq!(
+            mgr.sealed_partitions()
+                .iter()
+                .map(|partition| partition.meta.row_count)
+                .collect::<Vec<_>>(),
+            vec![10, 10, 5, 5]
+        );
+        assert_eq!(mgr.hot_partition().meta.row_count, 0);
     }
 
     #[test]

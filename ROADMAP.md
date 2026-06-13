@@ -8,8 +8,14 @@ Active branch: `perf/historical-sync-throughput`. The branch is focused on EL hi
 
 Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The latest retained pipeline changes remove healthy-lookahead resets and keep lower downloads active while residual gaps are repaired.
 
+Draft PR: https://github.com/tdenisenko/logex/pull/92
+
 ## Completed Since Last Run
 
+- Created the draft PR for the current historical sync throughput work.
+- Audited the stale `fix/historical-fetch-stalls` PR and retained only the storage/cache/logging changes that still apply cleanly to the newer downloader.
+- Avoided rebuilding the full partition view after historical segment writes by appending the newly written segment metadata directly.
+- Preallocated receipt bloom caches and reduced CL block-response log noise from info to debug.
 - Added strict recent-checkpoint validation for CLI checkpoint values, checkpoint URLs, and persisted restart state.
 - Updated the dashboard CL label so it no longer claims head tracking unless the CL anchor is actually caught up.
 - Split historical sync into fetch, prepare, and ordered write stages so body/receipt downloads can continue while validation/extraction and writes run.
@@ -34,6 +40,7 @@ Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/Log
 - Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
 - Dense historical ranges use smaller 512-block fetch windows with more bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
 - Depth-6 is currently the retained high-memory downloader depth for this machine. Depth-8 was tested and rejected.
+- Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
 
@@ -46,18 +53,21 @@ Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/Log
 - Challenge: Increasing active fetch depth to 8 looked promising but increased timeout churn and below-prefix failures.
   - Resolution: Reverted to depth-6 after live comparison.
 
+- Challenge: An older open performance PR contained a mix of obsolete downloader changes and useful small optimizations.
+  - Resolution: Kept the storage metadata append optimization, receipt bloom cache preallocation, and CL log-level downgrade; rejected the stale downloader diff.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted the rejected depth-8 change before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
-- No obsolete production files were removed in this pass.
+- Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`
-- Pull request status: not ready
+- Commits made during this run: `perf: improve historical downloader overlap`; storage/cache salvage commit pending
+- Pull request status: draft PR #92 open
 - Merge status: not merged
 - Blockers: remaining EL historical sync performance work is still in progress.
 
