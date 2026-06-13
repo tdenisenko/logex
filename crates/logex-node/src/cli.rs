@@ -50,14 +50,16 @@ pub struct Cli {
 
     /// Weak-subjectivity checkpoint root, slot@root pair, or descriptor file path.
     ///
-    /// Required for a fresh data directory unless --checkpoint-sync-url can
-    /// resolve a recent finalized checkpoint.
+    /// When supplied, the checkpoint is validated against --checkpoint-sync-url
+    /// and must be recent. When omitted for a fresh data directory, LogEx
+    /// resolves a recent finalized checkpoint from --checkpoint-sync-url.
     #[arg(long, global = true)]
     pub checkpoint: Option<String>,
 
     /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
     ///
-    /// Use comma-separated URLs to require multi-source checkpoint agreement.
+    /// Defaults to https://mainnet.checkpoint.sigp.io for sync. Use
+    /// comma-separated URLs to require multi-source checkpoint agreement.
     #[arg(long, global = true)]
     pub checkpoint_sync_url: Option<String>,
 

@@ -175,6 +175,10 @@ impl ConsensusStore {
         self.inner.lock().unwrap().checkpoint
     }
 
+    pub fn trusted_beacon_slot(&self) -> Option<u64> {
+        weak_subjectivity_trusted_slot(&self.inner.lock().unwrap())
+    }
+
     pub fn chain_anchors(&self) -> ChainAnchors {
         self.inner.lock().unwrap().anchors.clone()
     }

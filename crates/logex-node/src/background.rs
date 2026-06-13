@@ -16,7 +16,7 @@ const ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 1_024;
 const ACTIVE_SYNC_COMPACTION_HIGH_BACKLOG: usize = 4_096;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
-const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 2;
+const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 0;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT: usize = 8;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
@@ -209,6 +209,9 @@ pub async fn run_background_indexer(
         }
 
         let active_sync = sync_is_active(&state) || historical_sync_is_incomplete(&state).await;
+        if should_defer_query_indexing(active_sync) {
+            continue;
+        }
         let sealed_index_limit = sealed_index_segment_limit(active_sync);
 
         let (sealed_max_id, sealed_targets) = {
@@ -359,6 +362,10 @@ fn sealed_index_segment_limit(active_sync: bool) -> usize {
     } else {
         BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
     }
+}
+
+fn should_defer_query_indexing(active_sync: bool) -> bool {
+    active_sync
 }
 
 fn active_sync_compaction_limits(raw_backlog: usize, base_limit: usize) -> (usize, usize) {
@@ -589,16 +596,14 @@ mod tests {
     }
 
     #[test]
-    fn sealed_query_indexing_continues_during_active_sync_at_lower_batch_size() {
-        assert_eq!(
-            sealed_index_segment_limit(true),
-            ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT
-        );
+    fn sealed_query_indexing_is_deferred_during_active_sync() {
+        assert_eq!(sealed_index_segment_limit(true), 0);
         assert_eq!(
             sealed_index_segment_limit(false),
             BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
         );
-        assert!(sealed_index_segment_limit(true) < sealed_index_segment_limit(false));
+        assert!(should_defer_query_indexing(true));
+        assert!(!should_defer_query_indexing(false));
     }
 
     #[test]

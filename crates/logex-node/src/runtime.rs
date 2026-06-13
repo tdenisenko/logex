@@ -29,12 +29,14 @@ use reth_ethereum_forks::Head;
 use serde::{Deserialize, Serialize};
 
 use crate::background::{log_task_exit, run_background_indexer};
-use crate::checkpoint::resolve_checkpoint;
+use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
+const MAINNET_SECONDS_PER_SLOT: u64 = 12;
+const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoricalSyncMode {
@@ -163,6 +165,26 @@ pub async fn run_sync(options: RunSyncOptions) {
     };
 
     if let Some(consensus) = consensus.as_ref() {
+        if let Some(staleness) = recent_consensus_state_staleness(consensus) {
+            tracing::error!(
+                trusted_slot = staleness.trusted_slot,
+                trusted_epoch = staleness.trusted_epoch,
+                current_epoch = staleness.current_epoch,
+                max_epochs = staleness.max_epochs,
+                "persisted consensus state is too stale; start from a fresh recent checkpoint"
+            );
+            std::process::exit(1);
+        }
+        if let Some(staleness) = local_execution_progress_staleness(sync_head, consensus) {
+            tracing::error!(
+                block_number = staleness.block_number,
+                timestamp = staleness.timestamp,
+                age_secs = staleness.age_secs,
+                max_age_secs = staleness.max_age_secs,
+                "local execution progress is too stale; start from a fresh recent checkpoint in a fresh data directory"
+            );
+            std::process::exit(1);
+        }
         let checkpoint = consensus.checkpoint();
         let mut anchors = consensus.chain_anchors();
         anchors.indexed_head = storage.chain_anchors().indexed_head;
@@ -568,7 +590,7 @@ fn consensus_anchor_network_head(anchor: logex_types::ExecutionAnchor) -> Head {
         anchor.block_hash,
         MAINNET_CONSENSUS_CHAIN_SPEC
             .genesis_time
-            .saturating_add(anchor.beacon_slot.saturating_mul(12)),
+            .saturating_add(anchor.beacon_slot.saturating_mul(MAINNET_SECONDS_PER_SLOT)),
     )
 }
 
@@ -584,7 +606,7 @@ fn consensus_checkpoint_network_head(consensus: &ConsensusStore) -> Head {
 fn consensus_slot_timestamp(slot: u64) -> u64 {
     MAINNET_CONSENSUS_CHAIN_SPEC
         .genesis_time
-        .saturating_add(slot.saturating_mul(12))
+        .saturating_add(slot.saturating_mul(MAINNET_SECONDS_PER_SLOT))
 }
 
 fn current_unix_timestamp() -> u64 {
@@ -633,6 +655,80 @@ fn maybe_open_consensus_store(
     }
 
     Ok(None)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecentConsensusStateStaleness {
+    trusted_slot: u64,
+    trusted_epoch: u64,
+    current_epoch: u64,
+    max_epochs: u64,
+}
+
+fn recent_consensus_state_staleness(
+    consensus: &ConsensusStore,
+) -> Option<RecentConsensusStateStaleness> {
+    let trusted_slot = consensus.trusted_beacon_slot()?;
+    let trusted_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(trusted_slot);
+    let current_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch();
+    (current_epoch > trusted_epoch.saturating_add(RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG))
+        .then_some(RecentConsensusStateStaleness {
+            trusted_slot,
+            trusted_epoch,
+            current_epoch,
+            max_epochs: RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG,
+        })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalExecutionProgressStaleness {
+    block_number: u64,
+    timestamp: u64,
+    age_secs: u64,
+    max_age_secs: u64,
+}
+
+fn local_execution_progress_staleness(
+    sync_head: Option<SyncHead>,
+    consensus: &ConsensusStore,
+) -> Option<LocalExecutionProgressStaleness> {
+    let mut latest = sync_head
+        .filter(|head| head.timestamp > 0)
+        .map(|head| (head.block_number, head.timestamp));
+    let anchor_coverage = consensus.anchor_coverage();
+    if anchor_coverage.gap_count == 0 {
+        if let Some(anchor) = anchor_coverage.ceiling {
+            let anchor_timestamp = consensus_slot_timestamp(anchor.beacon_slot);
+            if latest
+                .map(|(_, timestamp)| anchor_timestamp > timestamp)
+                .unwrap_or(true)
+            {
+                latest = Some((anchor.block_number, anchor_timestamp));
+            }
+        }
+    } else if latest.is_none()
+        && let Some(anchor) = anchor_coverage.floor
+    {
+        let anchor_timestamp = consensus_slot_timestamp(anchor.beacon_slot);
+        latest = Some((anchor.block_number, anchor_timestamp));
+    }
+
+    let (block_number, timestamp) = latest?;
+    let now = current_unix_timestamp();
+    let age_secs = now.saturating_sub(timestamp);
+    let max_age_secs = recent_checkpoint_max_age_secs();
+    (age_secs > max_age_secs).then_some(LocalExecutionProgressStaleness {
+        block_number,
+        timestamp,
+        age_secs,
+        max_age_secs,
+    })
+}
+
+fn recent_checkpoint_max_age_secs() -> u64 {
+    RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG
+        .saturating_mul(MAINNET_SLOTS_PER_EPOCH)
+        .saturating_mul(MAINNET_SECONDS_PER_SLOT)
 }
 
 async fn wait_for_shutdown_signal() -> &'static str {

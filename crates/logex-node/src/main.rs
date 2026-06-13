@@ -7,6 +7,7 @@ mod runtime;
 use clap::Parser;
 use std::net::IpAddr;
 
+use checkpoint::DEFAULT_CHECKPOINT_SYNC_URL;
 use cli::{Cli, Command, Config, default_data_dir};
 use logex_storage::PartitionManagerConfig;
 
@@ -82,6 +83,9 @@ fn main() {
             let dashboard_enabled =
                 file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
             let dashboard_password = dashboard_password.or(file_config.dashboard_password);
+            let checkpoint_sync_url = checkpoint_sync_url
+                .filter(|url| !url.trim().is_empty())
+                .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
             if dashboard_password
                 .as_ref()
                 .is_some_and(|password| password.is_empty())

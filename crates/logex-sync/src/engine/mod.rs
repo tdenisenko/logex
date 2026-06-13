@@ -50,6 +50,7 @@ const HISTORICAL_BACKFILL_CONNECTED_PEER_FLOOR_CAP: usize = 4;
 const RECENT_HEADER_WINDOW: usize = 8_192;
 const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
 const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
+const HISTORICAL_INITIAL_ROWS_PER_BLOCK_EWMA: f64 = 500.0;
 
 pub(super) struct HistoricalValidatedBlock {
     index: usize,
@@ -69,6 +70,7 @@ pub(super) struct HistoricalFetchedBatch {
     required_block: u64,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
+    residual_header_batch: Option<HistoricalHeaderBatch>,
 }
 
 pub(super) struct HistoricalHeaderBatch {
@@ -103,6 +105,20 @@ pub(super) struct HistoricalIngestOutcome {
     write_elapsed: Duration,
 }
 
+pub(super) struct PreparedHistoricalBatch {
+    requested_headers: usize,
+    header_elapsed: Duration,
+    body_receipt_elapsed: Duration,
+    extracted: ingest::HistoricalExtractedBatch,
+    peer_notes: Vec<PeerId>,
+    lowest_block: u64,
+    highest_block: u64,
+    block_count: usize,
+    validation_elapsed: Duration,
+    processing_elapsed: Duration,
+    residual_header_batch: Option<HistoricalHeaderBatch>,
+}
+
 pub(super) struct WrittenHistoricalBatch {
     requested_headers: usize,
     header_elapsed: Duration,
@@ -115,6 +131,7 @@ pub(super) struct WrittenHistoricalBatch {
     validation_elapsed: Duration,
     prepare_wait_elapsed: Duration,
     processing_elapsed: Duration,
+    residual_header_batch: Option<HistoricalHeaderBatch>,
 }
 
 pub(super) struct HistoricalValidationFailure {
@@ -126,11 +143,15 @@ pub(super) struct HistoricalValidationFailure {
 }
 
 pub(super) struct HistoricalPrepareTask {
+    sequence: u64,
     next_child_header: Option<Header>,
     handle: JoinHandle<
-        Result<std::result::Result<WrittenHistoricalBatch, Box<HistoricalValidationFailure>>>,
+        Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
     >,
 }
+
+pub(super) type HistoricalPrepareResult =
+    Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>;
 
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {
@@ -151,6 +172,9 @@ pub struct SyncEngine {
     historical_fetch_planned_child: Option<Header>,
     historical_fetch_handles: HashMap<u64, JoinHandle<()>>,
     historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
+    historical_prepare_expected_sequence: u64,
+    historical_prepare_handles: BTreeMap<u64, HistoricalPrepareTask>,
+    historical_prepare_completed: BTreeMap<u64, HistoricalPrepareResult>,
     historical_rows_per_block_ewma: Option<f64>,
     last_historical_allocator_trim: Option<Instant>,
     connected_once: bool,
@@ -188,7 +212,10 @@ impl SyncEngine {
             historical_fetch_planned_child: None,
             historical_fetch_handles: HashMap::new(),
             historical_fetch_completed: BTreeMap::new(),
-            historical_rows_per_block_ewma: None,
+            historical_prepare_expected_sequence: 0,
+            historical_prepare_handles: BTreeMap::new(),
+            historical_prepare_completed: BTreeMap::new(),
+            historical_rows_per_block_ewma: Some(HISTORICAL_INITIAL_ROWS_PER_BLOCK_EWMA),
             last_historical_allocator_trim: None,
             connected_once: false,
             last_validated_header: None,

@@ -4,103 +4,120 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `fix/dashboard-sync-metrics`. The current branch fixes dashboard sync metric presentation for CPU charts, historical sync progress, and Consensus Layer peer visibility.
+Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
+
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, density-aware fetch windows, a density-gated deeper fetch pipeline for dense-but-not-extreme ranges, and split active/completed fetch budgeting when memory is healthy.
+
+Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 ## Completed Since Last Run
 
-- Fixed the Historical Sync dashboard card so known zero progress and zero sync rates render as explicit values instead of blank placeholders.
-- Kept incomplete historical-sync estimates meaningful while the backend has not yet produced a historical rate.
-- Stabilized the CPU chart against a 100% utilization baseline while continuing to use normalized process CPU from the status endpoint.
-- Expanded Advanced Metrics with detailed Consensus Layer peer counters from the existing `consensus_network` status payload.
+- Created the draft PR for the current historical sync throughput work.
+- Audited the stale `fix/historical-fetch-stalls` PR and retained only the storage/cache/logging changes that still apply cleanly to the newer downloader.
+- Avoided rebuilding the full partition view after historical segment writes by appending the newly written segment metadata directly.
+- Preallocated receipt bloom caches and reduced CL block-response log noise from info to debug.
+- Added strict recent-checkpoint validation for CLI checkpoint values, checkpoint URLs, and persisted restart state.
+- Updated the dashboard CL label so it no longer claims head tracking unless the CL anchor is actually caught up.
+- Split historical sync into fetch, prepare, and ordered write stages so body/receipt downloads can continue while validation/extraction and writes run.
+- Added residual-gap handling for accepted partial body/receipt prefixes; verified residual gaps are fetched, validated, and written without discarding the full lookahead queue.
+- Removed the dense-range lookahead reset that discarded healthy in-flight fetches after transient peer-count drops.
+- Benchmarked and rejected the depth-8 downloader experiment because it reintroduced below-prefix resets without a sustained throughput gain.
+- Added macOS memory probes for historical fetch/write sizing so the Mac mini test host uses real available-memory data instead of falling back to conservative unknown-memory behavior.
+- Reduced pipelined body/receipt chunk request timeout from the global request timeout to 6 seconds after live testing showed better progress at low serving-peer counts.
+- Benchmarked and rejected larger dial fanout, one-peer chunk attempts, larger completed-fetch buffering, and shorter body/receipt plan timeout because they increased residuals or stalls without sustained throughput improvement.
+- Capped medium-density fetch windows by target log count instead of allowing 5,000-block batches through dense ranges that repeatedly hit peer tail latency.
+- Lowered the dense-range threshold and enabled an 8-deep fetch pipeline only for dense-but-not-extreme ranges when memory and serving-peer counts are healthy.
+- Reworked residual repair to consume verified partial prefixes in a loop instead of falling back to large sequential body/receipt requests after a partial response.
+- Benchmarked and rejected speculative prefix hedging because it reduced some fetch timings but increased residual churn and did not improve sustained progress.
+- Added WAL replay recovery for the crash window where hot column files advanced but the manifest, canonical bitmap, or WAL truncation did not complete before shutdown.
+- Split active fetch depth from completed fetch buffering under healthy memory so completed batches do not prematurely throttle new body/receipt downloads.
+- Benchmarked and rejected one paired body/receipt chunk per peer; it slightly reduced fetch p50 but lowered active fetch utilization and did not improve sustained logs/sec.
+- Applied body/receipt peer success/failure accounting as soon as asynchronous historical fetch outcomes complete, so timed-out peers are paused, demoted, or quarantined before later queued results are consumed.
+- Benchmarked and rejected a deeper prepare lookahead and a 4-second body/receipt request timeout with a 2-second hedge delay; neither produced a sustained improvement over the accounting-only build.
+- Added a scoped clippy allowance around generated tonic protobuf code after GitHub nightly started flagging `tonic::Status` in generated service traits as `result_large_err`.
 
 ## Remaining TODOs
 
-1. Complete release hardening.
+1. Improve body/receipt peer-tail handling.
+   - Reason: Historical sync is still limited by slow or timeout-prone peers delaying contiguous prefixes.
+   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained density-aware pipeline without increasing validation risk, memory risk, or peer churn.
+
+2. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
    - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, exposed listener policy, and a live release-candidate run from a clean data directory.
 
 ## Design Decisions
 
-- Forward-only sync is a fresh-data-dir mode because switching an existing historical data directory into partial-history mode would make coverage semantics ambiguous.
-- The mode marker lives at `sync-mode.json` in the data directory. It is intentionally separate from storage segments so startup can validate the mode before sync begins.
-- Restarting without `--disable-historical-sync` removes the marker and resumes default historical sync, preserving the existing pivot/floor metadata as the backfill start point.
-- The dashboard hides historical-only details when forward-only mode is active instead of showing zeroed reverse-sync metrics.
-- SQL responses no longer have a hidden server-side row cap; dashboard-generated queries default to `LIMIT 500`.
-- Dashboard query history and query-builder state remain browser-local only.
-- Bounded log queries prune whole segments with metadata first, then use indexes where available, then apply row-level checks for correctness.
-- Common ERC20 Transfer and Approval topic filtering uses compact per-segment bloom indexes by default instead of large exact composite indexes; this keeps storage growth practical while preserving correctness through row rechecks.
-- `SUM(data)` uses a native exact aggregate path because Ethereum event `data` is hex-encoded `uint256`; results are returned as exact decimal strings.
-- Grouped `SUM(data)` balance queries stay on the native exact aggregate path when grouped by `address`, so token balances do not fall back to text-based SQL aggregation.
-- `COUNT(*)` and `COUNT(1)` over native filters run on a native aggregate path; `GROUP BY source` reads only the compact source column for matching row ids.
-- Background indexing builds the compact ERC20 event profile continuously during sync at a conservative batch size, then catches up faster when the node is idle.
-- Checkpoint-sync source configuration stays backward-compatible with a single URL, but comma-separated URLs require majority agreement for automatic checkpoint resolution and inline checkpoint validation.
-- Query APIs bind to loopback by default. Public HTTP listeners require Basic auth, and public gRPC listeners require an explicit operator opt-in because gRPC is unauthenticated.
-- CLI and README examples should show public HTTP as an explicit operator choice using `--http-host 0.0.0.0` plus `--dashboard-password`.
-- WebSocket ERC20 transfer hooks use a dedicated `type: "erc20Transfers"` subscription instead of overloading `eth_getLogs` filters; this keeps wallet/token/amount alert semantics explicit while preserving legacy log streams.
-- WebSocket transfer hooks are live-only. Historical data remains available through SQL and JSON-RPC, but backfill does not replay as alert traffic.
-- Dashboard amount bounds are entered in token units and converted to raw uint256 values before subscription. If amount bounds are used with token filters, all selected tokens must share the same decimals to avoid ambiguous comparisons.
-- ERC20 transfer hooks require at least one filter dimension: wallet addresses, token addresses, or both. Token-only subscriptions intentionally mean every transfer for the selected token contracts.
-- Dashboard-created ERC20 transfer sessions are in-memory, browser-id scoped, and expire one minute after the browser WebSocket disconnects; service-created sessions are in-memory and persist until delete or process restart.
-- Retained live-transfer notifications are bounded in memory to avoid OOM risk from broad token subscriptions.
-- Dashboard CPU charts use normalized process CPU (`raw process CPU / logical core capacity`) and keep a 100% baseline so multi-core hosts are interpreted consistently.
-- Historical sync progress displays `0.00%` and `0 logs/s` when those are known values; unknown telemetry still displays `--`.
+- Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
+- Checkpoints are accepted only when they are recent relative to a checkpoint-sync endpoint. Persisted state that is too stale now requires a fresh recent checkpoint.
+- Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
+- Dense historical ranges use smaller 512-block fetch windows with bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
+- Global depth-8 fetching was rejected, but density-gated depth-8 fetching is retained for dense-but-not-extreme ranges after live testing showed zero residual batches in the sampled window and better body/receipt p50 than the prior retained run.
+- Active downloads and completed fetch buffering are budgeted separately while available memory is healthy; low-memory mode still uses the conservative combined pending cap.
+- Body/receipt chunk attempts still keep intra-chunk fallback peers, because one-peer chunk attempts returned failures faster but caused residual gaps and near-stalls.
+- The paired body/receipt plan window still allows roughly two paired chunks per peer; a one-paired-chunk-per-peer policy was closer to geth's busy-peer model but did not improve sustained remote throughput in this workload.
+- The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
+- Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. A 4-second timeout lowered some short samples but increased timeout density, peer churn, and p50/p90 fetch latency over a larger sample.
+- Peer accounting is applied when fetch outcomes are received, not only when they are ingested in order, because queued fetch plans otherwise reused peers that had already timed out in completed asynchronous work.
+- Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
 
-- Challenge: The main checkout had unrelated local work on another branch.
-  - Resolution: Created a separate worktree at `/private/tmp/logex-disable-historical-sync` and branched from `master`.
+- Challenge: Partial body/receipt prefixes caused long queue resets even when hundreds of contiguous blocks were valid.
+  - Resolution: Accepted one full chunk as recoverable progress, repaired the residual gap, and continued lookahead below the residual boundary.
 
-- Challenge: Forward-only mode still needs a trustworthy pivot and resumable default conversion.
-  - Resolution: Kept CL-authenticated forward anchor handling intact and only disabled the reverse historical backfill scheduler.
+- Challenge: Healthy dense lookahead was reset when transient peer-count changes lowered the computed buffer depth.
+  - Resolution: Removed that reset path; only memory pressure can now force a healthy lookahead reset.
 
-- Challenge: The live transfer status element reused the generic `.error` class, which hid it and caused the buttons to shift.
-  - Resolution: Replaced it with a scoped status modifier class and verified the action row stays stable after validation errors.
+- Challenge: Increasing active fetch depth to 8 looked promising but increased timeout churn and below-prefix failures.
+  - Resolution: Reverted the broad depth-8 change, then retained a narrower density-gated depth-8 path for dense ranges where the 512-block cap keeps memory bounded.
 
-- Challenge: The transaction cell needed both row-cell copy behavior and a nested external-link action.
-  - Resolution: Kept the cell copyable, added a scoped Etherscan link styled as a compact button, and handled link clicks before the table-level copy handler.
+- Challenge: An older open performance PR contained a mix of obsolete downloader changes and useful small optimizations.
+  - Resolution: Kept the storage metadata append optimization, receipt bloom cache preallocation, and CL log-level downgrade; rejected the stale downloader diff.
 
-- Challenge: Refresh-resumable live transfer notifications require state outside the browser, but unbounded in-memory retention can exhaust smaller machines.
-  - Resolution: Moved live transfer notification retention into server-backed sessions with a bounded history, one-minute post-disconnect dashboard expiry, and explicit service-subscription endpoints.
+- Challenge: Several plausible peer-tail mitigations improved one metric while hurting ordered progress.
+  - Resolution: Reverted larger dial fanout, depth-8 fetches, one-peer chunk attempts, larger fetch buffers, and an 18-second plan timeout after live benchmarks showed worse residuals or stalls.
 
-- Challenge: The Historical Sync card treated valid zero progress/rates as missing telemetry.
-  - Resolution: Updated the dashboard formatter and progress rendering so known zero values remain visible while unknown values still use placeholders.
+- Challenge: Medium-density ranges still produced large partial body/receipt tails.
+  - Resolution: Capped medium-density batches by target row count, treated 300+ rows/block as dense, and changed residual repair to keep verified partial progress instead of restarting with sequential fetches.
 
-- Challenge: Consensus Layer peer data was available in `/status` but too compressed in Advanced Metrics.
-  - Resolution: Added separate CL peer rows for connected, dialing, discovered, dialable, routing, RPC-capable, and pending-RPC counts.
+- Challenge: A graceful-restart test exposed a storage recovery gap where WAL replay had already advanced hot columns but canonical bitmap repair did not complete before startup integrity verification.
+  - Resolution: WAL replay now verifies already-applied hot rows against the WAL before repairing metadata, and startup repairs recoverable hot canonical bitmap length mismatches before integrity verification.
+
+- Challenge: Completed fetch buffers could fill and throttle new downloads even when CPU, disk, and memory were healthy.
+  - Resolution: Split the healthy-memory budget so active downloads can stay full while completed fetches wait to be ingested; low-memory mode keeps the previous combined cap.
+
+- Challenge: Reducing each body/receipt plan to one paired chunk per peer reduced some fetch-tail latency but also lowered active fetch utilization.
+  - Resolution: Reverted the experiment after remote samples failed to show a sustained logs/sec improvement.
+
+- Challenge: Slow peers were scored only when queued fetch outcomes were consumed in sequence, allowing timed-out peers to appear in multiple future plans.
+  - Resolution: Drained success/failure accounting when fetch outcomes arrive, while preserving ordered validation and writes.
+
+- Challenge: Shorter body/receipt timeouts looked promising in isolated samples but made the run more bursty.
+  - Resolution: Reverted the 4-second timeout and 2-second hedge delay after the larger sample regressed to 8.3s p50 and 18.3s p90 body/receipt latency.
+
+- Challenge: GitHub CI clippy failed on generated tonic code, not handwritten application code.
+  - Resolution: Added a module-scoped generated-code allowance for `clippy::result_large_err` at the protobuf include boundary.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Kept the legacy Transfer bloom reader only as a compatibility fallback for old data directories that have not been backfilled yet.
-- Removed remote obsolete ERC20 composite and Transfer-only bloom index files after replacing them with compact common event blooms; primary segment data was not removed.
-- Searched CLI definitions and README command references for stale or missing parameter documentation.
-- Replaced obsolete query row-cap documentation with the current unlimited SQL endpoint behavior and dashboard `LIMIT 500` default.
-- Removed obsolete historical WebSocket subscription plumbing from the EL historical ingest path.
-- Reused the existing Ethereum address parser for WebSocket subscriptions instead of adding a second parser.
-- Searched the touched WebSocket, dashboard, and historical ingest paths for old subscription helpers and stale call signatures.
-- Rechecked the live transfer WebSocket and dashboard paths for obsolete empty-filter assumptions.
-- Rechecked the live transfer dashboard rendering path and replaced raw title-only address/hash cells with the existing copy-cell pattern.
-- Rechecked the live transfer WebSocket path and kept legacy raw log subscriptions on the existing broadcast channel while routing resumable ERC20 sessions through the new session registry.
-- Reused the existing ERC20 transfer filter and notification formatter for service subscriptions instead of adding a second notification path.
-- Inspected the dashboard sync metric rendering and chart setup paths; no dead code was found in the touched UI-only branch.
+- Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
+- Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
+- Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
+- Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
 
 ## Git Workflow
 
-- Current branch: `fix/dashboard-sync-metrics`
-- New branch created this run: yes
-- Commits made during this run: `fix: clarify dashboard sync metrics`
-- Pull request status: pending push
+- Current branch: `perf/historical-sync-throughput`
+- New branch created this run: no
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`
+- Pull request status: draft PR #92 open
 - Merge status: not merged
-- Blockers: none currently.
+- Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
+- Blockers: remaining EL historical sync performance work is still in progress.
 
 ## Known Issues or Risks
 
-- Forward-only mode intentionally provides recent/live query coverage only until the operator restarts without the flag and completes historical backfill.
-- No remote runtime test was run because this task explicitly requested local testing only.
-- Older synced data directories need `build-indexes --missing-only --profile erc20-transfer` before they receive compact common ERC20 event bloom indexes.
-- Very wide selective queries can still spend seconds checking thousands of segment-level skip indexes; exact full-history global indexes would be faster but require substantially more storage.
-- Queries without selective bounds or predicates can be expensive because unbounded SQL is intentionally allowed.
-- Single checkpoint-sync URL mode remains available for compatibility and has the same trust assumption as before; use comma-separated URLs for quorum-based checkpoint resolution until LogEx operates a first-party checkpoint source.
-- HTTP Basic auth is not transport encryption; public HTTP deployments still need firewalling, SSH tunneling, or TLS termination even though localhost binding is now the default.
-- WebSocket transfer hooks notify after verified live block ingestion, not pending mempool transfers.
-- WebSocket missed-event replay is not implemented; clients that disconnect should query historical logs for the missed range after reconnecting.
+- Historical sync is still body/receipt fetch-tail bound; peer timeout clusters can hold back contiguous progress.
+- The remote benchmark after restarts needs warm peer pools before logs/sec samples are comparable.
 - Verification-critical security review is still required before a production-ready release.
