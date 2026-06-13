@@ -18,10 +18,13 @@ const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
+const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
+const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
-const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 384;
+const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
+    PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
@@ -535,6 +538,8 @@ impl BodyReceiptRequestPlan {
             let max_scheduled_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
+            let max_hedged_attempts = self.max_in_flight.max(max_scheduled_chunks);
+            let mut scheduled_prefix_ranges = Vec::with_capacity(max_scheduled_chunks);
             for _ in 0..max_scheduled_chunks {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
                     break;
@@ -546,8 +551,37 @@ impl BodyReceiptRequestPlan {
                     &self,
                     &mut attempts,
                     &mut in_flight,
-                    range,
+                    range.clone(),
                     chunk_index,
+                    chunk_body_peer_ids,
+                    chunk_receipt_peer_ids,
+                );
+                scheduled_prefix_ranges.push((chunk_index, range));
+            }
+
+            let redundant_prefix_chunks = body_receipt_initial_prefix_redundancy_count(
+                &self.ranges,
+                min_return_blocks,
+                max_scheduled_chunks,
+                self.max_in_flight,
+                self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
+            );
+            for (duplicate_index, (base_chunk_index, range)) in scheduled_prefix_ranges
+                .iter()
+                .take(redundant_prefix_chunks)
+                .cloned()
+                .enumerate()
+            {
+                let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                let chunk_receipt_peer_ids =
+                    peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                schedule_body_receipt_chunk_attempt(
+                    &self,
+                    &mut attempts,
+                    &mut in_flight,
+                    range,
+                    base_chunk_index
+                        + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
                     chunk_body_peer_ids,
                     chunk_receipt_peer_ids,
                 );
@@ -584,6 +618,7 @@ impl BodyReceiptRequestPlan {
                             break;
                         }
                         if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
+                            && attempts.len() < max_hedged_attempts
                             && let Some((range, chunk_index)) = body_receipt_hedge_candidate(
                                 &mut in_flight,
                                 &chunks,
@@ -695,7 +730,9 @@ impl BodyReceiptRequestPlan {
                     );
                 }
 
-                while hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES {
+                while hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
+                    && attempts.len() < max_hedged_attempts
+                {
                     let Some((range, chunk_index)) = body_receipt_hedge_candidate(
                         &mut in_flight,
                         &chunks,
@@ -3204,6 +3241,32 @@ fn body_receipt_scheduled_chunk_limit(
     prefix_chunks.clamp(1, ranges.len())
 }
 
+fn body_receipt_initial_prefix_redundancy_count(
+    ranges: &[std::ops::Range<usize>],
+    min_return_blocks: usize,
+    scheduled_chunks: usize,
+    max_in_flight: usize,
+    peer_count: usize,
+) -> usize {
+    if ranges.is_empty()
+        || min_return_blocks == 0
+        || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
+        || peer_count < PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+    {
+        return 0;
+    }
+
+    let spare_attempts = max_in_flight.saturating_sub(scheduled_chunks);
+    if spare_attempts == 0 {
+        return 0;
+    }
+
+    let prefix_chunks = body_receipt_scheduled_chunk_limit(ranges, min_return_blocks);
+    spare_attempts
+        .min(prefix_chunks)
+        .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Eip658Value, TxType};
@@ -3317,8 +3380,8 @@ mod tests {
     #[test]
     fn body_receipt_min_accepted_prefix_rejects_tiny_dense_progress() {
         assert_eq!(body_receipt_min_accepted_prefix(128), 128);
-        assert_eq!(body_receipt_min_accepted_prefix(1024), 384);
-        assert_eq!(body_receipt_min_accepted_prefix(10_000), 384);
+        assert_eq!(body_receipt_min_accepted_prefix(1024), 128);
+        assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
     }
 
     #[test]
@@ -3329,6 +3392,38 @@ mod tests {
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 1);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 3);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 4096), 6);
+    }
+
+    #[test]
+    fn body_receipt_initial_prefix_redundancy_uses_only_spare_dense_capacity() {
+        let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
+
+        assert_eq!(
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 16),
+            4
+        );
+        assert_eq!(
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 16),
+            2
+        );
+        assert_eq!(
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 16),
+            0
+        );
+    }
+
+    #[test]
+    fn body_receipt_initial_prefix_redundancy_skips_sparse_or_underpeered_plans() {
+        let ranges = vec![0..128, 128..256, 256..384, 384..512, 512..640];
+
+        assert_eq!(
+            body_receipt_initial_prefix_redundancy_count(&ranges, 2048, 5, 10, 32),
+            0
+        );
+        assert_eq!(
+            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 15),
+            0
+        );
     }
 
     #[test]

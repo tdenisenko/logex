@@ -4,68 +4,65 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput and peer-retention stability.
+Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
 
-Current benchmark blocker: the Mac mini split-tunnel gateway keeps local outbound traffic off the VPS, but the VPS currently source-NATs forwarded inbound TCP peers to `10.66.0.1`. Under that topology the client is seeing only roughly 4-5 serving peers and about 50k-120k logs/sec, so further code throughput tests are not comparable with the previous 400k+ logs/sec baseline.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The latest retained pipeline changes remove healthy-lookahead resets and keep lower downloads active while residual gaps are repaired.
 
 ## Completed Since Last Run
 
-- Verified the client still runs on `192.168.50.44` with data at `/Volumes/SSD 4TB/LogEx` and HTTP port `18683`.
-- Tested a 512-block dense historical fetch window and rejected it because it underperformed the 1,024-block baseline.
-- Restored the 1,024-block dense fetch window and restarted the remote client from a clean data directory while preserving peer identity/cache files.
-- Confirmed active sync no longer builds query indexes during historical backfill, avoiding unnecessary local contention.
-- Confirmed the retained body/receipt hedge settings pass targeted tests.
+- Added strict recent-checkpoint validation for CLI checkpoint values, checkpoint URLs, and persisted restart state.
+- Updated the dashboard CL label so it no longer claims head tracking unless the CL anchor is actually caught up.
+- Split historical sync into fetch, prepare, and ordered write stages so body/receipt downloads can continue while validation/extraction and writes run.
+- Added residual-gap handling for accepted partial body/receipt prefixes; verified residual gaps are fetched, validated, and written without discarding the full lookahead queue.
+- Removed the dense-range lookahead reset that discarded healthy in-flight fetches after transient peer-count drops.
+- Benchmarked and rejected the depth-8 downloader experiment because it reintroduced below-prefix resets without a sustained throughput gain.
 
 ## Remaining TODOs
 
-1. Restore a valid high-peer benchmark environment.
-   - Reason: Current split-tunnel source NAT caps useful serving peers and invalidates throughput comparisons.
-   - Completion criteria: The benchmark host reaches a stable serving-peer pool comparable to the previous 80-90 peer run, or a new public-host setup is selected.
+1. Improve body/receipt peer-tail handling.
+   - Reason: Historical sync is still limited by slow or timeout-prone peers delaying contiguous prefixes.
+   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained depth-6/no-reset pipeline without increasing validation risk, memory risk, or peer churn.
 
-2. Improve historical fetch utilization beyond the current baseline.
-   - Reason: The pipeline is still fetch-bound and can lose useful completed work when a blocking prefix chunk delays a batch.
-   - Completion criteria: A measured benchmark beats the restored 1,024-block baseline by a meaningful margin without increasing data loss risk, memory risk, or peer churn.
-
-3. Complete release hardening.
+2. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
    - Completion criteria: Tests or smokes cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, exposed listener policy, and a live release-candidate run from a clean data directory.
 
 ## Design Decisions
 
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
-- Query index builds are deferred during active historical sync. This favors full-sync throughput and lets index catch-up run after the node is idle.
-- Dense historical backfill currently uses a 1,024-block fetch window. A 512-block window reduced reset sensitivity but lost too much batch efficiency in live testing.
-- The current split-tunnel setup is useful for reducing local outbound traffic through the VPS, but it is not equivalent to a clean public node because inbound peers are source-NATed at the VPS.
+- Checkpoints are accepted only when they are recent relative to a checkpoint-sync endpoint. Persisted state that is too stale now requires a fresh recent checkpoint.
+- Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
+- Dense historical ranges use smaller 512-block fetch windows with more bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
+- Depth-6 is currently the retained high-memory downloader depth for this machine. Depth-8 was tested and rejected.
 
 ## Challenges and Resolutions
 
-- Challenge: The 512-block dense-window experiment looked plausible because it reduced contiguous-prefix exposure.
-  - Resolution: Benchmarked it on the remote Mac mini, observed materially lower logs/sec, and reverted it.
+- Challenge: Partial body/receipt prefixes caused long queue resets even when hundreds of contiguous blocks were valid.
+  - Resolution: Accepted one full chunk as recoverable progress, repaired the residual gap, and continued lookahead below the residual boundary.
 
-- Challenge: The local release binary was copied to the Mac mini once and failed with `bad CPU type in executable`.
-  - Resolution: Synced source and rebuilt on the Mac mini itself.
+- Challenge: Healthy dense lookahead was reset when transient peer-count changes lowered the computed buffer depth.
+  - Resolution: Removed that reset path; only memory pressure can now force a healthy lookahead reset.
 
-- Challenge: Current split-tunnel networking reduced serving peers compared with earlier full-tunnel/public-host tests.
-  - Resolution: Identified VPS TCP source NAT as the active topology issue; no code-side throughput conclusions should be drawn from this setup.
+- Challenge: Increasing active fetch depth to 8 looked promising but increased timeout churn and below-prefix failures.
+  - Resolution: Reverted to depth-6 after live comparison.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted the rejected 512-block dense-window experiment.
-- Rechecked the touched sync/index paths for temporary experiment code; retained only the query-index deferral and body/receipt hedge changes that remain justified by prior benchmark results.
+- Reverted the rejected depth-8 change before leaving the remote running.
+- Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - No obsolete production files were removed in this pass.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: none yet
+- Commits made during this run: `perf: improve historical downloader overlap`
 - Pull request status: not ready
 - Merge status: not merged
-- Blockers: high-peer benchmark environment is currently invalid under split-tunnel source NAT.
+- Blockers: remaining EL historical sync performance work is still in progress.
 
 ## Known Issues or Risks
 
-- The current Mac mini split tunnel keeps default outbound traffic local, but inbound TCP peers forwarded by the VPS are source-NATed to the tunnel IP. This can reduce peer retention and makes LogEx unlike a normal public Ethereum node.
-- A source-preserving split tunnel would require Mac-side policy routing/PF handling for replies from forwarded sessions, or running LogEx directly on a public host.
-- The historical body/receipt pipeline still commits only contiguous prefixes. A correct suffix-cache or gap-fill redesign may be needed for the next substantial throughput gain.
+- Historical sync is still body/receipt fetch-tail bound; peer timeout clusters can hold back contiguous progress.
+- The remote benchmark after restarts needs warm peer pools before logs/sec samples are comparable.
 - Verification-critical security review is still required before a production-ready release.

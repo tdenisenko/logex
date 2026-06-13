@@ -2,11 +2,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use logex_cl::{CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS, MAINNET_CONSENSUS_CHAIN_SPEC};
+use logex_cl::MAINNET_CONSENSUS_CHAIN_SPEC;
 use serde::Deserialize;
 use thiserror::Error;
 
 const CHECKPOINT_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_CHECKPOINT_SYNC_URL: &str = "https://mainnet.checkpoint.sigp.io";
+pub const RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG: u64 = 256;
 
 #[derive(Debug, Error)]
 pub enum CheckpointSyncError {
@@ -14,6 +16,18 @@ pub enum CheckpointSyncError {
     InvalidUrl(String),
     #[error("invalid checkpoint {0}")]
     InvalidCheckpoint(String),
+    #[error("checkpoint-sync URL is required to fetch or validate a recent checkpoint")]
+    MissingCheckpointSyncUrl,
+    #[error("unsupported checkpoint descriptor format for {0}")]
+    UnsupportedDescriptor(String),
+    #[error("failed to read checkpoint descriptor {path}: {source}")]
+    ReadDescriptor {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse checkpoint descriptor {path}: {message}")]
+    ParseDescriptor { path: String, message: String },
     #[error("failed to request {url}: {source}")]
     Request {
         url: String,
@@ -77,6 +91,20 @@ struct InlineCheckpoint {
     root: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedCheckpoint {
+    checkpoint: InlineCheckpoint,
+    original_value: String,
+    preserve_original_value: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CheckpointDescriptorForValidation {
+    beacon_root: String,
+    #[serde(default)]
+    beacon_slot: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct BeaconHeaderResponse {
     data: BeaconHeaderData,
@@ -127,22 +155,13 @@ pub async fn resolve_checkpoint(
     checkpoint: Option<String>,
     checkpoint_sync_url: Option<&str>,
 ) -> Result<Option<String>, CheckpointSyncError> {
-    let Some(checkpoint_sync_url) = checkpoint_sync_url else {
-        return Ok(checkpoint);
-    };
+    let checkpoint_sync_url =
+        checkpoint_sync_url.ok_or(CheckpointSyncError::MissingCheckpointSyncUrl)?;
 
-    let parsed_checkpoint = match checkpoint.as_deref() {
-        Some(checkpoint) => parse_inline_checkpoint(checkpoint)?,
+    let parsed_checkpoint = match checkpoint {
+        Some(checkpoint) => Some(parse_checkpoint_for_validation(checkpoint)?),
         None => None,
     };
-    if checkpoint.is_some() && parsed_checkpoint.is_none() {
-        tracing::debug!(
-            checkpoint = checkpoint.as_deref().unwrap_or_default(),
-            source = %checkpoint_sync_url,
-            "skipping checkpoint-sync endpoint validation for descriptor-file checkpoint"
-        );
-        return Ok(checkpoint);
-    }
 
     let sources = CheckpointSyncSources::new(checkpoint_sync_url)?;
     let client = reqwest::Client::builder()
@@ -159,7 +178,7 @@ pub async fn resolve_checkpoint(
         .max_by_key(|header| header.slot)
         .expect("fetch_finalized_headers returns a quorum");
 
-    match checkpoint {
+    match parsed_checkpoint {
         None => {
             let resolved = sources
                 .resolve_fresh_checkpoint(&client, &finalized)
@@ -168,16 +187,15 @@ pub async fn resolve_checkpoint(
             tracing::info!(
                 checkpoint = %checkpoint,
                 sources = %resolved.sources.join(","),
-                "resolved weak-subjectivity checkpoint from checkpoint-sync source quorum"
+                "resolved recent checkpoint from checkpoint-sync source quorum"
             );
             Ok(Some(checkpoint))
         }
-        Some(_) => {
-            let parsed = parsed_checkpoint.expect("inline checkpoint parsed before endpoint fetch");
+        Some(parsed) => {
             let resolved = sources
-                .resolve_requested_checkpoint(&client, &parsed)
+                .resolve_requested_checkpoint(&client, &parsed.checkpoint)
                 .await?;
-            let requested_root = normalize_root(&parsed.root);
+            let requested_root = normalize_root(&parsed.checkpoint.root);
             if normalize_root(&resolved.header.root) != requested_root {
                 return Err(CheckpointSyncError::RootMismatch {
                     requested_root,
@@ -192,9 +210,13 @@ pub async fn resolve_checkpoint(
                 checkpoint = %checkpoint,
                 finalized_slot = newest_finalized.slot,
                 sources = %resolved.sources.join(","),
-                "validated weak-subjectivity checkpoint against checkpoint-sync source quorum"
+                "validated recent checkpoint against checkpoint-sync source quorum"
             );
-            Ok(Some(checkpoint))
+            if parsed.preserve_original_value {
+                Ok(Some(parsed.original_value))
+            } else {
+                Ok(Some(checkpoint))
+            }
         }
     }
 }
@@ -205,14 +227,13 @@ fn reject_stale_checkpoint(
 ) -> Result<(), CheckpointSyncError> {
     let checkpoint_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(checkpoint.slot);
     let finalized_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(finalized.slot);
-    if finalized_epoch
-        > checkpoint_epoch.saturating_add(CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS)
+    if finalized_epoch > checkpoint_epoch.saturating_add(RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG)
     {
         return Err(CheckpointSyncError::Stale {
             slot: checkpoint.slot,
             root: checkpoint.root.clone(),
             finalized_slot: finalized.slot,
-            max_epochs: CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS,
+            max_epochs: RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG,
         });
     }
     Ok(())
@@ -598,6 +619,53 @@ fn parse_inline_checkpoint(input: &str) -> Result<Option<InlineCheckpoint>, Chec
     }))
 }
 
+fn parse_checkpoint_for_validation(input: String) -> Result<ParsedCheckpoint, CheckpointSyncError> {
+    if Path::new(&input).exists() {
+        let checkpoint = parse_checkpoint_descriptor_for_validation(&input)?;
+        return Ok(ParsedCheckpoint {
+            checkpoint,
+            original_value: input,
+            preserve_original_value: true,
+        });
+    }
+
+    let checkpoint = parse_inline_checkpoint(&input)?
+        .ok_or_else(|| CheckpointSyncError::InvalidCheckpoint(input.clone()))?;
+    Ok(ParsedCheckpoint {
+        checkpoint,
+        original_value: input,
+        preserve_original_value: false,
+    })
+}
+
+fn parse_checkpoint_descriptor_for_validation(
+    path: &str,
+) -> Result<InlineCheckpoint, CheckpointSyncError> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|source| CheckpointSyncError::ReadDescriptor {
+            path: path.to_owned(),
+            source,
+        })?;
+    let descriptor =
+        match Path::new(path).extension().and_then(|ext| ext.to_str()) {
+            Some("json") => serde_json::from_str::<CheckpointDescriptorForValidation>(&contents)
+                .map_err(|error| CheckpointSyncError::ParseDescriptor {
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                })?,
+            Some("toml") => toml::from_str::<CheckpointDescriptorForValidation>(&contents)
+                .map_err(|error| CheckpointSyncError::ParseDescriptor {
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                })?,
+            _ => return Err(CheckpointSyncError::UnsupportedDescriptor(path.to_owned())),
+        };
+    Ok(InlineCheckpoint {
+        slot: descriptor.beacon_slot,
+        root: parse_checkpoint_root(path, &descriptor.beacon_root)?,
+    })
+}
+
 fn parse_checkpoint_root(checkpoint: &str, root: &str) -> Result<String, CheckpointSyncError> {
     let root = normalize_root(root);
     if !is_normalized_checkpoint_root(&root) {
@@ -687,18 +755,64 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn inline_checkpoint_is_normalized_after_validation() {
+        assert_eq!(
+            parse_checkpoint_for_validation(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+            )
+            .unwrap(),
+            ParsedCheckpoint {
+                checkpoint: InlineCheckpoint {
+                    slot: None,
+                    root: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                },
+                original_value:
+                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                preserve_original_value: false,
+            }
+        );
+    }
+
     #[tokio::test]
-    async fn descriptor_file_checkpoint_skips_endpoint_resolution() {
-        let checkpoint = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("Cargo.toml")
-            .to_string_lossy()
-            .to_string();
+    async fn checkpoint_resolution_requires_validation_source() {
+        assert!(matches!(
+            resolve_checkpoint(
+                Some(
+                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+                ),
+                None,
+            )
+            .await,
+            Err(CheckpointSyncError::MissingCheckpointSyncUrl)
+        ));
+    }
+
+    #[test]
+    fn descriptor_file_checkpoint_is_parsed_for_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let descriptor = temp.path().join("checkpoint.json");
+        std::fs::write(
+            &descriptor,
+            r#"{
+  "beacon_root": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "beacon_slot": 123
+}"#,
+        )
+        .unwrap();
 
         assert_eq!(
-            resolve_checkpoint(Some(checkpoint.clone()), Some("not a url"))
-                .await
-                .unwrap(),
-            Some(checkpoint)
+            parse_checkpoint_for_validation(descriptor.to_string_lossy().to_string()).unwrap(),
+            ParsedCheckpoint {
+                checkpoint: InlineCheckpoint {
+                    slot: Some(123),
+                    root: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                },
+                original_value: descriptor.to_string_lossy().to_string(),
+                preserve_original_value: true,
+            }
         );
     }
 
@@ -766,7 +880,7 @@ mod tests {
             root: "0x01".to_owned(),
         };
         let finalized = BeaconHeader {
-            slot: (CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS + 2) * 32,
+            slot: (RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG + 2) * 32,
             root: "0x02".to_owned(),
         };
 

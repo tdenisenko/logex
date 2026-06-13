@@ -3103,6 +3103,11 @@ function updateStatus(data) {
   var optimisticTime = anchorTime(data.optimistic_execution_head);
   var materializedBlock = anchorBlock(data.materialized_execution_ceiling);
   var materializedTime = anchorTime(data.materialized_execution_ceiling);
+  var consensusHeadBlock = optimisticBlock || latestBlock;
+  var consensusHeadTime = optimisticTime || latestTime;
+  var consensusHeadLag = materializedBlock == null || consensusHeadBlock == null
+    ? null
+    : Math.max(0, consensusHeadBlock - materializedBlock);
   var historicalBlockRate = numberOrNull(data.historical_blocks_per_sec) || 0;
   var liveBlockRate = numberOrNull(data.blocks_per_sec) || 0;
   var blockRate = historicalComplete ? liveBlockRate : historicalBlockRate;
@@ -3166,8 +3171,10 @@ function updateStatus(data) {
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
-  if (materializedBlock != null && latestBlock != null && materializedBlock >= latestBlock) {
+  if (consensusHeadLag != null && consensusHeadLag < 3) {
     consensusStatus = 'Tracking head';
+  } else if (materializedBlock != null && consensusHeadBlock != null) {
+    consensusStatus = 'Catching up';
   } else if (materializedBlock != null) {
     consensusStatus = 'Syncing';
   } else if (data.checkpoint_root) {
@@ -3176,7 +3183,7 @@ function updateStatus(data) {
   setText('consensusStatus', consensusStatus);
   setText('consensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
-    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
+    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.');
 
   setText('logRange', blockRange(queryFrom, queryTo));
   setText('logRangeDetail', queryFrom == null
@@ -3203,7 +3210,7 @@ function updateStatus(data) {
   setText('debugConsensusStatus', consensusStatus);
   setText('debugConsensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
-    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; latest ' + blockWithAge(latestBlock, latestTime) + '.');
+    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.');
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
   setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
   setText('debugStorageWritePath', data.storage_write_path);
