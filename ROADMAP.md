@@ -66,9 +66,10 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; storage/cache salvage commit pending
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`
 - Pull request status: draft PR #92 open
 - Merge status: not merged
+- Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
 - Blockers: remaining EL historical sync performance work is still in progress.
 
 ## Known Issues or Risks
