@@ -536,9 +536,24 @@ fn historical_write_chunk_row_limit_for_available_memory(
 
 #[cfg(target_os = "linux")]
 fn historical_available_memory_bytes() -> Option<u64> {
+    read_linux_meminfo_bytes("MemAvailable:")
+}
+
+#[cfg(target_os = "macos")]
+fn historical_available_memory_bytes() -> Option<u64> {
+    read_darwin_available_memory_bytes()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn historical_available_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_meminfo_bytes(prefix: &str) -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
-        let Some(rest) = line.strip_prefix("MemAvailable:") else {
+        let Some(rest) = line.strip_prefix(prefix) else {
             continue;
         };
         let kib = rest
@@ -550,9 +565,34 @@ fn historical_available_memory_bytes() -> Option<u64> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
-fn historical_available_memory_bytes() -> Option<u64> {
-    None
+#[cfg(target_os = "macos")]
+fn read_darwin_available_memory_bytes() -> Option<u64> {
+    let mut stats: libc::vm_statistics64_data_t = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    #[allow(deprecated)]
+    let host = unsafe { libc::mach_host_self() };
+    let rc = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut stats as *mut libc::vm_statistics64_data_t).cast(),
+            &mut count,
+        )
+    };
+    if rc != libc::KERN_SUCCESS {
+        return None;
+    }
+
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+
+    let reclaimable_pages = u64::from(stats.free_count)
+        .saturating_add(u64::from(stats.inactive_count))
+        .saturating_add(u64::from(stats.speculative_count))
+        .saturating_add(u64::from(stats.purgeable_count));
+    reclaimable_pages.checked_mul(page_size as u64)
 }
 
 fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {

@@ -50,6 +50,7 @@ const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
+#[cfg(target_os = "linux")]
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 const HISTORICAL_CRITICAL_AVAILABLE_MEMORY_BYTES: u64 = 2 * BYTES_PER_GIB;
@@ -549,17 +550,44 @@ fn trim_process_allocator() -> bool {
 
 fn historical_total_memory_bytes() -> Option<u64> {
     static TOTAL_MEMORY_BYTES: OnceLock<Option<u64>> = OnceLock::new();
-    *TOTAL_MEMORY_BYTES.get_or_init(read_linux_total_memory_bytes)
+    *TOTAL_MEMORY_BYTES.get_or_init(read_platform_total_memory_bytes)
 }
 
 fn historical_available_memory_bytes() -> Option<u64> {
+    read_platform_available_memory_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn read_platform_available_memory_bytes() -> Option<u64> {
     read_linux_meminfo_bytes("MemAvailable:")
 }
 
-fn read_linux_total_memory_bytes() -> Option<u64> {
+#[cfg(target_os = "linux")]
+fn read_platform_total_memory_bytes() -> Option<u64> {
     read_linux_meminfo_bytes("MemTotal:")
 }
 
+#[cfg(target_os = "macos")]
+fn read_platform_available_memory_bytes() -> Option<u64> {
+    read_darwin_available_memory_bytes()
+}
+
+#[cfg(target_os = "macos")]
+fn read_platform_total_memory_bytes() -> Option<u64> {
+    read_darwin_total_memory_bytes()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_platform_available_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_platform_total_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
 fn read_linux_meminfo_bytes(prefix: &str) -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
@@ -573,6 +601,53 @@ fn read_linux_meminfo_bytes(prefix: &str) -> Option<u64> {
         return kib.checked_mul(BYTES_PER_KIB);
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn read_darwin_total_memory_bytes() -> Option<u64> {
+    let name = b"hw.memsize\0";
+    let mut value = 0u64;
+    let mut size = std::mem::size_of::<u64>() as libc::size_t;
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut value as *mut u64).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && size == std::mem::size_of::<u64>() as libc::size_t).then_some(value)
+}
+
+#[cfg(target_os = "macos")]
+fn read_darwin_available_memory_bytes() -> Option<u64> {
+    let mut stats: libc::vm_statistics64_data_t = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    #[allow(deprecated)]
+    let host = unsafe { libc::mach_host_self() };
+    let rc = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut stats as *mut libc::vm_statistics64_data_t).cast(),
+            &mut count,
+        )
+    };
+    if rc != libc::KERN_SUCCESS {
+        return None;
+    }
+
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+
+    let reclaimable_pages = u64::from(stats.free_count)
+        .saturating_add(u64::from(stats.inactive_count))
+        .saturating_add(u64::from(stats.speculative_count))
+        .saturating_add(u64::from(stats.purgeable_count));
+    reclaimable_pages.checked_mul(page_size as u64)
 }
 
 fn validate_and_extract_historical_block_chunk(

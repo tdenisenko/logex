@@ -6,7 +6,7 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The latest retained pipeline changes remove healthy-lookahead resets and keep lower downloads active while residual gaps are repaired.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses shorter per-request body/receipt timeouts and macOS memory-aware sizing; broader fetch-depth, buffer-depth, and plan-timeout experiments were rejected after live tests.
 
 Draft PR: https://github.com/tdenisenko/logex/pull/92
 
@@ -22,6 +22,9 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Added residual-gap handling for accepted partial body/receipt prefixes; verified residual gaps are fetched, validated, and written without discarding the full lookahead queue.
 - Removed the dense-range lookahead reset that discarded healthy in-flight fetches after transient peer-count drops.
 - Benchmarked and rejected the depth-8 downloader experiment because it reintroduced below-prefix resets without a sustained throughput gain.
+- Added macOS memory probes for historical fetch/write sizing so the Mac mini test host uses real available-memory data instead of falling back to conservative unknown-memory behavior.
+- Reduced pipelined body/receipt chunk request timeout from the global request timeout to 6 seconds after live testing showed better progress at low serving-peer counts.
+- Benchmarked and rejected larger dial fanout, one-peer chunk attempts, larger completed-fetch buffering, and shorter body/receipt plan timeout because they increased residuals or stalls without sustained throughput improvement.
 
 ## Remaining TODOs
 
@@ -40,6 +43,8 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
 - Dense historical ranges use smaller 512-block fetch windows with more bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
 - Depth-6 is currently the retained high-memory downloader depth for this machine. Depth-8 was tested and rejected.
+- Body/receipt chunk attempts still keep intra-chunk fallback peers, because one-peer chunk attempts returned failures faster but caused residual gaps and near-stalls.
+- The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
@@ -56,9 +61,12 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: An older open performance PR contained a mix of obsolete downloader changes and useful small optimizations.
   - Resolution: Kept the storage metadata append optimization, receipt bloom cache preallocation, and CL log-level downgrade; rejected the stale downloader diff.
 
+- Challenge: Several plausible peer-tail mitigations improved one metric while hurting ordered progress.
+  - Resolution: Reverted larger dial fanout, depth-8 fetches, one-peer chunk attempts, larger fetch buffers, and an 18-second plan timeout after live benchmarks showed worse residuals or stalls.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted the rejected depth-8 change before leaving the remote running.
+- Reverted rejected depth-8, dial-fanout, one-peer chunk, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 
@@ -66,7 +74,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`
 - Pull request status: draft PR #92 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
