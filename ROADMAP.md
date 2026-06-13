@@ -6,7 +6,7 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses shorter per-request body/receipt timeouts, macOS memory-aware sizing, density-aware fetch windows, and a density-gated deeper fetch pipeline for dense-but-not-extreme ranges.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses shorter per-request body/receipt timeouts, macOS memory-aware sizing, density-aware fetch windows, a density-gated deeper fetch pipeline for dense-but-not-extreme ranges, and split active/completed fetch budgeting when memory is healthy.
 
 Draft PR: https://github.com/tdenisenko/logex/pull/92
 
@@ -29,6 +29,8 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Lowered the dense-range threshold and enabled an 8-deep fetch pipeline only for dense-but-not-extreme ranges when memory and serving-peer counts are healthy.
 - Reworked residual repair to consume verified partial prefixes in a loop instead of falling back to large sequential body/receipt requests after a partial response.
 - Benchmarked and rejected speculative prefix hedging because it reduced some fetch timings but increased residual churn and did not improve sustained progress.
+- Added WAL replay recovery for the crash window where hot column files advanced but the manifest, canonical bitmap, or WAL truncation did not complete before shutdown.
+- Split active fetch depth from completed fetch buffering under healthy memory so completed batches do not prematurely throttle new body/receipt downloads.
 
 ## Remaining TODOs
 
@@ -47,6 +49,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Historical body/receipt sync may download below a residual gap before that gap is written, but data is still committed only after cryptographic validation and in chain order.
 - Dense historical ranges use smaller 512-block fetch windows with bounded lookahead, because this reduced queue loss in partial-prefix cases while keeping memory use controlled.
 - Global depth-8 fetching was rejected, but density-gated depth-8 fetching is retained for dense-but-not-extreme ranges after live testing showed zero residual batches in the sampled window and better body/receipt p50 than the prior retained run.
+- Active downloads and completed fetch buffering are budgeted separately while available memory is healthy; low-memory mode still uses the conservative combined pending cap.
 - Body/receipt chunk attempts still keep intra-chunk fallback peers, because one-peer chunk attempts returned failures faster but caused residual gaps and near-stalls.
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
@@ -71,17 +74,24 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: Medium-density ranges still produced large partial body/receipt tails.
   - Resolution: Capped medium-density batches by target row count, treated 300+ rows/block as dense, and changed residual repair to keep verified partial progress instead of restarting with sequential fetches.
 
+- Challenge: A graceful-restart test exposed a storage recovery gap where WAL replay had already advanced hot columns but canonical bitmap repair did not complete before startup integrity verification.
+  - Resolution: WAL replay now verifies already-applied hot rows against the WAL before repairing metadata, and startup repairs recoverable hot canonical bitmap length mismatches before integrity verification.
+
+- Challenge: Completed fetch buffers could fill and throttle new downloads even when CPU, disk, and memory were healthy.
+  - Resolution: Split the healthy-memory budget so active downloads can stay full while completed fetches wait to be ingested; low-memory mode keeps the previous combined cap.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, larger-buffer, and shorter-plan-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
+- Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`
 - Pull request status: draft PR #92 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.

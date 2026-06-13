@@ -464,6 +464,19 @@ fn historical_fetch_buffer_depth(
         .min(HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT)
 }
 
+fn historical_fetch_budget_has_capacity(
+    pending_fetches: usize,
+    completed_fetches: usize,
+    buffer_depth: usize,
+    available_memory_bytes: Option<u64>,
+) -> bool {
+    if historical_available_memory_is_low(available_memory_bytes) {
+        pending_fetches < buffer_depth
+    } else {
+        completed_fetches < buffer_depth
+    }
+}
+
 fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u64> {
     let rows_per_block = rows_per_block?;
     if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
@@ -1796,7 +1809,12 @@ impl SyncEngine {
             self.historical_fetch_planned_child = Some(child_header.clone());
         }
         while self.active_historical_fetch_count() < pipeline_depth
-            && self.pending_historical_fetch_count() < buffer_depth
+            && historical_fetch_budget_has_capacity(
+                self.pending_historical_fetch_count(),
+                self.historical_fetch_completed.len(),
+                buffer_depth,
+                available_memory_bytes,
+            )
         {
             let Some(planned_child) = self.historical_fetch_planned_child.take() else {
                 break;
@@ -3432,6 +3450,28 @@ mod tests {
             historical_fetch_buffer_depth(8, None, Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK)),
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT
         );
+    }
+
+    #[test]
+    fn historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy() {
+        assert!(historical_fetch_budget_has_capacity(
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT + 4,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT - 1,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
+        ));
+        assert!(!historical_fetch_budget_has_capacity(
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
+        ));
+        assert!(!historical_fetch_budget_has_capacity(
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            0,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
     }
 
     #[test]
