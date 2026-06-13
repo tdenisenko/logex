@@ -436,8 +436,8 @@ fn historical_dense_fetch_pipeline_depth_boost(
     }
 
     let rows_per_block = rows_per_block?;
-    (rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK
-        && rows_per_block < HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)
+    (HISTORICAL_DENSE_ROWS_PER_BLOCK..HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)
+        .contains(&rows_per_block)
         .then_some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
 }
 
@@ -1615,7 +1615,7 @@ impl SyncEngine {
         self.historical_prepare_completed.clear();
     }
 
-    fn store_historical_fetch_outcome(&mut self, outcome: HistoricalFetchOutcome) {
+    fn store_historical_fetch_outcome(&mut self, mut outcome: HistoricalFetchOutcome) {
         if outcome.generation != self.historical_fetch_generation {
             return;
         }
@@ -1624,6 +1624,8 @@ impl SyncEngine {
         if outcome.sequence < self.historical_fetch_expected_sequence {
             return;
         }
+        self.peers
+            .apply_body_receipt_request_accounting(&mut outcome.outcome);
         self.historical_fetch_completed
             .insert(outcome.sequence, outcome);
     }

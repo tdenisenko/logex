@@ -473,21 +473,16 @@ impl PeerManager {
 
     pub(crate) fn complete_bodies_and_receipts_request(
         &mut self,
-        outcome: BodyReceiptRequestOutcome,
+        mut outcome: BodyReceiptRequestOutcome,
     ) -> Result<Option<BodyReceiptRequestCompletion>> {
+        self.apply_body_receipt_request_accounting(&mut outcome);
         let BodyReceiptRequestOutcome {
             total_hashes,
             return_blocks,
             chunks,
-            failures,
-            stats,
+            failures: _,
+            stats: _,
         } = outcome;
-        let mut dead_peers = HashSet::new();
-        for (peer_id, kind, blocks, elapsed) in stats {
-            self.record_peer_request_success(peer_id, kind, blocks, elapsed);
-        }
-        self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
-        self.remove_dead_peers(&dead_peers);
 
         let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
 
@@ -507,6 +502,32 @@ impl PeerManager {
             )
         }
     }
+
+    pub(crate) fn apply_body_receipt_request_accounting(
+        &mut self,
+        outcome: &mut BodyReceiptRequestOutcome,
+    ) {
+        let (stats, failures) = take_body_receipt_request_accounting(outcome);
+        if stats.is_empty() && failures.is_empty() {
+            return;
+        }
+
+        let mut dead_peers = HashSet::new();
+        for (peer_id, kind, blocks, elapsed) in stats {
+            self.record_peer_request_success(peer_id, kind, blocks, elapsed);
+        }
+        self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
+        self.remove_dead_peers(&dead_peers);
+    }
+}
+
+fn take_body_receipt_request_accounting(
+    outcome: &mut BodyReceiptRequestOutcome,
+) -> (TypedRequestStats, ParallelChunkFailures) {
+    (
+        std::mem::take(&mut outcome.stats),
+        std::mem::take(&mut outcome.failures),
+    )
 }
 
 impl BodyReceiptRequestPlan {
@@ -3488,6 +3509,33 @@ mod tests {
         let blocks = take_contiguous_prefix(6, chunks);
 
         assert_eq!(blocks, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn body_receipt_request_accounting_is_drained_once() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut outcome = BodyReceiptRequestOutcome {
+            total_hashes: 4,
+            return_blocks: 4,
+            chunks: BTreeMap::new(),
+            failures: vec![ChunkRequestFailure {
+                role: ChunkRequestRole::Receipts,
+                peer_id: peer,
+                requested: 4,
+                kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::Timeout,
+                )),
+            }],
+            stats: vec![(peer, PeerRequestKind::Bodies, 4, Duration::from_millis(250))],
+        };
+
+        let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(failures.len(), 1);
+
+        let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
+        assert!(stats.is_empty());
+        assert!(failures.is_empty());
     }
 
     #[test]
