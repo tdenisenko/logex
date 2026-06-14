@@ -31,7 +31,7 @@ const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
 const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
 const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
-const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 8;
+const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT: usize = 12;
@@ -2015,6 +2015,7 @@ impl SyncEngine {
             .prepare_bodies_and_receipts_request_for_hashes_and_gas(
                 body_receipt_hashes,
                 body_receipt_gas_used,
+                self.historical_rows_per_block_ewma,
                 header_batch.required_block,
                 &[header_batch.header_peer],
             )
@@ -2429,6 +2430,7 @@ impl SyncEngine {
                 .prepare_bodies_and_receipts_request_for_hashes_and_gas(
                     remaining_hashes.clone(),
                     body_receipt_gas_used,
+                    self.historical_rows_per_block_ewma,
                     required_block,
                     &[header_peer],
                 )

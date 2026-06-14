@@ -4,9 +4,9 @@
 
 LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution headers as the EL pivot, verifies EL history back to genesis by default, follows new head blocks, and exposes verified logs through the dashboard, SQL endpoint, JSON-RPC, gRPC, and WebSocket.
 
-Active branch: `perf/historical-sync-throughput`. The branch is focused on EL historical sync throughput, checkpoint freshness safety, and peer-retention stability.
+Active branch: `perf/historical-sync-queue-v2`. The branch is focused on EL historical sync throughput and peer-tail stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, density-aware fetch windows, a density-gated deeper fetch pipeline for dense-but-not-extreme ranges, and split active/completed fetch budgeting when memory is healthy.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses density-aware body/receipt return windows, a 4-deep dense historical fetch pipeline, 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, and split active/completed fetch budgeting when memory is healthy.
 
 Draft PR: https://github.com/tdenisenko/logex/pull/92
 
@@ -35,6 +35,9 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Applied body/receipt peer success/failure accounting as soon as asynchronous historical fetch outcomes complete, so timed-out peers are paused, demoted, or quarantined before later queued results are consumed.
 - Benchmarked and rejected a deeper prepare lookahead and a 4-second body/receipt request timeout with a 2-second hedge delay; neither produced a sustained improvement over the accounting-only build.
 - Added a scoped clippy allowance around generated tonic protobuf code after GitHub nightly started flagging `tonic::Status` in generated service traits as `result_large_err`.
+- Added density-aware body/receipt return windows so dense ranges return 1,024 verified blocks instead of trying to hold much larger dense prefixes.
+- Reduced dense historical fetch pipeline depth from 8 to 4 after live benchmarks showed fewer timeout tails and steadier body/receipt p90 than depth 5 or depth 8.
+- Benchmarked and rejected a 4-second body/receipt request timeout, a deeper prepare lookahead, and dense depth 5 because they increased failures or did not improve sustained committed throughput.
 
 ## Remaining TODOs
 
@@ -59,6 +62,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. A 4-second timeout lowered some short samples but increased timeout density, peer churn, and p50/p90 fetch latency over a larger sample.
 - Peer accounting is applied when fetch outcomes are received, not only when they are ingested in order, because queued fetch plans otherwise reused peers that had already timed out in completed asynchronous work.
+- Dense ranges cap body/receipt return windows at 1,024 blocks and use a 4-deep historical fetch pipeline. This keeps enough work active while avoiding the stale-peer and timeout churn seen with depth 5, depth 8, and larger dense prefixes.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
@@ -99,18 +103,21 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: GitHub CI clippy failed on generated tonic code, not handwritten application code.
   - Resolution: Added a module-scoped generated-code allowance for `clippy::result_large_err` at the protobuf include boundary.
 
+- Challenge: Dense ranges were still sensitive to slow body/receipt peers.
+  - Resolution: Capped dense return windows to 1,024 blocks and reduced dense fetch depth to 4 after live samples showed lower timeout churn than depth 5, depth 8, shorter request timeouts, or deeper prepare lookahead.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected broad depth-8, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
+- Reverted rejected broad depth-8, depth-5, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 - Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
 
 ## Git Workflow
 
-- Current branch: `perf/historical-sync-throughput`
+- Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; pending commit for dense return/depth tuning
 - Pull request status: draft PR #92 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.

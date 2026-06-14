@@ -27,6 +27,7 @@ const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
+const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_REQUESTS_PER_PEER: usize = 4;
@@ -365,6 +366,7 @@ impl PeerManager {
         self.prepare_bodies_and_receipts_request_inner(
             hashes,
             None,
+            None,
             required_block,
             preferred_peers,
         )
@@ -375,12 +377,14 @@ impl PeerManager {
         &mut self,
         hashes: Vec<B256>,
         gas_used: Vec<u64>,
+        rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.prepare_bodies_and_receipts_request_inner(
             hashes,
             Some(gas_used),
+            rows_per_block,
             required_block,
             preferred_peers,
         )
@@ -391,6 +395,7 @@ impl PeerManager {
         &mut self,
         hashes: Vec<B256>,
         receipt_gas_used: Option<Vec<u64>>,
+        rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
@@ -429,7 +434,8 @@ impl PeerManager {
         if ranges.len() < 2 {
             return Ok(None);
         }
-        let return_blocks = body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref());
+        let return_blocks =
+            body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref(), rows_per_block);
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -3217,7 +3223,11 @@ fn body_receipt_prefix_range(
     }
 }
 
-fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> usize {
+fn body_receipt_return_blocks(
+    total_blocks: usize,
+    gas_used: Option<&[u64]>,
+    rows_per_block: Option<f64>,
+) -> usize {
     if total_blocks <= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS {
         return total_blocks;
     }
@@ -3226,11 +3236,17 @@ fn body_receipt_return_blocks(total_blocks: usize, gas_used: Option<&[u64]>) -> 
         return PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS;
     };
 
-    let return_limit = total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS);
+    let return_limit = if rows_per_block.is_some_and(|rows_per_block| {
+        rows_per_block >= PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK
+    }) {
+        total_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
+    } else {
+        total_blocks.min(PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS)
+    };
     let return_gas_target =
         PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET.saturating_mul(return_limit as u128);
     let mut cumulative_gas = 0u128;
-    for (index, gas) in gas_used.iter().take(total_blocks).enumerate() {
+    for (index, gas) in gas_used.iter().take(return_limit).enumerate() {
         cumulative_gas = cumulative_gas.saturating_add(u128::from(*gas));
         let returned_blocks = index + 1;
         if returned_blocks >= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
@@ -3392,11 +3408,32 @@ mod tests {
         let dense = vec![30_000_000; 4096];
         let sparse = vec![0; 12_000];
 
-        assert_eq!(body_receipt_return_blocks(128, Some(&dense)), 128);
-        assert_eq!(body_receipt_return_blocks(4096, Some(&dense)), 4096);
-        assert_eq!(body_receipt_return_blocks(6000, Some(&sparse)), 6000);
-        assert_eq!(body_receipt_return_blocks(12_000, Some(&sparse)), 10_000);
-        assert_eq!(body_receipt_return_blocks(4096, None), 1024);
+        assert_eq!(
+            body_receipt_return_blocks(128, Some(&dense), Some(300.0)),
+            128
+        );
+        assert_eq!(
+            body_receipt_return_blocks(4096, Some(&dense), Some(300.0)),
+            1024
+        );
+        let medium_gas = vec![15_000_000; 4096];
+        assert_eq!(
+            body_receipt_return_blocks(4096, Some(&medium_gas), Some(300.0)),
+            1024
+        );
+        assert_eq!(
+            body_receipt_return_blocks(4096, Some(&dense), Some(80.0)),
+            4096
+        );
+        assert_eq!(
+            body_receipt_return_blocks(6000, Some(&sparse), Some(80.0)),
+            6000
+        );
+        assert_eq!(
+            body_receipt_return_blocks(12_000, Some(&sparse), Some(80.0)),
+            10_000
+        );
+        assert_eq!(body_receipt_return_blocks(4096, None, None), 1024);
     }
 
     #[test]
