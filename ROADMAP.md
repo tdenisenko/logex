@@ -41,6 +41,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 - Split dense body and receipt prefix fetching into independent chunk queues while preserving per-block receipt peer attribution for validation blame.
 - Raised the retained dense historical fetch depth from 4 to 6 for the split queue path after live samples improved over the prior committed profile.
 - Benchmarked and rejected split-path depth 8, bounded decoupled hedging, and larger initial peer request limits because each regressed actual floor/log deltas or reintroduced residual/fallback churn.
+- Added partial-prefix acceptance to the split dense path so valid contiguous body/receipt prefixes can be committed without falling back to the paired path when tail chunks fail.
 
 ## Remaining TODOs
 
@@ -65,7 +66,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. A 4-second timeout lowered some short samples but increased timeout density, peer churn, and p50/p90 fetch latency over a larger sample.
 - Peer accounting is applied when fetch outcomes are received, not only when they are ingested in order, because queued fetch plans otherwise reused peers that had already timed out in completed asynchronous work.
-- Dense ranges cap body/receipt return windows at 1,024 blocks, fetch body and receipt chunks independently, and use a 6-deep historical fetch pipeline. Receipt peer attribution remains per block so validation failures still penalize the serving peer that supplied the bad receipts.
+- Dense ranges cap body/receipt return windows at 1,024 blocks, fetch body and receipt chunks independently, accept minimum valid contiguous split prefixes, and use a 6-deep historical fetch pipeline. Receipt peer attribution remains per block so validation failures still penalize the serving peer that supplied the bad receipts.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
@@ -112,6 +113,9 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 - Challenge: Pairing body and receipt chunks made each prefix depend on the slower side of each peer pair.
   - Resolution: Added a split dense-prefix path that fetches bodies and receipts through independent queues, preserves receipt peer provenance, and falls back to the paired path if the split path cannot produce a prefix.
 
+- Challenge: Split-prefix fetching still fell back to the paired path when tail chunks failed, even if the leading prefix was usable.
+  - Resolution: The split path now returns a validated contiguous partial prefix once it reaches the existing accepted-prefix threshold.
+
 - Challenge: Several follow-up split-path tweaks looked plausible but did not improve actual committed progress.
   - Resolution: Rejected depth 8, bounded decoupled hedging, and larger initial request limits after live samples regressed logs/sec or reintroduced residual/fallback churn.
 
@@ -126,7 +130,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 
 - Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; `perf: tune dense historical fetches`; pending commit for split dense body/receipt queues
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; `perf: tune dense historical fetches`; `perf: split dense body receipt fetches`; pending commit for split partial-prefix acceptance
 - Pull request status: draft PR #93 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.

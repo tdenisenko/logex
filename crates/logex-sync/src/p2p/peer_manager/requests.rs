@@ -643,17 +643,22 @@ impl BodyReceiptRequestPlan {
             }
         };
 
-        if let (Some(bodies), Some(receipts)) = (bodies, receipts) {
-            match body_receipt_blocks_if_sourced_counts_match(&bodies, receipts, return_blocks) {
-                Ok(blocks) => {
-                    chunks.insert(0, blocks);
+        if let (Some(mut bodies), Some(mut receipts)) = (bodies, receipts) {
+            let prefix_len = bodies.len().min(receipts.len());
+            if prefix_len >= body_receipt_min_accepted_prefix(self.return_blocks) {
+                bodies.truncate(prefix_len);
+                receipts.truncate(prefix_len);
+                match body_receipt_blocks_if_sourced_counts_match(&bodies, receipts, prefix_len) {
+                    Ok(blocks) => {
+                        chunks.insert(0, blocks);
+                    }
+                    Err((peer_id, kind)) => failures.push(ChunkRequestFailure {
+                        role: ChunkRequestRole::Receipts,
+                        peer_id,
+                        requested: prefix_len,
+                        kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                    }),
                 }
-                Err((peer_id, kind)) => failures.push(ChunkRequestFailure {
-                    role: ChunkRequestRole::Receipts,
-                    peer_id,
-                    requested: return_blocks,
-                    kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                }),
             }
         }
 
@@ -1311,12 +1316,9 @@ impl BodyReceiptRequestPlan {
             }
         }
 
-        let mut bodies = Vec::with_capacity(hashes.len());
-        for (_, (peer_id, chunk_bodies)) in chunks {
-            bodies.extend(chunk_bodies.into_iter().map(|body| (peer_id, body)));
-        }
+        let bodies = sourced_bodies_from_chunks(hashes.len(), chunks);
 
-        if bodies.len() == hashes.len() {
+        if bodies.len() >= body_receipt_min_accepted_prefix(hashes.len()) {
             Ok(Some((bodies, stats, failures)))
         } else if failures.is_empty() {
             Ok(None)
@@ -1470,7 +1472,7 @@ impl BodyReceiptRequestPlan {
         }
 
         let receipts = sourced_receipts_from_chunks(hashes.len(), chunks);
-        if receipts.len() == hashes.len() {
+        if receipts.len() >= body_receipt_min_accepted_prefix(hashes.len()) {
             Ok(Some((receipts, stats, failures)))
         } else if failures.is_empty() {
             Ok(None)
@@ -3422,18 +3424,47 @@ fn body_receipt_blocks_if_sourced_counts_match(
     Ok(bodies.iter().cloned().zip(receipts).collect())
 }
 
+fn sourced_bodies_from_chunks(
+    total_hashes: usize,
+    chunks: BTreeMap<
+        usize,
+        (
+            PeerId,
+            Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
+        ),
+    >,
+) -> Vec<SourcedBlockBody> {
+    let mut bodies = Vec::with_capacity(total_hashes);
+    let mut expected_start = 0usize;
+    for (start, (peer_id, chunk_bodies)) in chunks {
+        if start != expected_start || bodies.len() >= total_hashes {
+            break;
+        }
+        expected_start = expected_start.saturating_add(chunk_bodies.len());
+        bodies.extend(chunk_bodies.into_iter().map(|body| (peer_id, body)));
+    }
+    bodies.truncate(total_hashes);
+    bodies
+}
+
 fn sourced_receipts_from_chunks(
     total_hashes: usize,
     chunks: BTreeMap<usize, (PeerId, ReceiptBatch)>,
 ) -> Vec<SourcedReceiptSet> {
     let mut receipts = Vec::with_capacity(total_hashes);
-    for (_, (peer_id, chunk_receipts)) in chunks {
+    let mut expected_start = 0usize;
+    for (start, (peer_id, chunk_receipts)) in chunks {
+        if start != expected_start || receipts.len() >= total_hashes {
+            break;
+        }
+        expected_start = expected_start.saturating_add(chunk_receipts.len());
         receipts.extend(
             chunk_receipts
                 .into_iter()
                 .map(|receipts| (peer_id, receipts)),
         );
     }
+    receipts.truncate(total_hashes);
     receipts
 }
 
@@ -3958,6 +3989,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, first, second]
         );
+    }
+
+    #[test]
+    fn sourced_receipts_from_chunks_stops_at_first_gap() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let chunks: BTreeMap<usize, (PeerId, ReceiptBatch)> = BTreeMap::from([
+            (0, (first, vec![Vec::new()])),
+            (2, (second, vec![Vec::new()])),
+        ]);
+
+        let receipts = sourced_receipts_from_chunks(3, chunks);
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].0, first);
     }
 
     #[test]
