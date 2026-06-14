@@ -1196,6 +1196,7 @@ impl BodyReceiptRequestPlan {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
+        let mut bad_peers = HashSet::<PeerId>::new();
         for _ in 0..max_in_flight {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
@@ -1223,12 +1224,16 @@ impl BodyReceiptRequestPlan {
                     chunks.insert(range.start, (peer_id, bodies));
                 }
                 Err(kind) => {
-                    failures.push(ChunkRequestFailure {
+                    let failure = ChunkRequestFailure {
                         role: ChunkRequestRole::Bodies,
                         peer_id,
                         requested,
                         kind: kind.clone(),
-                    });
+                    };
+                    if chunk_failure_disables_role_peer(&failure) {
+                        bad_peers.insert(peer_id);
+                    }
+                    failures.push(failure);
                     trace!(
                         peer = %peer_id,
                         requested,
@@ -1258,10 +1263,11 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
+            let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
             schedule_decoupled_body_chunk(
                 self,
                 &mut attempts,
-                peer_ids,
+                &chunk_peer_ids,
                 &hashes,
                 chunk_index,
                 range,
@@ -1269,7 +1275,7 @@ impl BodyReceiptRequestPlan {
         }
 
         if !missing_chunk_ranges(&ranges, &chunks).is_empty() {
-            let mut bad_peers = disabled_chunk_peers(&failures, ChunkRequestRole::Bodies);
+            bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Bodies));
             for range in missing_chunk_ranges(&ranges, &chunks) {
                 let base_chunk_index = range_indices_by_start
                     .get(&range.start)
@@ -1351,6 +1357,7 @@ impl BodyReceiptRequestPlan {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
+        let mut bad_peers = HashSet::<PeerId>::new();
         for _ in 0..max_in_flight {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
@@ -1378,12 +1385,16 @@ impl BodyReceiptRequestPlan {
                     chunks.insert(range.start, (peer_id, receipts));
                 }
                 Err(kind) => {
-                    failures.push(ChunkRequestFailure {
+                    let failure = ChunkRequestFailure {
                         role: ChunkRequestRole::Receipts,
                         peer_id,
                         requested,
                         kind: kind.clone(),
-                    });
+                    };
+                    if chunk_failure_disables_role_peer(&failure) {
+                        bad_peers.insert(peer_id);
+                    }
+                    failures.push(failure);
                     trace!(
                         peer = %peer_id,
                         requested,
@@ -1413,10 +1424,11 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
+            let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
             schedule_decoupled_receipt_chunk(
                 self,
                 &mut attempts,
-                peer_ids,
+                &chunk_peer_ids,
                 &hashes,
                 chunk_index,
                 range,
@@ -1424,7 +1436,7 @@ impl BodyReceiptRequestPlan {
         }
 
         if !missing_chunk_ranges(&ranges, &chunks).is_empty() {
-            let mut bad_peers = disabled_chunk_peers(&failures, ChunkRequestRole::Receipts);
+            bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Receipts));
             for range in missing_chunk_ranges(&ranges, &chunks) {
                 let base_chunk_index = range_indices_by_start
                     .get(&range.start)

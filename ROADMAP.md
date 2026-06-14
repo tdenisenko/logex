@@ -6,48 +6,25 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-queue-v2`. The branch is focused on EL historical sync throughput and peer-tail stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses density-aware 1,024-block body/receipt return windows, split body and receipt chunk queues for dense prefixes, a 6-deep dense historical fetch pipeline, 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, and split active/completed fetch budgeting when memory is healthy.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. The data directory was reset once for a fresh dense-range benchmark and must not be reset again until this sync reaches genesis. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses density-aware 1,024-block body/receipt return windows, split body and receipt chunk queues for dense prefixes, a 6-deep dense historical fetch pipeline, 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, split active/completed fetch budgeting when memory is healthy, two-stage prepare lookahead, and per-request exclusion of peers that fail decoupled body/receipt chunks.
 
 Draft PR: https://github.com/tdenisenko/logex/pull/93
 
 ## Completed Since Last Run
 
-- Created the draft PR for the current historical sync throughput work.
-- Audited the stale `fix/historical-fetch-stalls` PR and retained only the storage/cache/logging changes that still apply cleanly to the newer downloader.
-- Avoided rebuilding the full partition view after historical segment writes by appending the newly written segment metadata directly.
-- Preallocated receipt bloom caches and reduced CL block-response log noise from info to debug.
-- Added strict recent-checkpoint validation for CLI checkpoint values, checkpoint URLs, and persisted restart state.
-- Updated the dashboard CL label so it no longer claims head tracking unless the CL anchor is actually caught up.
-- Split historical sync into fetch, prepare, and ordered write stages so body/receipt downloads can continue while validation/extraction and writes run.
-- Added residual-gap handling for accepted partial body/receipt prefixes; verified residual gaps are fetched, validated, and written without discarding the full lookahead queue.
-- Removed the dense-range lookahead reset that discarded healthy in-flight fetches after transient peer-count drops.
-- Benchmarked and rejected the depth-8 downloader experiment because it reintroduced below-prefix resets without a sustained throughput gain.
-- Added macOS memory probes for historical fetch/write sizing so the Mac mini test host uses real available-memory data instead of falling back to conservative unknown-memory behavior.
-- Reduced pipelined body/receipt chunk request timeout from the global request timeout to 6 seconds after live testing showed better progress at low serving-peer counts.
-- Benchmarked and rejected larger dial fanout, one-peer chunk attempts, larger completed-fetch buffering, and shorter body/receipt plan timeout because they increased residuals or stalls without sustained throughput improvement.
-- Capped medium-density fetch windows by target log count instead of allowing 5,000-block batches through dense ranges that repeatedly hit peer tail latency.
-- Lowered the dense-range threshold and enabled an 8-deep fetch pipeline only for dense-but-not-extreme ranges when memory and serving-peer counts are healthy.
-- Reworked residual repair to consume verified partial prefixes in a loop instead of falling back to large sequential body/receipt requests after a partial response.
-- Benchmarked and rejected speculative prefix hedging because it reduced some fetch timings but increased residual churn and did not improve sustained progress.
-- Added WAL replay recovery for the crash window where hot column files advanced but the manifest, canonical bitmap, or WAL truncation did not complete before shutdown.
-- Split active fetch depth from completed fetch buffering under healthy memory so completed batches do not prematurely throttle new body/receipt downloads.
-- Benchmarked and rejected one paired body/receipt chunk per peer; it slightly reduced fetch p50 but lowered active fetch utilization and did not improve sustained logs/sec.
-- Applied body/receipt peer success/failure accounting as soon as asynchronous historical fetch outcomes complete, so timed-out peers are paused, demoted, or quarantined before later queued results are consumed.
-- Benchmarked and rejected a deeper prepare lookahead and a 4-second body/receipt request timeout with a 2-second hedge delay; neither produced a sustained improvement over the accounting-only build.
-- Added a scoped clippy allowance around generated tonic protobuf code after GitHub nightly started flagging `tonic::Status` in generated service traits as `result_large_err`.
-- Added density-aware body/receipt return windows so dense ranges return 1,024 verified blocks instead of trying to hold much larger dense prefixes.
-- Reduced dense historical fetch pipeline depth from 8 to 4 after live benchmarks showed fewer timeout tails and steadier body/receipt p90 than depth 5 or depth 8.
-- Benchmarked and rejected a 4-second body/receipt request timeout, a deeper prepare lookahead, and dense depth 5 because they increased failures or did not improve sustained committed throughput.
-- Split dense body and receipt prefix fetching into independent chunk queues while preserving per-block receipt peer attribution for validation blame.
-- Raised the retained dense historical fetch depth from 4 to 6 for the split queue path after live samples improved over the prior committed profile.
-- Benchmarked and rejected split-path depth 8, bounded decoupled hedging, and larger initial peer request limits because each regressed actual floor/log deltas or reintroduced residual/fallback churn.
-- Added partial-prefix acceptance to the split dense path so valid contiguous body/receipt prefixes can be committed without falling back to the paired path when tail chunks fail.
+- Reset the remote benchmark data directory once, preserving only `discovery-secret` and `known-peers.json`, so dense recent ranges can be measured again. This reset must not be repeated until the current run reaches genesis.
+- Reverted the 4,096-block dense window experiment before reset after a fixed sample regressed to about 101k actual logs/sec.
+- Retained the measured useful changes from the reset run: two-stage historical prepare lookahead and local exclusion of peers that fail decoupled body/receipt chunks.
+- Benchmarked and rejected lowering the split dense minimum peer threshold from 12 to 8; fixed samples were noisy and not materially better than baseline.
+- Benchmarked and rejected plan-time peer rotation; it regressed from about 151k to about 126k actual logs/sec in comparable 5-minute samples.
+- Benchmarked and rejected a 1-second chunk hedge delay; it caused poor peer recovery and throughput collapse during warm-up.
+- Checked local geth/nethermind sources. The relevant reference pattern is a central idle-peer queue with per-peer capacity and timeout-based unreserve/reschedule, which is larger than a timing-constant tweak.
 
 ## Remaining TODOs
 
 1. Improve body/receipt peer-tail handling.
    - Reason: Historical sync is still limited by slow or timeout-prone peers delaying contiguous prefixes.
-   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained density-aware pipeline without increasing validation risk, memory risk, or peer churn.
+   - Completion criteria: A benchmark shows a sustained, meaningful improvement over the retained density-aware pipeline without increasing validation risk, memory risk, or peer churn. The most likely next candidate is a geth-style idle-peer/capacity queue for historical body and receipt tasks.
 
 2. Complete release hardening.
    - Reason: Production readiness depends on verification safety, graceful shutdown, and deployment safety.
@@ -119,9 +96,12 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 - Challenge: Several follow-up split-path tweaks looked plausible but did not improve actual committed progress.
   - Resolution: Rejected depth 8, bounded decoupled hedging, and larger initial request limits after live samples regressed logs/sec or reintroduced residual/fallback churn.
 
+- Challenge: Dense-range samples after the fresh reset showed that local processing was not the bottleneck; body/receipt fetches still spent 8-26 seconds waiting on peer tails.
+  - Resolution: Rejected plan-time peer rotation and 1-second hedging after live samples regressed. Geth/nethermind source review points to a larger idle-peer/capacity queue as the next meaningful direction.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected broad depth-8, depth-5, prefix-hedge, decoupled-hedge, larger-initial-request-limit, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
+- Reverted rejected broad depth-8, depth-5, prefix-hedge, decoupled-hedge, larger-initial-request-limit, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, shorter-request-timeout, plan-time peer rotation, 1-second hedge delay, and lowered split-path peer threshold experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 - Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
@@ -130,7 +110,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 
 - Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; `perf: tune dense historical fetches`; `perf: split dense body receipt fetches`; pending commit for split partial-prefix acceptance
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; `perf: tune dense historical fetches`; `perf: split dense body receipt fetches`; pending commit for the retained reset-run tuning
 - Pull request status: draft PR #93 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
@@ -140,4 +120,5 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 
 - Historical sync is still body/receipt fetch-tail bound; peer timeout clusters can hold back contiguous progress.
 - The remote benchmark after restarts needs warm peer pools before logs/sec samples are comparable.
+- Repeated restarts temporarily depress serving-peer counts; avoid more restarts unless testing a validated candidate.
 - Verification-critical security review is still required before a production-ready release.
