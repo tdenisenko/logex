@@ -18,6 +18,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
 - Benchmarked and rejected lowering the split dense minimum peer threshold from 12 to 8; fixed samples were noisy and not materially better than baseline.
 - Benchmarked and rejected plan-time peer rotation; it regressed from about 151k to about 126k actual logs/sec in comparable 5-minute samples.
 - Benchmarked and rejected a 1-second chunk hedge delay; it caused poor peer recovery and throughput collapse during warm-up.
+- Benchmarked and rejected one-per-peer and two-per-peer shared request coordinator experiments; both throttled body/receipt fetching and regressed actual committed logs/sec.
 - Checked local geth/nethermind sources. The relevant reference pattern is a central idle-peer queue with per-peer capacity and timeout-based unreserve/reschedule, which is larger than a timing-constant tweak.
 
 ## Remaining TODOs
@@ -97,11 +98,11 @@ Draft PR: https://github.com/tdenisenko/logex/pull/93
   - Resolution: Rejected depth 8, bounded decoupled hedging, and larger initial request limits after live samples regressed logs/sec or reintroduced residual/fallback churn.
 
 - Challenge: Dense-range samples after the fresh reset showed that local processing was not the bottleneck; body/receipt fetches still spent 8-26 seconds waiting on peer tails.
-  - Resolution: Rejected plan-time peer rotation and 1-second hedging after live samples regressed. Geth/nethermind source review points to a larger idle-peer/capacity queue as the next meaningful direction.
+  - Resolution: Rejected plan-time peer rotation, 1-second hedging, and simple shared peer semaphores after live samples regressed. Geth/nethermind source review points to a larger idle-peer/capacity queue as the next meaningful direction.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected broad depth-8, depth-5, prefix-hedge, decoupled-hedge, larger-initial-request-limit, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, shorter-request-timeout, plan-time peer rotation, 1-second hedge delay, and lowered split-path peer threshold experiments before leaving the remote running.
+- Reverted rejected broad depth-8, depth-5, prefix-hedge, decoupled-hedge, larger-initial-request-limit, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, shorter-request-timeout, plan-time peer rotation, 1-second hedge delay, lowered split-path peer threshold, and shared peer coordinator experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 - Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
