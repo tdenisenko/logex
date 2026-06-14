@@ -6,9 +6,9 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-queue-v2`. The branch is focused on EL historical sync throughput and peer-tail stability.
 
-Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses density-aware body/receipt return windows, a 4-deep dense historical fetch pipeline, 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, and split active/completed fetch budgeting when memory is healthy.
+Current benchmark state: the Mac mini remote is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. Historical sync remains fetch-bound by body/receipt peer response tails, not CPU, RAM, or disk IO. The retained pipeline uses density-aware 1,024-block body/receipt return windows, split body and receipt chunk queues for dense prefixes, a 6-deep dense historical fetch pipeline, 6-second body/receipt request timeouts, early peer accounting for asynchronous fetch outcomes, macOS memory-aware sizing, and split active/completed fetch budgeting when memory is healthy.
 
-Draft PR: https://github.com/tdenisenko/logex/pull/92
+Draft PR: https://github.com/tdenisenko/logex/pull/93
 
 ## Completed Since Last Run
 
@@ -38,6 +38,9 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Added density-aware body/receipt return windows so dense ranges return 1,024 verified blocks instead of trying to hold much larger dense prefixes.
 - Reduced dense historical fetch pipeline depth from 8 to 4 after live benchmarks showed fewer timeout tails and steadier body/receipt p90 than depth 5 or depth 8.
 - Benchmarked and rejected a 4-second body/receipt request timeout, a deeper prepare lookahead, and dense depth 5 because they increased failures or did not improve sustained committed throughput.
+- Split dense body and receipt prefix fetching into independent chunk queues while preserving per-block receipt peer attribution for validation blame.
+- Raised the retained dense historical fetch depth from 4 to 6 for the split queue path after live samples improved over the prior committed profile.
+- Benchmarked and rejected split-path depth 8, bounded decoupled hedging, and larger initial peer request limits because each regressed actual floor/log deltas or reintroduced residual/fallback churn.
 
 ## Remaining TODOs
 
@@ -62,7 +65,7 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - The body/receipt plan timeout stays at 45 seconds, because an 18-second cap increased partial/residual work in dense ranges.
 - Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. A 4-second timeout lowered some short samples but increased timeout density, peer churn, and p50/p90 fetch latency over a larger sample.
 - Peer accounting is applied when fetch outcomes are received, not only when they are ingested in order, because queued fetch plans otherwise reused peers that had already timed out in completed asynchronous work.
-- Dense ranges cap body/receipt return windows at 1,024 blocks and use a 4-deep historical fetch pipeline. This keeps enough work active while avoiding the stale-peer and timeout churn seen with depth 5, depth 8, and larger dense prefixes.
+- Dense ranges cap body/receipt return windows at 1,024 blocks, fetch body and receipt chunks independently, and use a 6-deep historical fetch pipeline. Receipt peer attribution remains per block so validation failures still penalize the serving peer that supplied the bad receipts.
 - Stale PR #91 was audited instead of merged because its large downloader changes would discard the newer residual-gap and overlap architecture; only low-risk pieces with direct tests were retained.
 
 ## Challenges and Resolutions
@@ -106,9 +109,15 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 - Challenge: Dense ranges were still sensitive to slow body/receipt peers.
   - Resolution: Capped dense return windows to 1,024 blocks and reduced dense fetch depth to 4 after live samples showed lower timeout churn than depth 5, depth 8, shorter request timeouts, or deeper prepare lookahead.
 
+- Challenge: Pairing body and receipt chunks made each prefix depend on the slower side of each peer pair.
+  - Resolution: Added a split dense-prefix path that fetches bodies and receipts through independent queues, preserves receipt peer provenance, and falls back to the paired path if the split path cannot produce a prefix.
+
+- Challenge: Several follow-up split-path tweaks looked plausible but did not improve actual committed progress.
+  - Resolution: Rejected depth 8, bounded decoupled hedging, and larger initial request limits after live samples regressed logs/sec or reintroduced residual/fallback churn.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected broad depth-8, depth-5, prefix-hedge, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
+- Reverted rejected broad depth-8, depth-5, prefix-hedge, decoupled-hedge, larger-initial-request-limit, dial-fanout, one-peer chunk, one-paired-chunk-per-peer, larger-buffer, shorter-plan-timeout, deeper-prepare, and shorter-request-timeout experiments before leaving the remote running.
 - Rechecked the historical fetch/prepare/residual code paths and retained only changes that improved correctness or benchmark stability.
 - Compared the stale performance PR against the current branch and did not carry over obsolete downloader code.
 - Removed stray remote-root source copies created by a mistaken rsync destination during deployment.
@@ -117,8 +126,8 @@ Draft PR: https://github.com/tdenisenko/logex/pull/92
 
 - Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; pending commit for dense return/depth tuning
-- Pull request status: draft PR #92 open
+- Commits made during this run: `perf: improve historical downloader overlap`; `perf: salvage storage write optimizations`; `docs: record stale performance pr cleanup`; `perf: tune historical fetch tail handling`; `perf: reduce historical residual churn`; `fix: recover hot segment wal replay`; `perf: keep historical fetches active`; `perf: apply historical peer accounting early`; `fix: allow generated tonic clippy lint`; `perf: tune dense historical fetches`; pending commit for split dense body/receipt queues
+- Pull request status: draft PR #93 open
 - Merge status: not merged
 - Stale PR cleanup: PR #91 was closed and remote branch `fix/historical-fetch-stalls` was deleted after useful changes were salvaged.
 - Blockers: remaining EL historical sync performance work is still in progress.
