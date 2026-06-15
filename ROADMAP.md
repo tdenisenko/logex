@@ -6,23 +6,18 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-queue-v2`. Draft PR: https://github.com/tdenisenko/logex/pull/93
 
-The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`. The data directory was reset once for dense-range benchmarking and must not be reset again until this sync reaches genesis. Historical sync is still dominated by EL body/receipt peer tail latency rather than CPU, RAM, or disk IO.
+The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`, with the dashboard exposed at `http://157.245.195.72:18683/`. The data directory was reset once for dense-range benchmarking and must not be reset again until this sync reaches genesis. Historical sync is still dominated by EL body/receipt peer churn and request tail latency rather than CPU, RAM, or disk IO.
 
 ## Completed Since Last Run
 
-- Added hot-segment WAL replay recovery for partially applied native-storage writes seen during restart testing.
-- Added residual historical body/receipt prefix completion so small verified residual gaps can make progress instead of resetting the whole lookahead.
-- Increased initial body/receipt request limits to 48 with wider latency thresholds, and trimmed very large body/receipt candidate lists to the fastest measured peers.
-- Added low-volume body/receipt plan diagnostics used to reject unhelpful performance experiments.
-- Benchmarked and rejected two new experiments:
-  - Dense 1,024-block fetch windows: increased plan time, residual gaps, and request failures.
-  - 2-second body/receipt hedge delay: did not improve sustained wall-clock throughput and nearly doubled request failures.
-- Restored the remote run to the stable 512-block dense fetch cap and 3-second hedge delay.
+- Resumed the interrupted Mac mini benchmark through Tailscale and confirmed the public VPS dashboard path is working.
+- Kept the decoupled queue early-exit change after it removed unnecessary waiting once all prefix chunks were filled.
+- Accepted smaller dense body/receipt prefixes so verified 64-127 block prefixes advance instead of resetting the lookahead.
 
 ## Remaining TODOs
 
 1. Improve body/receipt peer-tail handling.
-   - Reason: Historical sync still waits on slow or timeout-prone peers for contiguous body/receipt prefixes.
+   - Reason: Historical sync still depends on a small serving-peer set and loses throughput when sessions churn or slow chunk requests dominate a plan.
    - Completion criteria: A benchmark shows sustained improvement over the retained pipeline without increasing validation risk, memory risk, residual gaps, or peer churn. The next meaningful candidate is a geth-style idle-peer/capacity queue for historical body and receipt tasks.
 
 2. Complete release hardening.
@@ -35,6 +30,7 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Checkpoints are accepted only when recent relative to a checkpoint-sync endpoint. Persisted state that is too stale requires a fresh recent checkpoint.
 - Historical data may be downloaded ahead of the current write point, but rows are committed only after cryptographic validation and in chain order.
 - Dense historical ranges stay capped at 512 fetched blocks for now. Larger dense windows regressed peer-tail behavior on the live benchmark.
+- Dense historical ranges accept verified prefixes down to half a chunk. This avoids discarding cryptographically verified progress when a dense request returns 64-127 contiguous blocks, while sparse windows still require larger prefixes.
 - Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. Shorter timeout/hedge experiments increased churn or failed to improve sustained throughput.
 - Very large sorted candidate lists are trimmed to the fastest measured body/receipt peers to avoid repeatedly assigning chunks to slow tail peers.
 
@@ -49,24 +45,29 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Challenge: Plausible throughput tweaks improved short dashboard bursts but hurt wall-clock progress.
   - Resolution: Dense 1,024-block windows and 2-second hedging were reverted after log parsing showed worse plan time, failures, or residual churn.
 
+- Challenge: Cleaning remote build artifacts exposed a missing `protoc` dependency.
+  - Resolution: Installed `protobuf` on the Mac mini and used an explicit `PROTOC=/usr/local/bin/protoc` for the clean release build.
+
+- Challenge: The source sync deleted old benchmark logs stored under the remote source `run/` directory.
+  - Resolution: Current experiment logs were parsed immediately; future deploy syncs should exclude `run/` or write retained benchmark logs outside the source tree.
+
 ## Dead Code and Obsolescence Cleanup
 
-- Reverted rejected dense-window and hedge-delay experiments locally and on the remote.
-- Removed stray remote-root source copies created by an incorrect rsync destination.
-- Rechecked the current diff and retained only the storage recovery, residual-prefix, request-limit, fast-peer pool, and diagnostic changes.
+- Rechecked the current diff and retained only the dense-prefix threshold change in this checkpoint.
+- Rejected the earlier decoupled minimum-peer threshold experiment and kept the threshold at 12.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: pending
+- Commits made during this run: `perf: stop completed decoupled fetch queues early`; dense-prefix checkpoint pending commit
 - Pull request status: draft PR #93 open
 - Merge status: not merged
 - Blockers: remaining EL historical sync performance work is still in progress.
 
 ## Known Issues or Risks
 
-- Historical sync remains body/receipt fetch-tail bound; a larger scheduler rewrite may be required for another step-change improvement.
+- Historical sync remains body/receipt peer-churn and fetch-tail bound; a larger scheduler rewrite may be required for another step-change improvement.
 - Remote benchmark samples after restarts are not comparable until the peer pool warms up.
 - Repeated restarts depress serving-peer counts, so further experiments should be larger and better justified than simple constant changes.
 - Verification-critical security review is still required before a production-ready release.

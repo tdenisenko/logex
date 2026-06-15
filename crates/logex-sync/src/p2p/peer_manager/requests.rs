@@ -28,6 +28,8 @@ const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 12;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_DENSE_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
+    PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT / 2;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
 const PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 16;
@@ -3982,7 +3984,12 @@ fn body_receipt_return_blocks(
 }
 
 fn body_receipt_min_accepted_prefix(return_blocks: usize) -> usize {
-    return_blocks.min(PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS)
+    let prefix = if return_blocks <= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS {
+        PIPELINED_BODY_RECEIPT_DENSE_MIN_ACCEPTED_PREFIX_BLOCKS
+    } else {
+        PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS
+    };
+    return_blocks.min(prefix)
 }
 
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
@@ -4211,9 +4218,11 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_min_accepted_prefix_rejects_tiny_dense_progress() {
-        assert_eq!(body_receipt_min_accepted_prefix(128), 128);
-        assert_eq!(body_receipt_min_accepted_prefix(1024), 128);
+    fn body_receipt_min_accepted_prefix_accepts_dense_half_chunk_progress() {
+        assert_eq!(body_receipt_min_accepted_prefix(32), 32);
+        assert_eq!(body_receipt_min_accepted_prefix(64), 64);
+        assert_eq!(body_receipt_min_accepted_prefix(128), 64);
+        assert_eq!(body_receipt_min_accepted_prefix(1024), 64);
         assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
     }
 
