@@ -21,6 +21,8 @@ const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
+const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
+const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 12;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
@@ -28,6 +30,7 @@ const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
+const PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
@@ -434,6 +437,7 @@ impl PeerManager {
             .await;
         self.filter_paused_request_peers(&mut body_peer_ids, PeerRequestKind::Bodies);
         self.sort_peer_ids_by_request_performance(&mut body_peer_ids, PeerRequestKind::Bodies);
+        limit_body_receipt_candidate_pool(&mut body_peer_ids);
         if body_peer_ids.is_empty() {
             return Ok(None);
         }
@@ -443,6 +447,7 @@ impl PeerManager {
             .await;
         self.filter_paused_request_peers(&mut receipt_peer_ids, PeerRequestKind::Receipts);
         self.sort_peer_ids_by_request_performance(&mut receipt_peer_ids, PeerRequestKind::Receipts);
+        limit_body_receipt_candidate_pool(&mut receipt_peer_ids);
         if receipt_peer_ids.is_empty() {
             return Ok(None);
         }
@@ -501,7 +506,25 @@ impl PeerManager {
 
     pub(crate) fn complete_bodies_and_receipts_request(
         &mut self,
+        outcome: BodyReceiptRequestOutcome,
+    ) -> Result<Option<BodyReceiptRequestCompletion>> {
+        self.complete_bodies_and_receipts_request_with_min_prefix(outcome, None)
+    }
+
+    pub(crate) fn complete_residual_bodies_and_receipts_request(
+        &mut self,
+        outcome: BodyReceiptRequestOutcome,
+    ) -> Result<Option<BodyReceiptRequestCompletion>> {
+        self.complete_bodies_and_receipts_request_with_min_prefix(
+            outcome,
+            Some(PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS),
+        )
+    }
+
+    fn complete_bodies_and_receipts_request_with_min_prefix(
+        &mut self,
         mut outcome: BodyReceiptRequestOutcome,
+        min_accepted_prefix_override: Option<usize>,
     ) -> Result<Option<BodyReceiptRequestCompletion>> {
         self.apply_body_receipt_request_accounting(&mut outcome);
         let BodyReceiptRequestOutcome {
@@ -514,7 +537,9 @@ impl PeerManager {
 
         let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
 
-        let min_accepted_prefix = body_receipt_min_accepted_prefix(return_blocks);
+        let min_accepted_prefix = min_accepted_prefix_override
+            .map(|prefix| body_receipt_min_accepted_prefix_override(return_blocks, prefix))
+            .unwrap_or_else(|| body_receipt_min_accepted_prefix(return_blocks));
         if blocks.len() >= min_accepted_prefix {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
@@ -917,6 +942,66 @@ impl BodyReceiptRequestPlan {
                 }
             }
         }
+
+        let mut body_requests = 0usize;
+        let mut receipt_requests = 0usize;
+        let mut body_total_ms = 0u128;
+        let mut receipt_total_ms = 0u128;
+        let mut body_max_ms = 0u128;
+        let mut receipt_max_ms = 0u128;
+        let mut body_failures = 0usize;
+        let mut receipt_failures = 0usize;
+        for (_, kind, _, elapsed) in &stats {
+            match kind {
+                PeerRequestKind::Bodies => {
+                    body_requests += 1;
+                    let elapsed_ms = elapsed.as_millis();
+                    body_total_ms += elapsed_ms;
+                    body_max_ms = body_max_ms.max(elapsed_ms);
+                }
+                PeerRequestKind::Receipts => {
+                    receipt_requests += 1;
+                    let elapsed_ms = elapsed.as_millis();
+                    receipt_total_ms += elapsed_ms;
+                    receipt_max_ms = receipt_max_ms.max(elapsed_ms);
+                }
+                PeerRequestKind::Headers => {}
+            }
+        }
+        for failure in &failures {
+            match failure.role {
+                ChunkRequestRole::Bodies => body_failures += 1,
+                ChunkRequestRole::Receipts => receipt_failures += 1,
+            }
+        }
+        let contiguous_blocks = contiguous_chunk_blocks(&chunks);
+        let body_avg_ms = if body_requests == 0 {
+            0
+        } else {
+            body_total_ms / body_requests as u128
+        };
+        let receipt_avg_ms = if receipt_requests == 0 {
+            0
+        } else {
+            receipt_total_ms / receipt_requests as u128
+        };
+        debug!(
+            total_hashes = self.hashes.len(),
+            return_blocks = self.return_blocks,
+            contiguous_blocks,
+            completed_chunks = chunks.len(),
+            failures = failures.len(),
+            body_failures,
+            receipt_failures,
+            body_requests,
+            receipt_requests,
+            body_avg_ms,
+            receipt_avg_ms,
+            body_max_ms,
+            receipt_max_ms,
+            plan_ms = plan_started_at.elapsed().as_millis(),
+            "body/receipt chunk pipeline plan completed"
+        );
 
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
@@ -3771,6 +3856,12 @@ fn request_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
         .clamp(1, max_in_flight)
 }
 
+fn limit_body_receipt_candidate_pool(peer_ids: &mut Vec<PeerId>) {
+    if peer_ids.len() >= PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS {
+        peer_ids.truncate(PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
+    }
+}
+
 fn paired_body_receipt_chunk_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
     let request_limit = request_window_limit(peer_count, max_in_flight);
     if request_limit == 0 {
@@ -3884,6 +3975,10 @@ fn body_receipt_return_blocks(
 
 fn body_receipt_min_accepted_prefix(return_blocks: usize) -> usize {
     return_blocks.min(PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS)
+}
+
+fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
+    return_blocks.min(prefix)
 }
 
 fn body_receipt_scheduled_chunk_limit(
@@ -4043,6 +4138,19 @@ mod tests {
     }
 
     #[test]
+    fn body_receipt_candidate_pool_only_trims_large_peer_sets() {
+        let mut peers = (0..PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS - 1)
+            .map(|index| PeerId::repeat_byte(index as u8))
+            .collect::<Vec<_>>();
+        limit_body_receipt_candidate_pool(&mut peers);
+        assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS - 1);
+
+        peers.push(PeerId::repeat_byte(0xff));
+        limit_body_receipt_candidate_pool(&mut peers);
+        assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
+    }
+
+    #[test]
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
         assert_eq!(body_receipt_chunk_cap(31), 128);
         assert_eq!(body_receipt_chunk_cap(32), 128);
@@ -4099,6 +4207,24 @@ mod tests {
         assert_eq!(body_receipt_min_accepted_prefix(128), 128);
         assert_eq!(body_receipt_min_accepted_prefix(1024), 128);
         assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
+    }
+
+    #[test]
+    fn body_receipt_residual_prefix_accepts_small_verified_progress() {
+        assert_eq!(
+            body_receipt_min_accepted_prefix_override(
+                816,
+                PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
+            ),
+            16
+        );
+        assert_eq!(
+            body_receipt_min_accepted_prefix_override(
+                8,
+                PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
+            ),
+            8
+        );
     }
 
     #[test]

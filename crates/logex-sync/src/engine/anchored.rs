@@ -2438,7 +2438,10 @@ impl SyncEngine {
             {
                 Some(plan) => {
                     let outcome = plan.execute().await;
-                    match self.peers.complete_bodies_and_receipts_request(outcome) {
+                    match self
+                        .peers
+                        .complete_residual_bodies_and_receipts_request(outcome)
+                    {
                         Ok(Some(completion))
                             if !completion.blocks.is_empty()
                                 && completion.blocks.len() <= remaining_headers.len() =>
@@ -3283,6 +3286,10 @@ mod tests {
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+        assert_eq!(
+            historical_density_fetch_window_cap(Some(900.0)),
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
