@@ -1328,6 +1328,10 @@ impl BodyReceiptRequestPlan {
                 }
             }
 
+            if missing_chunk_ranges(&ranges, &chunks).is_empty() {
+                break;
+            }
+
             let retry_range = if request_failed && peer_ids.len() > 1 {
                 let retry_count = retry_counts.entry(range.start).or_default();
                 if *retry_count < PARALLEL_CHUNK_RETRY_ROUNDS {
@@ -1487,6 +1491,10 @@ impl BodyReceiptRequestPlan {
                         "decoupled receipt chunk request failed"
                     );
                 }
+            }
+
+            if missing_chunk_ranges(&ranges, &chunks).is_empty() {
+                break;
             }
 
             let retry_range = if request_failed && peer_ids.len() > 1 {
