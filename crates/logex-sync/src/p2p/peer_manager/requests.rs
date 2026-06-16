@@ -21,6 +21,7 @@ const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
+const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
@@ -731,7 +732,12 @@ impl BodyReceiptRequestPlan {
             let max_scheduled_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
-            let max_hedged_attempts = self.max_in_flight.max(max_scheduled_chunks);
+            let max_hedged_attempts = self.max_in_flight.max(max_scheduled_chunks).saturating_add(
+                body_receipt_prefix_hedge_spare_attempts(
+                    min_return_blocks,
+                    self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
+                ),
+            );
             let mut scheduled_prefix_ranges = Vec::with_capacity(max_scheduled_chunks);
             for _ in 0..max_scheduled_chunks {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
@@ -4046,6 +4052,17 @@ fn body_receipt_initial_prefix_redundancy_count(
         .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
 }
 
+fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count: usize) -> usize {
+    if min_return_blocks == 0
+        || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
+        || peer_count < PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+    {
+        return 0;
+    }
+
+    PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Eip658Value, TxType};
@@ -4292,6 +4309,14 @@ mod tests {
             body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 15),
             0
         );
+    }
+
+    #[test]
+    fn body_receipt_prefix_hedges_get_spare_capacity_for_dense_peer_sets() {
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 16), 4);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1025, 32), 0);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 15), 0);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(0, 32), 0);
     }
 
     #[test]

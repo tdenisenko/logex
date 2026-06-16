@@ -6,12 +6,14 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-queue-v2`. Draft PR: https://github.com/tdenisenko/logex/pull/93
 
-The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`, with the dashboard exposed at `http://157.245.195.72:18683/`. The data directory was reset once for dense-range benchmarking and must not be reset again until this sync reaches genesis. Historical sync is still dominated by EL body/receipt peer churn and request tail latency rather than CPU, RAM, or disk IO. The latest retained experiment overlaps validation/extraction for later completed fetch windows while preserving ordered writes.
+The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel on HTTP port `18683`, with the dashboard exposed at `http://157.245.195.72:18683/`. The data directory was reset once for dense-range benchmarking and must not be reset again until this sync reaches genesis. Historical sync is still dominated by EL body/receipt peer churn and request tail latency rather than CPU, RAM, or disk IO. The latest retained pipeline overlaps validation/extraction for later completed fetch windows while preserving ordered writes and allows spare hedge attempts for dense prefix gaps when enough serving peers are available.
 
 ## Completed Since Last Run
 
 - Added out-of-order historical prepare overlap: completed later fetch windows can be validated/extracted before the current sequence finishes, while storage commits remain strictly ordered.
 - Benchmarked the prepare-overlap change on the Mac mini run and kept it after it improved plan time and sustained logs/sec versus the retained baseline.
+- Added dense-prefix hedge spare capacity so early blocking body/receipt chunks can be duplicated without waiting for later prefix chunks to finish.
+- Rejected deeper fetch depth and residual-gap pipelining experiments after live benchmarks showed worse tail latency, stale fetch resets, or no material throughput gain.
 
 ## Remaining TODOs
 
@@ -33,6 +35,7 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Dense historical ranges accept verified prefixes down to half a chunk. This avoids discarding cryptographically verified progress when a dense request returns 64-127 contiguous blocks, while sparse windows still require larger prefixes.
 - Body/receipt request timeout remains 6 seconds with a 3-second hedge delay. Shorter timeout/hedge experiments increased churn or failed to improve sustained throughput.
 - Very large sorted candidate lists are trimmed to the fastest measured body/receipt peers to avoid repeatedly assigning chunks to slow tail peers.
+- Dense prefix hedge attempts may temporarily exceed the base in-flight request count when at least 16 body/receipt-capable peers are available. This trades a small amount of redundant network traffic for lower contiguous-prefix tail latency.
 
 ## Challenges and Resolutions
 
@@ -48,6 +51,9 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Challenge: In-order fetch completion left validation/extraction idle while a slow earlier prefix was still pending.
   - Resolution: Completed later fetch windows are now prepared opportunistically and held until their ordered commit turn.
 
+- Challenge: Filling every in-flight slot with distinct dense prefix chunks left no room to hedge the earliest unresolved gap.
+  - Resolution: Dense body/receipt plans now reserve spare hedge attempts once the serving peer pool is large enough.
+
 - Challenge: Cleaning remote build artifacts exposed a missing `protoc` dependency.
   - Resolution: Installed `protobuf` on the Mac mini and used an explicit `PROTOC=/usr/local/bin/protoc` for the clean release build.
 
@@ -56,14 +62,14 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 
 ## Dead Code and Obsolescence Cleanup
 
-- Rechecked the current diff and retained only the out-of-order prepare overlap after benchmarking.
-- Rejected prior small tuning experiments that did not beat the retained baseline.
+- Rechecked the current diff and retained only the request-scheduler hedge-capacity change from this pass.
+- Rejected deeper pipeline depth and residual-gap pipelining experiments after benchmarking.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-queue-v2`
 - New branch created this run: no
-- Commits made during this run: prepare-overlap checkpoint pending commit
+- Commits made during this run: prepare-overlap checkpoint; prefix-hedge checkpoint
 - Pull request status: draft PR #93 open
 - Merge status: not merged
 - Blockers: remaining EL historical sync performance work is still in progress.
