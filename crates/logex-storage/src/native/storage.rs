@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::SyncHead;
 use crate::wal::WriteAheadLog;
-use crate::{ColumnFile, ColumnReader, SegmentReader};
+use crate::{ColumnFile, ColumnFileHeader, ColumnReader, NullBitmap, SegmentReader};
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
@@ -750,6 +750,16 @@ impl NativeStorage {
         match self.commit_rows_to_segments(&rows) {
             Ok(()) => {}
             Err(error) => {
+                if self.rebuild_partial_hot_segment_before_wal_replay()? {
+                    tracing::warn!(
+                        rows = rows.len(),
+                        "rebuilt partially-applied hot segment before WAL replay"
+                    );
+                    self.commit_rows_to_segments(&rows)?;
+                    self.wal.truncate()?;
+                    return Ok(());
+                }
+
                 let recovered = self.recover_already_applied_wal_prefix(&rows)?;
                 if recovered == 0 {
                     return Err(error);
@@ -829,6 +839,65 @@ impl NativeStorage {
         }
 
         Ok(applied_len)
+    }
+
+    fn rebuild_partial_hot_segment_before_wal_replay(&mut self) -> std::io::Result<bool> {
+        let Some(hot_id) = self.catalog.active_hot_segment else {
+            return Ok(false);
+        };
+        let Some(segment_index) = self
+            .catalog
+            .segments
+            .iter()
+            .position(|segment| segment.id == hot_id)
+        else {
+            return Ok(false);
+        };
+
+        let descriptor = self.catalog.segments[segment_index].clone();
+        let segment_dir = self.paths.segment_dir(hot_id);
+        let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
+        if column_counts
+            .iter()
+            .all(|(_, row_count)| *row_count == descriptor.row_count)
+        {
+            return Ok(false);
+        }
+        if let Some((name, row_count)) = column_counts
+            .iter()
+            .find(|(_, row_count)| *row_count < descriptor.row_count)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment {hot_id} column {name} has fewer rows than descriptor: {row_count} < {}",
+                    descriptor.row_count
+                ),
+            ));
+        }
+
+        let committed_rows = if descriptor.row_count == 0 {
+            Vec::new()
+        } else {
+            let row_ids = (0..descriptor.row_count)
+                .map(|row| {
+                    u32::try_from(row).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("segment {hot_id} exceeds supported row addressing"),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            SegmentReader::open(&segment_dir)?.read_log_rows(Some(&row_ids))?
+        };
+
+        append_rows(&segment_dir, 0, &committed_rows)?;
+        ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
+        persist_segment_manifest(&self.paths, &descriptor)?;
+        self.catalog.segments[segment_index] = descriptor;
+        self.persist_catalog()?;
+        Ok(true)
     }
 
     fn repair_recoverable_hot_segment_artifacts(&self) -> std::io::Result<()> {
@@ -1195,6 +1264,59 @@ fn repair_missing_timestamp_metadata(
     descriptor.max_timestamp = boundary_timestamps.iter().copied().max();
     persist_segment_manifest(paths, descriptor)?;
     Ok(true)
+}
+
+fn hot_segment_physical_row_counts(segment_dir: &Path) -> io::Result<Vec<(&'static str, u64)>> {
+    const COLUMN_FILES: &[&str] = &[
+        "address.col",
+        "block_number.col",
+        "block_hash.col",
+        "timestamp.col",
+        "tx_hash.col",
+        "tx_index.col",
+        "log_index.col",
+        "data_len.col",
+        "source.col",
+        "topic0.col",
+        "topic1.col",
+        "topic2.col",
+        "topic3.col",
+        "data.col",
+    ];
+    const BITMAP_FILES: &[&str] = &[
+        "topic0.null",
+        "topic1.null",
+        "topic2.null",
+        "topic3.null",
+        "canonical.bitmap",
+    ];
+
+    let mut counts = Vec::with_capacity(COLUMN_FILES.len() + BITMAP_FILES.len());
+    for name in COLUMN_FILES {
+        let path = segment_dir.join(name);
+        let data = fs::read(&path)?;
+        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt hot segment column {}", path.display()),
+            )
+        })?;
+        counts.push((*name, header.row_count));
+    }
+
+    for name in BITMAP_FILES {
+        let path = segment_dir.join(name);
+        let data = fs::read(&path)?;
+        let bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt hot segment bitmap {}", path.display()),
+            )
+        })?;
+        counts.push((*name, bitmap.len()));
+    }
+
+    Ok(counts)
 }
 
 fn load_manifest_descriptors(
@@ -1586,6 +1708,56 @@ mod tests {
                 descriptor.row_count,
             )
             .unwrap();
+        }
+
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 8);
+        assert_eq!(recovered.hot_partition_meta().row_count, 8);
+
+        let hot = recovered.hot_partition_meta();
+        let reader = SegmentReader::open(&recovered.segment_path(hot.id)).unwrap();
+        let mut expected = initial_rows;
+        expected.extend(wal_rows);
+        assert_eq!(reader.read_log_rows(None).unwrap(), expected);
+        assert!(recovered.wal.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_storage_rebuilds_partial_hot_segment_before_wal_replay() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let initial_rows = make_rows(5, 100);
+        let wal_rows = make_rows(3, 200);
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&initial_rows).unwrap();
+
+            storage.wal.append(&wal_rows).unwrap();
+            let hot_id = storage.catalog.active_hot_segment.unwrap();
+            let descriptor = storage
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == hot_id)
+                .cloned()
+                .unwrap();
+            let segment_dir = storage.paths.segment_dir(hot_id);
+            let data_col = fs::read(segment_dir.join("data.col")).unwrap();
+            let topic3_col = fs::read(segment_dir.join("topic3.col")).unwrap();
+            let topic3_null = fs::read(segment_dir.join("topic3.null")).unwrap();
+            let canonical_bitmap = fs::read(segment_dir.join("canonical.bitmap")).unwrap();
+
+            append_rows(&segment_dir, descriptor.row_count, &wal_rows).unwrap();
+
+            fs::write(segment_dir.join("data.col"), data_col).unwrap();
+            fs::write(segment_dir.join("topic3.col"), topic3_col).unwrap();
+            fs::write(segment_dir.join("topic3.null"), topic3_null).unwrap();
+            fs::write(segment_dir.join("canonical.bitmap"), canonical_bitmap).unwrap();
         }
 
         let recovered = NativeStorage::open(config).unwrap();

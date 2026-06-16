@@ -31,12 +31,12 @@ const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
 const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
 const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
-const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 8;
+const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT: usize = 12;
 const HISTORICAL_DENSE_FETCH_BUFFER_EXTRA: usize = 4;
-const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 1;
+const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
@@ -1664,25 +1664,55 @@ impl SyncEngine {
         self.drain_historical_prepare_tasks().await?;
 
         while self.pending_historical_prepare_count() < HISTORICAL_PREPARE_LOOKAHEAD_DEPTH {
-            let sequence = self.historical_fetch_expected_sequence;
+            let Some(sequence) = self.next_historical_fetch_sequence_to_prepare() else {
+                break;
+            };
             let Some(outcome) = self.historical_fetch_completed.remove(&sequence) else {
                 break;
             };
-            let Some((sequence, batch)) = self.complete_historical_fetch_outcome(outcome)? else {
+            let expected_sequence = sequence == self.historical_fetch_expected_sequence;
+            let Some((sequence, batch, next_child_header)) =
+                self.materialize_historical_fetch_outcome(outcome)?
+            else {
+                if expected_sequence {
+                    self.reset_historical_fetch_pipeline();
+                }
                 break;
             };
+            if expected_sequence {
+                self.advance_historical_fetch_sequence(next_child_header);
+            }
             let task = spawn_historical_prepare_task(sequence, batch);
             self.historical_prepare_handles.insert(sequence, task);
 
-            let Some(next_child_header) = self.historical_fetch_expected_child.clone() else {
-                break;
-            };
-            self.ensure_historical_fetch_pipeline(next_child_header)
-                .await?;
+            if expected_sequence {
+                let Some(next_child_header) = self.historical_fetch_expected_child.clone() else {
+                    break;
+                };
+                self.ensure_historical_fetch_pipeline(next_child_header)
+                    .await?;
+            }
             self.drain_historical_fetch_outcomes();
         }
 
         Ok(())
+    }
+
+    fn next_historical_fetch_sequence_to_prepare(&self) -> Option<u64> {
+        if self
+            .historical_fetch_completed
+            .contains_key(&self.historical_fetch_expected_sequence)
+        {
+            return Some(self.historical_fetch_expected_sequence);
+        }
+
+        self.historical_fetch_completed
+            .iter()
+            .find_map(|(sequence, outcome)| {
+                (*sequence > self.historical_fetch_expected_sequence
+                    && outcome.outcome.has_accepted_contiguous_prefix())
+                .then_some(*sequence)
+            })
     }
 
     fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> bool {
@@ -1887,6 +1917,20 @@ impl SyncEngine {
         &mut self,
         fetch: HistoricalFetchOutcome,
     ) -> Result<Option<(u64, HistoricalFetchedBatch)>> {
+        let Some((sequence, batch, next_child_header)) =
+            self.materialize_historical_fetch_outcome(fetch)?
+        else {
+            self.reset_historical_fetch_pipeline();
+            return Ok(None);
+        };
+        self.advance_historical_fetch_sequence(next_child_header);
+        Ok(Some((sequence, batch)))
+    }
+
+    fn materialize_historical_fetch_outcome(
+        &mut self,
+        fetch: HistoricalFetchOutcome,
+    ) -> Result<Option<(u64, HistoricalFetchedBatch, Option<Header>)>> {
         let HistoricalFetchOutcome {
             sequence,
             header_batch,
@@ -1933,13 +1977,8 @@ impl SyncEngine {
                             .unwrap_or_default(),
                         "historical body/receipt pipeline completed partial prefix with residual gap"
                     );
-                } else {
-                    self.historical_fetch_expected_child = next_child_header.clone();
                 }
-                self.historical_fetch_expected_sequence =
-                    self.historical_fetch_expected_sequence.saturating_add(1);
-                self.historical_fetch_expected_child =
-                    residual_next_child_header.or(next_child_header.clone());
+                let next_child_header = residual_next_child_header.or(next_child_header.clone());
                 Ok(Some((
                     sequence,
                     HistoricalFetchedBatch {
@@ -1952,6 +1991,7 @@ impl SyncEngine {
                         body_receipt_elapsed,
                         residual_header_batch,
                     },
+                    next_child_header,
                 )))
             }
             Ok(Some(completion)) => {
@@ -1960,23 +2000,24 @@ impl SyncEngine {
                     blocks = completion.blocks.len(),
                     "historical body/receipt pipeline returned unusable response, resetting lookahead"
                 );
-                self.reset_historical_fetch_pipeline();
                 Ok(None)
             }
-            Ok(None) => {
-                self.reset_historical_fetch_pipeline();
-                Ok(None)
-            }
+            Ok(None) => Ok(None),
             Err(error) => {
                 tracing::debug!(
                     error = %error,
                     "historical body/receipt pipeline failed, resetting lookahead"
                 );
-                self.reset_historical_fetch_pipeline();
                 self.refresh_connectivity_state();
                 Ok(None)
             }
         }
+    }
+
+    fn advance_historical_fetch_sequence(&mut self, next_child_header: Option<Header>) {
+        self.historical_fetch_expected_sequence =
+            self.historical_fetch_expected_sequence.saturating_add(1);
+        self.historical_fetch_expected_child = next_child_header;
     }
 
     async fn prepare_historical_fetch_plan(
@@ -2015,6 +2056,7 @@ impl SyncEngine {
             .prepare_bodies_and_receipts_request_for_hashes_and_gas(
                 body_receipt_hashes,
                 body_receipt_gas_used,
+                self.historical_rows_per_block_ewma,
                 header_batch.required_block,
                 &[header_batch.header_peer],
             )
@@ -2429,6 +2471,7 @@ impl SyncEngine {
                 .prepare_bodies_and_receipts_request_for_hashes_and_gas(
                     remaining_hashes.clone(),
                     body_receipt_gas_used,
+                    self.historical_rows_per_block_ewma,
                     required_block,
                     &[header_peer],
                 )
@@ -2436,7 +2479,10 @@ impl SyncEngine {
             {
                 Some(plan) => {
                     let outcome = plan.execute().await;
-                    match self.peers.complete_bodies_and_receipts_request(outcome) {
+                    match self
+                        .peers
+                        .complete_residual_bodies_and_receipts_request(outcome)
+                    {
                         Ok(Some(completion))
                             if !completion.blocks.is_empty()
                                 && completion.blocks.len() <= remaining_headers.len() =>
@@ -3281,6 +3327,10 @@ mod tests {
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
+        );
+        assert_eq!(
+            historical_density_fetch_window_cap(Some(900.0)),
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
