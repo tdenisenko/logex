@@ -688,12 +688,15 @@ impl BodyReceiptRequestPlan {
                     Ok(blocks) => {
                         chunks.insert(0, blocks);
                     }
-                    Err((peer_id, kind)) => failures.push(ChunkRequestFailure {
-                        role: ChunkRequestRole::Receipts,
-                        peer_id,
-                        requested: prefix_len,
-                        kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                    }),
+                    Err(error) => {
+                        let (peer_id, kind) = *error;
+                        failures.push(ChunkRequestFailure {
+                            role: ChunkRequestRole::Receipts,
+                            peer_id,
+                            requested: prefix_len,
+                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                        });
+                    }
                 }
             }
         }
@@ -3504,13 +3507,13 @@ fn body_receipt_blocks_if_sourced_counts_match(
     bodies: &[SourcedBlockBody],
     receipts: Vec<SourcedReceiptSet>,
     requested: usize,
-) -> std::result::Result<Vec<SourcedBodyReceipts>, (PeerId, ReceiptCountMismatch)> {
+) -> std::result::Result<Vec<SourcedBodyReceipts>, Box<(PeerId, ReceiptCountMismatch)>> {
     if receipts.len() != requested {
         let peer_id = receipts
             .last()
             .map(|(peer_id, _)| *peer_id)
             .unwrap_or(PeerId::ZERO);
-        return Err((
+        return Err(Box::new((
             peer_id,
             ReceiptCountMismatch {
                 response_kind: "receipts",
@@ -3520,7 +3523,7 @@ fn body_receipt_blocks_if_sourced_counts_match(
                 expected_receipts: None,
                 returned_receipts: None,
             },
-        ));
+        )));
     }
 
     for (block_index, ((receipt_peer, block_receipts), (_, body))) in
@@ -3528,7 +3531,7 @@ fn body_receipt_blocks_if_sourced_counts_match(
     {
         let expected_receipts = body.transaction_count();
         if block_receipts.len() != expected_receipts {
-            return Err((
+            return Err(Box::new((
                 *receipt_peer,
                 ReceiptCountMismatch {
                     response_kind: "receipts",
@@ -3538,7 +3541,7 @@ fn body_receipt_blocks_if_sourced_counts_match(
                     expected_receipts: Some(expected_receipts),
                     returned_receipts: Some(block_receipts.len()),
                 },
-            ));
+            )));
         }
     }
 
