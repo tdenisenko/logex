@@ -13,7 +13,7 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Added out-of-order historical prepare overlap: completed later fetch windows can be validated/extracted before the current sequence finishes, while storage commits remain strictly ordered.
 - Benchmarked the prepare-overlap change on the Mac mini run and kept it after it improved plan time and sustained logs/sec versus the retained baseline.
 - Added dense-prefix hedge spare capacity so early blocking body/receipt chunks can be duplicated without waiting for later prefix chunks to finish.
-- Rejected deeper fetch depth and residual-gap pipelining experiments after live benchmarks showed worse tail latency, stale fetch resets, or no material throughput gain.
+- Rejected deeper fetch depth, residual-gap pipelining, smaller dense windows, and smaller initial body/receipt request limits after live benchmarks showed worse tail latency, stale fetch resets, or no material throughput gain.
 
 ## Remaining TODOs
 
@@ -54,6 +54,9 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 - Challenge: Filling every in-flight slot with distinct dense prefix chunks left no room to hedge the earliest unresolved gap.
   - Resolution: Dense body/receipt plans now reserve spare hedge attempts once the serving peer pool is large enough.
 
+- Challenge: Smaller dense windows and smaller initial request limits improved some request-latency counters but reduced sustained logs/sec.
+  - Resolution: Both experiments were reverted; the retained configuration keeps 512-block dense windows and 48-block initial body/receipt request limits.
+
 - Challenge: Cleaning remote build artifacts exposed a missing `protoc` dependency.
   - Resolution: Installed `protobuf` on the Mac mini and used an explicit `PROTOC=/usr/local/bin/protoc` for the clean release build.
 
@@ -63,7 +66,7 @@ The Mac mini benchmark is running on `/Volumes/SSD 4TB/LogEx` through the VPS fu
 ## Dead Code and Obsolescence Cleanup
 
 - Rechecked the current diff and retained only the request-scheduler hedge-capacity change from this pass.
-- Rejected deeper pipeline depth and residual-gap pipelining experiments after benchmarking.
+- Rejected deeper pipeline depth, residual-gap pipelining, 256-block dense windows, and 24-block initial body/receipt request limits after benchmarking.
 
 ## Git Workflow
 
