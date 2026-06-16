@@ -131,6 +131,14 @@ pub(crate) struct BodyReceiptRequestOutcome {
     stats: TypedRequestStats,
 }
 
+impl BodyReceiptRequestOutcome {
+    pub(crate) fn has_accepted_contiguous_prefix(&self) -> bool {
+        let contiguous_blocks = contiguous_chunk_blocks(&self.chunks);
+        let min_accepted_prefix = body_receipt_min_accepted_prefix(self.return_blocks);
+        contiguous_blocks >= min_accepted_prefix
+    }
+}
+
 pub(crate) struct BodyReceiptRequestCompletion {
     pub(crate) blocks: Vec<SourcedBodyReceipts>,
     pub(crate) planned_return_blocks: usize,
