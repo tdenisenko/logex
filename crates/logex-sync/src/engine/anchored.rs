@@ -1536,6 +1536,12 @@ impl SyncEngine {
             return Ok(false);
         };
         if child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+            {
+                let mut storage = self.storage.write().await;
+                storage.finalize_historical_segment().map_err(|error| {
+                    eyre::eyre!("historical storage finalization error: {error}")
+                })?;
+            }
             self.refresh_historical_status().await;
             return Ok(false);
         }

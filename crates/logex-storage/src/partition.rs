@@ -86,10 +86,23 @@ impl PartitionManager {
 
     /// Ingest immutable historical rows directly as sealed compacted segments.
     pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
-        let appended = self.inner.write_historical_batch(rows)?;
-        self.sealed_partitions
-            .extend(appended.into_iter().map(|meta| Partition { meta }));
+        self.inner.write_historical_batch(rows)?;
+        self.refresh_views();
         Ok(())
+    }
+
+    /// Compact and close any sparse historical staging segment.
+    pub fn finalize_historical_segment(&mut self) -> std::io::Result<bool> {
+        let finalized = self.inner.finalize_active_historical_segment()?;
+        if finalized {
+            self.refresh_views();
+        }
+        Ok(finalized)
+    }
+
+    /// Return the segment currently absorbing sparse historical writes.
+    pub fn active_historical_segment_id(&self) -> Option<u64> {
+        self.inner.active_historical_segment_id()
     }
 
     /// Refresh manifest metadata after indexes are rebuilt externally.
@@ -359,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_appends_historical_partitions_without_rebuilding_existing_views() {
+    fn manager_coalesces_sparse_historical_partitions_across_writes() {
         let tmp = TempDir::new().unwrap();
         let mut mgr = PartitionManager::open(PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -373,15 +386,16 @@ mod tests {
         mgr.write_historical_batch(&make_test_rows(5, 900)).unwrap();
 
         assert_eq!(mgr.total_rows(), 30);
-        assert_eq!(mgr.sealed_count(), 4);
+        assert_eq!(mgr.sealed_count(), 3);
         assert_eq!(
             mgr.sealed_partitions()
                 .iter()
                 .map(|partition| partition.meta.row_count)
                 .collect::<Vec<_>>(),
-            vec![10, 10, 5, 5]
+            vec![10, 10, 10]
         );
         assert_eq!(mgr.hot_partition().meta.row_count, 0);
+        assert_eq!(mgr.active_historical_segment_id(), None);
     }
 
     #[test]
