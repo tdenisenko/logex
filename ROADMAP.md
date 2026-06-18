@@ -6,16 +6,17 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `fix/historical-segment-coalescing`.
 
-The Mac mini is reachable through the Raspberry Pi at `ssh pi-remote` then `ssh gremlinmaster@192.168.50.44`, but direct Tailscale access is still down because the Mac is logged out of Tailscale and the Tailscale control-plane dial is failing over IPv6 despite the host having no IPv6 router. A repair script has been copied to `~/logex-gateway/repair-tailscale-wireguard-coexistence.sh` on the Mac; it requires an interactive sudo run.
+The Mac mini is directly reachable again through Tailscale at `ssh gremlinmaster@100.64.47.113`. The VPS WireGuard inbound forwarding remains configured for dashboard and P2P ports, but a system-wide WireGuard full tunnel conflicts with reliable Tailscale management on this macOS host because Tailscale's control/DERP underlay traffic is also captured by the full-tunnel default routes. The safe current operating mode is Tailscale for management plus VPS inbound forwarding; making LogEx egress exclusively through the VPS needs a per-service routing design or a VM/container boundary rather than host-wide default-route replacement.
 
 The remote LogEx client did not crash. It stopped cleanly on the low-disk safety guard after `/Volumes/SSD 4TB/LogEx` dropped below the 10 GiB free-space threshold. The active data directory contains about 6.98B rows, but it expanded to roughly 1.5 TiB because sparse historical ranges were persisted as many small segment directories.
 
 ## Completed Since Last Run
 
-- Diagnosed direct Tailscale failure:
-  - Mac Tailscale state is `NeedsLogin`.
-  - WireGuard was routing `100.64.0.0/10` through the VPS tunnel, which breaks Tailscale peer routing.
-  - Tailscale control-plane login is also blocked by IPv6 dialing with no IPv6 route.
+- Restored direct Tailscale access to the Mac mini and verified `ssh gremlinmaster@100.64.47.113` works.
+- Diagnosed WireGuard/Tailscale coexistence:
+  - Host-wide WireGuard `0.0.0.0/1` and `128.0.0.0/1` routes make the Mac egress as the VPS, but they also break Tailscale health and direct management access.
+  - Routing `100.64.0.0/10` to Tailscale is necessary but not sufficient, because Tailscale's own relay/control traffic uses normal internet destinations.
+  - The route-maintenance daemon that kept re-adding the full-tunnel routes is disabled.
 - Diagnosed the LogEx stop as a graceful low-disk shutdown, not data corruption.
 - Identified the storage-footprint bug: sparse historical batches created thousands of tiny sealed segments, causing high filesystem allocation overhead on the external disk.
 - Added durable sparse historical segment coalescing:
@@ -27,9 +28,9 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 
 ## Remaining TODOs
 
-1. Restore Mac mini Tailscale and WireGuard coexistence.
-   - Reason: Direct remote control and high-peer EL networking need Tailscale management plus the VPS WireGuard full tunnel without route conflicts.
-   - Completion criteria: `ssh gremlinmaster@100.64.47.113` works directly, public traffic uses the VPS, `100.64.0.0/10` routes through Tailscale, and LogEx can again warm toward the expected long-run peer count.
+1. Choose and implement safe VPS egress for LogEx, if full VPS identity is still required.
+   - Reason: Host-wide WireGuard full tunneling breaks Tailscale management. LogEx can currently use VPS inbound forwarding, but outbound traffic remains local unless a per-service routing boundary is added.
+   - Completion criteria: Either accept VPS inbound forwarding plus local outbound as the operating model, or implement and validate a per-service/VM routing design where LogEx egresses through the VPS while Tailscale remains healthy.
 
 2. Recover remote runtime safely.
    - Reason: The current remote data directory is too full to restart LogEx reliably.
@@ -50,11 +51,15 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 - Sparse historical writes are now coalesced in durable storage instead of only in memory, so verified rows remain crash-safe while segment count stays bounded.
 - The active historical staging segment is query-visible but excluded from background compaction and sealed query indexing until finalized.
 - WireGuard full-tunnel routing must preserve Tailscale’s `100.64.0.0/10` route through the Tailscale interface, not through the VPS tunnel.
+- Host-wide WireGuard full tunneling is not safe on the Mac mini when Tailscale is the required management path; Tailscale also needs non-`100.64.0.0/10` underlay reachability for control and DERP traffic.
 
 ## Challenges and Resolutions
 
-- Challenge: Direct Tailscale SSH was unavailable.
-  - Resolution: Reached the Mac through the Raspberry Pi, confirmed Tailscale is logged out, and prepared a sudo repair script for IPv6/Tailscale/WireGuard route recovery.
+- Challenge: Direct Tailscale SSH was unavailable after full-tunnel route changes.
+  - Resolution: Reached the Mac through the Raspberry Pi, removed the host-wide WireGuard half-default routes, restored `100.64.0.0/10` through Tailscale, disabled the route-maintenance daemon, and verified direct Tailscale SSH recovered.
+
+- Challenge: The VPS full tunnel appeared to work for public egress but broke Tailscale.
+  - Resolution: Confirmed Mac egress changed to `157.245.195.72` only while Tailscale health degraded. Recovered management access and left the system in the stable split state.
 
 - Challenge: LogEx was down on the remote Mac mini.
   - Resolution: Confirmed it exited via the low-disk guard: free space fell just below the 10 GiB threshold.
@@ -72,14 +77,13 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 
 - Current branch: `fix/historical-segment-coalescing`
 - New branch created this run: yes
-- Commits made during this run: none yet
+- Commits made during this run: `0e55883 fix: coalesce sparse historical segments`
 - Pull request status: not created
 - Merge status: not merged
-- Blockers: Tailscale repair requires an interactive sudo run on the Mac mini; remote LogEx cannot restart safely until disk space is reclaimed or data is reset.
+- Blockers: remote LogEx cannot restart safely until disk space is reclaimed or data is reset; full VPS egress needs a per-service/VM routing decision because host-wide full tunneling conflicts with Tailscale.
 
 ## Known Issues or Risks
 
 - Existing remote data remains oversized; the coalescing fix prevents recurrence on a fresh or future run but does not rewrite the existing 1.5 TiB data directory.
-- The Mac mini still needs interactive Tailscale re-authentication.
-- Peer count cannot be re-evaluated until Tailscale/WireGuard routing is corrected and LogEx is restarted with enough free disk.
+- Peer count cannot be re-evaluated until LogEx is restarted with enough free disk.
 - Historical sync performance work should resume only after the networking and storage baseline is healthy.
