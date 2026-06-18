@@ -8,7 +8,7 @@ Active branch: `fix/historical-segment-coalescing`.
 
 The Mac mini is now intentionally managed through the Raspberry Pi path (`ssh pi-remote` then `ssh gremlinmaster@192.168.50.44`) while the host-wide WireGuard full tunnel is enabled for LogEx testing. Tailscale is stopped on the Mac because the full tunnel conflicts with reliable Tailscale management on this macOS host. The VPS WireGuard inbound forwarding remains configured for dashboard and P2P ports, and Mac public egress has been verified as `157.245.195.72` in this fallback mode.
 
-The remote LogEx client did not crash. It stopped cleanly on the low-disk safety guard after `/Volumes/SSD 4TB/LogEx` dropped below the 10 GiB free-space threshold. The active data directory contained about 6.98B rows, but it expanded far beyond the expected footprint because sparse historical ranges were persisted as many small segment directories. The oversized data directory is currently being reset while preserving peer files and node discovery secrets; a heartbeat monitor will restart LogEx after deletion completes.
+The remote LogEx client did not crash. It stopped cleanly on the low-disk safety guard after `/Volumes/SSD 4TB/LogEx` dropped below the 10 GiB free-space threshold. The active data directory contained about 6.98B rows, but it expanded far beyond the expected footprint because sparse historical ranges were persisted as many small segment directories. The oversized data directory has been reset while preserving peer files and node discovery secrets, the rebuilt binary is running in a detached `screen` session, and `/status` responds through the VPS on port `18683`.
 
 ## Completed Since Last Run
 
@@ -20,6 +20,11 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 - Diagnosed the LogEx stop as a graceful low-disk shutdown, not data corruption.
 - Started a fresh remote reset that preserves EL/CL known peers and discovery secrets while deleting stale chain/log/index data.
 - Rebuilt the remote Mac binary with the sparse historical segment coalescing fix.
+- Started a fresh Mac run in full-VPS mode using the rebuilt binary:
+  - Data dir: `/Volumes/SSD 4TB/LogEx`
+  - Dashboard: `0.0.0.0:18683` with HTTP basic auth.
+  - NAT advertisement: `extip:157.245.195.72`.
+  - Initial public `/status` check succeeded through the VPS.
 - Identified the storage-footprint bug: sparse historical batches created thousands of tiny sealed segments, causing high filesystem allocation overhead on the external disk.
 - Added durable sparse historical segment coalescing:
   - Historical writes now append sparse batches into an active historical staging segment.
@@ -30,13 +35,13 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 
 ## Remaining TODOs
 
-1. Restart the Mac fresh-run benchmark after data reset completes.
-   - Reason: The current reset is still deleting the oversized historical segment tree. LogEx must start only after the preserved peer files are restored.
-   - Completion criteria: `/Volumes/SSD 4TB/LogEx` contains only preserved peer/secret files before startup, LogEx runs in tmux on port `18683`, public egress is `157.245.195.72`, and `/status` responds through the VPS.
+1. Monitor the fresh Mac benchmark.
+   - Reason: The reset and restart are complete, but peer retention and historical throughput need a longer run before judging the storage fix and network mode.
+   - Completion criteria: Long-run peer count warms toward the expected range, historical sync remains stable, disk usage grows according to the new coalesced segment layout, and no low-disk or networking regressions appear.
 
 2. Recover remote runtime safely.
    - Reason: The current remote data directory is too full to restart LogEx reliably.
-   - Completion criteria: Complete the reset, verify free disk headroom, start from the rebuilt binary with the coalescing fix, then verify LogEx stays up on port `18683` and follows live head.
+   - Completion criteria: Keep the fresh run online, verify it follows live head, and collect enough storage growth data to confirm sparse segment coalescing prevents the previous bloat.
 
 3. Resume historical-sync performance work after networking/storage recovery.
    - Reason: The last full sync still took close to 24 hours; target is 4 hours.
@@ -70,6 +75,9 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 - Challenge: The data directory used far more disk than expected.
   - Resolution: Found the active catalog has plausible total rows but too many tiny historical segment directories. Implemented durable sparse historical segment coalescing to prevent this on future runs and started a fresh reset to validate the fix.
 
+- Challenge: `tmux` is unavailable on the Mac mini.
+  - Resolution: Started LogEx in a detached `screen` session with logs under `/Users/gremlinmaster/logex-src/run/`. This is an operational fallback for the current host; install `tmux` later if persistent tmux workflow is still preferred.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the storage, background indexer, and historical ingest paths touched by the segment-coalescing change.
@@ -83,11 +91,10 @@ The remote LogEx client did not crash. It stopped cleanly on the low-disk safety
 - Commits made during this run: `0e55883 fix: coalesce sparse historical segments`, `2d40157 docs: update remote network recovery status`
 - Pull request status: not created
 - Merge status: not merged
-- Blockers: the remote data reset is still deleting the old segment tree; a heartbeat monitor `continue-logex-mac-reset-and-restart` will resume startup after the reset completes.
+- Blockers: no active blocker for the fresh run; longer observation is needed before concluding the storage fix and network mode.
 
 ## Known Issues or Risks
 
-- Existing remote data remains oversized; the coalescing fix prevents recurrence on a fresh or future run but does not rewrite the existing 1.5 TiB data directory.
-- Peer count cannot be re-evaluated until LogEx is restarted with enough free disk.
+- Peer count and throughput still need longer observation on the fresh run.
 - Direct Tailscale management is unavailable by design during full-tunnel testing; use the Raspberry Pi path until the run is over or the network mode changes.
 - Historical sync performance work should resume only after the networking and storage baseline is healthy.
