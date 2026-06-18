@@ -162,6 +162,8 @@ pub struct NativeStorageCatalog {
     #[serde(default)]
     pub active_hot_segment: Option<u64>,
     #[serde(default)]
+    pub active_historical_segment: Option<u64>,
+    #[serde(default)]
     pub anchors: ChainAnchors,
     pub segments: Vec<SegmentDescriptor>,
 }
@@ -189,6 +191,7 @@ impl NativeStorageCatalog {
             hot_target_rows: config.hot_target_rows,
             next_segment_id: 0,
             active_hot_segment: None,
+            active_historical_segment: None,
             anchors: ChainAnchors::default(),
             segments: Vec::new(),
         };

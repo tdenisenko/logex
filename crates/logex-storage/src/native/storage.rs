@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,11 +19,11 @@ use super::catalog::{
 };
 use super::segment::{
     append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
-    persist_segment_manifest, persist_segment_manifest_with_columns,
-    segment_uses_current_compaction_profile, write_compacted_rows,
+    persist_segment_manifest, segment_uses_current_compaction_profile,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
+const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StorageState {
@@ -298,24 +298,93 @@ impl NativeStorage {
         }
 
         let target_rows = self.config.hot_target_rows.max(1) as usize;
-        let mut appended = Vec::new();
-        for chunk in rows.chunks(target_rows) {
-            let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
-            let segment_dir = self.paths.segment_dir(descriptor.id);
-            if segment_dir.exists() {
-                fs::remove_dir_all(&segment_dir)?;
+        let mut touched = BTreeSet::new();
+        let mut offset = 0usize;
+        while offset < rows.len() {
+            let segment_id = self.ensure_active_historical_segment()?;
+            let segment_index = self
+                .catalog
+                .segments
+                .iter()
+                .position(|segment| segment.id == segment_id)
+                .ok_or_else(|| std::io::Error::other("active historical segment is missing"))?;
+
+            let existing_rows = self.catalog.segments[segment_index].row_count;
+            let remaining_capacity = target_rows.saturating_sub(existing_rows as usize);
+            if remaining_capacity == 0 {
+                self.finalize_active_historical_segment()?;
+                continue;
             }
-            let columns = write_compacted_rows(&segment_dir, chunk)?;
-            apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
-            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
-            appended.push(self.partition_meta(&descriptor));
-            self.catalog.segments.push(descriptor);
-        }
-        if !appended.is_empty() {
+
+            let remaining_rows = rows.len() - offset;
+            let take = remaining_capacity.min(remaining_rows);
+            let chunk = &rows[offset..offset + take];
+            if existing_rows > 0
+                && historical_segment_would_exceed_block_span(
+                    &self.catalog.segments[segment_index],
+                    chunk,
+                )
+            {
+                self.finalize_active_historical_segment()?;
+                continue;
+            }
+
+            let segment_dir = self.paths.segment_dir(segment_id);
+            append_rows(&segment_dir, existing_rows, chunk)?;
+            {
+                let descriptor = &mut self.catalog.segments[segment_index];
+                apply_ordered_rows_to_descriptor(descriptor, chunk);
+                persist_segment_manifest(&self.paths, descriptor)?;
+                touched.insert(descriptor.id);
+            }
             self.persist_catalog()?;
+            offset += take;
+
+            let should_finalize = {
+                let descriptor = &self.catalog.segments[segment_index];
+                descriptor.row_count >= target_rows as u64
+                    || historical_segment_block_span(descriptor)
+                        .is_some_and(|span| span >= HISTORICAL_STAGING_MAX_BLOCK_SPAN)
+            };
+            if should_finalize {
+                self.finalize_active_historical_segment()?;
+            }
         }
 
-        Ok(appended)
+        Ok(touched
+            .into_iter()
+            .filter_map(|segment_id| {
+                self.catalog
+                    .segments
+                    .iter()
+                    .find(|segment| segment.id == segment_id)
+                    .map(|segment| self.partition_meta(segment))
+            })
+            .collect())
+    }
+
+    pub fn finalize_active_historical_segment(&mut self) -> std::io::Result<bool> {
+        let Some(segment_id) = self.catalog.active_historical_segment else {
+            return Ok(false);
+        };
+        let descriptor = self
+            .catalog
+            .segments
+            .iter()
+            .find(|segment| segment.id == segment_id)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("active historical segment is missing"))?;
+
+        if descriptor.row_count > 0 {
+            compact_segment(&self.paths, &descriptor)?;
+        }
+        self.catalog.active_historical_segment = None;
+        self.persist_catalog()?;
+        Ok(true)
+    }
+
+    pub fn active_historical_segment_id(&self) -> Option<u64> {
+        self.catalog.active_historical_segment
     }
 
     fn commit_rows_to_segments(&mut self, rows: &[logex_types::LogRow]) -> std::io::Result<()> {
@@ -492,6 +561,10 @@ impl NativeStorage {
         segment: &SegmentDescriptor,
         mode: CompactionMode,
     ) -> std::io::Result<bool> {
+        if Some(segment.id) == self.catalog.active_historical_segment {
+            return Ok(false);
+        }
+
         match mode {
             CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment),
             CompactionMode::ProfileRewrite => self.segment_needs_profile_rewrite(segment),
@@ -502,6 +575,9 @@ impl NativeStorage {
     pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
         let mut count = 0usize;
         for segment in &self.catalog.segments {
+            if Some(segment.id) == self.catalog.active_historical_segment {
+                continue;
+            }
             if self.segment_needs_raw_compaction(segment)? {
                 count += 1;
             }
@@ -512,6 +588,9 @@ impl NativeStorage {
     pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
         let mut count = 0usize;
         for segment in &self.catalog.segments {
+            if Some(segment.id) == self.catalog.active_historical_segment {
+                continue;
+            }
             if self.segment_needs_compaction(segment)? {
                 count += 1;
             }
@@ -522,6 +601,9 @@ impl NativeStorage {
     pub fn profile_rewrite_backlog_count(&self) -> std::io::Result<usize> {
         let mut count = 0usize;
         for segment in &self.catalog.segments {
+            if Some(segment.id) == self.catalog.active_historical_segment {
+                continue;
+            }
             if self.segment_needs_profile_rewrite(segment)? {
                 count += 1;
             }
@@ -635,6 +717,36 @@ impl NativeStorage {
         Ok(descriptor.id)
     }
 
+    fn ensure_active_historical_segment(&mut self) -> std::io::Result<u64> {
+        if let Some(segment_id) = self.catalog.active_historical_segment {
+            if let Some(descriptor) = self
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == segment_id && segment.kind == SegmentKind::Sealed)
+            {
+                let path = self.paths.segment_dir(descriptor.id);
+                fs::create_dir_all(&path)?;
+                persist_segment_manifest(&self.paths, descriptor)?;
+                return Ok(descriptor.id);
+            }
+            self.catalog.active_historical_segment = None;
+        }
+
+        let descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
+        let segment_dir = self.paths.segment_dir(descriptor.id);
+        if segment_dir.exists() {
+            fs::remove_dir_all(&segment_dir)?;
+        }
+        fs::create_dir_all(&segment_dir)?;
+        persist_segment_manifest(&self.paths, &descriptor)?;
+        let segment_id = descriptor.id;
+        self.catalog.segments.push(descriptor);
+        self.catalog.active_historical_segment = Some(segment_id);
+        self.persist_catalog()?;
+        Ok(segment_id)
+    }
+
     fn repair_catalog_from_manifests(&mut self) -> std::io::Result<()> {
         let mut descriptors = load_manifest_descriptors(&self.paths)?;
         if descriptors.is_empty() {
@@ -687,6 +799,17 @@ impl NativeStorage {
             .max();
         if self.catalog.active_hot_segment != active_hot_segment {
             self.catalog.active_hot_segment = active_hot_segment;
+            changed = true;
+        }
+
+        let active_historical_segment =
+            self.catalog.active_historical_segment.filter(|segment_id| {
+                repaired_segments
+                    .iter()
+                    .any(|segment| segment.id == *segment_id && segment.kind == SegmentKind::Sealed)
+            });
+        if self.catalog.active_historical_segment != active_historical_segment {
+            self.catalog.active_historical_segment = active_historical_segment;
             changed = true;
         }
 
@@ -1221,6 +1344,40 @@ fn segment_diff_is_timestamp_metadata_only(
     &comparable == repaired
 }
 
+fn historical_segment_would_exceed_block_span(
+    descriptor: &SegmentDescriptor,
+    rows: &[LogRow],
+) -> bool {
+    let Some((min_block, max_block)) = rows_block_range(rows) else {
+        return false;
+    };
+    let min_block = descriptor
+        .min_block
+        .map(|current| current.min(min_block))
+        .unwrap_or(min_block);
+    let max_block = descriptor
+        .max_block
+        .map(|current| current.max(max_block))
+        .unwrap_or(max_block);
+    max_block.saturating_sub(min_block) >= HISTORICAL_STAGING_MAX_BLOCK_SPAN
+}
+
+fn historical_segment_block_span(descriptor: &SegmentDescriptor) -> Option<u64> {
+    Some(descriptor.max_block?.saturating_sub(descriptor.min_block?))
+}
+
+fn rows_block_range(rows: &[LogRow]) -> Option<(u64, u64)> {
+    let mut iter = rows.iter().map(|row| row.block_number);
+    let first = iter.next()?;
+    let mut min_block = first;
+    let mut max_block = first;
+    for block_number in iter {
+        min_block = min_block.min(block_number);
+        max_block = max_block.max(block_number);
+    }
+    Some((min_block, max_block))
+}
+
 fn repair_missing_timestamp_metadata(
     paths: &StorageCatalogPaths,
     descriptor: &mut SegmentDescriptor,
@@ -1560,6 +1717,7 @@ mod tests {
         assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
         assert!(!first_segment.join("address.col").exists());
         assert!(first_segment.join("columns/address.pages").exists());
+        assert!(storage.active_historical_segment_id().is_some());
 
         let reloaded = NativeStorage::open(NativeStorageConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -1570,6 +1728,52 @@ mod tests {
         assert_eq!(reloaded.total_rows(), 25);
         assert_eq!(reloaded.sealed_count(), 3);
         assert_eq!(reloaded.hot_partition_meta().row_count, 0);
+        assert!(reloaded.active_historical_segment_id().is_some());
+    }
+
+    #[test]
+    fn native_storage_coalesces_sparse_historical_writes_across_batches() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage.write_historical_batch(&make_rows(3, 100)).unwrap();
+        let active_segment = storage.active_historical_segment_id().unwrap();
+        storage.write_historical_batch(&make_rows(4, 90)).unwrap();
+
+        let sealed = storage.sealed_partition_metas();
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].id, active_segment);
+        assert_eq!(sealed[0].row_count, 7);
+        assert_eq!(storage.total_rows(), 7);
+        assert!(
+            storage
+                .segment_path(active_segment)
+                .join("address.col")
+                .exists()
+        );
+
+        storage.write_historical_batch(&make_rows(3, 80)).unwrap();
+        assert_eq!(storage.active_historical_segment_id(), None);
+        let sealed = storage.sealed_partition_metas();
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].row_count, 10);
+        assert!(
+            !storage
+                .segment_path(active_segment)
+                .join("address.col")
+                .exists()
+        );
+        assert!(
+            storage
+                .segment_path(active_segment)
+                .join("columns/address.pages")
+                .exists()
+        );
     }
 
     #[cfg(unix)]

@@ -500,10 +500,12 @@ fn sealed_query_index_targets(
         return (max_segment_id, Vec::new());
     }
 
+    let active_historical_segment = storage.active_historical_segment_id();
     let targets = storage
         .sealed_partitions()
         .iter()
         .filter(|partition| partition.meta.row_count > 0)
+        .filter(|partition| Some(partition.meta.id) != active_historical_segment)
         .filter(|partition| query_indexes_missing(&partition.meta.path))
         .take(limit)
         .map(|partition| SealedIndexTarget {
@@ -617,6 +619,45 @@ mod tests {
             std::fs::write(indexes.join(file_name), []).unwrap();
         }
         assert!(!query_indexes_missing(tmp.path()));
+    }
+
+    #[test]
+    fn sealed_query_indexing_skips_active_historical_staging_segment() {
+        use alloy_primitives::{Address, B256, Bytes};
+        use logex_storage::{PartitionManager, PartitionManagerConfig};
+        use logex_types::{LogRow, Source};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 10,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        let rows = (0..5)
+            .map(|index| LogRow {
+                block_number: 100 + index,
+                block_hash: B256::repeat_byte(0xAA),
+                timestamp: 1_700_000_000 + index,
+                tx_hash: B256::repeat_byte(0xBB),
+                tx_index: 0,
+                log_index: index as u32,
+                address: Address::repeat_byte(0xCC),
+                topic0: Some(B256::repeat_byte(0xDD)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: Bytes::new(),
+                data_len: 0,
+                source: Source::Receipt,
+            })
+            .collect::<Vec<_>>();
+        storage.write_historical_batch(&rows).unwrap();
+
+        let (_, targets) = sealed_query_index_targets(&storage, 8);
+
+        assert!(storage.active_historical_segment_id().is_some());
+        assert!(targets.is_empty());
     }
 
     #[test]
