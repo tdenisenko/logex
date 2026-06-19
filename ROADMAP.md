@@ -8,7 +8,7 @@ Active branch: `perf/historical-sync-throughput-v3`.
 
 The sparse historical segment coalescing work was merged. The Mac mini is running LogEx from `/Users/gremlinmaster/logex-src` against `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel with public egress/NAT `157.245.195.72`. Tailscale remains stopped on the Mac during full-tunnel testing; manage the host through `ssh pi-remote` and then `ssh gremlinmaster@192.168.50.44`. The client is running in a detached tmux session using `/Users/gremlinmaster/.local/bin/tmux`, not `screen`.
 
-Historical sync is progressing, but the remaining bottleneck is still body/receipt fetch tail latency. Local validation and storage writes are much smaller than fetch time in the dense ranges sampled so far. Prefix redundancy now activates at smaller serving-peer counts, which improves low-peer dense-range throughput but does not remove the long-tail fetch bottleneck.
+Historical sync is progressing, but the remaining bottleneck is still body/receipt fetch tail latency. Local validation and storage writes are much smaller than fetch time in the dense ranges sampled so far. Prefix redundancy now activates at smaller serving-peer counts, and shared short-lived body/receipt request cooldowns reduce immediate reuse of peers that time out inside concurrent plans. The live Mac mini run improved from low tens of thousands of logs/sec to roughly 130k logs/sec at 13 serving peers, but this is still below the 800k logs/sec target.
 
 ## Completed Since Last Run
 
@@ -24,12 +24,16 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - Kept a targeted prefix-redundancy change for dense body/receipt plans:
   - Redundant prefix requests now activate at 8 serving peers instead of 16.
   - Live testing on the Mac mini improved low-peer throughput relative to the restored baseline, while focused, full `logex-sync`, and clippy validation passed.
+- Kept the combined shared-cooldown experiment:
+  - Body/receipt plans now share short request-role cooldowns so slow peers are not immediately reused by sibling plans after timeout, disconnect, incomplete, or invalid receipt-count failures.
+  - High-memory fetch pipeline depth now waits for 24 serving peers, reducing early over-scheduling while the peer pool is still warming.
+  - Live testing on the Mac mini reached roughly 130k logs/sec at 13 serving peers; `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings` passed locally.
 
 ## Remaining TODOs
 
-1. Continue live benchmarking of prefix redundancy and scheduler refill behavior over a longer warm run.
-   - Reason: Early low-peer samples improved, but higher serving-peer samples are still required before treating the change as production-proven.
-   - Completion criteria: Active fetches remain populated during dense sync, peer count warms normally, and sustained throughput improves without higher memory churn or excessive duplicate fetch work.
+1. Continue live benchmarking over a longer warm run.
+   - Reason: Shared request cooldowns improved the current sample, but higher serving-peer samples are still required before treating the change as production-proven.
+   - Completion criteria: Active fetches remain populated during dense sync, peer count warms normally, and sustained throughput improves without higher memory churn, excessive duplicate fetch work, or new peer-retention regressions.
 
 2. Reduce body/receipt fetch tail latency.
    - Reason: Request plans still regularly take 10-40 seconds, causing visible floor stalls even when CPU, RAM, and disk are not saturated.
@@ -51,6 +55,7 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - During the current Mac mini benchmark, full-VPS routing is preferred over direct Tailscale management; use the Raspberry Pi SSH path until the network mode changes.
 - Dense historical fetch window size remains capped at 512 blocks. Increasing active dense fetch depth to 10 was rejected because it raised memory/CPU pressure and worsened request tail latency.
 - Dense body/receipt prefix redundancy starts at 8 serving peers so the earliest contiguous chunks are less likely to block on a single slow peer. This spends limited spare request capacity on the prefix instead of broadening the whole fetch pipeline.
+- Shared body/receipt cooldown state is in-memory only and scoped to peer request role. It gives concurrent plans immediate timeout feedback without changing persisted data or permanently banning peers; if every candidate is cooled down, scheduling falls back to the normal candidate list to avoid starvation.
 
 ## Challenges and Resolutions
 
@@ -63,20 +68,24 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - Challenge: Low-peer dense sync could stall behind a slow leading body/receipt chunk.
   - Resolution: Lowered the prefix-redundancy serving-peer threshold from 16 to 8 and validated it with live low-peer samples plus `logex-sync` tests and clippy.
 
+- Challenge: Failed peers were only penalized after a whole body/receipt plan finished and was consumed by `PeerManager`, so concurrent sibling plans could immediately select the same timed-out peer.
+  - Resolution: Added shared per-role request cooldowns that are marked inside body/receipt chunk execution and consulted by later scheduling attempts.
+
 - Challenge: Tailscale and host-wide WireGuard full-tunnel routing conflict on the Mac mini.
   - Resolution: Keep Tailscale stopped during full-tunnel performance runs and manage through the Raspberry Pi route.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected historical scheduler and request-layer changes made during this pass.
-- Removed the ineffective dense-depth and high-pipeline-threshold experiments before committing.
-- Inspected body/receipt request scheduling helpers and tests touched by prefix redundancy; no dead production code was identified.
+- Removed the ineffective dense-depth experiment before committing.
+- Inspected body/receipt request scheduling helpers and tests touched by prefix redundancy and shared cooldowns; consolidated repeated peer-selection code behind a paired scheduling helper.
+- No dead production code was identified in the touched request scheduling path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: yes
-- Commits made during this run: pending
+- Commits made during this run: prefix-redundancy checkpoint already pushed; shared request cooldown checkpoint
 - Pull request status: not created for the current branch
 - Merge status: previous storage PR merged; current performance branch not merged
 - Blockers: none, but longer live benchmarking is required before opening a PR for performance work.

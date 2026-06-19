@@ -3,8 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use alloy_primitives::B256;
@@ -124,6 +123,7 @@ pub struct PeerManager {
     network_activated: bool,
     max_peers: usize,
     session_metrics: ExecutionPeerSessionMetrics,
+    request_cooldowns: SharedPeerRequestCooldowns,
 }
 
 #[derive(Default)]
@@ -168,12 +168,19 @@ pub struct PeerManagerConfig {
     pub known_peers_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PeerRequestKind {
     Headers,
     Bodies,
     Receipts,
 }
+
+#[derive(Default)]
+struct PeerRequestCooldowns {
+    paused_until: HashMap<(PeerId, PeerRequestKind), Instant>,
+}
+
+type SharedPeerRequestCooldowns = Arc<Mutex<PeerRequestCooldowns>>;
 
 impl PeerManager {
     /// Create a new peer manager backed by Reth's network/session stack.
@@ -289,6 +296,7 @@ impl PeerManager {
             network_activated,
             max_peers,
             session_metrics: ExecutionPeerSessionMetrics::default(),
+            request_cooldowns: Arc::new(Mutex::new(PeerRequestCooldowns::default())),
         };
 
         manager.seed_known_peers();
