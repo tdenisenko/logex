@@ -880,7 +880,9 @@ fn spawn_historical_prepare_task(
     batch: HistoricalFetchedBatch,
 ) -> HistoricalPrepareTask {
     let next_child_header = historical_batch_next_child_header(&batch);
-    let handle = tokio::spawn(async move { process_historical_batch(batch).await });
+    let refill_child_header = next_child_header.clone();
+    let handle =
+        tokio::spawn(async move { process_historical_batch(batch, refill_child_header).await });
 
     HistoricalPrepareTask {
         sequence,
@@ -891,6 +893,7 @@ fn spawn_historical_prepare_task(
 
 async fn process_historical_batch(
     batch: HistoricalFetchedBatch,
+    next_child_header: Option<Header>,
 ) -> Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>> {
     let HistoricalFetchedBatch {
         header_peer,
@@ -935,6 +938,7 @@ async fn process_historical_batch(
 
     Ok(Ok(PreparedHistoricalBatch {
         requested_headers,
+        next_child_header,
         header_elapsed,
         body_receipt_elapsed,
         extracted,
@@ -954,6 +958,7 @@ async fn write_prepared_historical_batch(
 ) -> Result<WrittenHistoricalBatch> {
     let PreparedHistoricalBatch {
         requested_headers,
+        next_child_header,
         header_elapsed,
         body_receipt_elapsed,
         extracted,
@@ -971,6 +976,7 @@ async fn write_prepared_historical_batch(
 
     Ok(WrittenHistoricalBatch {
         requested_headers,
+        next_child_header,
         header_elapsed,
         body_receipt_elapsed,
         outcome,
@@ -2242,14 +2248,8 @@ impl SyncEngine {
         prefetched: bool,
     ) -> Result<bool> {
         let sequence = task.sequence;
-        let immediate_next_child_header = task.next_child_header.clone();
-        if let Some(immediate_next_child_header) = immediate_next_child_header
-            && immediate_next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
-            && self.peers.peer_count() > 0
-        {
-            self.ensure_historical_fetch_pipeline(immediate_next_child_header)
-                .await?;
-        }
+        self.ensure_historical_fetch_pipeline_for_child(task.next_child_header.clone())
+            .await?;
 
         let mut handle = task.handle;
         let prepared = loop {
@@ -2278,6 +2278,20 @@ impl SyncEngine {
 
         self.ingest_historical_prepare_result(sequence, prepared, prefetched)
             .await
+    }
+
+    async fn ensure_historical_fetch_pipeline_for_child(
+        &mut self,
+        next_child_header: Option<Header>,
+    ) -> Result<()> {
+        if let Some(next_child_header) = next_child_header
+            && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
+            && self.peers.peer_count() > 0
+        {
+            self.ensure_historical_fetch_pipeline(next_child_header)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn ingest_historical_prepare_result(
@@ -2311,6 +2325,7 @@ impl SyncEngine {
         };
         let mut written =
             write_prepared_historical_batch(prepared, Arc::clone(&self.storage)).await?;
+        let next_child_header = written.next_child_header.clone();
         written.prepare_wait_elapsed = prepare_wait_started.elapsed();
         self.historical_prepare_expected_sequence = sequence.saturating_add(1);
         let overlap_elapsed = overlap_started.elapsed();
@@ -2351,6 +2366,8 @@ impl SyncEngine {
             self.refresh_historical_status().await;
             return Ok(true);
         }
+        self.ensure_historical_fetch_pipeline_for_child(next_child_header)
+            .await?;
 
         tracing::debug!(
             requested_headers,

@@ -107,6 +107,7 @@ pub(super) struct HistoricalIngestOutcome {
 
 pub(super) struct PreparedHistoricalBatch {
     requested_headers: usize,
+    next_child_header: Option<Header>,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
     extracted: ingest::HistoricalExtractedBatch,
@@ -121,6 +122,7 @@ pub(super) struct PreparedHistoricalBatch {
 
 pub(super) struct WrittenHistoricalBatch {
     requested_headers: usize,
+    next_child_header: Option<Header>,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
     outcome: HistoricalIngestOutcome,
