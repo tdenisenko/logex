@@ -40,7 +40,7 @@ const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 8;
-const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 24;
+const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
 const HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
@@ -3247,7 +3247,7 @@ mod tests {
                 high_pipeline_memory,
                 None,
             ),
-            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
             historical_fetch_pipeline_depth_for_serving_peers(
@@ -3279,7 +3279,7 @@ mod tests {
                 high_pipeline_memory,
                 None,
             ),
-            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+            HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
             historical_fetch_window_blocks_for_serving_peers(
@@ -3287,7 +3287,7 @@ mod tests {
                 high_pipeline_memory,
                 None,
             ),
-            HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS
+            HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS
         );
         assert_eq!(
             historical_fetch_window_blocks_for_serving_peers(

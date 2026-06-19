@@ -19,7 +19,7 @@ const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
-const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
+const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
@@ -122,7 +122,6 @@ pub(crate) struct BodyReceiptRequestPlan {
     receipt_peer_ids: Vec<PeerId>,
     max_in_flight: usize,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
-    request_cooldowns: SharedPeerRequestCooldowns,
 }
 
 pub(crate) struct BodyReceiptRequestOutcome {
@@ -448,11 +447,6 @@ impl PeerManager {
             .peer_ids_for_block_requests(Some(required_block), preferred_peers)
             .await;
         self.filter_paused_request_peers(&mut body_peer_ids, PeerRequestKind::Bodies);
-        filter_shared_request_cooldown_peers(
-            &mut body_peer_ids,
-            &self.request_cooldowns,
-            PeerRequestKind::Bodies,
-        );
         self.sort_peer_ids_by_request_performance(&mut body_peer_ids, PeerRequestKind::Bodies);
         limit_body_receipt_candidate_pool(&mut body_peer_ids);
         if body_peer_ids.is_empty() {
@@ -463,11 +457,6 @@ impl PeerManager {
             .peer_ids_for_receipt_requests(required_block, preferred_peers)
             .await;
         self.filter_paused_request_peers(&mut receipt_peer_ids, PeerRequestKind::Receipts);
-        filter_shared_request_cooldown_peers(
-            &mut receipt_peer_ids,
-            &self.request_cooldowns,
-            PeerRequestKind::Receipts,
-        );
         self.sort_peer_ids_by_request_performance(&mut receipt_peer_ids, PeerRequestKind::Receipts);
         limit_body_receipt_candidate_pool(&mut receipt_peer_ids);
         if receipt_peer_ids.is_empty() {
@@ -523,7 +512,6 @@ impl PeerManager {
             receipt_peer_ids,
             max_in_flight,
             peers,
-            request_cooldowns: Arc::clone(&self.request_cooldowns),
         }))
     }
 
@@ -634,40 +622,6 @@ impl BodyReceiptRequestPlan {
             && self.return_blocks <= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
             && self.body_peer_ids.len().min(self.receipt_peer_ids.len())
                 >= PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS
-    }
-
-    fn schedule_paired_chunk_attempt<'a>(
-        &'a self,
-        attempts: &mut futures_util::stream::FuturesUnordered<
-            futures_util::future::BoxFuture<'a, BodyReceiptChunk>,
-        >,
-        in_flight: &mut HashMap<usize, InFlightBodyReceiptChunk>,
-        range: std::ops::Range<usize>,
-        chunk_index: usize,
-        body_bad_peers: &HashSet<PeerId>,
-        receipt_bad_peers: &HashSet<PeerId>,
-    ) {
-        let body_peer_ids = request_peer_ids_available_for_attempt(
-            &self.body_peer_ids,
-            body_bad_peers,
-            &self.request_cooldowns,
-            PeerRequestKind::Bodies,
-        );
-        let receipt_peer_ids = request_peer_ids_available_for_attempt(
-            &self.receipt_peer_ids,
-            receipt_bad_peers,
-            &self.request_cooldowns,
-            PeerRequestKind::Receipts,
-        );
-        schedule_body_receipt_chunk_attempt(
-            self,
-            attempts,
-            in_flight,
-            range,
-            chunk_index,
-            body_peer_ids,
-            receipt_peer_ids,
-        );
     }
 
     async fn execute_decoupled_dense(&self) -> BodyReceiptRequestOutcome {
@@ -792,13 +746,17 @@ impl BodyReceiptRequestPlan {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
                     break;
                 };
-                self.schedule_paired_chunk_attempt(
+                let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                let chunk_receipt_peer_ids =
+                    peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                schedule_body_receipt_chunk_attempt(
+                    &self,
                     &mut attempts,
                     &mut in_flight,
                     range.clone(),
                     chunk_index,
-                    &body_bad_peers,
-                    &receipt_bad_peers,
+                    chunk_body_peer_ids,
+                    chunk_receipt_peer_ids,
                 );
                 scheduled_prefix_ranges.push((chunk_index, range));
             }
@@ -816,14 +774,18 @@ impl BodyReceiptRequestPlan {
                 .cloned()
                 .enumerate()
             {
-                self.schedule_paired_chunk_attempt(
+                let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                let chunk_receipt_peer_ids =
+                    peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                schedule_body_receipt_chunk_attempt(
+                    &self,
                     &mut attempts,
                     &mut in_flight,
                     range,
                     base_chunk_index
                         + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
-                    &body_bad_peers,
-                    &receipt_bad_peers,
+                    chunk_body_peer_ids,
+                    chunk_receipt_peer_ids,
                 );
             }
 
@@ -866,15 +828,20 @@ impl BodyReceiptRequestPlan {
                                 Instant::now(),
                             )
                         {
-                            self.schedule_paired_chunk_attempt(
+                            let chunk_body_peer_ids =
+                                peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                            let chunk_receipt_peer_ids =
+                                peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                            schedule_body_receipt_chunk_attempt(
+                                &self,
                                 &mut attempts,
                                 &mut in_flight,
                                 range,
                                 chunk_index
                                     + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count)
                                         * self.ranges.len()),
-                                &body_bad_peers,
-                                &receipt_bad_peers,
+                                chunk_body_peer_ids,
+                                chunk_receipt_peer_ids,
                             );
                             hedge_count += 1;
                         }
@@ -928,13 +895,18 @@ impl BodyReceiptRequestPlan {
                     let retry_count = retry_counts.entry(chunk_start).or_default();
                     *retry_count += 1;
                     let chunk_index = base_chunk_index + (*retry_count * self.ranges.len());
-                    self.schedule_paired_chunk_attempt(
+                    let chunk_body_peer_ids =
+                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                    let chunk_receipt_peer_ids =
+                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                    schedule_body_receipt_chunk_attempt(
+                        &self,
                         &mut attempts,
                         &mut in_flight,
                         range,
                         chunk_index,
-                        &body_bad_peers,
-                        &receipt_bad_peers,
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
                     );
                 }
 
@@ -945,13 +917,18 @@ impl BodyReceiptRequestPlan {
                     let Some((chunk_index, range)) = pending_ranges.next() else {
                         break;
                     };
-                    self.schedule_paired_chunk_attempt(
+                    let chunk_body_peer_ids =
+                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                    let chunk_receipt_peer_ids =
+                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                    schedule_body_receipt_chunk_attempt(
+                        &self,
                         &mut attempts,
                         &mut in_flight,
                         range,
                         chunk_index,
-                        &body_bad_peers,
-                        &receipt_bad_peers,
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
                     );
                 }
 
@@ -966,14 +943,19 @@ impl BodyReceiptRequestPlan {
                     ) else {
                         break;
                     };
-                    self.schedule_paired_chunk_attempt(
+                    let chunk_body_peer_ids =
+                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
+                    let chunk_receipt_peer_ids =
+                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
+                    schedule_body_receipt_chunk_attempt(
+                        &self,
                         &mut attempts,
                         &mut in_flight,
                         range,
                         chunk_index
                             + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count) * self.ranges.len()),
-                        &body_bad_peers,
-                        &receipt_bad_peers,
+                        chunk_body_peer_ids,
+                        chunk_receipt_peer_ids,
                     );
                     hedge_count += 1;
                 }
@@ -1071,15 +1053,12 @@ impl BodyReceiptRequestPlan {
                 PIPELINED_CHUNK_REQUEST_PEERS,
             );
             let Some(first_receipt_peer) = receipt_candidates.first().copied() else {
-                self.record_body_receipt_failure(
-                    &mut failures,
-                    ChunkRequestFailure {
-                        role: ChunkRequestRole::Bodies,
-                        peer_id: body_peer,
-                        requested: hashes.len(),
-                        kind: ChunkFailureKind::Request(RequestAttempt::Disconnected),
-                    },
-                );
+                failures.push(ChunkRequestFailure {
+                    role: ChunkRequestRole::Bodies,
+                    peer_id: body_peer,
+                    requested: hashes.len(),
+                    kind: ChunkFailureKind::Request(RequestAttempt::Disconnected),
+                });
                 continue;
             };
             let has_cached_receipts = cached_receipts.is_some();
@@ -1121,11 +1100,6 @@ impl BodyReceiptRequestPlan {
 
             let bodies = match body_result {
                 Ok(bodies) => {
-                    clear_shared_request_cooldown(
-                        &self.request_cooldowns,
-                        body_peer,
-                        PeerRequestKind::Bodies,
-                    );
                     stats.push((
                         body_peer,
                         PeerRequestKind::Bodies,
@@ -1138,22 +1112,14 @@ impl BodyReceiptRequestPlan {
                         .collect::<Vec<_>>()
                 }
                 Err(kind) => {
-                    self.record_body_receipt_failure(
-                        &mut failures,
-                        ChunkRequestFailure {
-                            role: ChunkRequestRole::Bodies,
-                            peer_id: body_peer,
-                            requested: hashes.len(),
-                            kind,
-                        },
-                    );
+                    failures.push(ChunkRequestFailure {
+                        role: ChunkRequestRole::Bodies,
+                        peer_id: body_peer,
+                        requested: hashes.len(),
+                        kind,
+                    });
                     match receipt_result {
                         Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
-                            clear_shared_request_cooldown(
-                                &self.request_cooldowns,
-                                receipt_peer,
-                                PeerRequestKind::Receipts,
-                            );
                             stats.push((
                                 receipt_peer,
                                 PeerRequestKind::Receipts,
@@ -1163,15 +1129,12 @@ impl BodyReceiptRequestPlan {
                             cached_receipts.get_or_insert((receipt_peer, receipts));
                         }
                         Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
-                            self.record_body_receipt_failure(
-                                &mut failures,
-                                ChunkRequestFailure {
-                                    role: ChunkRequestRole::Receipts,
-                                    peer_id: receipt_peer,
-                                    requested: hashes.len(),
-                                    kind,
-                                },
-                            );
+                            failures.push(ChunkRequestFailure {
+                                role: ChunkRequestRole::Receipts,
+                                peer_id: receipt_peer,
+                                requested: hashes.len(),
+                                kind,
+                            });
                         }
                         None => {}
                     }
@@ -1202,26 +1165,18 @@ impl BodyReceiptRequestPlan {
                     }
                     Err(kind) => {
                         skip_fallback_receipt_peer = Some(receipt_peer);
-                        self.record_body_receipt_failure(
-                            &mut failures,
-                            ChunkRequestFailure {
-                                role: ChunkRequestRole::Receipts,
-                                peer_id: receipt_peer,
-                                requested: hashes.len(),
-                                kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                            },
-                        );
+                        failures.push(ChunkRequestFailure {
+                            role: ChunkRequestRole::Receipts,
+                            peer_id: receipt_peer,
+                            requested: hashes.len(),
+                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                        });
                     }
                 }
             }
 
             match receipt_result {
                 Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
-                    clear_shared_request_cooldown(
-                        &self.request_cooldowns,
-                        receipt_peer,
-                        PeerRequestKind::Receipts,
-                    );
                     stats.push((
                         receipt_peer,
                         PeerRequestKind::Receipts,
@@ -1242,27 +1197,22 @@ impl BodyReceiptRequestPlan {
                                 stats,
                             };
                         }
-                        Err(kind) => self.record_body_receipt_failure(
-                            &mut failures,
-                            ChunkRequestFailure {
-                                role: ChunkRequestRole::Receipts,
-                                peer_id: receipt_peer,
-                                requested: hashes.len(),
-                                kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                            },
-                        ),
-                    }
-                }
-                Some((receipt_peer, _receipt_elapsed, Err(kind))) => self
-                    .record_body_receipt_failure(
-                        &mut failures,
-                        ChunkRequestFailure {
+                        Err(kind) => failures.push(ChunkRequestFailure {
                             role: ChunkRequestRole::Receipts,
                             peer_id: receipt_peer,
                             requested: hashes.len(),
-                            kind,
-                        },
-                    ),
+                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                        }),
+                    }
+                }
+                Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
+                    failures.push(ChunkRequestFailure {
+                        role: ChunkRequestRole::Receipts,
+                        peer_id: receipt_peer,
+                        requested: hashes.len(),
+                        kind,
+                    })
+                }
                 None => {}
             }
 
@@ -1280,11 +1230,6 @@ impl BodyReceiptRequestPlan {
                     .await
                 {
                     Ok(receipts) => {
-                        clear_shared_request_cooldown(
-                            &self.request_cooldowns,
-                            receipt_peer,
-                            PeerRequestKind::Receipts,
-                        );
                         stats.push((
                             receipt_peer,
                             PeerRequestKind::Receipts,
@@ -1305,26 +1250,20 @@ impl BodyReceiptRequestPlan {
                                     stats,
                                 };
                             }
-                            Err(kind) => self.record_body_receipt_failure(
-                                &mut failures,
-                                ChunkRequestFailure {
-                                    role: ChunkRequestRole::Receipts,
-                                    peer_id: receipt_peer,
-                                    requested: hashes.len(),
-                                    kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                                },
-                            ),
+                            Err(kind) => failures.push(ChunkRequestFailure {
+                                role: ChunkRequestRole::Receipts,
+                                peer_id: receipt_peer,
+                                requested: hashes.len(),
+                                kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                            }),
                         }
                     }
-                    Err(kind) => self.record_body_receipt_failure(
-                        &mut failures,
-                        ChunkRequestFailure {
-                            role: ChunkRequestRole::Receipts,
-                            peer_id: receipt_peer,
-                            requested: hashes.len(),
-                            kind,
-                        },
-                    ),
+                    Err(kind) => failures.push(ChunkRequestFailure {
+                        role: ChunkRequestRole::Receipts,
+                        peer_id: receipt_peer,
+                        requested: hashes.len(),
+                        kind,
+                    }),
                 }
             }
         }
@@ -1335,21 +1274,6 @@ impl BodyReceiptRequestPlan {
             failures,
             stats,
         }
-    }
-
-    fn record_body_receipt_failure(
-        &self,
-        failures: &mut ParallelChunkFailures,
-        failure: ChunkRequestFailure,
-    ) {
-        if chunk_failure_disables_role_peer(&failure) {
-            mark_shared_request_cooldown(
-                &self.request_cooldowns,
-                failure.peer_id,
-                failure.role.request_kind(),
-            );
-        }
-        failures.push(failure);
     }
 
     async fn request_decoupled_body_chunks(
@@ -3326,74 +3250,6 @@ fn peer_ids_excluding(peer_ids: &[PeerId], bad_peers: &HashSet<PeerId>) -> Vec<P
     }
 }
 
-fn request_peer_ids_available_for_attempt(
-    peer_ids: &[PeerId],
-    bad_peers: &HashSet<PeerId>,
-    cooldowns: &SharedPeerRequestCooldowns,
-    kind: PeerRequestKind,
-) -> Vec<PeerId> {
-    let mut available = peer_ids_excluding(peer_ids, bad_peers);
-    filter_shared_request_cooldown_peers(&mut available, cooldowns, kind);
-    available
-}
-
-fn filter_shared_request_cooldown_peers(
-    peer_ids: &mut Vec<PeerId>,
-    cooldowns: &SharedPeerRequestCooldowns,
-    kind: PeerRequestKind,
-) {
-    if peer_ids.is_empty() {
-        return;
-    }
-
-    let now = Instant::now();
-    let mut cooldowns = shared_request_cooldowns(cooldowns);
-    cooldowns.paused_until.retain(|_, until| *until > now);
-    if cooldowns.paused_until.is_empty() {
-        return;
-    }
-
-    let original = peer_ids.clone();
-    peer_ids.retain(|peer_id| {
-        cooldowns
-            .paused_until
-            .get(&(*peer_id, kind))
-            .is_none_or(|until| *until <= now)
-    });
-    if peer_ids.is_empty() {
-        *peer_ids = original;
-    }
-}
-
-fn mark_shared_request_cooldown(
-    cooldowns: &SharedPeerRequestCooldowns,
-    peer_id: PeerId,
-    kind: PeerRequestKind,
-) {
-    let mut cooldowns = shared_request_cooldowns(cooldowns);
-    cooldowns.paused_until.insert(
-        (peer_id, kind),
-        Instant::now() + REQUEST_KIND_PAUSE_DURATION,
-    );
-}
-
-fn clear_shared_request_cooldown(
-    cooldowns: &SharedPeerRequestCooldowns,
-    peer_id: PeerId,
-    kind: PeerRequestKind,
-) {
-    let mut cooldowns = shared_request_cooldowns(cooldowns);
-    cooldowns.paused_until.remove(&(peer_id, kind));
-}
-
-fn shared_request_cooldowns(
-    cooldowns: &SharedPeerRequestCooldowns,
-) -> std::sync::MutexGuard<'_, PeerRequestCooldowns> {
-    cooldowns
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn disabled_chunk_peers(
     failures: &[ChunkRequestFailure],
     role: ChunkRequestRole,
@@ -4245,45 +4101,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_request_cooldowns_filter_by_request_kind_with_fallback() {
-        let first = PeerId::repeat_byte(0x11);
-        let second = PeerId::repeat_byte(0x22);
-        let third = PeerId::repeat_byte(0x33);
-        let cooldowns = Arc::new(Mutex::new(PeerRequestCooldowns::default()));
-
-        mark_shared_request_cooldown(&cooldowns, first, PeerRequestKind::Bodies);
-        mark_shared_request_cooldown(&cooldowns, second, PeerRequestKind::Receipts);
-
-        let mut body_peers = vec![first, second, third];
-        filter_shared_request_cooldown_peers(&mut body_peers, &cooldowns, PeerRequestKind::Bodies);
-        assert_eq!(body_peers, vec![second, third]);
-
-        let mut receipt_peers = vec![first, second, third];
-        filter_shared_request_cooldown_peers(
-            &mut receipt_peers,
-            &cooldowns,
-            PeerRequestKind::Receipts,
-        );
-        assert_eq!(receipt_peers, vec![first, third]);
-
-        mark_shared_request_cooldown(&cooldowns, second, PeerRequestKind::Bodies);
-        mark_shared_request_cooldown(&cooldowns, third, PeerRequestKind::Bodies);
-        let mut all_cooled = vec![first, second, third];
-        filter_shared_request_cooldown_peers(&mut all_cooled, &cooldowns, PeerRequestKind::Bodies);
-        assert_eq!(all_cooled, vec![first, second, third]);
-
-        let mut bad_peers = HashSet::new();
-        bad_peers.insert(first);
-        let available = request_peer_ids_available_for_attempt(
-            &[first, second, third],
-            &bad_peers,
-            &cooldowns,
-            PeerRequestKind::Bodies,
-        );
-        assert_eq!(available, vec![second, third]);
-    }
-
-    #[test]
     fn body_receipt_chunks_prefer_distinct_first_receipt_peer() {
         let body_peer = PeerId::repeat_byte(0x11);
         let second = PeerId::repeat_byte(0x22);
@@ -4470,15 +4287,15 @@ mod tests {
         let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
 
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 8),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 16),
             4
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 8),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 16),
             2
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 8),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 16),
             0
         );
     }
@@ -4492,16 +4309,16 @@ mod tests {
             0
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 7),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 15),
             0
         );
     }
 
     #[test]
     fn body_receipt_prefix_hedges_get_spare_capacity_for_dense_peer_sets() {
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 8), 4);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 16), 4);
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(1025, 32), 0);
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 7), 0);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 15), 0);
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(0, 32), 0);
     }
 
