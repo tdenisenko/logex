@@ -467,6 +467,7 @@ fn historical_fetch_buffer_depth(
 fn historical_fetch_budget_has_capacity(
     pending_fetches: usize,
     completed_fetches: usize,
+    pipeline_depth: usize,
     buffer_depth: usize,
     available_memory_bytes: Option<u64>,
 ) -> bool {
@@ -474,6 +475,7 @@ fn historical_fetch_budget_has_capacity(
         pending_fetches < buffer_depth
     } else {
         completed_fetches < buffer_depth
+            || pending_fetches < buffer_depth.saturating_add(pipeline_depth)
     }
 }
 
@@ -1856,6 +1858,7 @@ impl SyncEngine {
             && historical_fetch_budget_has_capacity(
                 self.pending_historical_fetch_count(),
                 self.historical_fetch_completed.len(),
+                pipeline_depth,
                 buffer_depth,
                 available_memory_bytes,
             )
@@ -3548,18 +3551,28 @@ mod tests {
         assert!(historical_fetch_budget_has_capacity(
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT + 4,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT - 1,
+            6,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
+        ));
+        assert!(historical_fetch_budget_has_capacity(
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            6,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
         ));
         assert!(!historical_fetch_budget_has_capacity(
+            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT + 6,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
-            HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
+            6,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)
         ));
         assert!(!historical_fetch_budget_has_capacity(
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             0,
+            6,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
         ));
