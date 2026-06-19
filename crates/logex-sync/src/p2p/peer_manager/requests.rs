@@ -1064,7 +1064,9 @@ impl BodyReceiptRequestPlan {
             let has_cached_receipts = cached_receipts.is_some();
             let fallback_receipt_candidates = receipt_candidates
                 .into_iter()
-                .skip(if has_cached_receipts { 0 } else { 1 });
+                .skip(if has_cached_receipts { 0 } else { 1 })
+                .collect::<Vec<_>>();
+            let mut allow_serial_receipt_fallbacks = has_cached_receipts;
 
             let body_hashes = hashes.clone();
             let (body_elapsed, body_result, receipt_result) = if has_cached_receipts {
@@ -1165,6 +1167,7 @@ impl BodyReceiptRequestPlan {
                     }
                     Err(kind) => {
                         skip_fallback_receipt_peer = Some(receipt_peer);
+                        allow_serial_receipt_fallbacks = true;
                         failures.push(ChunkRequestFailure {
                             role: ChunkRequestRole::Receipts,
                             peer_id: receipt_peer,
@@ -1206,6 +1209,7 @@ impl BodyReceiptRequestPlan {
                     }
                 }
                 Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
+                    allow_serial_receipt_fallbacks = receipt_failure_allows_serial_fallback(&kind);
                     failures.push(ChunkRequestFailure {
                         role: ChunkRequestRole::Receipts,
                         peer_id: receipt_peer,
@@ -1214,6 +1218,10 @@ impl BodyReceiptRequestPlan {
                     })
                 }
                 None => {}
+            }
+
+            if !allow_serial_receipt_fallbacks {
+                break;
             }
 
             for receipt_peer in fallback_receipt_candidates {
@@ -3294,6 +3302,24 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
     }
 }
 
+fn receipt_failure_allows_serial_fallback(kind: &ChunkFailureKind) -> bool {
+    match kind {
+        ChunkFailureKind::Incomplete { .. } | ChunkFailureKind::ReceiptCountMismatch(_) => true,
+        ChunkFailureKind::Request(RequestAttempt::Request(
+            reth_network::p2p::error::RequestError::BadResponse
+            | reth_network::p2p::error::RequestError::UnsupportedCapability,
+        )) => true,
+        ChunkFailureKind::Request(
+            RequestAttempt::Disconnected
+            | RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::Timeout
+                | reth_network::p2p::error::RequestError::ChannelClosed
+                | reth_network::p2p::error::RequestError::ConnectionDropped,
+            ),
+        ) => false,
+    }
+}
+
 fn schedule_body_receipt_chunk_attempt<'a>(
     plan: &'a BodyReceiptRequestPlan,
     attempts: &mut futures_util::stream::FuturesUnordered<
@@ -4119,6 +4145,46 @@ mod tests {
         let ordered = receipt_candidates_for_body_peer(vec![body_peer], body_peer, 3);
 
         assert_eq!(ordered, vec![body_peer]);
+    }
+
+    #[test]
+    fn receipt_serial_fallbacks_skip_transport_tail_failures() {
+        use reth_network::p2p::error::RequestError;
+
+        assert!(!receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Disconnected)
+        ));
+        assert!(!receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::Timeout))
+        ));
+        assert!(!receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::ChannelClosed))
+        ));
+        assert!(!receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::ConnectionDropped))
+        ));
+
+        assert!(receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::BadResponse))
+        ));
+        assert!(receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Request(RequestAttempt::Request(
+                RequestError::UnsupportedCapability
+            ))
+        ));
+        assert!(receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::Incomplete { returned: 4 }
+        ));
+        assert!(receipt_failure_allows_serial_fallback(
+            &ChunkFailureKind::ReceiptCountMismatch(ReceiptCountMismatch {
+                response_kind: "receipts",
+                requested_blocks: 8,
+                returned_blocks: 8,
+                block_index: Some(0),
+                expected_receipts: Some(1),
+                returned_receipts: Some(0),
+            })
+        ));
     }
 
     #[test]

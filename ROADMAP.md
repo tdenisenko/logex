@@ -20,6 +20,9 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Validated the code with formatting and `logex-sync` tests.
 - Staged `/Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini to repair the stale VPS tunnel once sudo is available.
 - Deployed and rebuilt the cleaned scheduler baseline on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
+- Added a bounded receipt-fallback change for paired body/receipt chunks: transport-level receipt failures now end that chunk attempt so the outer hedge/retry scheduler can rotate peers instead of serially waiting on more receipt fallbacks inside one future.
+- Validated the fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed and rebuilt the fallback-tail candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
 
 ## Remaining TODOs
 
@@ -45,6 +48,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Checkpoints are accepted only when recent relative to a checkpoint-sync endpoint. Persisted state that is too stale requires a fresh recent checkpoint.
 - Keep the PR #93/master body/receipt request scheduling baseline until a live benchmark proves a replacement is better.
 - Do not keep request-cooldown or earlier prefix-hedge experiments without evidence from healthy-network runs.
+- Paired body/receipt chunk attempts should not serially try extra receipt peers after timeout/disconnect/channel-close failures; those are transport-tail failures better handled by the outer hedge/retry scheduler with rotated candidates. Serial fallback remains allowed for incomplete, mismatched, or bad-protocol receipt responses where cached bodies can still avoid a full body refetch.
 
 ## Challenges and Resolutions
 
@@ -57,18 +61,22 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Challenge: Current remote benchmark path is unhealthy.
   - Resolution: Identified stale WireGuard as the blocker, staged a repair script on the Mac mini, and confirmed remote sudo requires a password; live throughput work should resume only after the tunnel and peer discovery recover.
 
+- Challenge: A paired body/receipt chunk future could spend extra time on serial receipt fallbacks after a transport-level receipt failure.
+  - Resolution: Added a local fallback classifier so slow transport failures return to the outer scheduler for hedged/retry rotation, while data-shape failures can still use cached bodies.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler and body/receipt request-layer changes from this branch.
 - Removed the obsolete shared request cooldown state, helper functions, and tests.
 - Removed the unproven low-peer prefix redundancy change by restoring the prior threshold.
+- Inspected paired body/receipt fallback behavior and kept the new change scoped to transport-tail fallback gating.
 - No additional dead production code was identified in the touched paths.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `1efa95e` (`fix: restore historical sync scheduling baseline`), `d9f041a` (`docs: record historical sync regression status`)
+- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, and `perf: bound receipt fallback tail latency`
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.
