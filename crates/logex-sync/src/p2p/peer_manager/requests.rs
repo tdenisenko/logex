@@ -1000,9 +1000,40 @@ impl BodyReceiptRequestPlan {
         } else {
             receipt_total_ms / receipt_requests as u128
         };
+        let planned_chunks = self.ranges.len();
+        let (min_planned_chunk_blocks, max_planned_chunk_blocks, total_planned_chunk_blocks) =
+            self.ranges.iter().fold(
+                (usize::MAX, 0usize, 0usize),
+                |(min_blocks, max_blocks, total_blocks), range| {
+                    let blocks = range.len();
+                    (
+                        min_blocks.min(blocks),
+                        max_blocks.max(blocks),
+                        total_blocks.saturating_add(blocks),
+                    )
+                },
+            );
+        let min_planned_chunk_blocks = if planned_chunks == 0 {
+            0
+        } else {
+            min_planned_chunk_blocks
+        };
+        let avg_planned_chunk_blocks = total_planned_chunk_blocks
+            .checked_div(planned_chunks)
+            .unwrap_or_default();
+        let min_accepted_prefix_blocks = body_receipt_min_accepted_prefix(self.return_blocks);
+        let prefix_chunks =
+            body_receipt_scheduled_chunk_limit(&self.ranges, min_accepted_prefix_blocks);
         debug!(
             total_hashes = self.hashes.len(),
             return_blocks = self.return_blocks,
+            min_accepted_prefix_blocks,
+            planned_chunks,
+            prefix_chunks,
+            max_in_flight = self.max_in_flight,
+            avg_planned_chunk_blocks,
+            min_planned_chunk_blocks,
+            max_planned_chunk_blocks,
             contiguous_blocks,
             completed_chunks = chunks.len(),
             failures = failures.len(),
