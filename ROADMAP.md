@@ -18,6 +18,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Restored dense prefix redundancy behavior to the PR #93/master baseline.
 - Kept the historical fetch-pipeline refill fix as the only performance code change relative to `master`.
 - Validated the code with formatting and `logex-sync` tests.
+- Staged `/Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini to repair the stale VPS tunnel once sudo is available.
 
 ## Remaining TODOs
 
@@ -53,7 +54,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
   - Resolution: Carried the next child header through prepared/written batches and refilled the fetch pipeline after completed prepare ingestion.
 
 - Challenge: Current remote benchmark path is unhealthy.
-  - Resolution: Identified stale WireGuard as the blocker; live throughput work should resume only after the tunnel and peer discovery recover.
+  - Resolution: Identified stale WireGuard as the blocker and staged a repair script on the Mac mini; live throughput work should resume only after the tunnel and peer discovery recover.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -66,7 +67,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: pending
+- Commits made during this run: `1efa95e` (`fix: restore historical sync scheduling baseline`)
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel.
