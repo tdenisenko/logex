@@ -19,7 +19,8 @@ use super::catalog::{
 };
 use super::segment::{
     append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
-    persist_segment_manifest, segment_uses_current_compaction_profile,
+    persist_segment_manifest, persist_segment_manifest_with_columns,
+    segment_uses_current_compaction_profile, write_compacted_rows,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -298,6 +299,53 @@ impl NativeStorage {
         }
 
         let target_rows = self.config.hot_target_rows.max(1) as usize;
+        let dense_threshold = dense_historical_batch_row_threshold(target_rows);
+        if rows.len() >= dense_threshold {
+            self.finalize_active_historical_segment()?;
+
+            let compacted_len = compacted_historical_row_prefix_len(rows.len(), target_rows);
+            let mut appended =
+                self.write_compacted_historical_segments(&rows[..compacted_len], target_rows)?;
+            if compacted_len < rows.len() {
+                appended.extend(
+                    self.write_staged_historical_rows(&rows[compacted_len..], target_rows)?,
+                );
+            }
+            return Ok(appended);
+        }
+
+        self.write_staged_historical_rows(rows, target_rows)
+    }
+
+    fn write_compacted_historical_segments(
+        &mut self,
+        rows: &[logex_types::LogRow],
+        target_rows: usize,
+    ) -> std::io::Result<Vec<PartitionMeta>> {
+        let mut appended = Vec::new();
+        for chunk in rows.chunks(target_rows) {
+            let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
+            let segment_dir = self.paths.segment_dir(descriptor.id);
+            if segment_dir.exists() {
+                fs::remove_dir_all(&segment_dir)?;
+            }
+            let columns = write_compacted_rows(&segment_dir, chunk)?;
+            apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
+            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
+            appended.push(self.partition_meta(&descriptor));
+            self.catalog.segments.push(descriptor);
+        }
+        if !appended.is_empty() {
+            self.persist_catalog()?;
+        }
+        Ok(appended)
+    }
+
+    fn write_staged_historical_rows(
+        &mut self,
+        rows: &[logex_types::LogRow],
+        target_rows: usize,
+    ) -> std::io::Result<Vec<PartitionMeta>> {
         let mut touched = BTreeSet::new();
         let mut offset = 0usize;
         while offset < rows.len() {
@@ -1366,6 +1414,28 @@ fn historical_segment_block_span(descriptor: &SegmentDescriptor) -> Option<u64> 
     Some(descriptor.max_block?.saturating_sub(descriptor.min_block?))
 }
 
+fn dense_historical_batch_row_threshold(target_rows: usize) -> usize {
+    if target_rows <= 1024 {
+        target_rows.max(1)
+    } else {
+        (target_rows / 4).max(1)
+    }
+}
+
+fn compacted_historical_row_prefix_len(row_count: usize, target_rows: usize) -> usize {
+    if row_count <= target_rows {
+        return row_count;
+    }
+
+    let dense_threshold = dense_historical_batch_row_threshold(target_rows);
+    let remainder = row_count % target_rows;
+    if remainder > 0 && remainder < dense_threshold {
+        row_count - remainder
+    } else {
+        row_count
+    }
+}
+
 fn rows_block_range(rows: &[LogRow]) -> Option<(u64, u64)> {
     let mut iter = rows.iter().map(|row| row.block_number);
     let first = iter.next()?;
@@ -1729,6 +1799,31 @@ mod tests {
         assert_eq!(reloaded.sealed_count(), 3);
         assert_eq!(reloaded.hot_partition_meta().row_count, 0);
         assert!(reloaded.active_historical_segment_id().is_some());
+    }
+
+    #[test]
+    fn native_storage_writes_dense_subtarget_historical_batches_compacted() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows(600, 100);
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 2_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+
+        storage.write_historical_batch(&rows).unwrap();
+
+        let sealed = storage.sealed_partition_metas();
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].row_count, 600);
+        assert_eq!(storage.active_historical_segment_id(), None);
+
+        let segment_dir = storage.segment_path(sealed[0].id);
+        assert!(!segment_dir.join("address.col").exists());
+        assert!(segment_dir.join("columns/address.pages").exists());
+        let reader = SegmentReader::open(&segment_dir).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
     }
 
     #[test]

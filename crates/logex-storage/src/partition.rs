@@ -84,7 +84,7 @@ impl PartitionManager {
         Ok(())
     }
 
-    /// Ingest immutable historical rows directly as sealed compacted segments.
+    /// Ingest immutable historical rows using compacted dense segments and sparse staging.
     pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {
         self.inner.write_historical_batch(rows)?;
         self.refresh_views();
