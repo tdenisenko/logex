@@ -8,7 +8,7 @@ Active branch: `perf/historical-sync-throughput-v3`.
 
 The sparse historical segment coalescing work was merged. The Mac mini is running LogEx from `/Users/gremlinmaster/logex-src` against `/Volumes/SSD 4TB/LogEx` through the VPS full tunnel with public egress/NAT `157.245.195.72`. Tailscale remains stopped on the Mac during full-tunnel testing; manage the host through `ssh pi-remote` and then `ssh gremlinmaster@192.168.50.44`. The client is running in a detached tmux session using `/Users/gremlinmaster/.local/bin/tmux`, not `screen`.
 
-Historical sync is progressing, but the remaining bottleneck is still body/receipt fetch tail latency. Local validation and storage writes are much smaller than fetch time in the dense ranges sampled so far.
+Historical sync is progressing, but the remaining bottleneck is still body/receipt fetch tail latency. Local validation and storage writes are much smaller than fetch time in the dense ranges sampled so far. Prefix redundancy now activates at smaller serving-peer counts, which improves low-peer dense-range throughput but does not remove the long-tail fetch bottleneck.
 
 ## Completed Since Last Run
 
@@ -21,12 +21,15 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - Tested a denser active-fetch experiment and reverted it:
   - Raising dense fetch depth from 6 to 10 increased RSS and CPU but worsened request-plan tail latency and floor stalls.
   - The running client was restored to the stable refill-fix build.
+- Kept a targeted prefix-redundancy change for dense body/receipt plans:
+  - Redundant prefix requests now activate at 8 serving peers instead of 16.
+  - Live testing on the Mac mini improved low-peer throughput relative to the restored baseline, while focused, full `logex-sync`, and clippy validation passed.
 
 ## Remaining TODOs
 
-1. Prove or reject the scheduler refill fix over a longer warm run.
-   - Reason: Early logs show it prevents the downloader from draining to zero, but the benchmark still needs higher serving-peer samples.
-   - Completion criteria: Active fetches remain populated during dense sync, peer count warms normally, and sustained throughput improves without higher memory churn.
+1. Continue live benchmarking of prefix redundancy and scheduler refill behavior over a longer warm run.
+   - Reason: Early low-peer samples improved, but higher serving-peer samples are still required before treating the change as production-proven.
+   - Completion criteria: Active fetches remain populated during dense sync, peer count warms normally, and sustained throughput improves without higher memory churn or excessive duplicate fetch work.
 
 2. Reduce body/receipt fetch tail latency.
    - Reason: Request plans still regularly take 10-40 seconds, causing visible floor stalls even when CPU, RAM, and disk are not saturated.
@@ -47,6 +50,7 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - Sparse historical writes are coalesced in durable storage so verified rows remain crash-safe while segment count stays bounded.
 - During the current Mac mini benchmark, full-VPS routing is preferred over direct Tailscale management; use the Raspberry Pi SSH path until the network mode changes.
 - Dense historical fetch window size remains capped at 512 blocks. Increasing active dense fetch depth to 10 was rejected because it raised memory/CPU pressure and worsened request tail latency.
+- Dense body/receipt prefix redundancy starts at 8 serving peers so the earliest contiguous chunks are less likely to block on a single slow peer. This spends limited spare request capacity on the prefix instead of broadening the whole fetch pipeline.
 
 ## Challenges and Resolutions
 
@@ -56,14 +60,17 @@ Historical sync is progressing, but the remaining bottleneck is still body/recei
 - Challenge: Completed historical prepare results could consume buffered batches without scheduling the next fetch window.
   - Resolution: Carried the next child header through prepared/written batches and refilled the fetch pipeline after completed prepare ingestion.
 
+- Challenge: Low-peer dense sync could stall behind a slow leading body/receipt chunk.
+  - Resolution: Lowered the prefix-redundancy serving-peer threshold from 16 to 8 and validated it with live low-peer samples plus `logex-sync` tests and clippy.
+
 - Challenge: Tailscale and host-wide WireGuard full-tunnel routing conflict on the Mac mini.
   - Resolution: Keep Tailscale stopped during full-tunnel performance runs and manage through the Raspberry Pi route.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected historical scheduler and request-layer changes made during this pass.
-- Removed the ineffective dense-depth experiment before committing.
-- No additional dead production code was identified in the touched scheduler structs or helper path.
+- Removed the ineffective dense-depth and high-pipeline-threshold experiments before committing.
+- Inspected body/receipt request scheduling helpers and tests touched by prefix redundancy; no dead production code was identified.
 
 ## Git Workflow
 

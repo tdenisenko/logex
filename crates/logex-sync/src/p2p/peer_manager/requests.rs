@@ -19,7 +19,7 @@ const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
-const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
+const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
@@ -4287,15 +4287,15 @@ mod tests {
         let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
 
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 16),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 8),
             4
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 16),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 8),
             2
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 16),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 8),
             0
         );
     }
@@ -4309,16 +4309,16 @@ mod tests {
             0
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 15),
+            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 7),
             0
         );
     }
 
     #[test]
     fn body_receipt_prefix_hedges_get_spare_capacity_for_dense_peer_sets() {
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 16), 4);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 8), 4);
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(1025, 32), 0);
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 15), 0);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 7), 0);
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(0, 32), 0);
     }
 
