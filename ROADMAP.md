@@ -6,7 +6,7 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput-v3`.
 
-Historical sync performance work is focused on body/receipt fetch tail latency and keeping the downloader active while validation/write work drains. Preserved Mac mini logs confirm earlier runs reached 800k+ logs/sec bursts; later low-throughput runs showed fewer active fetches, more body/receipt chunks per batch, and longer body/receipt plans. The current branch removes unproven cooldown/prefix experiments, removes the failed decoupled dense body/receipt pre-pass, and keeps bounded scheduler changes that refill lookahead, rotate retries, skip serial receipt fallbacks on transport-tail failures, and keep active downloads full when completed buffers are healthy.
+Historical sync performance work is focused on body/receipt fetch tail latency and keeping the downloader active while validation/write work drains. Preserved Mac mini logs confirm earlier runs reached 800k+ logs/sec bursts; later low-throughput runs showed fewer active fetches, more body/receipt chunks per batch, and longer body/receipt plans. The current branch removes unproven cooldown/prefix experiments, removes the failed decoupled dense body/receipt pre-pass, and keeps bounded scheduler changes that refill lookahead, rotate retries, skip serial body/receipt fallbacks on transport-tail failures, and keep active downloads full when completed buffers are healthy.
 
 Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx is running locally, but the VPS cannot reach `10.66.0.2:18683`, the Mac cannot ping `10.66.0.1`, and the client has zero EL peers. Throughput samples are not meaningful until the tunnel is healthy again.
 
@@ -23,7 +23,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Added a bounded receipt-fallback change for paired body/receipt chunks: transport-level receipt failures now end that chunk attempt so the outer hedge/retry scheduler can rotate peers instead of serially waiting on more receipt fallbacks inside one future.
 - Validated the fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Deployed and rebuilt the fallback-tail candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Added retry-ordinal peer rotation for paired, decoupled, and generic parallel chunk retries so a failed chunk retry does not select the same first peer again when the chunk count is a multiple of the peer count.
+- Added retry-ordinal peer rotation for paired and generic parallel chunk retries so a failed chunk retry does not select the same first peer again when the chunk count is a multiple of the peer count.
 - Validated retry rotation with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Deployed and rebuilt the retry-rotation candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
 - Compared PR #93-era and current preserved logs. The strongest baseline samples reached ~970k logs/sec bursts with shorter body/receipt plans, while degraded v3 samples had lower active fetch counts and much longer plan times in dense ranges.
@@ -38,6 +38,9 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Validated the cleanup with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Deployed and rebuilt the paired-only dense candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
 - Confirmed the paired-only build starts and storage integrity passes; live throughput remains blocked because the Mac mini WireGuard tunnel still has zero EL peers and cannot reach `10.66.0.1`.
+- Compared body and receipt failures across retained and degraded logs; body failures are also material in degraded runs.
+- Extended the transport-tail fallback rule to body requests, so timeout/disconnect/channel-close body failures return to the outer hedge/retry scheduler instead of serially trying more body peers inside one chunk future.
+- Validated the body fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 
 ## Remaining TODOs
 
@@ -63,7 +66,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Checkpoints are accepted only when recent relative to a checkpoint-sync endpoint. Persisted state that is too stale requires a fresh recent checkpoint.
 - Keep the PR #93/master body/receipt request scheduling baseline until a live benchmark proves a replacement is better.
 - Do not keep request-cooldown or earlier prefix-hedge experiments without evidence from healthy-network runs.
-- Paired body/receipt chunk attempts should not serially try extra receipt peers after timeout/disconnect/channel-close failures; those are transport-tail failures better handled by the outer hedge/retry scheduler with rotated candidates. Serial fallback remains allowed for incomplete, mismatched, or bad-protocol receipt responses where cached bodies can still avoid a full body refetch.
+- Paired body/receipt chunk attempts should not serially try extra body or receipt peers after timeout/disconnect/channel-close failures; those are transport-tail failures better handled by the outer hedge/retry scheduler with rotated candidates. Serial fallback remains allowed for incomplete, mismatched, or bad-protocol responses where local partial work can still avoid a full refetch.
 - Chunk retry/hedge scheduling uses retry ordinal as the peer-rotation offset rather than multiplying by the number of ranges. Multiplying by range count can repeatedly select the same first peer when `range_count % peer_count == 0`, which wastes hedges on the exact slow peer path.
 - Under healthy memory, completed fetch buffers are allowed to fill without starving active downloads; the scheduler can keep up to one pipeline window active beyond the completed buffer limit, preserving a bounded memory budget while reducing spike/plunge behavior.
 - Request-limit changes should wait for healthy-network diagnostics. Preserved logs show degraded dense runs over-fragmented body/receipt plans, but raising limits without live confirmation may increase peer tail timeouts.
@@ -83,6 +86,9 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Challenge: A paired body/receipt chunk future could spend extra time on serial receipt fallbacks after a transport-level receipt failure.
   - Resolution: Added a local fallback classifier so slow transport failures return to the outer scheduler for hedged/retry rotation, while data-shape failures can still use cached bodies.
 
+- Challenge: Degraded logs also showed body failures increasing materially, leaving the same serial-tail risk on the body side.
+  - Resolution: Reused the fallback classifier for body failures so transport-tail body errors also stop the chunk attempt and rotate through the outer scheduler.
+
 - Challenge: Chunk retries and hedges could rotate by a multiple of the peer count and reuse the same first peer.
   - Resolution: Retried chunks now advance by retry ordinal, with tests covering bounded hedge indexes.
 
@@ -100,8 +106,8 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Inspected the historical scheduler and body/receipt request-layer changes from this branch.
 - Removed the obsolete shared request cooldown state, helper functions, and tests.
 - Removed the unproven low-peer prefix redundancy change by restoring the prior threshold.
-- Inspected paired body/receipt fallback behavior and kept the new change scoped to transport-tail fallback gating.
-- Inspected retry-index construction across paired, decoupled, and generic parallel chunk request paths; replaced repeated multiplier expressions with one retry-index helper.
+- Inspected paired body/receipt fallback behavior and kept the changes scoped to transport-tail fallback gating.
+- Inspected retry-index construction across paired and generic parallel chunk request paths; replaced repeated multiplier expressions with one retry-index helper.
 - Inspected historical fetch budget logic and updated the existing capacity helper instead of adding a parallel scheduler path.
 - Inspected body/receipt chunk sizing, adaptive request limits, and local geth request scheduling references. No obsolete code was safe to remove; the next risky change is request-limit tuning and needs healthy-network evidence.
 - Removed the obsolete decoupled dense body/receipt pre-pass, decoupled scheduling helpers, sourced body assembly helper, and source-count validation helper.
@@ -111,7 +117,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`; remote deployment note pending commit
+- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`, `docs: record paired dense remote deployment`; body fallback change pending commit
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.

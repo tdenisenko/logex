@@ -1013,6 +1013,7 @@ impl BodyReceiptRequestPlan {
                         .collect::<Vec<_>>()
                 }
                 Err(kind) => {
+                    let allow_serial_body_fallback = chunk_failure_allows_serial_fallback(&kind);
                     failures.push(ChunkRequestFailure {
                         role: ChunkRequestRole::Bodies,
                         peer_id: body_peer,
@@ -1038,6 +1039,9 @@ impl BodyReceiptRequestPlan {
                             });
                         }
                         None => {}
+                    }
+                    if !allow_serial_body_fallback {
+                        break;
                     }
                     continue;
                 }
@@ -1108,7 +1112,7 @@ impl BodyReceiptRequestPlan {
                     }
                 }
                 Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
-                    allow_serial_receipt_fallbacks = receipt_failure_allows_serial_fallback(&kind);
+                    allow_serial_receipt_fallbacks = chunk_failure_allows_serial_fallback(&kind);
                     failures.push(ChunkRequestFailure {
                         role: ChunkRequestRole::Receipts,
                         peer_id: receipt_peer,
@@ -2870,7 +2874,7 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
     }
 }
 
-fn receipt_failure_allows_serial_fallback(kind: &ChunkFailureKind) -> bool {
+fn chunk_failure_allows_serial_fallback(kind: &ChunkFailureKind) -> bool {
     match kind {
         ChunkFailureKind::Incomplete { .. } | ChunkFailureKind::ReceiptCountMismatch(_) => true,
         ChunkFailureKind::Request(RequestAttempt::Request(
@@ -3591,34 +3595,34 @@ mod tests {
     }
 
     #[test]
-    fn receipt_serial_fallbacks_skip_transport_tail_failures() {
+    fn chunk_serial_fallbacks_skip_transport_tail_failures() {
         use reth_network::p2p::error::RequestError;
 
-        assert!(!receipt_failure_allows_serial_fallback(
+        assert!(!chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Disconnected)
         ));
-        assert!(!receipt_failure_allows_serial_fallback(
+        assert!(!chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::Timeout))
         ));
-        assert!(!receipt_failure_allows_serial_fallback(
+        assert!(!chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::ChannelClosed))
         ));
-        assert!(!receipt_failure_allows_serial_fallback(
+        assert!(!chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::ConnectionDropped))
         ));
 
-        assert!(receipt_failure_allows_serial_fallback(
+        assert!(chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Request(RequestError::BadResponse))
         ));
-        assert!(receipt_failure_allows_serial_fallback(
+        assert!(chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Request(RequestAttempt::Request(
                 RequestError::UnsupportedCapability
             ))
         ));
-        assert!(receipt_failure_allows_serial_fallback(
+        assert!(chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::Incomplete { returned: 4 }
         ));
-        assert!(receipt_failure_allows_serial_fallback(
+        assert!(chunk_failure_allows_serial_fallback(
             &ChunkFailureKind::ReceiptCountMismatch(ReceiptCountMismatch {
                 response_kind: "receipts",
                 requested_blocks: 8,
