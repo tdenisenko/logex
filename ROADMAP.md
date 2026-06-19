@@ -23,6 +23,9 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Added a bounded receipt-fallback change for paired body/receipt chunks: transport-level receipt failures now end that chunk attempt so the outer hedge/retry scheduler can rotate peers instead of serially waiting on more receipt fallbacks inside one future.
 - Validated the fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Deployed and rebuilt the fallback-tail candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
+- Added retry-ordinal peer rotation for paired, decoupled, and generic parallel chunk retries so a failed chunk retry does not select the same first peer again when the chunk count is a multiple of the peer count.
+- Validated retry rotation with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed and rebuilt the retry-rotation candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
 
 ## Remaining TODOs
 
@@ -49,6 +52,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Keep the PR #93/master body/receipt request scheduling baseline until a live benchmark proves a replacement is better.
 - Do not keep request-cooldown or earlier prefix-hedge experiments without evidence from healthy-network runs.
 - Paired body/receipt chunk attempts should not serially try extra receipt peers after timeout/disconnect/channel-close failures; those are transport-tail failures better handled by the outer hedge/retry scheduler with rotated candidates. Serial fallback remains allowed for incomplete, mismatched, or bad-protocol receipt responses where cached bodies can still avoid a full body refetch.
+- Chunk retry/hedge scheduling uses retry ordinal as the peer-rotation offset rather than multiplying by the number of ranges. Multiplying by range count can repeatedly select the same first peer when `range_count % peer_count == 0`, which wastes hedges on the exact slow peer path.
 
 ## Challenges and Resolutions
 
@@ -64,19 +68,23 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Challenge: A paired body/receipt chunk future could spend extra time on serial receipt fallbacks after a transport-level receipt failure.
   - Resolution: Added a local fallback classifier so slow transport failures return to the outer scheduler for hedged/retry rotation, while data-shape failures can still use cached bodies.
 
+- Challenge: Chunk retries and hedges could rotate by a multiple of the peer count and reuse the same first peer.
+  - Resolution: Retried chunks now advance by retry ordinal, with tests covering bounded hedge indexes.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler and body/receipt request-layer changes from this branch.
 - Removed the obsolete shared request cooldown state, helper functions, and tests.
 - Removed the unproven low-peer prefix redundancy change by restoring the prior threshold.
 - Inspected paired body/receipt fallback behavior and kept the new change scoped to transport-tail fallback gating.
+- Inspected retry-index construction across paired, decoupled, and generic parallel chunk request paths; replaced repeated multiplier expressions with one retry-index helper.
 - No additional dead production code was identified in the touched paths.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, and `perf: bound receipt fallback tail latency`
+- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, and retry-rotation work pending commit
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.

@@ -782,8 +782,7 @@ impl BodyReceiptRequestPlan {
                     &mut attempts,
                     &mut in_flight,
                     range,
-                    base_chunk_index
-                        + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
+                    retry_chunk_index(base_chunk_index, duplicate_index + 1),
                     chunk_body_peer_ids,
                     chunk_receipt_peer_ids,
                 );
@@ -837,9 +836,7 @@ impl BodyReceiptRequestPlan {
                                 &mut attempts,
                                 &mut in_flight,
                                 range,
-                                chunk_index
-                                    + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count)
-                                        * self.ranges.len()),
+                                chunk_index,
                                 chunk_body_peer_ids,
                                 chunk_receipt_peer_ids,
                             );
@@ -894,7 +891,7 @@ impl BodyReceiptRequestPlan {
                 {
                     let retry_count = retry_counts.entry(chunk_start).or_default();
                     *retry_count += 1;
-                    let chunk_index = base_chunk_index + (*retry_count * self.ranges.len());
+                    let chunk_index = retry_chunk_index(base_chunk_index, *retry_count);
                     let chunk_body_peer_ids =
                         peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
                     let chunk_receipt_peer_ids =
@@ -952,8 +949,7 @@ impl BodyReceiptRequestPlan {
                         &mut attempts,
                         &mut in_flight,
                         range,
-                        chunk_index
-                            + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count) * self.ranges.len()),
+                        chunk_index,
                         chunk_body_peer_ids,
                         chunk_receipt_peer_ids,
                     );
@@ -1293,7 +1289,6 @@ impl BodyReceiptRequestPlan {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
         }
-        let range_count = ranges.len();
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -1367,7 +1362,7 @@ impl BodyReceiptRequestPlan {
                         .get(&range.start)
                         .copied()
                         .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
+                    Some((retry_chunk_index(base_chunk_index, *retry_count), range))
                 } else {
                     None
                 }
@@ -1400,7 +1395,7 @@ impl BodyReceiptRequestPlan {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    retry_chunk_index(base_chunk_index, PARALLEL_CHUNK_RETRY_ROUNDS + 1),
                 );
                 for peer_id in retry_peer_ids {
                     let request_hashes = hashes[range.clone()].to_vec();
@@ -1458,7 +1453,6 @@ impl BodyReceiptRequestPlan {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
         }
-        let range_count = ranges.len();
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -1532,7 +1526,7 @@ impl BodyReceiptRequestPlan {
                         .get(&range.start)
                         .copied()
                         .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
+                    Some((retry_chunk_index(base_chunk_index, *retry_count), range))
                 } else {
                     None
                 }
@@ -1565,7 +1559,7 @@ impl BodyReceiptRequestPlan {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    retry_chunk_index(base_chunk_index, PARALLEL_CHUNK_RETRY_ROUNDS + 1),
                 );
                 for peer_id in retry_peer_ids {
                     let request_hashes = hashes[range.clone()].to_vec();
@@ -2398,7 +2392,6 @@ impl PeerManager {
         if ranges.len() < 2 {
             return Ok(None);
         }
-        let range_count = ranges.len();
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -2473,7 +2466,7 @@ impl PeerManager {
                         .get(&range.start)
                         .copied()
                         .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
+                    Some((retry_chunk_index(base_chunk_index, *retry_count), range))
                 } else {
                     None
                 }
@@ -2517,7 +2510,7 @@ impl PeerManager {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    retry_chunk_index(base_chunk_index, PARALLEL_CHUNK_RETRY_ROUNDS + 1),
                 );
                 for peer_id in retry_peer_ids {
                     let request_hashes = hashes[range.clone()].to_vec();
@@ -2608,7 +2601,6 @@ impl PeerManager {
         if ranges.len() < 2 {
             return Ok(None);
         }
-        let range_count = ranges.len();
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
@@ -2689,7 +2681,7 @@ impl PeerManager {
                         .get(&range.start)
                         .copied()
                         .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
+                    Some((retry_chunk_index(base_chunk_index, *retry_count), range))
                 } else {
                     None
                 }
@@ -2739,7 +2731,7 @@ impl PeerManager {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    retry_chunk_index(base_chunk_index, PARALLEL_CHUNK_RETRY_ROUNDS + 1),
                 );
                 for peer_id in retry_peer_ids {
                     let request_hashes = hashes[range.clone()].to_vec();
@@ -3320,6 +3312,10 @@ fn receipt_failure_allows_serial_fallback(kind: &ChunkFailureKind) -> bool {
     }
 }
 
+fn retry_chunk_index(base_chunk_index: usize, retry_ordinal: usize) -> usize {
+    base_chunk_index.saturating_add(retry_ordinal)
+}
+
 fn schedule_body_receipt_chunk_attempt<'a>(
     plan: &'a BodyReceiptRequestPlan,
     attempts: &mut futures_util::stream::FuturesUnordered<
@@ -3394,7 +3390,10 @@ fn body_receipt_hedge_candidate(
 
     entry.hedges += 1;
     entry.last_hedged_at = now;
-    Some((entry.range.clone(), entry.chunk_index))
+    Some((
+        entry.range.clone(),
+        retry_chunk_index(entry.chunk_index, entry.hedges),
+    ))
 }
 
 fn body_receipt_chunk_request<'a>(
@@ -4396,6 +4395,14 @@ mod tests {
     }
 
     #[test]
+    fn retry_chunk_index_advances_by_attempt_ordinal() {
+        assert_eq!(retry_chunk_index(0, 1), 1);
+        assert_eq!(retry_chunk_index(7, 1), 8);
+        assert_eq!(retry_chunk_index(7, 3), 10);
+        assert_eq!(retry_chunk_index(usize::MAX, 1), usize::MAX);
+    }
+
+    #[test]
     fn body_receipt_hedge_candidate_allows_bounded_rehedges_for_blocking_gap() {
         let start = Instant::now();
         let mut in_flight = HashMap::from([(
@@ -4412,7 +4419,7 @@ mod tests {
 
         assert_eq!(
             body_receipt_hedge_candidate(&mut in_flight, &chunks, 1024, start),
-            Some((0..32, 0))
+            Some((0..32, 1))
         );
         assert!(body_receipt_hedge_candidate(&mut in_flight, &chunks, 1024, start).is_none());
         for retry in 1..PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK {
@@ -4423,7 +4430,7 @@ mod tests {
                     1024,
                     start + (PIPELINED_BODY_RECEIPT_HEDGE_DELAY * retry as u32)
                 ),
-                Some((0..32, 0))
+                Some((0..32, retry + 1))
             );
         }
         assert!(
