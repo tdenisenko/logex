@@ -6,60 +6,32 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput-v3`.
 
-Historical sync performance work is focused on body/receipt fetch tail latency and keeping the downloader active while validation/write work drains. Preserved Mac mini logs confirm earlier runs reached 800k+ logs/sec bursts; later low-throughput runs showed longer body/receipt plans, higher local extraction/write cost in dense batches, and occasional fetch-buffer starvation. The current branch removes unproven cooldown/prefix experiments, removes the failed decoupled dense body/receipt pre-pass, and keeps bounded scheduler changes that refill lookahead, rotate retries, skip serial body/receipt fallbacks on transport-tail failures, and keep active downloads full when completed buffers are healthy.
+The Mac mini WireGuard/VPS path is healthy again after replacing the stale-interface wrapper with a health-checking LaunchDaemon script. The wrapper now treats a tunnel as healthy only if the VPS tunnel IP responds or the WireGuard handshake is recent; otherwise it restarts the tunnel and restores the full-tunnel routes while preserving LAN access.
 
-Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx is running locally, full-tunnel routes exist, but the VPS handshake is stale, the Mac cannot ping `10.66.0.1`, and the client has zero EL peers. Throughput samples are not meaningful until the tunnel is healthy again.
+Historical sync performance work has been reset to the proven `master` scheduler baseline. A same-data A/B test on the Mac mini showed the v3 scheduler branch regressed to roughly 15k-42k logs/sec with 11-20 serving peers, while a clean `master` build reached roughly 60k-99k logs/sec with only 4-6 serving peers and shorter body/receipt plans. The remote client is currently running the clean `master` build from `/Users/gremlinmaster/logex-master-test` against `/Volumes/SSD 4TB/LogEx` for continued warm-up observation.
 
 ## Completed Since Last Run
 
-- Investigated the performance regression against preserved remote logs.
-- Confirmed prior high-throughput samples reached roughly 800k-970k logs/sec bursts.
-- Removed the unproven shared body/receipt cooldown experiment from the current branch.
-- Restored dense prefix redundancy behavior to the PR #93/master baseline.
-- Kept the historical fetch-pipeline refill fix as the only performance code change relative to `master`.
-- Validated the code with formatting and `logex-sync` tests.
-- Staged `/Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini to repair the stale VPS tunnel once sudo is available.
-- Deployed and rebuilt the cleaned scheduler baseline on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Added a bounded receipt-fallback change for paired body/receipt chunks: transport-level receipt failures now end that chunk attempt so the outer hedge/retry scheduler can rotate peers instead of serially waiting on more receipt fallbacks inside one future.
-- Validated the fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Deployed and rebuilt the fallback-tail candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Added retry-ordinal peer rotation for paired and generic parallel chunk retries so a failed chunk retry does not select the same first peer again when the chunk count is a multiple of the peer count.
-- Validated retry rotation with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Deployed and rebuilt the retry-rotation candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Compared PR #93-era and current preserved logs. The strongest baseline samples reached ~970k logs/sec bursts with shorter body/receipt plans, while degraded v3 samples had lower active fetch counts and much longer plan times in dense ranges.
-- Updated the healthy-memory fetch budget so completed buffered fetches do not block the scheduler from keeping the active download window full; total outstanding fetches remain bounded by buffer depth plus pipeline depth.
-- Validated the active-download budget change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Deployed and rebuilt the active-download budget candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Compared retained high-throughput and degraded dense logs for request-plan shape. Degraded dense runs averaged roughly twice as many planned chunks per 512-block batch, which points at adaptive request-limit shrinkage or peer-tail retries as a likely remaining bottleneck.
-- Added debug-only body/receipt plan diagnostics for planned chunk count, prefix chunk count, active in-flight cap, and min/avg/max planned chunk size so the next healthy run can identify whether request limits are over-fragmenting dense ranges.
-- Validated the diagnostics change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Identified `perf: split dense body receipt fetches` as a strong regression candidate: preserved degraded logs repeatedly showed the decoupled dense pre-pass failing to produce a prefix before falling back to paired body/receipt fetching.
-- Removed the decoupled dense body/receipt pre-pass and its unused helpers so dense ranges use the paired scheduler directly.
-- Validated the cleanup with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Deployed and rebuilt the paired-only dense candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Confirmed the paired-only build starts and storage integrity passes; live throughput remains blocked because the Mac mini WireGuard tunnel still has zero EL peers and cannot reach `10.66.0.1`.
-- Compared body and receipt failures across retained and degraded logs; body failures are also material in degraded runs.
-- Extended the transport-tail fallback rule to body requests, so timeout/disconnect/channel-close body failures return to the outer hedge/retry scheduler instead of serially trying more body peers inside one chunk future.
-- Validated the body fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
-- Deployed and rebuilt the body-fallback candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
-- Confirmed the latest build starts and storage integrity passes; live throughput remains blocked because the Mac mini WireGuard tunnel still has zero EL peers.
-- Rechecked the PR #93-era preserved logs. Earlier 800k+ logs/sec bursts are real: the strongest retained samples reached roughly 839k, 935k, and 971k logs/sec, with `active_fetches=6`, buffers around 15, and body/receipt p95 near 13s-16s.
-- Compared degraded v3 runs against those retained samples. The long degraded v3 sample averaged roughly 179k logs/sec with body/receipt p95 around 22s, while a storage-test sample hit roughly 446k max but had a smaller completed buffer. That keeps body/receipt tail latency and active queue health as the next bottleneck to verify.
-- Confirmed the Mac mini still cannot repair WireGuard non-interactively because remote `sudo -n` requires a password.
+- Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
+- Confirmed the repaired tunnel has working VPS egress, tunnel ping, DNAT/forwarding counters, and dashboard access through the VPS.
+- Built a clean `master` binary on the Mac mini after fixing the SSH PATH for Homebrew `protoc`.
+- Restarted LogEx gracefully in tmux without resetting the data directory and benchmarked `master` against the same data/tunnel path.
+- Reverted the v3 scheduler code changes back to the `master` scheduler/storage baseline because live A/B evidence showed the newer branch was a throughput regression.
+- Validated the restored baseline with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, and `cargo check --workspace`.
 
 ## Remaining TODOs
 
-1. Repair the Mac mini VPS tunnel and rerun live benchmarks.
-   - Reason: Peer and throughput measurements are invalid while WireGuard is stale and the client has zero peers.
-   - Completion criteria: run `sudo /Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini or through the Pi path, VPS access to `http://10.66.0.2:18683/status` works, the Mac can reach `10.66.0.1`, peers warm normally, and the current scheduler candidate is benchmarked in dense historical ranges.
+1. Re-establish high-throughput historical sync from the master scheduler baseline.
+   - Reason: Earlier retained runs reached 800k-970k logs/sec bursts; the fresh master A/B is healthier than v3 but still needs warm peers and further verification.
+   - Completion criteria: With the repaired VPS tunnel, run long enough to reach normal peer counts, confirm whether dense ranges return to 800k+ logs/sec peaks, and keep only changes that improve sustained logs/sec and ETA versus the master baseline.
 
-2. Reduce body/receipt fetch tail latency.
-   - Reason: Dense historical sync still stalls behind slow body/receipt request plans when peers are available but chunks complete unevenly.
-   - Completion criteria: Benchmark the paired-only dense path on a healthy run, use the new chunk diagnostics to confirm the remaining bottleneck, then implement and benchmark a scheduling, hedging, request-limit, or peer-selection change that materially improves sustained logs/sec without increasing stalls, memory churn, or peer churn.
+2. Identify the remaining bottleneck if throughput stays below target after peer warm-up.
+   - Reason: The goal is to reduce full historical sync toward the 4-hour target without relying on short spikes.
+   - Completion criteria: Use body/receipt plan latency, peer count, serving-peer mix, CPU, memory, disk, and network observations to prove whether the bottleneck is peer tail latency, local processing, or infrastructure before changing code.
 
 3. Match production-client P2P behavior more closely.
    - Reason: The target is Geth/Nethermind-class peer retention and sync performance.
-   - Completion criteria: Audit relevant Geth/Nethermind peer scoring, request scheduling, and timeout behavior; apply compatible improvements only when live benchmarks justify them.
+   - Completion criteria: Audit relevant Geth/Nethermind peer scoring, request scheduling, timeout, and peer-retention behavior; implement compatible changes only when benchmarks show they beat the restored baseline.
 
 4. Complete release hardening.
    - Reason: Production readiness depends on verification safety, restart safety, and predictable operations.
@@ -67,69 +39,39 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 ## Design Decisions
 
+- Keep the `master` body/receipt scheduler as the performance baseline until a live benchmark proves a replacement is better.
+- Do not keep v3 scheduler experiments that regress throughput, even if they appear theoretically cleaner.
+- WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
-- Checkpoints are accepted only when recent relative to a checkpoint-sync endpoint. Persisted state that is too stale requires a fresh recent checkpoint.
-- Keep the PR #93/master body/receipt request scheduling baseline until a live benchmark proves a replacement is better.
-- Do not keep request-cooldown or earlier prefix-hedge experiments without evidence from healthy-network runs.
-- Paired body/receipt chunk attempts should not serially try extra body or receipt peers after timeout/disconnect/channel-close failures; those are transport-tail failures better handled by the outer hedge/retry scheduler with rotated candidates. Serial fallback remains allowed for incomplete, mismatched, or bad-protocol responses where local partial work can still avoid a full refetch.
-- Chunk retry/hedge scheduling uses retry ordinal as the peer-rotation offset rather than multiplying by the number of ranges. Multiplying by range count can repeatedly select the same first peer when `range_count % peer_count == 0`, which wastes hedges on the exact slow peer path.
-- Under healthy memory, completed fetch buffers are allowed to fill without starving active downloads; the scheduler can keep up to one pipeline window active beyond the completed buffer limit, preserving a bounded memory budget while reducing spike/plunge behavior.
-- Request-limit changes should wait for healthy-network diagnostics. Preserved logs show degraded dense runs over-fragmented body/receipt plans, but raising limits without live confirmation may increase peer tail timeouts.
-- Remove the decoupled dense body/receipt pre-pass until a benchmark proves it helps. It was all-or-nothing, frequently failed to assemble a prefix in degraded logs, and then repeated the work through the paired fallback path. The paired scheduler is the safer baseline because retained high-throughput logs reached 800k+ logs/sec without relying on that pre-pass.
 
 ## Challenges and Resolutions
 
-- Challenge: Later body/receipt scheduling experiments correlated with performance below the earlier 800k+ logs/sec bursts.
-  - Resolution: Reverted those experiments locally and reduced the branch delta to the validated refill fix.
+- Challenge: WireGuard suddenly stopped working without a recent config edit.
+  - Resolution: Identified the stale-interface failure mode and installed a health-checking wrapper that restarts the tunnel when ping/handshake checks fail.
 
-- Challenge: Completed historical prepare results could consume buffered batches without scheduling the next fetch window.
-  - Resolution: Carried the next child header through prepared/written batches and refilled the fetch pipeline after completed prepare ingestion.
+- Challenge: The v3 branch had accumulated many plausible scheduler changes but live throughput was worse than prior baselines.
+  - Resolution: Built and ran clean `master` on the same Mac/data/tunnel path, confirmed it was materially better, and reverted the branch code to the `master` scheduler baseline.
 
-- Challenge: Current remote benchmark path is unhealthy.
-  - Resolution: Identified stale WireGuard as the blocker, staged a repair script on the Mac mini, confirmed direct Tailscale SSH is down, confirmed the Pi route still works, and confirmed remote sudo requires a password; live throughput work should resume only after the tunnel and peer discovery recover.
-
-- Challenge: A paired body/receipt chunk future could spend extra time on serial receipt fallbacks after a transport-level receipt failure.
-  - Resolution: Added a local fallback classifier so slow transport failures return to the outer scheduler for hedged/retry rotation, while data-shape failures can still use cached bodies.
-
-- Challenge: Degraded logs also showed body failures increasing materially, leaving the same serial-tail risk on the body side.
-  - Resolution: Reused the fallback classifier for body failures so transport-tail body errors also stop the chunk attempt and rotate through the outer scheduler.
-
-- Challenge: Chunk retries and hedges could rotate by a multiple of the peer count and reuse the same first peer.
-  - Resolution: Retried chunks now advance by retry ordinal, with tests covering bounded hedge indexes.
-
-- Challenge: Completed historical fetches could fill the buffer and stop new downloads even when active in-flight fetches dropped below the pipeline target.
-  - Resolution: Healthy-memory fetch budgeting now allows active downloads to refill until total outstanding fetches reaches buffer depth plus pipeline depth.
-
-- Challenge: Current degraded dense logs have about twice as many planned body/receipt chunks per 512-block batch as retained high-throughput logs.
-  - Resolution: Added debug diagnostics to capture planned chunk sizing and prefix scheduling in the existing plan-completion log before changing request-limit heuristics.
-
-- Challenge: The decoupled dense body/receipt path often failed before paired fallback, creating duplicate request work and longer dense batch tails.
-  - Resolution: Removed the decoupled pre-pass and its dead helper code; dense historical fetches now go straight to the paired scheduler.
+- Challenge: Clean remote master build failed because `protoc` was not on the non-interactive SSH PATH.
+  - Resolution: Confirmed Homebrew protobuf was already installed and rebuilt with `/usr/local/bin` on PATH.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the historical scheduler and body/receipt request-layer changes from this branch.
-- Removed the obsolete shared request cooldown state, helper functions, and tests.
-- Removed the unproven low-peer prefix redundancy change by restoring the prior threshold.
-- Inspected paired body/receipt fallback behavior and kept the changes scoped to transport-tail fallback gating.
-- Inspected retry-index construction across paired and generic parallel chunk request paths; replaced repeated multiplier expressions with one retry-index helper.
-- Inspected historical fetch budget logic and updated the existing capacity helper instead of adding a parallel scheduler path.
-- Inspected body/receipt chunk sizing, adaptive request limits, and local geth request scheduling references. No obsolete code was safe to remove; the next risky change is request-limit tuning and needs healthy-network evidence.
-- Removed the obsolete decoupled dense body/receipt pre-pass, decoupled scheduling helpers, sourced body assembly helper, and source-count validation helper.
-- No additional dead production code was identified in the touched paths.
+- Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
+- Removed the obsolete v3 scheduler delta from the branch by restoring the proven master implementation.
+- No unrelated production code was removed.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`, `docs: record paired dense remote deployment`, `perf: bound body fallback tail latency`; regression/network note pending commit
+- Commits made during this run: pending commit for restored scheduler baseline and roadmap update
 - Pull request status: not created
 - Merge status: not merged
-- Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.
+- Blockers: none for local code validation; performance target still requires longer remote warm-up and benchmarking.
 
 ## Known Issues or Risks
 
-- Historical sync still needs a healthy-network benchmark before this branch can be considered ready.
-- The current performance target remains 800k+ logs/sec in dense ranges and materially shorter full-sync time.
-- The Mac mini network mode must provide both VPS public P2P/dashboard access and a reliable management path before long benchmarks are useful.
-- The Mac mini is currently running the cleaned build, but EL peers remain at zero until the VPS tunnel is repaired.
+- Current remote run is healthier but has not yet warmed to the 80-90 peer profile seen in earlier successful runs.
+- The 800k+ logs/sec target has not yet been revalidated on the repaired tunnel.
+- The branch is not ready for PR/merge until validation passes and a longer remote benchmark confirms the restored baseline or a measured improvement.
