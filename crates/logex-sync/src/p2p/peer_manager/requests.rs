@@ -105,6 +105,20 @@ struct BodyReceiptChunk {
     stats: TypedRequestStats,
 }
 
+struct BodyReceiptChunkAttempt {
+    chunk: BodyReceiptChunk,
+    body_peer: Option<PeerId>,
+    receipt_peer: Option<PeerId>,
+}
+
+#[derive(Default)]
+struct BodyReceiptPlanPeerState {
+    body_in_flight_peers: HashMap<PeerId, usize>,
+    receipt_in_flight_peers: HashMap<PeerId, usize>,
+    body_bad_peers: HashSet<PeerId>,
+    receipt_bad_peers: HashSet<PeerId>,
+}
+
 struct InFlightBodyReceiptChunk {
     range: std::ops::Range<usize>,
     chunk_index: usize,
@@ -728,8 +742,7 @@ impl BodyReceiptRequestPlan {
                     });
             let mut retry_counts = HashMap::<usize, usize>::new();
             let mut in_flight = HashMap::<usize, InFlightBodyReceiptChunk>::new();
-            let mut body_bad_peers = HashSet::<PeerId>::new();
-            let mut receipt_bad_peers = HashSet::<PeerId>::new();
+            let mut peer_state = BodyReceiptPlanPeerState::default();
             let mut hedge_count = 0usize;
             let min_return_blocks = self.return_blocks;
             let max_scheduled_chunks =
@@ -746,17 +759,13 @@ impl BodyReceiptRequestPlan {
                 let Some((chunk_index, range)) = pending_ranges.next() else {
                     break;
                 };
-                let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                let chunk_receipt_peer_ids =
-                    peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                 schedule_body_receipt_chunk_attempt(
                     &self,
                     &mut attempts,
                     &mut in_flight,
+                    &mut peer_state,
                     range.clone(),
                     chunk_index,
-                    chunk_body_peer_ids,
-                    chunk_receipt_peer_ids,
                 );
                 scheduled_prefix_ranges.push((chunk_index, range));
             }
@@ -774,18 +783,14 @@ impl BodyReceiptRequestPlan {
                 .cloned()
                 .enumerate()
             {
-                let chunk_body_peer_ids = peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                let chunk_receipt_peer_ids =
-                    peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                 schedule_body_receipt_chunk_attempt(
                     &self,
                     &mut attempts,
                     &mut in_flight,
+                    &mut peer_state,
                     range,
                     base_chunk_index
                         + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
-                    chunk_body_peer_ids,
-                    chunk_receipt_peer_ids,
                 );
             }
 
@@ -828,26 +833,31 @@ impl BodyReceiptRequestPlan {
                                 Instant::now(),
                             )
                         {
-                            let chunk_body_peer_ids =
-                                peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                            let chunk_receipt_peer_ids =
-                                peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                             schedule_body_receipt_chunk_attempt(
                                 &self,
                                 &mut attempts,
                                 &mut in_flight,
+                                &mut peer_state,
                                 range,
                                 chunk_index
                                     + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count)
                                         * self.ranges.len()),
-                                chunk_body_peer_ids,
-                                chunk_receipt_peer_ids,
                             );
                             hedge_count += 1;
                         }
                         continue;
                     }
                 };
+                let BodyReceiptChunkAttempt {
+                    chunk,
+                    body_peer,
+                    receipt_peer,
+                } = chunk;
+                release_body_receipt_attempt_peer(&mut peer_state.body_in_flight_peers, body_peer);
+                release_body_receipt_attempt_peer(
+                    &mut peer_state.receipt_in_flight_peers,
+                    receipt_peer,
+                );
                 let chunk_start = chunk.start;
                 complete_body_receipt_chunk_attempt(&mut in_flight, chunk_start);
                 let chunk_already_completed = chunks.contains_key(&chunk_start);
@@ -857,10 +867,10 @@ impl BodyReceiptRequestPlan {
                         if chunk_failure_disables_role_peer(failure) {
                             match failure.role {
                                 ChunkRequestRole::Bodies => {
-                                    body_bad_peers.insert(failure.peer_id);
+                                    peer_state.body_bad_peers.insert(failure.peer_id);
                                 }
                                 ChunkRequestRole::Receipts => {
-                                    receipt_bad_peers.insert(failure.peer_id);
+                                    peer_state.receipt_bad_peers.insert(failure.peer_id);
                                 }
                             }
                         }
@@ -895,18 +905,13 @@ impl BodyReceiptRequestPlan {
                     let retry_count = retry_counts.entry(chunk_start).or_default();
                     *retry_count += 1;
                     let chunk_index = base_chunk_index + (*retry_count * self.ranges.len());
-                    let chunk_body_peer_ids =
-                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                    let chunk_receipt_peer_ids =
-                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                     schedule_body_receipt_chunk_attempt(
                         &self,
                         &mut attempts,
                         &mut in_flight,
+                        &mut peer_state,
                         range,
                         chunk_index,
-                        chunk_body_peer_ids,
-                        chunk_receipt_peer_ids,
                     );
                 }
 
@@ -917,18 +922,13 @@ impl BodyReceiptRequestPlan {
                     let Some((chunk_index, range)) = pending_ranges.next() else {
                         break;
                     };
-                    let chunk_body_peer_ids =
-                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                    let chunk_receipt_peer_ids =
-                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                     schedule_body_receipt_chunk_attempt(
                         &self,
                         &mut attempts,
                         &mut in_flight,
+                        &mut peer_state,
                         range,
                         chunk_index,
-                        chunk_body_peer_ids,
-                        chunk_receipt_peer_ids,
                     );
                 }
 
@@ -943,19 +943,14 @@ impl BodyReceiptRequestPlan {
                     ) else {
                         break;
                     };
-                    let chunk_body_peer_ids =
-                        peer_ids_excluding(&self.body_peer_ids, &body_bad_peers);
-                    let chunk_receipt_peer_ids =
-                        peer_ids_excluding(&self.receipt_peer_ids, &receipt_bad_peers);
                     schedule_body_receipt_chunk_attempt(
                         &self,
                         &mut attempts,
                         &mut in_flight,
+                        &mut peer_state,
                         range,
                         chunk_index
                             + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + hedge_count) * self.ranges.len()),
-                        chunk_body_peer_ids,
-                        chunk_receipt_peer_ids,
                     );
                     hedge_count += 1;
                 }
@@ -3297,13 +3292,12 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
 fn schedule_body_receipt_chunk_attempt<'a>(
     plan: &'a BodyReceiptRequestPlan,
     attempts: &mut futures_util::stream::FuturesUnordered<
-        futures_util::future::BoxFuture<'a, BodyReceiptChunk>,
+        futures_util::future::BoxFuture<'a, BodyReceiptChunkAttempt>,
     >,
     in_flight: &mut HashMap<usize, InFlightBodyReceiptChunk>,
+    peer_state: &mut BodyReceiptPlanPeerState,
     range: std::ops::Range<usize>,
     chunk_index: usize,
-    body_peer_ids: Vec<PeerId>,
-    receipt_peer_ids: Vec<PeerId>,
 ) {
     let start = range.start;
     match in_flight.entry(start) {
@@ -3321,14 +3315,94 @@ fn schedule_body_receipt_chunk_attempt<'a>(
         }
     }
 
+    let (body_peer_ids, body_peer) = body_receipt_attempt_peer_ids(
+        &plan.body_peer_ids,
+        &peer_state.body_bad_peers,
+        &peer_state.body_in_flight_peers,
+        chunk_index,
+    );
+    let (receipt_peer_ids, receipt_peer) = body_receipt_attempt_peer_ids(
+        &plan.receipt_peer_ids,
+        &peer_state.receipt_bad_peers,
+        &peer_state.receipt_in_flight_peers,
+        chunk_index,
+    );
+    record_body_receipt_attempt_peer(&mut peer_state.body_in_flight_peers, body_peer);
+    record_body_receipt_attempt_peer(&mut peer_state.receipt_in_flight_peers, receipt_peer);
+
     attempts.push(body_receipt_chunk_request(
         plan,
         range,
-        chunk_index,
         &plan.hashes,
-        &body_peer_ids,
-        &receipt_peer_ids,
+        body_peer_ids,
+        receipt_peer_ids,
+        body_peer,
+        receipt_peer,
     ));
+}
+
+fn body_receipt_attempt_peer_ids(
+    peer_ids: &[PeerId],
+    bad_peers: &HashSet<PeerId>,
+    in_flight_peers: &HashMap<PeerId, usize>,
+    chunk_index: usize,
+) -> (Vec<PeerId>, Option<PeerId>) {
+    let mut ordered = peer_ids.to_vec();
+    rotate_request_candidates(&mut ordered, chunk_index);
+
+    let mut eligible = ordered
+        .iter()
+        .copied()
+        .filter(|peer_id| !bad_peers.contains(peer_id))
+        .collect::<Vec<_>>();
+    if eligible.is_empty() {
+        eligible = ordered;
+    }
+
+    let Some(min_in_flight) = eligible
+        .iter()
+        .map(|peer_id| in_flight_peers.get(peer_id).copied().unwrap_or_default())
+        .min()
+    else {
+        return (Vec::new(), None);
+    };
+
+    if let Some(index) = eligible.iter().position(|peer_id| {
+        in_flight_peers.get(peer_id).copied().unwrap_or_default() == min_in_flight
+    }) {
+        eligible.rotate_left(index);
+    }
+
+    let primary_peer = eligible.first().copied();
+    (eligible, primary_peer)
+}
+
+fn record_body_receipt_attempt_peer(
+    in_flight_peers: &mut HashMap<PeerId, usize>,
+    peer_id: Option<PeerId>,
+) {
+    let Some(peer_id) = peer_id else {
+        return;
+    };
+    *in_flight_peers.entry(peer_id).or_default() += 1;
+}
+
+fn release_body_receipt_attempt_peer(
+    in_flight_peers: &mut HashMap<PeerId, usize>,
+    peer_id: Option<PeerId>,
+) {
+    let Some(peer_id) = peer_id else {
+        return;
+    };
+    match in_flight_peers.entry(peer_id) {
+        std::collections::hash_map::Entry::Occupied(mut entry) if *entry.get() > 1 => {
+            *entry.get_mut() -= 1;
+        }
+        std::collections::hash_map::Entry::Occupied(entry) => {
+            entry.remove();
+        }
+        std::collections::hash_map::Entry::Vacant(_) => {}
+    }
 }
 
 fn complete_body_receipt_chunk_attempt(
@@ -3374,25 +3448,23 @@ fn body_receipt_hedge_candidate(
 fn body_receipt_chunk_request<'a>(
     plan: &'a BodyReceiptRequestPlan,
     range: std::ops::Range<usize>,
-    chunk_index: usize,
     hashes: &[B256],
-    body_peer_ids: &[PeerId],
-    receipt_peer_ids: &[PeerId],
-) -> futures_util::future::BoxFuture<'a, BodyReceiptChunk> {
+    body_peer_ids: Vec<PeerId>,
+    receipt_peer_ids: Vec<PeerId>,
+    body_peer: Option<PeerId>,
+    receipt_peer: Option<PeerId>,
+) -> futures_util::future::BoxFuture<'a, BodyReceiptChunkAttempt> {
     let chunk_hashes = hashes[range.clone()].to_vec();
-    let mut chunk_body_peers = body_peer_ids.to_vec();
-    rotate_request_candidates(&mut chunk_body_peers, chunk_index);
-    let mut chunk_receipt_peers = receipt_peer_ids.to_vec();
-    rotate_request_candidates(&mut chunk_receipt_peers, chunk_index);
 
     async move {
-        plan.request_body_receipt_chunk(
-            range.start,
-            chunk_hashes,
-            chunk_body_peers,
-            chunk_receipt_peers,
-        )
-        .await
+        let chunk = plan
+            .request_body_receipt_chunk(range.start, chunk_hashes, body_peer_ids, receipt_peer_ids)
+            .await;
+        BodyReceiptChunkAttempt {
+            chunk,
+            body_peer,
+            receipt_peer,
+        }
     }
     .boxed()
 }
@@ -4119,6 +4191,52 @@ mod tests {
         let ordered = receipt_candidates_for_body_peer(vec![body_peer], body_peer, 3);
 
         assert_eq!(ordered, vec![body_peer]);
+    }
+
+    #[test]
+    fn body_receipt_attempt_peers_prefer_least_loaded_non_bad_peer() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let fourth = PeerId::repeat_byte(0x44);
+        let peers = vec![first, second, third, fourth];
+        let bad_peers = HashSet::from([third]);
+        let in_flight = HashMap::from([(first, 2), (second, 1), (fourth, 3)]);
+
+        let (ordered, primary) = body_receipt_attempt_peer_ids(&peers, &bad_peers, &in_flight, 0);
+
+        assert_eq!(primary, Some(second));
+        assert_eq!(ordered, vec![second, fourth, first]);
+    }
+
+    #[test]
+    fn body_receipt_attempt_peers_preserve_rotation_among_equal_loads() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let peers = vec![first, second, third];
+
+        let (ordered, primary) =
+            body_receipt_attempt_peer_ids(&peers, &HashSet::new(), &HashMap::new(), 1);
+
+        assert_eq!(primary, Some(second));
+        assert_eq!(ordered, vec![second, third, first]);
+    }
+
+    #[test]
+    fn body_receipt_attempt_peer_load_accounting_releases_to_zero() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut in_flight = HashMap::new();
+
+        record_body_receipt_attempt_peer(&mut in_flight, Some(peer));
+        record_body_receipt_attempt_peer(&mut in_flight, Some(peer));
+        release_body_receipt_attempt_peer(&mut in_flight, Some(peer));
+
+        assert_eq!(in_flight.get(&peer), Some(&1));
+
+        release_body_receipt_attempt_peer(&mut in_flight, Some(peer));
+
+        assert!(!in_flight.contains_key(&peer));
     }
 
     #[test]
