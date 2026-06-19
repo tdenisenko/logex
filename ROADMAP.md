@@ -8,7 +8,7 @@ Active branch: `perf/historical-sync-throughput-v3`.
 
 The Mac mini WireGuard/VPS path is healthy again after replacing the stale-interface wrapper with a health-checking LaunchDaemon script. The wrapper now treats a tunnel as healthy only if the VPS tunnel IP responds or the WireGuard handshake is recent; otherwise it restarts the tunnel and restores the full-tunnel routes while preserving LAN access.
 
-Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, and lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking. Mac mini benchmarks from `/Users/gremlinmaster/logex-peerload-test` against `/Volumes/SSD 4TB/LogExBench/adaptive-storage-20260619-120422` recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
+Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks from `/Users/gremlinmaster/logex-peerload-test` against `/Volumes/SSD 4TB/LogExBench/adaptive-storage-20260619-120422` recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
 
 ## Completed Since Last Run
 
@@ -31,6 +31,8 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Rebuilt and deployed the adaptive storage branch on the Mac mini; the live benchmark recovered roughly 531k last-24-sample average and 992k max in the first parsed window, then continued showing 300k-890k dashboard samples as peers warmed up.
 - Rejected an attempted high-peer dense lookahead increase because it did not activate during the test window and did not provide evidence of improvement.
 - Lowered the dense body/receipt decoupled-pipeline threshold from 12 to 8 peers; the remote benchmark reduced paired fallback plan average latency from roughly 15.0s to roughly 9.6s, kept contiguous prefixes at 512/512, and reached roughly 493k last-120-sample average with 867k max while preserving the 6-plan dense fetch cap.
+- Rejected a 4s pipelined body/receipt timeout because it increased timeout churn and damaged contiguous prefixes despite producing some higher dashboard samples.
+- Capped parallel chunk requests per peer from 4 to 2; the extended remote benchmark reached roughly 521k last-12-sample average with 379k p10, kept 512-block contiguous prefixes, and reduced partial-batch churn to one partial across 835 batches.
 
 ## Remaining TODOs
 
@@ -53,6 +55,7 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Preserve useful stabilization changes when they improve tail latency without sacrificing sustained throughput.
 - Historical storage should be density-aware: dense batches are already large enough to amortize compacted segment overhead, while sparse ranges need raw staging/coalescing to avoid tiny segment and disk-usage growth.
 - Dense body/receipt fetches should enter the decoupled body/receipt path with at least 8 eligible peers; remote benchmarks showed this reduces paired fallback latency without increasing the active dense fetch cap.
+- Limit parallel chunk requests per peer to 2 so one slow peer cannot occupy many chunk slots before timeout accounting demotes it; the tradeoff is slightly lower theoretical burst capacity for a better sustained floor.
 - WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
 
@@ -71,7 +74,7 @@ Historical sync performance work has revalidated the earlier high-throughput com
   - Resolution: Benchmarked the relevant commit sequence and found the drop at the storage coalescing change. Implemented adaptive dense/sparse storage so dense batches use the fast compacted write path and sparse batches retain coalescing.
 
 - Challenge: Adaptive storage recovered high peaks but still shows low-throughput minutes with many serving peers.
-  - Resolution: Treat the remaining bottleneck as peer-tail/downloader scheduling rather than storage. Rejected high-peer dense lookahead as unproven, then kept the lower decoupled threshold because it reduced paired fallback latency and sustained high throughput in the remote run.
+  - Resolution: Treat the remaining bottleneck as peer-tail/downloader scheduling rather than storage. Rejected high-peer dense lookahead as unproven and the 4s timeout as too damaging to contiguous prefixes, then kept the lower decoupled threshold and per-peer chunk cap because they improved sustained throughput and reduced partial churn.
 
 - Challenge: Clean remote master build failed because `protoc` was not on the non-interactive SSH PATH.
   - Resolution: Confirmed Homebrew protobuf was already installed and rebuilt with `/usr/local/bin` on PATH.
@@ -82,13 +85,14 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Inspected the storage regression in `crates/logex-storage/src/native/storage.rs`, `crates/logex-storage/src/native/segment.rs`, and `crates/logex-storage/src/partition.rs`.
 - Removed the obsolete broad v3 scheduler delta from the branch by restoring the proven master implementation before adding the narrower peer-load change.
 - Reverted the unproven high-peer dense lookahead experiment before committing; only the decoupled threshold change remains from this pass.
+- Reverted the failed 4s timeout experiment before committing; only the per-peer chunk cap remains from the latest pass.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `perf: lower dense decoupled peer threshold`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `perf: cap per-peer chunk concurrency`.
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.

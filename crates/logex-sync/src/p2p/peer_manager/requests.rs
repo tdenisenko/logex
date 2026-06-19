@@ -38,7 +38,7 @@ const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
-const PARALLEL_REQUESTS_PER_PEER: usize = 4;
+const PARALLEL_REQUESTS_PER_PEER: usize = 2;
 const MAX_PARALLEL_BODY_RECEIPT_REQUESTS: usize = 128;
 const MAX_PARALLEL_BODY_REQUESTS: usize = 64;
 const MIN_PARALLEL_BODY_REQUEST_BLOCKS: usize = 64;
@@ -4284,16 +4284,16 @@ mod tests {
     #[test]
     fn request_window_limit_scales_in_flight_requests_by_peer_count() {
         assert_eq!(request_window_limit(0, 16), 0);
-        assert_eq!(request_window_limit(1, 16), 4);
-        assert_eq!(request_window_limit(2, 16), 8);
+        assert_eq!(request_window_limit(1, 16), 2);
+        assert_eq!(request_window_limit(2, 16), 4);
         assert_eq!(request_window_limit(8, 16), 16);
     }
 
     #[test]
     fn paired_body_receipt_window_counts_both_request_types() {
         assert_eq!(paired_body_receipt_chunk_window_limit(0, 16), 0);
-        assert_eq!(paired_body_receipt_chunk_window_limit(1, 16), 2);
-        assert_eq!(paired_body_receipt_chunk_window_limit(2, 16), 4);
+        assert_eq!(paired_body_receipt_chunk_window_limit(1, 16), 1);
+        assert_eq!(paired_body_receipt_chunk_window_limit(2, 16), 2);
         assert_eq!(paired_body_receipt_chunk_window_limit(8, 16), 8);
         assert_eq!(paired_body_receipt_chunk_window_limit(64, 128), 64);
     }
