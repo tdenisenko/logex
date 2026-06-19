@@ -6,9 +6,9 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput-v3`.
 
-Historical sync performance work is focused on body/receipt fetch tail latency and keeping the downloader active while validation/write work drains. Preserved Mac mini logs confirm earlier runs reached 800k+ logs/sec bursts; later low-throughput runs showed fewer active fetches, more body/receipt chunks per batch, and longer body/receipt plans. The current branch removes unproven cooldown/prefix experiments, removes the failed decoupled dense body/receipt pre-pass, and keeps bounded scheduler changes that refill lookahead, rotate retries, skip serial body/receipt fallbacks on transport-tail failures, and keep active downloads full when completed buffers are healthy.
+Historical sync performance work is focused on body/receipt fetch tail latency and keeping the downloader active while validation/write work drains. Preserved Mac mini logs confirm earlier runs reached 800k+ logs/sec bursts; later low-throughput runs showed longer body/receipt plans, higher local extraction/write cost in dense batches, and occasional fetch-buffer starvation. The current branch removes unproven cooldown/prefix experiments, removes the failed decoupled dense body/receipt pre-pass, and keeps bounded scheduler changes that refill lookahead, rotate retries, skip serial body/receipt fallbacks on transport-tail failures, and keep active downloads full when completed buffers are healthy.
 
-Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx is running locally, but the VPS cannot reach `10.66.0.2:18683`, the Mac cannot ping `10.66.0.1`, and the client has zero EL peers. Throughput samples are not meaningful until the tunnel is healthy again.
+Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx is running locally, full-tunnel routes exist, but the VPS handshake is stale, the Mac cannot ping `10.66.0.1`, and the client has zero EL peers. Throughput samples are not meaningful until the tunnel is healthy again.
 
 ## Completed Since Last Run
 
@@ -41,12 +41,17 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Compared body and receipt failures across retained and degraded logs; body failures are also material in degraded runs.
 - Extended the transport-tail fallback rule to body requests, so timeout/disconnect/channel-close body failures return to the outer hedge/retry scheduler instead of serially trying more body peers inside one chunk future.
 - Validated the body fallback change with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed and rebuilt the body-fallback candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
+- Confirmed the latest build starts and storage integrity passes; live throughput remains blocked because the Mac mini WireGuard tunnel still has zero EL peers.
+- Rechecked the PR #93-era preserved logs. Earlier 800k+ logs/sec bursts are real: the strongest retained samples reached roughly 839k, 935k, and 971k logs/sec, with `active_fetches=6`, buffers around 15, and body/receipt p95 near 13s-16s.
+- Compared degraded v3 runs against those retained samples. The long degraded v3 sample averaged roughly 179k logs/sec with body/receipt p95 around 22s, while a storage-test sample hit roughly 446k max but had a smaller completed buffer. That keeps body/receipt tail latency and active queue health as the next bottleneck to verify.
+- Confirmed the Mac mini still cannot repair WireGuard non-interactively because remote `sudo -n` requires a password.
 
 ## Remaining TODOs
 
 1. Repair the Mac mini VPS tunnel and rerun live benchmarks.
    - Reason: Peer and throughput measurements are invalid while WireGuard is stale and the client has zero peers.
-   - Completion criteria: VPS access to `http://10.66.0.2:18683/status` works, the Mac can reach `10.66.0.1`, peers warm normally, and the current scheduler candidate is benchmarked in dense historical ranges.
+   - Completion criteria: run `sudo /Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini or through the Pi path, VPS access to `http://10.66.0.2:18683/status` works, the Mac can reach `10.66.0.1`, peers warm normally, and the current scheduler candidate is benchmarked in dense historical ranges.
 
 2. Reduce body/receipt fetch tail latency.
    - Reason: Dense historical sync still stalls behind slow body/receipt request plans when peers are available but chunks complete unevenly.
@@ -81,7 +86,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
   - Resolution: Carried the next child header through prepared/written batches and refilled the fetch pipeline after completed prepare ingestion.
 
 - Challenge: Current remote benchmark path is unhealthy.
-  - Resolution: Identified stale WireGuard as the blocker, staged a repair script on the Mac mini, and confirmed remote sudo requires a password; live throughput work should resume only after the tunnel and peer discovery recover.
+  - Resolution: Identified stale WireGuard as the blocker, staged a repair script on the Mac mini, confirmed direct Tailscale SSH is down, confirmed the Pi route still works, and confirmed remote sudo requires a password; live throughput work should resume only after the tunnel and peer discovery recover.
 
 - Challenge: A paired body/receipt chunk future could spend extra time on serial receipt fallbacks after a transport-level receipt failure.
   - Resolution: Added a local fallback classifier so slow transport failures return to the outer scheduler for hedged/retry rotation, while data-shape failures can still use cached bodies.
@@ -117,7 +122,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`, `docs: record paired dense remote deployment`; body fallback change pending commit
+- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`, `docs: record paired dense remote deployment`, `perf: bound body fallback tail latency`; regression/network note pending commit
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.
