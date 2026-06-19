@@ -36,6 +36,8 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Identified `perf: split dense body receipt fetches` as a strong regression candidate: preserved degraded logs repeatedly showed the decoupled dense pre-pass failing to produce a prefix before falling back to paired body/receipt fetching.
 - Removed the decoupled dense body/receipt pre-pass and its unused helpers so dense ranges use the paired scheduler directly.
 - Validated the cleanup with `cargo fmt --all -- --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed and rebuilt the paired-only dense candidate on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
+- Confirmed the paired-only build starts and storage integrity passes; live throughput remains blocked because the Mac mini WireGuard tunnel still has zero EL peers and cannot reach `10.66.0.1`.
 
 ## Remaining TODOs
 
@@ -109,7 +111,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`; decoupled dense cleanup pending commit
+- Commits made during this run: `fix: restore historical sync scheduling baseline`, `docs: record historical sync regression status`, `perf: bound receipt fallback tail latency`, `perf: rotate chunk retries by attempt`, `perf: keep historical downloads active`, `perf: add historical chunk plan diagnostics`, `perf: remove failed decoupled dense fetch path`; remote deployment note pending commit
 - Pull request status: not created
 - Merge status: not merged
 - Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.
