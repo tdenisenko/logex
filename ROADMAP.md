@@ -19,6 +19,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 - Kept the historical fetch-pipeline refill fix as the only performance code change relative to `master`.
 - Validated the code with formatting and `logex-sync` tests.
 - Staged `/Users/gremlinmaster/logex-gateway/repair-logex-wireguard-stale.sh` on the Mac mini to repair the stale VPS tunnel once sudo is available.
+- Deployed and rebuilt the cleaned scheduler baseline on the Mac mini, then restarted LogEx in tmux without resetting the data directory.
 
 ## Remaining TODOs
 
@@ -54,7 +55,7 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
   - Resolution: Carried the next child header through prepared/written batches and refilled the fetch pipeline after completed prepare ingestion.
 
 - Challenge: Current remote benchmark path is unhealthy.
-  - Resolution: Identified stale WireGuard as the blocker and staged a repair script on the Mac mini; live throughput work should resume only after the tunnel and peer discovery recover.
+  - Resolution: Identified stale WireGuard as the blocker, staged a repair script on the Mac mini, and confirmed remote sudo requires a password; live throughput work should resume only after the tunnel and peer discovery recover.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -67,13 +68,14 @@ Live benchmarking is currently blocked by the Mac mini WireGuard tunnel: LogEx i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `1efa95e` (`fix: restore historical sync scheduling baseline`)
+- Commits made during this run: `1efa95e` (`fix: restore historical sync scheduling baseline`), `d9f041a` (`docs: record historical sync regression status`)
 - Pull request status: not created
 - Merge status: not merged
-- Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel.
+- Blockers: live benchmarking is blocked by the unhealthy WireGuard tunnel; the repair script requires local sudo on the Mac mini.
 
 ## Known Issues or Risks
 
 - Historical sync still needs a healthy-network benchmark before this branch can be considered ready.
 - The current performance target remains 800k+ logs/sec in dense ranges and materially shorter full-sync time.
 - The Mac mini network mode must provide both VPS public P2P/dashboard access and a reliable management path before long benchmarks are useful.
+- The Mac mini is currently running the cleaned build, but EL peers remain at zero until the VPS tunnel is repaired.
