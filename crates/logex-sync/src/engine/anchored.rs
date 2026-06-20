@@ -1061,7 +1061,9 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
             self.refresh_consensus_status().await;
-            if !self.set_peer_head_from_consensus() {
+            let consensus_head_available = self.set_peer_head_from_consensus();
+            let historical_resume_required_block = self.historical_resume_required_block().await;
+            if !consensus_head_available && historical_resume_required_block.is_none() {
                 self.set_runtime_state(NodeState::WaitingForConsensus);
                 if cancelable(
                     &mut self.shutdown,
@@ -1091,13 +1093,26 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
             self.refresh_connectivity_state();
-            let required_block = self
-                .consensus
-                .as_ref()
-                .and_then(|consensus| consensus.anchor_coverage().floor)
-                .map_or(1, |anchor| anchor.block_number);
-            if self.peers.has_block_request_peer(required_block) {
+            let consensus_required_block = consensus_head_available.then(|| {
+                self.consensus
+                    .as_ref()
+                    .and_then(|consensus| consensus.anchor_coverage().floor)
+                    .map_or(1, |anchor| anchor.block_number)
+            });
+            let consensus_ready = consensus_required_block
+                .is_some_and(|required_block| self.peers.has_block_request_peer(required_block));
+            let historical_ready = historical_resume_required_block
+                .is_some_and(|required_block| self.peers.has_block_request_peer(required_block));
+            if consensus_ready || historical_ready {
                 self.connected_once = true;
+                if historical_ready && !consensus_ready {
+                    tracing::info!(
+                        historical_resume_required_block,
+                        connected_peers = self.peers.peer_count(),
+                        serving_peers = self.peers.serving_peer_count(),
+                        "resuming historical backfill before consensus forward sync is ready"
+                    );
+                }
                 break;
             }
             attempt += 1;
@@ -1105,6 +1120,9 @@ impl SyncEngine {
             tracing::warn!(
                 attempt,
                 ?delay,
+                consensus_head_available,
+                consensus_required_block,
+                historical_resume_required_block,
                 "no execution peer eligible for consensus-anchored sync yet"
             );
             if cancelable(&mut self.shutdown, tokio::time::sleep(delay))
@@ -1274,6 +1292,16 @@ impl SyncEngine {
         }
 
         Ok(progressed)
+    }
+
+    async fn historical_resume_required_block(&self) -> Option<u64> {
+        let floor_block = {
+            let storage = self.storage.read().await;
+            storage
+                .historical_floor_header()
+                .map(alloy_consensus::BlockHeader::number)
+        };
+        historical_backfill_resume_required_block(self.config.disable_historical_sync, floor_block)
     }
 
     async fn prime_historical_backfill_pipeline(&mut self) -> Result<bool> {
@@ -3069,6 +3097,17 @@ fn can_bootstrap_from_anchor(current: u64, anchor_block: u64) -> bool {
     current == 0 && anchor_block > 0
 }
 
+fn historical_backfill_resume_required_block(
+    historical_sync_disabled: bool,
+    floor_block: Option<u64>,
+) -> Option<u64> {
+    if historical_sync_disabled {
+        return None;
+    }
+
+    floor_block.filter(|block| *block > EXECUTION_HISTORY_TARGET_BLOCK)
+}
+
 fn locate_consensus_reorg(
     consensus: &ConsensusStore,
     recent_headers: &[Header],
@@ -3220,6 +3259,33 @@ mod tests {
         let anchors = vec![anchor_for(&first, 1)];
 
         assert!(contiguous_anchor_batch(98, false, &anchors, 16).is_empty());
+    }
+
+    #[test]
+    fn historical_resume_requires_verified_floor_above_target() {
+        assert_eq!(
+            historical_backfill_resume_required_block(false, Some(EXECUTION_HISTORY_TARGET_BLOCK)),
+            None
+        );
+        assert_eq!(
+            historical_backfill_resume_required_block(
+                false,
+                Some(EXECUTION_HISTORY_TARGET_BLOCK + 1)
+            ),
+            Some(EXECUTION_HISTORY_TARGET_BLOCK + 1)
+        );
+    }
+
+    #[test]
+    fn historical_resume_does_not_bypass_fresh_or_disabled_sync() {
+        assert_eq!(historical_backfill_resume_required_block(false, None), None);
+        assert_eq!(
+            historical_backfill_resume_required_block(
+                true,
+                Some(EXECUTION_HISTORY_TARGET_BLOCK + 1)
+            ),
+            None
+        );
     }
 
     #[test]
