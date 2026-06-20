@@ -14,6 +14,8 @@ use tokio::task::JoinSet;
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
+const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL: u64 = 1;
+const CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS: u64 = 64;
 const CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT: usize = 2;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
@@ -1053,6 +1055,7 @@ fn historical_header_batch_matches_child(
 
 fn consensus_anchor_forward_batch_limit(
     current_block: u64,
+    target_block: u64,
     configured_limit: u64,
     historical_backfill_active: bool,
 ) -> u64 {
@@ -1061,7 +1064,12 @@ fn consensus_anchor_forward_batch_limit(
     }
 
     let fairness_limit = if historical_backfill_active {
-        CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
+        let forward_lag = target_block.saturating_sub(current_block);
+        if forward_lag > CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS {
+            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL
+        } else {
+            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
+        }
     } else {
         CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
     };
@@ -1200,6 +1208,7 @@ impl SyncEngine {
                 && self.historical_resume_required_block().await.is_some();
             let anchor_batch_limit = consensus_anchor_forward_batch_limit(
                 current,
+                self.sync_cursor().1,
                 self.config.header_batch_size,
                 historical_backfill_active,
             );
@@ -3298,17 +3307,31 @@ mod tests {
 
     #[test]
     fn consensus_forward_batch_limit_yields_while_historical_backfill_is_active() {
-        assert_eq!(consensus_anchor_forward_batch_limit(0, 64, true), 1);
+        assert_eq!(consensus_anchor_forward_batch_limit(0, 100, 64, true), 1);
         assert_eq!(
-            consensus_anchor_forward_batch_limit(100, 64, false),
+            consensus_anchor_forward_batch_limit(100, 200, 64, false),
             CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
         );
         assert_eq!(
-            consensus_anchor_forward_batch_limit(100, 64, true),
+            consensus_anchor_forward_batch_limit(
+                100,
+                100 + CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS,
+                64,
+                true
+            ),
             CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
         );
-        assert_eq!(consensus_anchor_forward_batch_limit(100, 2, true), 2);
-        assert_eq!(consensus_anchor_forward_batch_limit(100, 0, true), 1);
+        assert_eq!(
+            consensus_anchor_forward_batch_limit(
+                100,
+                101 + CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS,
+                64,
+                true
+            ),
+            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL
+        );
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 2, true), 2);
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 0, true), 1);
     }
 
     #[test]

@@ -24,6 +24,8 @@ Historical fetch lookahead now tracks active body/receipt requests across concur
 
 Latest A/B check against the previous accepted commit on the same Mac mini data directory did not justify reverting active-request accounting. The active-accounting run was still under-peered and slow, but reduced body/receipt p95 latency and per-plan failures versus the previous commit in the matched short window. Current HEAD is deployed again on the Mac mini for continued warm-up and longer observation.
 
+Historical backfill is now given an even tighter fairness window when forward sync is stale: while reverse history is incomplete and the live path is more than 64 blocks behind its consensus target, the forward path ingests one CL-anchored block per engine turn. This bounds the remaining cooperative-loop wait without weakening CL validation for forward blocks.
+
 ## Completed Since Last Run
 
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
@@ -91,6 +93,9 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
 - Added active-request reset cleanup for aborted historical fetch pipelines and validated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, and `cargo check --workspace`.
 - Ran a same-data-dir A/B check against the previous accepted commit. The previous commit showed worse body/receipt p95 latency and higher per-plan failure counts in the short warm-up window, so the active-request accounting change was kept.
 - Restored current branch HEAD on the Mac mini after the A/B check and restarted the client on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`.
+- Confirmed that historical validation is not CL-gated after a checkpoint-backed floor exists, but stale forward catch-up could still hold the shared engine loop for a multi-block forward batch.
+- Tightened stale forward catch-up fairness so, while historical backfill is incomplete and forward sync is more than 64 blocks behind the consensus target, the forward path processes one CL-anchored block per cooperative turn.
+- Validated the scheduler change with `cargo fmt --all -- --check`, focused `logex-sync` coverage, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 
 ## Remaining TODOs
 
@@ -99,7 +104,7 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
    - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting and cross-plan active reservations improve feedback latency but do not complete this TODO until live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
 
 2. Validate stale-forward catch-up fairness.
-   - Reason: The consensus loop now drains ready historical work, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits forward catch-up batch size while historical work remains. This still needs longer stale-resume runtime validation.
+   - Reason: The consensus loop now drains ready historical work, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits stale forward catch-up to one block per turn while historical work remains. This still needs longer stale-resume runtime validation.
    - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while historical fetches stay active and historical batches keep making steady progress. If cooperative scheduling still materially suppresses historical throughput during forward catch-up, split peer request scheduling/accounting into an actor so forward and historical workers can submit work independently.
 
 3. Match production-client P2P behavior more closely.
@@ -128,6 +133,7 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
 - Background historical body/receipt fetches should stream chunk-level request feedback to the engine. This keeps peer timeout/throughput scoring fresher for subsequent plans while preserving a single final outcome for validation/ingestion.
 - While historical backfill is incomplete, CL-anchored forward catch-up should use smaller batches. This favors frequent cooperative scheduling turns over maximum forward burst size and avoids making reverse sync appear blocked by stale live catch-up.
 - Concurrent historical fetch plans should report active body/receipt request load as it starts and finishes. The peer scorer treats active same-kind requests as capacity already in use rather than blacklisting the peer, which spreads lookahead work while still allowing a very fast busy peer to beat a slow idle one.
+- Stale forward catch-up should use a one-block fairness window while historical backfill is incomplete and forward lag exceeds 64 blocks. This gives reverse history frequent scheduling turns during stale restarts while preserving the existing small forward batch near head.
 
 ## Challenges and Resolutions
 
@@ -188,6 +194,9 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
 - Challenge: Historical fetch lookahead ran concurrently, but newly spawned plans could select peers before active requests from already spawned plans were visible to the scorer.
   - Resolution: Added active request start/finish accounting events, load-adjusted peer scores, a cooperative yield/drain between spawned historical plans, and reset cleanup for aborted lookahead.
 
+- Challenge: Historical sync is intended to be independent from forward/CL sync after a verified pivot exists, but stale forward catch-up still shared the single engine loop.
+  - Resolution: Confirmed there is no CL-head validity gate for resumed historical backfill, then reduced stale forward catch-up to one CL-anchored block per turn while history is incomplete. Full runtime separation remains the peer-scheduler actor TODO if cooperative-loop contention persists.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -209,13 +218,14 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
 - Reverted the uncommitted per-plan body/receipt peer rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs` after benchmarking showed a regression; no code from that attempt remains.
 - Reverted the uncommitted hard-timeout pause experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking showed a regression; no code from that attempt remains.
 - Inspected the historical request accounting paths in `crates/logex-sync/src/p2p/peer_manager/{requests.rs,state.rs}` and the fetch pipeline reset path in `crates/logex-sync/src/engine/anchored.rs`; kept the change scoped to active peer-load accounting and did not retain rejected rotation/backoff code.
+- Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining forward/CL gates. Kept the new change limited to the forward batch fairness helper and its unit coverage; no unrelated scheduler experiments were added.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
