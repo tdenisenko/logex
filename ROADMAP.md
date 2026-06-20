@@ -96,6 +96,7 @@ Historical backfill is now given an even tighter fairness window when forward sy
 - Confirmed that historical validation is not CL-gated after a checkpoint-backed floor exists, but stale forward catch-up could still hold the shared engine loop for a multi-block forward batch.
 - Tightened stale forward catch-up fairness so, while historical backfill is incomplete and forward sync is more than 64 blocks behind the consensus target, the forward path processes one CL-anchored block per cooperative turn.
 - Validated the scheduler change with `cargo fmt --all -- --check`, focused `logex-sync` coverage, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed the updated binary to the Mac mini, restarted the tmux-managed client gracefully on `/Volumes/SSD 4TB/LogEx`, and confirmed `/status` stayed within one block of head while historical backfill resumed.
 
 ## Remaining TODOs
 
