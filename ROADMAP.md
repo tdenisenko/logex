@@ -109,6 +109,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Revalidated the fix with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Tested a dial-expiry backoff experiment inspired by Nethermind-style connection-failure delays.
 - Rejected and reverted the dial-backoff experiment after the Mac mini benchmark showed lower sustained throughput than the accepted baseline: baseline averaged about 122k logs/sec with body/receipt p95 around 38s, while the experiment averaged about 106k logs/sec despite improving p95 to about 27s. The accepted binary was redeployed and restarted on `/Volumes/SSD 4TB/LogEx`.
+- Confirmed the Mac mini is still using the VPS WireGuard gateway correctly: public egress is `157.245.195.72`, LogEx advertises `--nat extip:157.245.195.72`, the public dashboard responds through the VPS, LogEx sockets bind on `0.0.0.0`, and VPS FORWARD counters are active for EL `30303`, CL `9000`, and dashboard `18683`.
+- Tested lower initial body/receipt request limits (`24`/`24`) after comparing Nethermind's smaller latency-based startup request sizers.
+- Rejected and reverted the lower initial request-limit experiment after the Mac mini benchmark averaged about 91k logs/sec versus the accepted baseline's about 122k; body/receipt p95 improved, but sustained sync throughput regressed. The accepted binary was redeployed again.
 
 ## Remaining TODOs
 
@@ -220,6 +223,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Expired outbound dials can make peer warm-up look stuck after restart, so a retry backoff for failed dials seemed likely to improve the serving pool.
   - Resolution: Tested a bounded failed-dial backoff and exposed its count in `/status` during the experiment. It improved body/receipt tail latency but reduced sustained logs/sec and did not raise serving peers enough to justify the extra churn, so the code and status field were reverted before committing.
 
+- Challenge: Low peer count could have been caused by WireGuard/VPS routing rather than LogEx peer acquisition.
+  - Resolution: Verified the gateway path end to end. The Mac mini egresses through the VPS, the VPS forwards the expected ports, public dashboard access works through the VPS, and LogEx has inbound EL/CL sockets over `10.66.0.2`. The remaining low serving-peer windows are not caused by bypassing the VPS.
+
+- Challenge: LogEx starts body/receipt peers at larger request sizes than Nethermind, which might overload newly connected peers.
+  - Resolution: Tested lower initial body/receipt limits of `24`/`24`. The change improved latency tail but reduced sustained logs/sec, so it was reverted before committing. Future request-size work should be adaptive per peer and benchmarked against throughput, not just p95 latency.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -231,6 +240,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Reverted uncommitted body/receipt request-window and early-prefix experiments from `crates/logex-sync/src/p2p/peer_manager/requests.rs` after identifying stale forward catch-up as the actual cause of the low dashboard rate.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for stale forward/historical scheduling coupling and kept the fix scoped to ready historical work; no abandoned helper paths were left behind.
 - Inspected and reverted the uncommitted failed-dial backoff experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,lifecycle.rs,state.rs}`, `crates/logex-types/src/sync.rs`, and `crates/logex-server/src/rest.rs`; no experiment code remains in the worktree.
+- Inspected and reverted the uncommitted lower initial body/receipt request-limit experiment in `crates/logex-sync/src/p2p/peer_manager/mod.rs`; no request-limit experiment code remains in the worktree.
 - Removed the obsolete `should_run_historical_backfill` helper and its test because historical backfill is now controlled by the verified historical floor and peer availability rather than forward-sync lag.
 - Inspected consensus-mode startup in `crates/logex-sync/src/engine/anchored.rs` and kept the resume fix scoped to persisted historical floor state; no fresh-sync bypass path was added.
 - Reverted the uncommitted per-chunk in-flight scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no experimental code remains from that attempt.
