@@ -16,6 +16,8 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
 
 Resumed historical backfill is no longer forced to wait for a fresh CL head before entering the consensus-mode sync loop. Fresh data directories still require a recent checkpoint and consensus-verified pivot; only data directories with a persisted verified historical floor can resume reverse EL sync while forward/CL tracking catches up.
 
+Historical validation is independent from CL and forward sync after a checkpoint-backed pivot exists. Runtime scheduling is still cooperative inside one `SyncEngine`/`PeerManager`, so reverse fetches run in background tasks but planning/accounting/ingestion can still share turns with forward catch-up until the peer scheduler is split into an actor.
+
 ## Completed Since Last Run
 
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
@@ -61,6 +63,9 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Replaced the post-forward blocking historical call with a nonblocking ready-work service that drains completed historical batches and primes reverse fetches without waiting on the next historical network response while forward anchors are available.
 - Revalidated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, `cargo check --workspace`, and `cargo test --workspace`.
 - Deployed the rebuilt binary to the Mac mini, restarted the existing `/Volumes/SSD 4TB/LogEx` run in tmux without resetting data, and confirmed `/status` stayed near head while historical backfill resumed after peer warm-up.
+- Rejected the uncommitted per-fetch peer-candidate rotation experiment after live Mac mini sampling showed lower average logs/sec and higher timeout churn than the committed baseline.
+- Restored, rebuilt, and restarted the committed baseline on the Mac mini; after peer warm-up, `/status` showed forward tracking near head and historical reverse sync active at roughly 198k logs/sec with 12 serving EL peers.
+- Rechecked historical/forward/CL coupling: no CL live-head wait remains after a persisted verified historical floor exists, but a full runtime split still requires a peer-request scheduler actor because `SyncEngine` currently owns the mutable `PeerManager`.
 
 ## Remaining TODOs
 
@@ -70,7 +75,7 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 
 2. Validate stale-forward catch-up fairness.
    - Reason: The consensus loop now drains ready historical work, primes historical downloads before forward batches, and can resume verified historical backfill before CL head tracking is ready. This still needs longer stale-resume runtime validation.
-   - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while historical fetches stay active and historical batches keep making steady progress.
+   - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while historical fetches stay active and historical batches keep making steady progress. If cooperative scheduling still materially suppresses historical throughput during forward catch-up, split peer request scheduling/accounting into an actor so forward and historical workers can submit work independently.
 
 3. Match production-client P2P behavior more closely.
    - Reason: The target is Geth/Nethermind-class peer retention and sync performance.
@@ -94,6 +99,7 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Historical throughput regressions must account for stale forward catch-up. The consensus-anchored loop now drains up to two already-ready historical batches and primes historical body/receipt fetches before forward anchor work, keeping historical downloads overlapped with live catch-up without starving the forward path.
 - Fresh sync must still be anchored by a recent CL checkpoint. Resumed historical sync may proceed without a currently available CL head only when storage already contains a persisted verified historical floor header.
 - When forward consensus anchors are available, the scheduler should only service ready historical work and keep reverse fetches primed; it should not block forward progress waiting for a historical network response. If no forward anchors are available, historical backfill may use the blocking path because there is no forward work to contend with.
+- Full runtime independence between live forward sync and historical reverse sync requires moving EL request scheduling/accounting out of the single mutable `SyncEngine` loop. Until then, reverse downloads can run concurrently, but ingestion and peer-plan creation remain cooperative.
 
 ## Challenges and Resolutions
 
@@ -136,6 +142,9 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Challenge: Historical sync was logically independent from CL after pivot creation, but forward catch-up could still share the same cooperative loop in a way that made one side wait for the other's next network response.
   - Resolution: Kept the single-engine architecture for now, but changed the forward-anchors path to perform only nonblocking historical service after forward work. This preserves background reverse downloads and ready-batch ingestion without introducing a full peer-manager actor split yet.
 
+- Challenge: Historical reverse sync was expected to be fully independent from forward/CL sync, but the current architecture still has one owner for mutable peer scheduling state.
+  - Resolution: Confirmed no CL live-head gate remains after a verified floor exists, restored the accepted baseline, and left the full actor split as the next architectural step if stale-forward validation proves cooperative scheduling is still a bottleneck.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -151,6 +160,7 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Reverted the uncommitted per-chunk in-flight scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no experimental code remains from that attempt.
 - Reverted the uncommitted role-weakness scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,lifecycle.rs,state.rs}` after remote benchmarking showed it regressed the accepted baseline.
 - Inspected the consensus-mode scheduler in `crates/logex-sync/src/engine/anchored.rs` and consolidated duplicated ready-historical servicing into a single helper; no abandoned blocking post-forward path remains.
+- Reverted the uncommitted per-fetch peer-candidate rotation experiment in `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no code from that rejected run remains.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
