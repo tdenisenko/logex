@@ -107,6 +107,8 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Deployed the updated binary to the Mac mini, restarted the tmux-managed client gracefully on `/Volumes/SSD 4TB/LogEx`, and confirmed `/status` stayed within one block of head while historical backfill resumed.
 - Fixed the remaining consensus-store availability edge: if a persisted verified historical floor exists, consensus-mode sync no longer exits when CL/forward consensus data is temporarily unavailable after startup; it keeps servicing historical backfill.
 - Revalidated the fix with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Tested a dial-expiry backoff experiment inspired by Nethermind-style connection-failure delays.
+- Rejected and reverted the dial-backoff experiment after the Mac mini benchmark showed lower sustained throughput than the accepted baseline: baseline averaged about 122k logs/sec with body/receipt p95 around 38s, while the experiment averaged about 106k logs/sec despite improving p95 to about 27s. The accepted binary was redeployed and restarted on `/Volumes/SSD 4TB/LogEx`.
 
 ## Remaining TODOs
 
@@ -215,6 +217,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Consensus-mode sync could still exit if the consensus store became unavailable after the loop had already entered with a persisted historical floor.
   - Resolution: Changed that branch to keep historical-only backfill alive when the persisted floor is above the history target. Fresh sync remains blocked until a recent checkpoint/pivot exists.
 
+- Challenge: Expired outbound dials can make peer warm-up look stuck after restart, so a retry backoff for failed dials seemed likely to improve the serving pool.
+  - Resolution: Tested a bounded failed-dial backoff and exposed its count in `/status` during the experiment. It improved body/receipt tail latency but reduced sustained logs/sec and did not raise serving peers enough to justify the extra churn, so the code and status field were reverted before committing.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -225,6 +230,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Removed remote experiment data directories matching `/Volumes/SSD 4TB/LogEx*` except the main `/Volumes/SSD 4TB/LogEx` directory.
 - Reverted uncommitted body/receipt request-window and early-prefix experiments from `crates/logex-sync/src/p2p/peer_manager/requests.rs` after identifying stale forward catch-up as the actual cause of the low dashboard rate.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for stale forward/historical scheduling coupling and kept the fix scoped to ready historical work; no abandoned helper paths were left behind.
+- Inspected and reverted the uncommitted failed-dial backoff experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,lifecycle.rs,state.rs}`, `crates/logex-types/src/sync.rs`, and `crates/logex-server/src/rest.rs`; no experiment code remains in the worktree.
 - Removed the obsolete `should_run_historical_backfill` helper and its test because historical backfill is now controlled by the verified historical floor and peer availability rather than forward-sync lag.
 - Inspected consensus-mode startup in `crates/logex-sync/src/engine/anchored.rs` and kept the resume fix scoped to persisted historical floor state; no fresh-sync bypass path was added.
 - Reverted the uncommitted per-chunk in-flight scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no experimental code remains from that attempt.
