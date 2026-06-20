@@ -49,6 +49,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Retested dense historical fetch depth 8 on top of adaptive fanout and rejected it because low-peer active request counts again climbed into the 60-100 range.
 - Delayed high-memory historical fetch depth until 24 serving peers. The remote sample kept logs/sec roughly flat while improving body/receipt p50/p95 versus adaptive fanout alone.
 - Added serving-peer fast-pool retention for dense body/receipt plans. Once a candidate set has at least 16 proven serving peers, the planner keeps that pool instead of mixing in compatible-but-unproven peers; the Mac mini run improved body/receipt latency distribution without breaking startup fallback behavior.
+- Tested and rejected a bounded unproven-peer probe budget on top of the serving fast pool. It raised serving peers above the 16-peer plateau, but body/receipt p95 regressed to about 20s and timeout failures nearly doubled, so the committed serving-only fast pool was restored on the Mac mini.
 - Rechecked the Mac mini WireGuard/VPS path while peer counts were low: external routes still use `utun4`, public egress is `157.245.195.72`, LogEx still advertises `--nat extip:157.245.195.72`, and public `/status` works through the VPS.
 - Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
 - Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
@@ -264,6 +265,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 - Challenge: Warmed EL peer count was healthy, but serving peers remained much lower than connected peers and slow body/receipt candidates still stretched plan tails.
   - Resolution: Added a thresholded serving-peer fast pool for dense body/receipt plans. It preserves fallback diversity below 16 serving candidates, then filters to proven serving peers above that threshold; the first Mac mini benchmark improved body/receipt p50/p95 enough to keep the change.
+
+- Challenge: Filtering entirely to proven serving peers risks freezing peer promotion, so a small unproven-peer probe budget looked attractive.
+  - Resolution: Tested the probe budget live and rejected it. Although serving peers increased, request tails and timeout counts worsened enough that sustained sync behavior was worse than the serving-only fast pool.
 
 - Challenge: LogEx starts body/receipt peers at larger request sizes than Nethermind, which might overload newly connected peers.
   - Resolution: Tested lower initial body/receipt limits of `24`/`24`. The change improved latency tail but reduced sustained logs/sec, so it was reverted before committing. Future request-size work should be adaptive per peer and benchmarked against throughput, not just p95 latency.
