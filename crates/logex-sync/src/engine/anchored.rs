@@ -1169,13 +1169,7 @@ impl SyncEngine {
             }
 
             let historical_pre_forward_progressed = if !self.config.disable_historical_sync {
-                let ready_progressed = self
-                    .ingest_ready_historical_backfill_batches(
-                        CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT,
-                    )
-                    .await?;
-                let pipeline_primed = self.prime_historical_backfill_pipeline().await?;
-                ready_progressed || pipeline_primed
+                self.service_ready_historical_backfill().await?
             } else {
                 false
             };
@@ -1222,7 +1216,7 @@ impl SyncEngine {
 
             let forward_progressed = self.ingest_anchored_blocks(anchors).await?;
             let historical_progressed = if !self.config.disable_historical_sync {
-                self.ingest_historical_backfill_batch().await?
+                self.service_ready_historical_backfill().await?
             } else {
                 false
             };
@@ -1237,6 +1231,14 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
         }
+    }
+
+    async fn service_ready_historical_backfill(&mut self) -> Result<bool> {
+        let ready_progressed = self
+            .ingest_ready_historical_backfill_batches(CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT)
+            .await?;
+        let pipeline_primed = self.prime_historical_backfill_pipeline().await?;
+        Ok(ready_progressed || pipeline_primed)
     }
 
     async fn ingest_ready_historical_backfill_batches(&mut self, limit: usize) -> Result<bool> {

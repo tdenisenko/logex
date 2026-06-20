@@ -57,6 +57,10 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Added unit coverage proving historical resume does not bypass fresh-checkpoint startup and does not run when historical sync is disabled.
 - Rejected an uncommitted per-chunk in-flight peer rebalancing experiment after Mac mini benchmarks showed lower average logs/sec and higher timeout churn than the accepted branch state.
 - Rejected an uncommitted role-specific peer weakness and low inherited-limit experiment after live Mac mini benchmarks showed lower average logs/sec, worse body/receipt p95 latency, and higher timeout churn than the accepted branch state.
+- Confirmed historical validation is cryptographically independent from CL/forward sync after a checkpoint-backed pivot exists, but found one remaining scheduler coupling: after forward anchor ingestion, the consensus loop could call the blocking historical path and wait for the next reverse fetch.
+- Replaced the post-forward blocking historical call with a nonblocking ready-work service that drains completed historical batches and primes reverse fetches without waiting on the next historical network response while forward anchors are available.
+- Revalidated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, `cargo check --workspace`, and `cargo test --workspace`.
+- Deployed the rebuilt binary to the Mac mini, restarted the existing `/Volumes/SSD 4TB/LogEx` run in tmux without resetting data, and confirmed `/status` stayed near head while historical backfill resumed after peer warm-up.
 
 ## Remaining TODOs
 
@@ -89,6 +93,7 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
 - Historical throughput regressions must account for stale forward catch-up. The consensus-anchored loop now drains up to two already-ready historical batches and primes historical body/receipt fetches before forward anchor work, keeping historical downloads overlapped with live catch-up without starving the forward path.
 - Fresh sync must still be anchored by a recent CL checkpoint. Resumed historical sync may proceed without a currently available CL head only when storage already contains a persisted verified historical floor header.
+- When forward consensus anchors are available, the scheduler should only service ready historical work and keep reverse fetches primed; it should not block forward progress waiting for a historical network response. If no forward anchors are available, historical backfill may use the blocking path because there is no forward work to contend with.
 
 ## Challenges and Resolutions
 
@@ -128,6 +133,9 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Challenge: Role-specific peer weakness tracking and lower inherited request limits matched production-client ideas in principle, but the combined experiment reduced throughput on the live Mac mini run.
   - Resolution: Reverted the experiment before committing code. The result suggests that the current bottleneck is not solved by shrinking peer request sizes globally; future work should use narrower capacity estimation or per-peer request sizing that proves higher sustained throughput before it is kept.
 
+- Challenge: Historical sync was logically independent from CL after pivot creation, but forward catch-up could still share the same cooperative loop in a way that made one side wait for the other's next network response.
+  - Resolution: Kept the single-engine architecture for now, but changed the forward-anchors path to perform only nonblocking historical service after forward work. This preserves background reverse downloads and ready-batch ingestion without introducing a full peer-manager actor split yet.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -142,13 +150,14 @@ Resumed historical backfill is no longer forced to wait for a fresh CL head befo
 - Inspected consensus-mode startup in `crates/logex-sync/src/engine/anchored.rs` and kept the resume fix scoped to persisted historical floor state; no fresh-sync bypass path was added.
 - Reverted the uncommitted per-chunk in-flight scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no experimental code remains from that attempt.
 - Reverted the uncommitted role-weakness scheduler experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,lifecycle.rs,state.rs}` after remote benchmarking showed it regressed the accepted baseline.
+- Inspected the consensus-mode scheduler in `crates/logex-sync/src/engine/anchored.rs` and consolidated duplicated ready-historical servicing into a single helper; no abandoned blocking post-forward path remains.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
