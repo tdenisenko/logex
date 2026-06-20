@@ -8,7 +8,9 @@ Active branch: `perf/historical-sync-throughput-v3`.
 
 The Mac mini WireGuard/VPS path is healthy again after replacing the stale-interface wrapper with a health-checking LaunchDaemon script. The wrapper now treats a tunnel as healthy only if the VPS tunnel IP responds or the WireGuard handshake is recent; otherwise it restarts the tunnel and restores the full-tunnel routes while preserving LAN access.
 
-Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks from `/Users/gremlinmaster/logex-peerload-test` against `/Volumes/SSD 4TB/LogExBench/adaptive-storage-20260619-120422` recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
+Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
+
+The active Mac mini client now runs from the main data directory `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Old `/Volumes/SSD 4TB/LogEx*` experiment directories were removed, leaving only the main data directory.
 
 ## Completed Since Last Run
 
@@ -33,6 +35,11 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Lowered the dense body/receipt decoupled-pipeline threshold from 12 to 8 peers; the remote benchmark reduced paired fallback plan average latency from roughly 15.0s to roughly 9.6s, kept contiguous prefixes at 512/512, and reached roughly 493k last-120-sample average with 867k max while preserving the 6-plan dense fetch cap.
 - Rejected a 4s pipelined body/receipt timeout because it increased timeout churn and damaged contiguous prefixes despite producing some higher dashboard samples.
 - Capped parallel chunk requests per peer from 4 to 2; the extended remote benchmark reached roughly 521k last-12-sample average with 379k p10, kept 512-block contiguous prefixes, and reduced partial-batch churn to one partial across 835 batches.
+- Investigated the stopped remote client. The main `/Volumes/SSD 4TB/LogEx` run had shut down cleanly from `SIGINT`; a benchmark run had stopped with `storage write error: Too many open files (os error 24)`.
+- Added startup file-descriptor hardening so LogEx raises the process soft `RLIMIT_NOFILE` to 16,384 when the OS hard limit permits it.
+- Cleaned remote experiment data under `/Volumes/SSD 4TB/LogEx*`, preserving only `/Volumes/SSD 4TB/LogEx`.
+- Rebuilt and restarted the Mac mini client in tmux against `/Volumes/SSD 4TB/LogEx`; startup raised the descriptor limit from 256 to 16,384, storage integrity passed, and `/status` reported healthy EL/CL peer warm-up with historical sync moving.
+- Validated locally with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
 
 ## Remaining TODOs
 
@@ -56,6 +63,7 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Historical storage should be density-aware: dense batches are already large enough to amortize compacted segment overhead, while sparse ranges need raw staging/coalescing to avoid tiny segment and disk-usage growth.
 - Dense body/receipt fetches should enter the decoupled body/receipt path with at least 8 eligible peers; remote benchmarks showed this reduces paired fallback latency without increasing the active dense fetch cap.
 - Limit parallel chunk requests per peer to 2 so one slow peer cannot occupy many chunk slots before timeout accounting demotes it; the tradeoff is slightly lower theoretical burst capacity for a better sustained floor.
+- Raise the process open-file soft limit at startup on Unix platforms. The client needs enough descriptors for P2P sockets plus storage segment reads/writes; relying on macOS's default soft limit of 256 is too fragile for long production runs.
 - WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
 
@@ -79,6 +87,9 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Challenge: Clean remote master build failed because `protoc` was not on the non-interactive SSH PATH.
   - Resolution: Confirmed Homebrew protobuf was already installed and rebuilt with `/usr/local/bin` on PATH.
 
+- Challenge: A remote benchmark run stopped with `Too many open files` while the Mac mini shell soft limit was 256.
+  - Resolution: Added Unix startup logic to raise the soft file-descriptor limit to 16,384 where permitted. The restarted client confirmed the new limit in logs and continued running from the main data directory.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -86,19 +97,20 @@ Historical sync performance work has revalidated the earlier high-throughput com
 - Removed the obsolete broad v3 scheduler delta from the branch by restoring the proven master implementation before adding the narrower peer-load change.
 - Reverted the unproven high-peer dense lookahead experiment before committing; only the decoupled threshold change remains from this pass.
 - Reverted the failed 4s timeout experiment before committing; only the per-peer chunk cap remains from the latest pass.
+- Removed remote experiment data directories matching `/Volumes/SSD 4TB/LogEx*` except the main `/Volumes/SSD 4TB/LogEx` directory.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `perf: cap per-peer chunk concurrency`.
-- Pull request status: not created
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; descriptor-limit hardening in this branch.
+- Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
 
 ## Known Issues or Risks
 
 - Adaptive storage recovered the 800k-900k+ peak range, but total sync-time improvement depends on reducing low-throughput peer-tail minutes.
-- Earlier commit tests must use isolated test data dirs or carefully verified compatibility so old storage code does not mutate the current storage-fix data.
+- Earlier commit tests must use isolated test data dirs or carefully verified compatibility so old storage code does not mutate the main `/Volumes/SSD 4TB/LogEx` data.
 - The branch is not ready for PR/merge until validation passes and a longer remote benchmark confirms a measured improvement over the selected baseline.

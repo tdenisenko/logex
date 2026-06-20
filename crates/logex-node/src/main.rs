@@ -17,6 +17,8 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_LOG_FILTER: &str = "info,discv5=error";
+#[cfg(unix)]
+const MIN_FILE_DESCRIPTOR_LIMIT: u64 = 16_384;
 
 fn main() {
     let cli = Cli::parse();
@@ -36,6 +38,8 @@ fn main() {
                 .unwrap_or_else(|_| log_level.parse().unwrap_or_default()),
         )
         .init();
+
+    raise_file_descriptor_limit();
 
     let data_dir = file_config
         .data_dir
@@ -198,9 +202,77 @@ fn is_public_listener(host: IpAddr) -> bool {
     !host.is_loopback()
 }
 
+fn raise_file_descriptor_limit() {
+    #[cfg(unix)]
+    match raise_file_descriptor_limit_unix(MIN_FILE_DESCRIPTOR_LIMIT) {
+        Ok(Some(change)) => tracing::info!(
+            previous_soft_limit = change.previous_soft,
+            soft_limit = change.current_soft,
+            hard_limit = change.hard,
+            "raised process file descriptor limit"
+        ),
+        Ok(None) => tracing::debug!(
+            minimum = MIN_FILE_DESCRIPTOR_LIMIT,
+            "process file descriptor limit is sufficient"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            minimum = MIN_FILE_DESCRIPTOR_LIMIT,
+            "failed to raise process file descriptor limit"
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileDescriptorLimitChange {
+    previous_soft: u64,
+    current_soft: u64,
+    hard: u64,
+}
+
+#[cfg(unix)]
+fn raise_file_descriptor_limit_unix(
+    minimum: u64,
+) -> std::io::Result<Option<FileDescriptorLimitChange>> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: getrlimit initializes the provided rlimit pointer when it returns 0.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: getrlimit succeeded, so the rlimit structure has been initialized.
+    let mut limit = unsafe { limit.assume_init() };
+
+    let current_soft = limit.rlim_cur;
+    let hard = limit.rlim_max;
+    let Some(target_soft) = desired_file_descriptor_soft_limit(current_soft, hard, minimum) else {
+        return Ok(None);
+    };
+
+    limit.rlim_cur = target_soft;
+    // SAFETY: limit was obtained from getrlimit and only rlim_cur is adjusted within rlim_max.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(Some(FileDescriptorLimitChange {
+        previous_soft: current_soft,
+        current_soft: target_soft,
+        hard,
+    }))
+}
+
+fn desired_file_descriptor_soft_limit(current_soft: u64, hard: u64, minimum: u64) -> Option<u64> {
+    let target = minimum.min(hard);
+    (target > current_soft).then_some(target)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_LOG_FILTER, effective_log_filter, validate_listener_policy};
+    use super::{
+        DEFAULT_LOG_FILTER, desired_file_descriptor_soft_limit, effective_log_filter,
+        validate_listener_policy,
+    };
     use std::net::IpAddr;
 
     #[test]
@@ -283,6 +355,30 @@ mod tests {
                 true,
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn descriptor_limit_is_raised_to_minimum_when_possible() {
+        assert_eq!(
+            desired_file_descriptor_soft_limit(256, 65_536, 16_384),
+            Some(16_384)
+        );
+    }
+
+    #[test]
+    fn descriptor_limit_respects_hard_limit() {
+        assert_eq!(
+            desired_file_descriptor_soft_limit(256, 4_096, 16_384),
+            Some(4_096)
+        );
+    }
+
+    #[test]
+    fn descriptor_limit_is_unchanged_when_already_sufficient() {
+        assert_eq!(
+            desired_file_descriptor_soft_limit(32_768, 65_536, 16_384),
+            None
         );
     }
 }
