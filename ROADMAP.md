@@ -79,6 +79,10 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Tested a per-plan body/receipt peer rotation experiment intended to spread concurrent lookahead plans across the ranked peer pool.
 - Rejected and reverted the rotation experiment after the live benchmark regressed: progress average fell to roughly 99k logs/sec, body/receipt p95 rose to roughly 31.9s, and plan failures/timeouts increased.
 - Rebuilt and restarted the accepted branch code on the Mac mini without resetting `/Volumes/SSD 4TB/LogEx`; the client resumed historical sync after peer warm-up began.
+- Audited Geth and Nethermind request sizing behavior. Both treat timeout/latency as a capacity signal; Geth keeps timed-out peers stale before reuse and Nethermind adapts body/receipt request sizes with latency watermarks.
+- Tested a longer hard-timeout pause for body/receipt peers to reduce repeated timeout churn.
+- Rejected and reverted the timeout-pause experiment after live benchmarking showed worse body/receipt p95 latency and lower average logs/sec despite fewer recorded failures.
+- Rebuilt and restarted the accepted branch code again on the Mac mini; no timeout-pause experiment code remains deployed.
 
 ## Remaining TODOs
 
@@ -169,6 +173,9 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Challenge: A per-plan body/receipt peer rotation experiment looked like a simple way to spread concurrent lookahead work without global reservations.
   - Resolution: Reverted the experiment because it worsened the Mac mini benchmark: p95 body/receipt latency increased, timeout churn rose, and logs/sec fell below the accepted baseline.
 
+- Challenge: Longer hard-timeout pauses matched Geth's stale-peer idea in principle and reduced repeated timeout churn, but risked starving the downloader when the serving pool was still warming.
+  - Resolution: Reverted the experiment because the Mac mini run showed lower average logs/sec and worse body/receipt p95 latency. Future timeout work should be tied to explicit in-flight peer allocation or peer-count-aware backoff, not a static longer pause.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -188,6 +195,7 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Inspected and updated `crates/logex-sync/src/engine/{mod.rs,anchored.rs}` and `crates/logex-sync/src/p2p/peer_manager/{mod.rs,requests.rs}` for streamed historical request accounting. No dead experimental scheduler code was left in place.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining CL/forward historical gates and added the fairness cap there; no obsolete helper path was introduced.
 - Reverted the uncommitted per-plan body/receipt peer rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs` after benchmarking showed a regression; no code from that attempt remains.
+- Reverted the uncommitted hard-timeout pause experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking showed a regression; no code from that attempt remains.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
