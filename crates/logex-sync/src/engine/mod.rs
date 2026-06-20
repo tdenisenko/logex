@@ -37,7 +37,7 @@ mod live;
 use self::helpers::{
     assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
     preferred_body_peers, refill_peer_floor, should_mark_historical_complete,
-    should_run_historical_backfill, should_switch_to_live_without_target,
+    should_switch_to_live_without_target,
 };
 
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
@@ -49,7 +49,6 @@ const PEER_REFILL_STEP: usize = 16;
 const HISTORICAL_BACKFILL_CONNECTED_PEER_FLOOR_CAP: usize = 4;
 const RECENT_HEADER_WINDOW: usize = 8_192;
 const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
-const LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD: u64 = 32;
 const HISTORICAL_INITIAL_ROWS_PER_BLOCK_EWMA: f64 = 500.0;
 
 pub(super) struct HistoricalValidatedBlock {

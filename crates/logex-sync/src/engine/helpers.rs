@@ -159,14 +159,6 @@ pub(super) fn should_switch_to_live_without_target(
     target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
 }
 
-pub(super) fn should_run_historical_backfill(
-    current_block: u64,
-    _target_block: u64,
-    _max_live_lag: u64,
-) -> bool {
-    current_block > 0
-}
-
 pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
     if max_peers == 0 {
         return 0;
@@ -363,15 +355,6 @@ mod tests {
             Some(10),
             HISTORICAL_EMPTY_THRESHOLD
         ));
-    }
-
-    #[test]
-    fn historical_backfill_runs_independently_of_live_lag() {
-        assert!(!should_run_historical_backfill(0, 0, 32));
-        assert!(should_run_historical_backfill(100, 0, 32));
-        assert!(should_run_historical_backfill(100, 132, 32));
-        assert!(should_run_historical_backfill(140, 132, 32));
-        assert!(should_run_historical_backfill(100, 133, 32));
     }
 
     #[test]

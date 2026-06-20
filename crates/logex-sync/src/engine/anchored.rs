@@ -1150,11 +1150,14 @@ impl SyncEngine {
                 continue;
             }
 
-            let historical_ready_progressed = if !self.config.disable_historical_sync {
-                self.ingest_ready_historical_backfill_batches(
-                    CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT,
-                )
-                .await?
+            let historical_pre_forward_progressed = if !self.config.disable_historical_sync {
+                let ready_progressed = self
+                    .ingest_ready_historical_backfill_batches(
+                        CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT,
+                    )
+                    .await?;
+                let pipeline_primed = self.prime_historical_backfill_pipeline().await?;
+                ready_progressed || pipeline_primed
             } else {
                 false
             };
@@ -1179,7 +1182,7 @@ impl SyncEngine {
                 } else {
                     self.set_runtime_state(NodeState::WaitingForConsensus);
                 }
-                if historical_ready_progressed {
+                if historical_pre_forward_progressed {
                     continue;
                 }
                 if !self.config.disable_historical_sync
@@ -1200,18 +1203,12 @@ impl SyncEngine {
             };
 
             let forward_progressed = self.ingest_anchored_blocks(anchors).await?;
-            let (current, target) = self.sync_cursor();
-            let historical_progressed = if !self.config.disable_historical_sync
-                && should_run_historical_backfill(
-                    current,
-                    target,
-                    LIVE_LAG_HISTORICAL_BACKFILL_THRESHOLD,
-                ) {
+            let historical_progressed = if !self.config.disable_historical_sync {
                 self.ingest_historical_backfill_batch().await?
             } else {
                 false
             };
-            if !(forward_progressed || historical_ready_progressed || historical_progressed)
+            if !(forward_progressed || historical_pre_forward_progressed || historical_progressed)
                 && cancelable(
                     &mut self.shutdown,
                     tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
@@ -1277,6 +1274,48 @@ impl SyncEngine {
         }
 
         Ok(progressed)
+    }
+
+    async fn prime_historical_backfill_pipeline(&mut self) -> Result<bool> {
+        let child_header = {
+            let storage = self.storage.read().await;
+            storage.historical_floor_header().cloned()
+        };
+        let Some(child_header) = child_header else {
+            return Ok(false);
+        };
+        if child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+            return Ok(false);
+        }
+
+        if self.peers.peer_count() == 0 {
+            self.refresh_connectivity_state();
+            return Ok(false);
+        }
+
+        let connected_peer_floor = historical_backfill_peer_floor(self.config.max_peers);
+        if self.peers.peer_count() < connected_peer_floor
+            && !self.has_ready_historical_fetch_for(&child_header)
+        {
+            self.refresh_connectivity_state();
+            tracing::debug!(
+                connected_peers = self.peers.peer_count(),
+                connected_peer_floor,
+                "waiting for execution peer pool before priming historical backfill"
+            );
+            return Ok(false);
+        }
+
+        let active_fetches = self.active_historical_fetch_count();
+        let pending_fetches = self.pending_historical_fetch_count();
+        let pending_prepares = self.pending_historical_prepare_count();
+
+        self.ensure_historical_fetch_pipeline(child_header).await?;
+        self.spawn_ready_historical_prepare_tasks().await?;
+
+        Ok(self.active_historical_fetch_count() != active_fetches
+            || self.pending_historical_fetch_count() != pending_fetches
+            || self.pending_historical_prepare_count() != pending_prepares)
     }
 
     async fn ingest_anchored_blocks(&mut self, anchors: Vec<ExecutionAnchor>) -> Result<bool> {
