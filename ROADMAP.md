@@ -75,6 +75,10 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Confirmed historical sync no longer has a CL live-head validity gate after a verified floor exists, but stale forward catch-up can still contend through the shared engine loop.
 - Added a forward-batch fairness cap while historical backfill is active so CL-anchored catch-up returns to historical scheduling more frequently.
 - Validated the fairness cap with `cargo fmt --all -- --check`, focused `logex-sync` tests, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Re-sampled the accepted Mac mini build after restart and confirmed the remaining low-throughput windows are body/receipt request tail latency, not CL gating: baseline plan p95 was about 19.7s with request timeouts dominating failures.
+- Tested a per-plan body/receipt peer rotation experiment intended to spread concurrent lookahead plans across the ranked peer pool.
+- Rejected and reverted the rotation experiment after the live benchmark regressed: progress average fell to roughly 99k logs/sec, body/receipt p95 rose to roughly 31.9s, and plan failures/timeouts increased.
+- Rebuilt and restarted the accepted branch code on the Mac mini without resetting `/Volumes/SSD 4TB/LogEx`; the client resumed historical sync after peer warm-up began.
 
 ## Remaining TODOs
 
@@ -162,6 +166,9 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Challenge: Historical sync was intended to be independent from CL/forward sync, but stale forward catch-up could still take large batches through the shared engine loop.
   - Resolution: Added a smaller forward-anchor batch cap while historical backfill is incomplete. This does not replace the larger peer-scheduler actor split, but it reduces cooperative-loop contention without weakening the CL anchor requirement for forward blocks.
 
+- Challenge: A per-plan body/receipt peer rotation experiment looked like a simple way to spread concurrent lookahead work without global reservations.
+  - Resolution: Reverted the experiment because it worsened the Mac mini benchmark: p95 body/receipt latency increased, timeout churn rose, and logs/sec fell below the accepted baseline.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -180,6 +187,7 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Reverted the uncommitted per-fetch peer-candidate rotation experiment in `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no code from that rejected run remains.
 - Inspected and updated `crates/logex-sync/src/engine/{mod.rs,anchored.rs}` and `crates/logex-sync/src/p2p/peer_manager/{mod.rs,requests.rs}` for streamed historical request accounting. No dead experimental scheduler code was left in place.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining CL/forward historical gates and added the fairness cap there; no obsolete helper path was introduced.
+- Reverted the uncommitted per-plan body/receipt peer rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs` after benchmarking showed a regression; no code from that attempt remains.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
