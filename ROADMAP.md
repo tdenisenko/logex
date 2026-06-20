@@ -20,6 +20,8 @@ Historical validation is independent from CL and forward sync after a checkpoint
 
 The consensus-mode scheduler now caps forward CL-anchor batches to a small fairness window while historical backfill remains incomplete. This keeps stale forward catch-up from monopolizing the single engine loop and gives reverse historical planning/ingestion frequent turns without changing the trust boundary: forward sync still follows CL anchors, while historical validation follows the EL parent chain and receipt roots from the checkpoint-backed pivot.
 
+Historical fetch lookahead now tracks active body/receipt requests across concurrently spawned historical plans. New plans rank already-busy peers lower for the same request kind, and pipeline resets clear active counters so aborted fetch tasks cannot leave stale peer-load state behind. This further reduces runtime coupling, but full runtime independence still requires moving peer request scheduling/accounting out of the single mutable `SyncEngine` loop.
+
 ## Completed Since Last Run
 
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
@@ -83,12 +85,14 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Tested a longer hard-timeout pause for body/receipt peers to reduce repeated timeout churn.
 - Rejected and reverted the timeout-pause experiment after live benchmarking showed worse body/receipt p95 latency and lower average logs/sec despite fewer recorded failures.
 - Rebuilt and restarted the accepted branch code again on the Mac mini; no timeout-pause experiment code remains deployed.
+- Added cross-plan active body/receipt request accounting so concurrent historical lookahead plans can rank peers by current same-kind load instead of waiting for an entire fetch plan to complete before updating peer pressure.
+- Added active-request reset cleanup for aborted historical fetch pipelines and validated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, and `cargo check --workspace`.
 
 ## Remaining TODOs
 
 1. Reduce peer-tail sawtooth in dense historical sync.
    - Reason: The goal is to reduce full historical sync toward the 4-hour target without relying on short spikes.
-   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. The latest chunk-level accounting change improves feedback latency but does not complete this TODO; next work should compare a full peer-request scheduler actor or explicit cross-plan reservations against the accepted baseline.
+   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting and cross-plan active reservations improve feedback latency but do not complete this TODO until live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
 
 2. Validate stale-forward catch-up fairness.
    - Reason: The consensus loop now drains ready historical work, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits forward catch-up batch size while historical work remains. This still needs longer stale-resume runtime validation.
@@ -119,6 +123,7 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Full runtime independence between live forward sync and historical reverse sync requires moving EL request scheduling/accounting out of the single mutable `SyncEngine` loop. Until then, reverse downloads can run concurrently, but ingestion and peer-plan creation remain cooperative.
 - Background historical body/receipt fetches should stream chunk-level request feedback to the engine. This keeps peer timeout/throughput scoring fresher for subsequent plans while preserving a single final outcome for validation/ingestion.
 - While historical backfill is incomplete, CL-anchored forward catch-up should use smaller batches. This favors frequent cooperative scheduling turns over maximum forward burst size and avoids making reverse sync appear blocked by stale live catch-up.
+- Concurrent historical fetch plans should report active body/receipt request load as it starts and finishes. The peer scorer treats active same-kind requests as capacity already in use rather than blacklisting the peer, which spreads lookahead work while still allowing a very fast busy peer to beat a slow idle one.
 
 ## Challenges and Resolutions
 
@@ -176,6 +181,9 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Challenge: Longer hard-timeout pauses matched Geth's stale-peer idea in principle and reduced repeated timeout churn, but risked starving the downloader when the serving pool was still warming.
   - Resolution: Reverted the experiment because the Mac mini run showed lower average logs/sec and worse body/receipt p95 latency. Future timeout work should be tied to explicit in-flight peer allocation or peer-count-aware backoff, not a static longer pause.
 
+- Challenge: Historical fetch lookahead ran concurrently, but newly spawned plans could select peers before active requests from already spawned plans were visible to the scorer.
+  - Resolution: Added active request start/finish accounting events, load-adjusted peer scores, a cooperative yield/drain between spawned historical plans, and reset cleanup for aborted lookahead.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -196,13 +204,14 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining CL/forward historical gates and added the fairness cap there; no obsolete helper path was introduced.
 - Reverted the uncommitted per-plan body/receipt peer rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs` after benchmarking showed a regression; no code from that attempt remains.
 - Reverted the uncommitted hard-timeout pause experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking showed a regression; no code from that attempt remains.
+- Inspected the historical request accounting paths in `crates/logex-sync/src/p2p/peer_manager/{requests.rs,state.rs}` and the fetch pipeline reset path in `crates/logex-sync/src/engine/anchored.rs`; kept the change scoped to active peer-load accounting and did not retain rejected rotation/backoff code.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.

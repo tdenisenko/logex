@@ -40,7 +40,7 @@ mod lifecycle;
 mod requests;
 mod state;
 
-use self::requests::RequestAttempt;
+use self::requests::{BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, RequestAttempt};
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
 };
@@ -151,6 +151,8 @@ struct ActivePeer {
     header_blocks_per_sec: f64,
     body_blocks_per_sec: f64,
     receipt_blocks_per_sec: f64,
+    body_active_requests: usize,
+    receipt_active_requests: usize,
     body_request_limit: usize,
     receipt_request_limit: usize,
     body_paused_until: Option<Instant>,

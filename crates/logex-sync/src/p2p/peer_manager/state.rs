@@ -299,6 +299,7 @@ impl PeerManager {
             PeerRequestKind::Bodies => peer.body_blocks_per_sec,
             PeerRequestKind::Receipts => peer.receipt_blocks_per_sec,
         };
+        let active_requests = peer_active_request_count(peer, kind);
         let base_rate = if measured_rate > 0.0 {
             measured_rate
         } else {
@@ -306,7 +307,38 @@ impl PeerManager {
         };
         let serving_bonus = if peer.is_serving { 4.0 } else { 0.0 };
         let timeout_penalty = f64::from(peer.consecutive_timeouts) * 8.0;
-        base_rate + serving_bonus - timeout_penalty
+        load_adjusted_peer_rate(base_rate, active_requests) + serving_bonus - timeout_penalty
+    }
+
+    pub(super) fn apply_body_receipt_active_request_deltas(
+        &mut self,
+        deltas: Vec<BodyReceiptActiveRequest>,
+    ) {
+        for delta in deltas {
+            let Some(peer) = self.peers.get_mut(&delta.peer_id) else {
+                continue;
+            };
+            let active_requests = match delta.kind {
+                PeerRequestKind::Headers => continue,
+                PeerRequestKind::Bodies => &mut peer.body_active_requests,
+                PeerRequestKind::Receipts => &mut peer.receipt_active_requests,
+            };
+            match delta.delta {
+                BodyReceiptActiveRequestDelta::Started => {
+                    *active_requests = active_requests.saturating_add(1);
+                }
+                BodyReceiptActiveRequestDelta::Finished => {
+                    *active_requests = active_requests.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clear_body_receipt_active_requests(&mut self) {
+        for peer in self.peers.values_mut() {
+            peer.body_active_requests = 0;
+            peer.receipt_active_requests = 0;
+        }
     }
 
     pub(super) fn record_peer_request_success(
@@ -955,6 +987,18 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
     }
 }
 
+fn peer_active_request_count(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
+    match kind {
+        PeerRequestKind::Headers => 0,
+        PeerRequestKind::Bodies => peer.body_active_requests,
+        PeerRequestKind::Receipts => peer.receipt_active_requests,
+    }
+}
+
+fn load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
+    base_rate / (1.0 + active_requests as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1240,5 +1284,12 @@ mod tests {
             advertised_status_range(cached, head),
             Some((10, 10, B256::repeat_byte(0x10)))
         );
+    }
+
+    #[test]
+    fn active_request_load_reduces_peer_score_without_blacklisting() {
+        assert_eq!(load_adjusted_peer_rate(120.0, 0), 120.0);
+        assert_eq!(load_adjusted_peer_rate(120.0, 1), 60.0);
+        assert_eq!(load_adjusted_peer_rate(120.0, 2), 40.0);
     }
 }

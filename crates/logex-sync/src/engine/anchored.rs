@@ -1765,6 +1765,7 @@ impl SyncEngine {
         self.historical_fetch_expected_child = None;
         self.historical_fetch_planned_child = None;
         self.historical_fetch_completed.clear();
+        self.peers.clear_body_receipt_active_requests();
         while self.historical_fetch_rx.try_recv().is_ok() {}
         while self.historical_request_accounting_rx.try_recv().is_ok() {}
     }
@@ -2035,6 +2036,8 @@ impl SyncEngine {
 
             self.historical_fetch_planned_child = plan.planned_next_child_header.clone();
             self.spawn_historical_fetch_plan(plan);
+            tokio::task::yield_now().await;
+            self.drain_historical_request_accounting();
         }
 
         Ok(())

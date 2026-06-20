@@ -151,6 +151,27 @@ pub(crate) struct BodyReceiptRequestOutcome {
 pub(crate) struct BodyReceiptRequestAccounting {
     stats: TypedRequestStats,
     failures: ParallelChunkFailures,
+    active_requests: Vec<BodyReceiptActiveRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BodyReceiptActiveRequest {
+    pub(super) peer_id: PeerId,
+    pub(super) kind: PeerRequestKind,
+    pub(super) delta: BodyReceiptActiveRequestDelta,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BodyReceiptActiveRequestDelta {
+    Started,
+    Finished,
+}
+
+struct BodyReceiptActiveRequestGuard {
+    accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    peer_id: PeerId,
+    kind: PeerRequestKind,
+    active: bool,
 }
 
 impl BodyReceiptRequestOutcome {
@@ -605,7 +626,12 @@ impl PeerManager {
         &mut self,
         accounting: BodyReceiptRequestAccounting,
     ) {
-        let BodyReceiptRequestAccounting { stats, failures } = accounting;
+        let BodyReceiptRequestAccounting {
+            stats,
+            failures,
+            active_requests,
+        } = accounting;
+        self.apply_body_receipt_active_request_deltas(active_requests);
         self.apply_body_receipt_request_accounting_parts(stats, failures);
     }
 
@@ -636,6 +662,62 @@ fn take_body_receipt_request_accounting(
     )
 }
 
+impl BodyReceiptActiveRequestGuard {
+    fn new(
+        accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+        peer_id: PeerId,
+        kind: PeerRequestKind,
+    ) -> Self {
+        emit_body_receipt_active_request_delta(
+            accounting_tx,
+            peer_id,
+            kind,
+            BodyReceiptActiveRequestDelta::Started,
+        );
+        Self {
+            accounting_tx: accounting_tx.clone(),
+            peer_id,
+            kind,
+            active: true,
+        }
+    }
+}
+
+impl Drop for BodyReceiptActiveRequestGuard {
+    fn drop(&mut self) {
+        if self.active {
+            emit_body_receipt_active_request_delta(
+                &self.accounting_tx,
+                self.peer_id,
+                self.kind,
+                BodyReceiptActiveRequestDelta::Finished,
+            );
+            self.active = false;
+        }
+    }
+}
+
+fn emit_body_receipt_active_request_delta(
+    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    peer_id: PeerId,
+    kind: PeerRequestKind,
+    delta: BodyReceiptActiveRequestDelta,
+) {
+    let Some(accounting_tx) = accounting_tx else {
+        return;
+    };
+
+    let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        stats: Vec::new(),
+        failures: Vec::new(),
+        active_requests: vec![BodyReceiptActiveRequest {
+            peer_id,
+            kind,
+            delta,
+        }],
+    });
+}
+
 fn emit_body_receipt_request_accounting(
     accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
     stats: TypedRequestStats,
@@ -649,7 +731,11 @@ fn emit_body_receipt_request_accounting(
         return;
     };
 
-    let _ = accounting_tx.send(BodyReceiptRequestAccounting { stats, failures });
+    let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        stats,
+        failures,
+        active_requests: Vec::new(),
+    });
 }
 
 impl BodyReceiptRequestPlan {
@@ -1127,6 +1213,11 @@ impl BodyReceiptRequestPlan {
             let body_hashes = hashes.clone();
             let (body_elapsed, body_result, receipt_result) = if has_cached_receipts {
                 let started_at = Instant::now();
+                let _active = BodyReceiptActiveRequestGuard::new(
+                    &self.accounting_tx,
+                    body_peer,
+                    PeerRequestKind::Bodies,
+                );
                 let result = self
                     .request_bodies_until_complete(body_peer, body_hashes)
                     .await;
@@ -1135,6 +1226,11 @@ impl BodyReceiptRequestPlan {
                 let receipt_hashes = hashes.clone();
                 let body_request = async {
                     let started_at = Instant::now();
+                    let _active = BodyReceiptActiveRequestGuard::new(
+                        &self.accounting_tx,
+                        body_peer,
+                        PeerRequestKind::Bodies,
+                    );
                     let result = self
                         .request_bodies_until_complete(body_peer, body_hashes)
                         .await;
@@ -1142,6 +1238,11 @@ impl BodyReceiptRequestPlan {
                 };
                 let receipt_request = async {
                     let started_at = Instant::now();
+                    let _active = BodyReceiptActiveRequestGuard::new(
+                        &self.accounting_tx,
+                        first_receipt_peer,
+                        PeerRequestKind::Receipts,
+                    );
                     let result = self
                         .request_receipts_until_complete(first_receipt_peer, receipt_hashes, None)
                         .await;
@@ -1279,6 +1380,11 @@ impl BodyReceiptRequestPlan {
                     continue;
                 }
                 let started_at = Instant::now();
+                let _active = BodyReceiptActiveRequestGuard::new(
+                    &self.accounting_tx,
+                    receipt_peer,
+                    PeerRequestKind::Receipts,
+                );
                 match self
                     .request_receipts_until_complete(
                         receipt_peer,
@@ -1456,6 +1562,11 @@ impl BodyReceiptRequestPlan {
                     let request_hashes = hashes[range.clone()].to_vec();
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
+                    let _active = BodyReceiptActiveRequestGuard::new(
+                        &self.accounting_tx,
+                        peer_id,
+                        PeerRequestKind::Bodies,
+                    );
                     match self
                         .request_bodies_until_complete(peer_id, request_hashes)
                         .await
@@ -1621,6 +1732,11 @@ impl BodyReceiptRequestPlan {
                     let request_hashes = hashes[range.clone()].to_vec();
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
+                    let _active = BodyReceiptActiveRequestGuard::new(
+                        &self.accounting_tx,
+                        peer_id,
+                        PeerRequestKind::Receipts,
+                    );
                     match self
                         .request_receipts_until_complete(peer_id, request_hashes, None)
                         .await
@@ -3548,6 +3664,11 @@ fn schedule_decoupled_body_chunk<'a>(
         async move {
             let started_at = Instant::now();
             let requested = request_hashes.len();
+            let _active = BodyReceiptActiveRequestGuard::new(
+                &plan.accounting_tx,
+                peer_id,
+                PeerRequestKind::Bodies,
+            );
             let result = plan
                 .request_bodies_until_complete(peer_id, request_hashes)
                 .await;
@@ -3580,6 +3701,11 @@ fn schedule_decoupled_receipt_chunk<'a>(
         async move {
             let started_at = Instant::now();
             let requested = request_hashes.len();
+            let _active = BodyReceiptActiveRequestGuard::new(
+                &plan.accounting_tx,
+                peer_id,
+                PeerRequestKind::Receipts,
+            );
             let result = plan
                 .request_receipts_until_complete(peer_id, request_hashes, None)
                 .await;
@@ -4621,6 +4747,45 @@ mod tests {
         let accounting = rx.try_recv().expect("accounting event should be emitted");
         assert_eq!(accounting.stats.len(), 1);
         assert_eq!(accounting.failures.len(), 1);
+        assert!(accounting.active_requests.is_empty());
+    }
+
+    #[test]
+    fn body_receipt_active_request_guard_emits_start_and_finish() {
+        let peer = PeerId::repeat_byte(0x11);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        {
+            let _guard =
+                BodyReceiptActiveRequestGuard::new(&Some(tx), peer, PeerRequestKind::Receipts);
+            let accounting = rx.try_recv().expect("start event should be emitted");
+            assert!(accounting.stats.is_empty());
+            assert!(accounting.failures.is_empty());
+            assert_eq!(accounting.active_requests.len(), 1);
+            assert_eq!(accounting.active_requests[0].peer_id, peer);
+            assert!(matches!(
+                accounting.active_requests[0].kind,
+                PeerRequestKind::Receipts
+            ));
+            assert!(matches!(
+                accounting.active_requests[0].delta,
+                BodyReceiptActiveRequestDelta::Started
+            ));
+        }
+
+        let accounting = rx.try_recv().expect("finish event should be emitted");
+        assert!(accounting.stats.is_empty());
+        assert!(accounting.failures.is_empty());
+        assert_eq!(accounting.active_requests.len(), 1);
+        assert_eq!(accounting.active_requests[0].peer_id, peer);
+        assert!(matches!(
+            accounting.active_requests[0].kind,
+            PeerRequestKind::Receipts
+        ));
+        assert!(matches!(
+            accounting.active_requests[0].delta,
+            BodyReceiptActiveRequestDelta::Finished
+        ));
     }
 
     #[test]

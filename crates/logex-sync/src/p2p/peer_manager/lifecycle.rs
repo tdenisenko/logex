@@ -343,6 +343,8 @@ impl PeerManager {
             header_blocks_per_sec: 0.0,
             body_blocks_per_sec: 0.0,
             receipt_blocks_per_sec: 0.0,
+            body_active_requests: 0,
+            receipt_active_requests: 0,
             body_request_limit,
             receipt_request_limit,
             body_paused_until: None,
