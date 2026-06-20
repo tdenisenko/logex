@@ -1312,8 +1312,8 @@ impl SyncEngine {
                 continue;
             }
 
-            if self.has_ready_historical_fetch_for(&child_header) {
-                progressed |= self.ingest_historical_backfill_batch().await?;
+            if self.spawn_ready_historical_prepare_tasks().await? {
+                progressed = true;
                 continue;
             }
 
@@ -1368,11 +1368,12 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.ensure_historical_fetch_pipeline(child_header).await?;
-        self.spawn_ready_historical_prepare_tasks().await?;
+        let prepare_progressed = self.spawn_ready_historical_prepare_tasks().await?;
 
         Ok(self.active_historical_fetch_count() != active_fetches
             || self.pending_historical_fetch_count() != pending_fetches
-            || self.pending_historical_prepare_count() != pending_prepares)
+            || self.pending_historical_prepare_count() != pending_prepares
+            || prepare_progressed)
     }
 
     async fn ingest_anchored_blocks(&mut self, anchors: Vec<ExecutionAnchor>) -> Result<bool> {
@@ -1839,10 +1840,11 @@ impl SyncEngine {
         self.historical_prepare_handles.len() + self.historical_prepare_completed.len()
     }
 
-    async fn spawn_ready_historical_prepare_tasks(&mut self) -> Result<()> {
+    async fn spawn_ready_historical_prepare_tasks(&mut self) -> Result<bool> {
         self.drain_historical_fetch_outcomes();
         self.drain_historical_prepare_tasks().await?;
 
+        let mut progressed = false;
         while self.pending_historical_prepare_count() < HISTORICAL_PREPARE_LOOKAHEAD_DEPTH {
             let Some(sequence) = self.next_historical_fetch_sequence_to_prepare() else {
                 break;
@@ -1857,6 +1859,7 @@ impl SyncEngine {
                 if expected_sequence {
                     self.reset_historical_fetch_pipeline();
                 }
+                progressed = true;
                 break;
             };
             if expected_sequence {
@@ -1864,6 +1867,7 @@ impl SyncEngine {
             }
             let task = spawn_historical_prepare_task(sequence, batch);
             self.historical_prepare_handles.insert(sequence, task);
+            progressed = true;
 
             if expected_sequence {
                 let Some(next_child_header) = self.historical_fetch_expected_child.clone() else {
@@ -1875,7 +1879,7 @@ impl SyncEngine {
             self.drain_historical_fetch_outcomes();
         }
 
-        Ok(())
+        Ok(progressed)
     }
 
     fn next_historical_fetch_sequence_to_prepare(&self) -> Option<u64> {

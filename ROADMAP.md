@@ -26,8 +26,14 @@ Latest A/B check against the previous accepted commit on the same Mac mini data 
 
 Historical backfill is now given an even tighter fairness window when forward sync is stale: while reverse history is incomplete and the live path is more than 64 blocks behind its consensus target, the forward path ingests one CL-anchored block per engine turn. This bounds the remaining cooperative-loop wait without weakening CL validation for forward blocks.
 
+Ready historical fetches no longer force the consensus loop to wait for validation/extraction in the same turn. Consensus mode now spawns prepare tasks for completed reverse body/receipt fetches and returns to the cooperative loop; completed prepare tasks are drained later. This keeps historical backfill independent from CL live-head availability after the checkpoint-backed floor exists, while still leaving full peer-scheduler separation as the larger architectural TODO.
+
 ## Completed Since Last Run
 
+- Confirmed historical validation is independent from CL/forward sync after a checkpoint-backed pivot, but found a remaining scheduling wait where completed historical fetches could be prepared synchronously inside the consensus loop.
+- Changed the ready-historical service path to spawn historical prepare tasks and return instead of awaiting validation/extraction immediately.
+- Validated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
+- Deployed the rebuilt binary to the Mac mini, restarted the tmux-managed client gracefully on `/Volumes/SSD 4TB/LogEx`, and confirmed `/status` stayed near head while historical batches resumed after EL peer warm-up.
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
 - Confirmed the repaired tunnel has working VPS egress, tunnel ping, DNAT/forwarding counters, and dashboard access through the VPS.
 - Built a clean `master` binary on the Mac mini after fixing the SSH PATH for Homebrew `protoc`.
@@ -105,7 +111,7 @@ Historical backfill is now given an even tighter fairness window when forward sy
    - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting and cross-plan active reservations improve feedback latency but do not complete this TODO until live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
 
 2. Validate stale-forward catch-up fairness.
-   - Reason: The consensus loop now drains ready historical work, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits stale forward catch-up to one block per turn while historical work remains. This still needs longer stale-resume runtime validation.
+   - Reason: The consensus loop now drains ready historical work, spawns historical preparation without waiting in the same turn, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits stale forward catch-up to one block per turn while historical work remains. This still needs longer stale-resume runtime validation.
    - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while historical fetches stay active and historical batches keep making steady progress. If cooperative scheduling still materially suppresses historical throughput during forward catch-up, split peer request scheduling/accounting into an actor so forward and historical workers can submit work independently.
 
 3. Match production-client P2P behavior more closely.
@@ -135,6 +141,7 @@ Historical backfill is now given an even tighter fairness window when forward sy
 - While historical backfill is incomplete, CL-anchored forward catch-up should use smaller batches. This favors frequent cooperative scheduling turns over maximum forward burst size and avoids making reverse sync appear blocked by stale live catch-up.
 - Concurrent historical fetch plans should report active body/receipt request load as it starts and finishes. The peer scorer treats active same-kind requests as capacity already in use rather than blacklisting the peer, which spreads lookahead work while still allowing a very fast busy peer to beat a slow idle one.
 - Stale forward catch-up should use a one-block fairness window while historical backfill is incomplete and forward lag exceeds 64 blocks. This gives reverse history frequent scheduling turns during stale restarts while preserving the existing small forward batch near head.
+- Completed reverse body/receipt fetches should be converted into background prepare tasks from the consensus loop instead of awaited immediately. This avoids turning ready historical network work into a validation/extraction wait that can still couple reverse sync with forward/CL scheduling.
 
 ## Challenges and Resolutions
 
@@ -198,6 +205,9 @@ Historical backfill is now given an even tighter fairness window when forward sy
 - Challenge: Historical sync is intended to be independent from forward/CL sync after a verified pivot exists, but stale forward catch-up still shared the single engine loop.
   - Resolution: Confirmed there is no CL-head validity gate for resumed historical backfill, then reduced stale forward catch-up to one CL-anchored block per turn while history is incomplete. Full runtime separation remains the peer-scheduler actor TODO if cooperative-loop contention persists.
 
+- Challenge: Completed historical fetches could still make the consensus loop wait for prepare/validation work in the same turn.
+  - Resolution: Changed ready historical servicing to spawn prepare tasks and return. Prepared batches are ingested later when complete, so reverse fetch completion no longer directly blocks CL/forward scheduling.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -220,6 +230,7 @@ Historical backfill is now given an even tighter fairness window when forward sy
 - Reverted the uncommitted hard-timeout pause experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking showed a regression; no code from that attempt remains.
 - Inspected the historical request accounting paths in `crates/logex-sync/src/p2p/peer_manager/{requests.rs,state.rs}` and the fetch pipeline reset path in `crates/logex-sync/src/engine/anchored.rs`; kept the change scoped to active peer-load accounting and did not retain rejected rotation/backoff code.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining forward/CL gates. Kept the new change limited to the forward batch fairness helper and its unit coverage; no unrelated scheduler experiments were added.
+- Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining consensus-loop waits and kept the fix scoped to ready historical prepare spawning; no fallback path was removed because sparse/empty historical ranges still need it.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
