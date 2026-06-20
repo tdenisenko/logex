@@ -28,6 +28,8 @@ Historical backfill is now given an even tighter fairness window when forward sy
 
 Ready historical fetches no longer force the consensus loop to wait for validation/extraction in the same turn. Consensus mode now spawns prepare tasks for completed reverse body/receipt fetches and returns to the cooperative loop; completed prepare tasks are drained later. This keeps historical backfill independent from CL live-head availability after the checkpoint-backed floor exists, while still leaving full peer-scheduler separation as the larger architectural TODO.
 
+Consensus-mode historical resume also now stays alive when the consensus store is temporarily unavailable after startup. Fresh sync still requires a recent checkpoint-backed pivot, but a data directory with a persisted verified historical floor can continue reverse EL backfill instead of exiting while CL/forward tracking recovers.
+
 ## Completed Since Last Run
 
 - Confirmed historical validation is independent from CL/forward sync after a checkpoint-backed pivot, but found a remaining scheduling wait where completed historical fetches could be prepared synchronously inside the consensus loop.
@@ -103,6 +105,8 @@ Ready historical fetches no longer force the consensus loop to wait for validati
 - Tightened stale forward catch-up fairness so, while historical backfill is incomplete and forward sync is more than 64 blocks behind the consensus target, the forward path processes one CL-anchored block per cooperative turn.
 - Validated the scheduler change with `cargo fmt --all -- --check`, focused `logex-sync` coverage, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Deployed the updated binary to the Mac mini, restarted the tmux-managed client gracefully on `/Volumes/SSD 4TB/LogEx`, and confirmed `/status` stayed within one block of head while historical backfill resumed.
+- Fixed the remaining consensus-store availability edge: if a persisted verified historical floor exists, consensus-mode sync no longer exits when CL/forward consensus data is temporarily unavailable after startup; it keeps servicing historical backfill.
+- Revalidated the fix with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 
 ## Remaining TODOs
 
@@ -207,6 +211,9 @@ Ready historical fetches no longer force the consensus loop to wait for validati
 
 - Challenge: Completed historical fetches could still make the consensus loop wait for prepare/validation work in the same turn.
   - Resolution: Changed ready historical servicing to spawn prepare tasks and return. Prepared batches are ingested later when complete, so reverse fetch completion no longer directly blocks CL/forward scheduling.
+
+- Challenge: Consensus-mode sync could still exit if the consensus store became unavailable after the loop had already entered with a persisted historical floor.
+  - Resolution: Changed that branch to keep historical-only backfill alive when the persisted floor is above the history target. Fresh sync remains blocked until a recent checkpoint/pivot exists.
 
 ## Dead Code and Obsolescence Cleanup
 

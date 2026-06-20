@@ -1200,12 +1200,32 @@ impl SyncEngine {
                 false
             };
 
-            let Some(consensus) = self.consensus.clone() else {
-                return Ok(());
-            };
-
             let historical_backfill_active = !self.config.disable_historical_sync
                 && self.historical_resume_required_block().await.is_some();
+
+            let Some(consensus) = self.consensus.clone() else {
+                if !historical_backfill_active {
+                    return Ok(());
+                }
+                if historical_pre_forward_progressed {
+                    continue;
+                }
+                if self.ingest_historical_backfill_batch().await? {
+                    continue;
+                }
+                self.set_runtime_state(NodeState::WaitingForConsensus);
+                if cancelable(
+                    &mut self.shutdown,
+                    tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
+                )
+                .await
+                .is_none()
+                {
+                    return self.finish_shutdown();
+                }
+                continue;
+            };
+
             let anchor_batch_limit = consensus_anchor_forward_batch_limit(
                 current,
                 self.sync_cursor().1,
