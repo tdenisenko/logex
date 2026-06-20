@@ -126,6 +126,7 @@ impl NativeStorage {
         storage.ensure_active_hot_segment()?;
         storage.replay_wal()?;
         storage.repair_recoverable_hot_segment_artifacts()?;
+        storage.repair_recoverable_historical_segment_artifacts()?;
         storage.verify_integrity()?;
         Ok(storage)
     }
@@ -1025,50 +1026,7 @@ impl NativeStorage {
             return Ok(false);
         };
 
-        let descriptor = self.catalog.segments[segment_index].clone();
-        let segment_dir = self.paths.segment_dir(hot_id);
-        let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
-        if column_counts
-            .iter()
-            .all(|(_, row_count)| *row_count == descriptor.row_count)
-        {
-            return Ok(false);
-        }
-        if let Some((name, row_count)) = column_counts
-            .iter()
-            .find(|(_, row_count)| *row_count < descriptor.row_count)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment {hot_id} column {name} has fewer rows than descriptor: {row_count} < {}",
-                    descriptor.row_count
-                ),
-            ));
-        }
-
-        let committed_rows = if descriptor.row_count == 0 {
-            Vec::new()
-        } else {
-            let row_ids = (0..descriptor.row_count)
-                .map(|row| {
-                    u32::try_from(row).map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("segment {hot_id} exceeds supported row addressing"),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            SegmentReader::open(&segment_dir)?.read_log_rows(Some(&row_ids))?
-        };
-
-        append_rows(&segment_dir, 0, &committed_rows)?;
-        ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
-        persist_segment_manifest(&self.paths, &descriptor)?;
-        self.catalog.segments[segment_index] = descriptor;
-        self.persist_catalog()?;
-        Ok(true)
+        self.rebuild_partial_raw_segment(segment_index, "hot")
     }
 
     fn repair_recoverable_hot_segment_artifacts(&self) -> std::io::Result<()> {
@@ -1123,6 +1081,83 @@ impl NativeStorage {
                 Ok(())
             }
         }
+    }
+
+    fn repair_recoverable_historical_segment_artifacts(&mut self) -> std::io::Result<()> {
+        let Some(segment_id) = self.catalog.active_historical_segment else {
+            return Ok(());
+        };
+        let Some(segment_index) =
+            self.catalog.segments.iter().position(|segment| {
+                segment.id == segment_id && segment.kind == SegmentKind::Sealed
+            })
+        else {
+            return Ok(());
+        };
+
+        if self.rebuild_partial_raw_segment(segment_index, "historical")? {
+            tracing::warn!(
+                segment_id,
+                "rebuilt partially-applied active historical segment"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn rebuild_partial_raw_segment(
+        &mut self,
+        segment_index: usize,
+        label: &'static str,
+    ) -> std::io::Result<bool> {
+        let descriptor = self.catalog.segments[segment_index].clone();
+        let segment_dir = self.paths.segment_dir(descriptor.id);
+        if !segment_dir.join("address.col").exists() {
+            return Ok(false);
+        }
+
+        let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
+        if column_counts
+            .iter()
+            .all(|(_, row_count)| *row_count == descriptor.row_count)
+        {
+            return Ok(false);
+        }
+        if let Some((name, row_count)) = column_counts
+            .iter()
+            .find(|(_, row_count)| *row_count < descriptor.row_count)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{label} segment {} column {name} has fewer rows than descriptor: {row_count} < {}",
+                    descriptor.id, descriptor.row_count
+                ),
+            ));
+        }
+
+        let committed_rows = if descriptor.row_count == 0 {
+            Vec::new()
+        } else {
+            let row_ids = (0..descriptor.row_count)
+                .map(|row| {
+                    u32::try_from(row).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("segment {} exceeds supported row addressing", descriptor.id),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            SegmentReader::open(&segment_dir)?.read_log_rows(Some(&row_ids))?
+        };
+
+        append_rows(&segment_dir, 0, &committed_rows)?;
+        ColumnFile::write_canonical_bitmap(&segment_dir, descriptor.row_count)?;
+        persist_segment_manifest(&self.paths, &descriptor)?;
+        self.catalog.segments[segment_index] = descriptor;
+        self.persist_catalog()?;
+        Ok(true)
     }
 
     fn partition_meta(&self, descriptor: &SegmentDescriptor) -> PartitionMeta {
@@ -1316,6 +1351,20 @@ fn verify_segment_integrity(
                 descriptor.id
             ),
         ));
+    }
+
+    if dir.join("address.col").exists() {
+        for (name, physical_rows) in hot_segment_physical_row_counts(&dir)? {
+            if physical_rows != row_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "segment {} raw column {name} row-count mismatch: manifest={row_count} storage={physical_rows}",
+                        descriptor.id
+                    ),
+                ));
+            }
+        }
     }
 
     let last_row = u32::try_from(row_count - 1).map_err(|_| {
@@ -2069,6 +2118,54 @@ mod tests {
         expected.extend(wal_rows);
         assert_eq!(reader.read_log_rows(None).unwrap(), expected);
         assert!(recovered.wal.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_storage_rebuilds_partial_active_historical_segment_on_open() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let committed_rows = make_rows(4, 100);
+        let uncommitted_rows = make_rows(3, 90);
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_historical_batch(&committed_rows).unwrap();
+            let segment_id = storage.active_historical_segment_id().unwrap();
+            let descriptor = storage
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == segment_id)
+                .cloned()
+                .unwrap();
+
+            append_rows(
+                &storage.paths.segment_dir(segment_id),
+                descriptor.row_count,
+                &uncommitted_rows,
+            )
+            .unwrap();
+        }
+
+        let recovered = NativeStorage::open(config).unwrap();
+        let segment_id = recovered.active_historical_segment_id().unwrap();
+        let descriptor = recovered
+            .segments()
+            .iter()
+            .find(|segment| segment.id == segment_id)
+            .unwrap();
+        assert_eq!(descriptor.row_count, committed_rows.len() as u64);
+
+        let reader = SegmentReader::open(&recovered.segment_path(segment_id)).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), committed_rows);
+        assert_eq!(
+            ColumnReader::read_row_count(&recovered.segment_path(segment_id)).unwrap(),
+            4
+        );
     }
 
     #[test]

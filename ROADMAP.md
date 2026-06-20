@@ -8,6 +8,8 @@ Active branch: `perf/historical-sync-throughput-v3`.
 
 The Mac mini WireGuard/VPS path is healthy again after replacing the stale-interface wrapper with a health-checking LaunchDaemon script. The wrapper now treats a tunnel as healthy only if the VPS tunnel IP responds or the WireGuard handshake is recent; otherwise it restarts the tunnel and restores the full-tunnel routes while preserving LAN access.
 
+Latest peer investigation confirmed the Mac mini is still using the VPS correctly: public egress is `157.245.195.72`, LogEx advertises `--nat extip:157.245.195.72`, public dashboard access works through the VPS, EL/CL DNAT rules are present on the VPS, and inbound EL sockets are established on `10.66.0.2:30303`. Low serving-peer windows are therefore a LogEx peer/request scheduling issue, not a WireGuard exposure issue. Current samples still show body/receipt request timeout clusters and underfilled serving sets during warm-up.
+
 Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
 
 The active Mac mini client now runs from the main data directory `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Old `/Volumes/SSD 4TB/LogEx*` experiment directories were removed, leaving only the main data directory.
@@ -112,6 +114,11 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Confirmed the Mac mini is still using the VPS WireGuard gateway correctly: public egress is `157.245.195.72`, LogEx advertises `--nat extip:157.245.195.72`, the public dashboard responds through the VPS, LogEx sockets bind on `0.0.0.0`, and VPS FORWARD counters are active for EL `30303`, CL `9000`, and dashboard `18683`.
 - Tested lower initial body/receipt request limits (`24`/`24`) after comparing Nethermind's smaller latency-based startup request sizers.
 - Rejected and reverted the lower initial request-limit experiment after the Mac mini benchmark averaged about 91k logs/sec versus the accepted baseline's about 122k; body/receipt p95 improved, but sustained sync throughput regressed. The accepted binary was redeployed again.
+- Diagnosed a restart crash from a partially-applied active historical segment whose raw column files had more rows than `segment.json` after interruption.
+- Added startup recovery for active historical raw segments and expanded startup integrity checks to reject raw column row-count drift.
+- Added regression coverage for rebuilding a partially-applied active historical segment on open; validated with `cargo fmt --all -- --check` and `cargo test -p logex-storage`.
+- Rejected and reverted an uncommitted serving-peer timeout-retention experiment: the Mac mini benchmark remained under-peered and averaged about 125k logs/sec, so it did not justify keeping the change.
+- Rebuilt and restarted the Mac mini client in tmux from the storage-only code path on `/Volumes/SSD 4TB/LogEx`; public and local dashboard checks passed on port `18683`.
 
 ## Remaining TODOs
 
@@ -229,6 +236,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: LogEx starts body/receipt peers at larger request sizes than Nethermind, which might overload newly connected peers.
   - Resolution: Tested lower initial body/receipt limits of `24`/`24`. The change improved latency tail but reduced sustained logs/sec, so it was reverted before committing. Future request-size work should be adaptive per peer and benchmarked against throughput, not just p95 latency.
 
+- Challenge: A partial historical segment append could leave raw column files ahead of the committed segment descriptor after an interrupted run.
+  - Resolution: Added active-historical segment repair using the same committed-prefix rebuild strategy as hot segment recovery, and added integrity checks that compare raw column row counts against the manifest before startup completes.
+
+- Challenge: Low EL peer count could still have been caused by a broken VPS/WireGuard path.
+  - Resolution: Verified public egress, public dashboard access, VPS WireGuard handshake, VPS DNAT/FORWARD rules, LogEx NAT flags, and inbound `30303` sockets. The gateway is healthy; the remaining peer problem is repeated body/receipt request timeouts and slow conversion from queued candidates to stable serving peers.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -255,6 +268,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining forward/CL gates. Kept the new change limited to the forward batch fairness helper and its unit coverage; no unrelated scheduler experiments were added.
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining consensus-loop waits and kept the fix scoped to ready historical prepare spawning; no fallback path was removed because sparse/empty historical ranges still need it.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
+- Reverted the uncommitted serving-peer timeout-retention experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking failed to show a material improvement.
 
 ## Git Workflow
 
