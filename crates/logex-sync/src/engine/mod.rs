@@ -19,7 +19,8 @@ use logex_types::{NodeState, SyncStatus};
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::{
-    BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager, SourcedBodyReceipts,
+    BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
+    SourcedBodyReceipts,
 };
 use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
@@ -164,6 +165,8 @@ pub struct SyncEngine {
     progress: ProgressTracker,
     historical_fetch_tx: mpsc::UnboundedSender<HistoricalFetchOutcome>,
     historical_fetch_rx: mpsc::UnboundedReceiver<HistoricalFetchOutcome>,
+    historical_request_accounting_tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
+    historical_request_accounting_rx: mpsc::UnboundedReceiver<BodyReceiptRequestAccounting>,
     historical_fetch_generation: u64,
     historical_fetch_next_sequence: u64,
     historical_fetch_expected_sequence: u64,
@@ -193,6 +196,8 @@ impl SyncEngine {
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));
         let (historical_fetch_tx, historical_fetch_rx) = mpsc::unbounded_channel();
+        let (historical_request_accounting_tx, historical_request_accounting_rx) =
+            mpsc::unbounded_channel();
         Self {
             config,
             peers,
@@ -204,6 +209,8 @@ impl SyncEngine {
             progress,
             historical_fetch_tx,
             historical_fetch_rx,
+            historical_request_accounting_tx,
+            historical_request_accounting_rx,
             historical_fetch_generation: 0,
             historical_fetch_next_sequence: 0,
             historical_fetch_expected_sequence: 0,

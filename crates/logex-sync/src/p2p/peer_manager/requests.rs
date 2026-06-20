@@ -2,7 +2,7 @@ use alloy_eips::BlockHashOrNumber;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
 use reth_primitives_traits::BlockBody as _;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
@@ -136,6 +136,7 @@ pub(crate) struct BodyReceiptRequestPlan {
     receipt_peer_ids: Vec<PeerId>,
     max_in_flight: usize,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
+    accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
 }
 
 pub(crate) struct BodyReceiptRequestOutcome {
@@ -144,6 +145,12 @@ pub(crate) struct BodyReceiptRequestOutcome {
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
     failures: ParallelChunkFailures,
     stats: TypedRequestStats,
+    accounting_forwarded: bool,
+}
+
+pub(crate) struct BodyReceiptRequestAccounting {
+    stats: TypedRequestStats,
+    failures: ParallelChunkFailures,
 }
 
 impl BodyReceiptRequestOutcome {
@@ -526,6 +533,7 @@ impl PeerManager {
             receipt_peer_ids,
             max_in_flight,
             peers,
+            accounting_tx: None,
         }))
     }
 
@@ -558,6 +566,7 @@ impl PeerManager {
             chunks,
             failures: _,
             stats: _,
+            accounting_forwarded: _,
         } = outcome;
 
         let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
@@ -585,7 +594,26 @@ impl PeerManager {
         &mut self,
         outcome: &mut BodyReceiptRequestOutcome,
     ) {
+        if outcome.accounting_forwarded {
+            return;
+        }
         let (stats, failures) = take_body_receipt_request_accounting(outcome);
+        self.apply_body_receipt_request_accounting_parts(stats, failures);
+    }
+
+    pub(crate) fn apply_body_receipt_request_accounting_event(
+        &mut self,
+        accounting: BodyReceiptRequestAccounting,
+    ) {
+        let BodyReceiptRequestAccounting { stats, failures } = accounting;
+        self.apply_body_receipt_request_accounting_parts(stats, failures);
+    }
+
+    fn apply_body_receipt_request_accounting_parts(
+        &mut self,
+        stats: TypedRequestStats,
+        failures: ParallelChunkFailures,
+    ) {
         if stats.is_empty() && failures.is_empty() {
             return;
         }
@@ -608,9 +636,33 @@ fn take_body_receipt_request_accounting(
     )
 }
 
+fn emit_body_receipt_request_accounting(
+    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    stats: TypedRequestStats,
+    failures: ParallelChunkFailures,
+) {
+    if stats.is_empty() && failures.is_empty() {
+        return;
+    }
+
+    let Some(accounting_tx) = accounting_tx else {
+        return;
+    };
+
+    let _ = accounting_tx.send(BodyReceiptRequestAccounting { stats, failures });
+}
+
 impl BodyReceiptRequestPlan {
     pub(crate) fn return_blocks(&self) -> usize {
         self.return_blocks
+    }
+
+    pub(crate) fn with_accounting_tx(
+        mut self,
+        accounting_tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
+    ) -> Self {
+        self.accounting_tx = Some(accounting_tx);
+        self
     }
 
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
@@ -639,6 +691,7 @@ impl BodyReceiptRequestPlan {
     }
 
     async fn execute_decoupled_dense(&self) -> BodyReceiptRequestOutcome {
+        let accounting_forwarded = self.accounting_tx.is_some();
         let return_blocks = self.return_blocks.min(self.hashes.len());
         let hashes = self.hashes[..return_blocks].to_vec();
         let ranges = self
@@ -715,16 +768,20 @@ impl BodyReceiptRequestPlan {
             }
         }
 
+        emit_body_receipt_request_accounting(&self.accounting_tx, stats.clone(), failures.clone());
+
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
             return_blocks: self.return_blocks,
             chunks,
             failures,
             stats,
+            accounting_forwarded,
         }
     }
 
     async fn execute_paired(self) -> BodyReceiptRequestOutcome {
+        let accounting_forwarded = self.accounting_tx.is_some();
         let plan_started_at = Instant::now();
         let mut chunks = BTreeMap::new();
         let mut failures = Vec::new();
@@ -862,6 +919,11 @@ impl BodyReceiptRequestPlan {
                 complete_body_receipt_chunk_attempt(&mut in_flight, chunk_start);
                 let chunk_already_completed = chunks.contains_key(&chunk_start);
                 let chunk_failed = chunk.blocks.is_empty();
+                emit_body_receipt_request_accounting(
+                    &self.accounting_tx,
+                    chunk.stats.clone(),
+                    chunk.failures.clone(),
+                );
                 if !chunk_already_completed {
                     for failure in &chunk.failures {
                         if chunk_failure_disables_role_peer(failure) {
@@ -1023,6 +1085,7 @@ impl BodyReceiptRequestPlan {
             chunks,
             failures,
             stats,
+            accounting_forwarded,
         }
     }
 
@@ -4519,6 +4582,7 @@ mod tests {
                 )),
             }],
             stats: vec![(peer, PeerRequestKind::Bodies, 4, Duration::from_millis(250))],
+            accounting_forwarded: false,
         };
 
         let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
@@ -4528,6 +4592,35 @@ mod tests {
         let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
         assert!(stats.is_empty());
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn body_receipt_request_accounting_event_emits_attempt_feedback() {
+        let peer = PeerId::repeat_byte(0x11);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let failure = ChunkRequestFailure {
+            role: ChunkRequestRole::Bodies,
+            peer_id: peer,
+            requested: 4,
+            kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::Timeout,
+            )),
+        };
+
+        emit_body_receipt_request_accounting(
+            &Some(tx),
+            vec![(
+                peer,
+                PeerRequestKind::Receipts,
+                4,
+                Duration::from_millis(500),
+            )],
+            vec![failure],
+        );
+
+        let accounting = rx.try_recv().expect("accounting event should be emitted");
+        assert_eq!(accounting.stats.len(), 1);
+        assert_eq!(accounting.failures.len(), 1);
     }
 
     #[test]

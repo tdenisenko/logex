@@ -1748,6 +1748,7 @@ impl SyncEngine {
         self.historical_fetch_planned_child = None;
         self.historical_fetch_completed.clear();
         while self.historical_fetch_rx.try_recv().is_ok() {}
+        while self.historical_request_accounting_rx.try_recv().is_ok() {}
     }
 
     fn reset_historical_prepare_pipeline(&mut self) {
@@ -1774,8 +1775,16 @@ impl SyncEngine {
     }
 
     fn drain_historical_fetch_outcomes(&mut self) {
+        self.drain_historical_request_accounting();
         while let Ok(outcome) = self.historical_fetch_rx.try_recv() {
             self.store_historical_fetch_outcome(outcome);
+        }
+    }
+
+    fn drain_historical_request_accounting(&mut self) {
+        while let Ok(accounting) = self.historical_request_accounting_rx.try_recv() {
+            self.peers
+                .apply_body_receipt_request_accounting_event(accounting);
         }
     }
 
@@ -2194,6 +2203,7 @@ impl SyncEngine {
             .iter()
             .map(|header| header.gas_used())
             .collect();
+        self.drain_historical_request_accounting();
         let body_receipt_plan = self
             .peers
             .prepare_bodies_and_receipts_request_for_hashes_and_gas(
@@ -2206,6 +2216,8 @@ impl SyncEngine {
             .await?;
 
         Ok(body_receipt_plan.map(|body_receipt_plan| {
+            let body_receipt_plan =
+                body_receipt_plan.with_accounting_tx(self.historical_request_accounting_tx.clone());
             let planned_next_child_header = body_receipt_plan
                 .return_blocks()
                 .min(header_batch.headers.len())
