@@ -12,6 +12,8 @@ Historical sync performance work has revalidated the earlier high-throughput com
 
 The active Mac mini client now runs from the main data directory `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Old `/Volumes/SSD 4TB/LogEx*` experiment directories were removed, leaving only the main data directory.
 
+Latest regression check: the apparent drop to roughly 20k logs/sec was caused by running from a stale data directory while the forward CL-anchored EL path was catching up to head. Once the forward path reached head, historical backfill returned to the prior high-throughput range on the same code/data path. Historical throughput experiments must compare runs only after forward catch-up is no longer consuming the main loop and peer request budget.
+
 ## Completed Since Last Run
 
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
@@ -40,18 +42,24 @@ The active Mac mini client now runs from the main data directory `/Volumes/SSD 4
 - Cleaned remote experiment data under `/Volumes/SSD 4TB/LogEx*`, preserving only `/Volumes/SSD 4TB/LogEx`.
 - Rebuilt and restarted the Mac mini client in tmux against `/Volumes/SSD 4TB/LogEx`; startup raised the descriptor limit from 256 to 16,384, storage integrity passed, and `/status` reported healthy EL/CL peer warm-up with historical sync moving.
 - Validated locally with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Reverted the temporary post-regression body/receipt fetch experiments made during the stale-data-dir investigation; the local and Mac mini source trees are back to the branch state before those experiments.
+- Confirmed the running Mac mini client was rebuilt and restarted from the reverted code, stayed near head, and recovered historical throughput during peer warm-up.
 
 ## Remaining TODOs
 
 1. Reduce peer-tail sawtooth in dense historical sync.
    - Reason: The goal is to reduce full historical sync toward the 4-hour target without relying on short spikes.
-   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk.
+   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately.
 
-2. Match production-client P2P behavior more closely.
+2. Decouple or account for stale forward catch-up contention.
+   - Reason: When the stored head is stale, the consensus-anchored loop processes forward batches before historical backfill, so the dashboard's historical logs/sec can collapse even when individual historical batches are fast.
+   - Completion criteria: Either make forward catch-up and historical backfill run with explicit fair scheduling/request budgets, or expose separate metrics that distinguish historical batch throughput from wall-clock throughput while forward catch-up is active.
+
+3. Match production-client P2P behavior more closely.
    - Reason: The target is Geth/Nethermind-class peer retention and sync performance.
    - Completion criteria: Audit relevant Geth/Nethermind peer scoring, request scheduling, timeout, and peer-retention behavior; implement compatible changes only when benchmarks show they beat the restored baseline.
 
-3. Complete release hardening.
+4. Complete release hardening.
    - Reason: Production readiness depends on verification safety, restart safety, and predictable operations.
    - Completion criteria: Smokes or tests cover bootstrap, CL updates, EL live sync, EL reverse sync, invalid peer data, reorgs, restart/resume, low disk, auth, exposed listener policy, and a clean full-sync release-candidate run.
 
@@ -66,6 +74,7 @@ The active Mac mini client now runs from the main data directory `/Volumes/SSD 4
 - Raise the process open-file soft limit at startup on Unix platforms. The client needs enough descriptors for P2P sockets plus storage segment reads/writes; relying on macOS's default soft limit of 256 is too fragile for long production runs.
 - WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
+- Historical throughput regressions must be benchmarked separately from stale forward catch-up. The consensus-anchored loop currently gives the forward path first chance each iteration, then runs at most one historical backfill batch, so wall-clock historical logs/sec includes forward catch-up time.
 
 ## Challenges and Resolutions
 
@@ -90,6 +99,9 @@ The active Mac mini client now runs from the main data directory `/Volumes/SSD 4
 - Challenge: A remote benchmark run stopped with `Too many open files` while the Mac mini shell soft limit was 256.
   - Resolution: Added Unix startup logic to raise the soft file-descriptor limit to 16,384 where permitted. The restarted client confirmed the new limit in logs and continued running from the main data directory.
 
+- Challenge: A stale main data directory made historical throughput appear to regress to roughly 20k logs/sec.
+  - Resolution: Reverted the temporary fetch-path changes made during that investigation and compared logs/status across the same run. The forward path was still catching up to head, and historical batches were interleaved behind forward work; after head catch-up, historical throughput returned to the prior high range.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -98,6 +110,7 @@ The active Mac mini client now runs from the main data directory `/Volumes/SSD 4
 - Reverted the unproven high-peer dense lookahead experiment before committing; only the decoupled threshold change remains from this pass.
 - Reverted the failed 4s timeout experiment before committing; only the per-peer chunk cap remains from the latest pass.
 - Removed remote experiment data directories matching `/Volumes/SSD 4TB/LogEx*` except the main `/Volumes/SSD 4TB/LogEx` directory.
+- Reverted uncommitted body/receipt request-window and early-prefix experiments from `crates/logex-sync/src/p2p/peer_manager/requests.rs` after identifying stale forward catch-up as the actual cause of the low dashboard rate.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
