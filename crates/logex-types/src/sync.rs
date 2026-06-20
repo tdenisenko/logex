@@ -211,6 +211,14 @@ pub struct ExecutionNetworkStatus {
     pub active_receipt_requests: usize,
     /// Connected peers with timeout penalties affecting request ranking.
     pub timeout_penalized_peers: usize,
+    /// Connected peers that have successfully served at least one body request.
+    pub body_proven_peers: usize,
+    /// Connected peers that have successfully served at least one receipt request.
+    pub receipt_proven_peers: usize,
+    /// Average adaptive body request block limit across connected peers.
+    pub body_request_limit_avg: usize,
+    /// Average adaptive receipt request block limit across connected peers.
+    pub receipt_request_limit_avg: usize,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

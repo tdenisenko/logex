@@ -58,10 +58,24 @@ impl PeerManager {
         let mut active_body_requests = 0usize;
         let mut active_receipt_requests = 0usize;
         let mut timeout_penalized_peers = 0usize;
+        let mut body_proven_peers = 0usize;
+        let mut receipt_proven_peers = 0usize;
+        let mut body_request_limit_total = 0usize;
+        let mut receipt_request_limit_total = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
             let body_paused = peer_request_is_paused(peer, PeerRequestKind::Bodies);
             let receipt_paused = peer_request_is_paused(peer, PeerRequestKind::Receipts);
+            if peer.body_blocks_per_sec > 0.0 {
+                body_proven_peers = body_proven_peers.saturating_add(1);
+            }
+            if peer.receipt_blocks_per_sec > 0.0 {
+                receipt_proven_peers = receipt_proven_peers.saturating_add(1);
+            }
+            body_request_limit_total =
+                body_request_limit_total.saturating_add(peer.body_request_limit);
+            receipt_request_limit_total =
+                receipt_request_limit_total.saturating_add(peer.receipt_request_limit);
             if body_paused {
                 body_request_paused_peers = body_request_paused_peers.saturating_add(1);
             } else {
@@ -79,6 +93,16 @@ impl PeerManager {
                 timeout_penalized_peers = timeout_penalized_peers.saturating_add(1);
             }
         }
+        let body_request_limit_avg = average_peer_request_limit(
+            body_request_limit_total,
+            self.peers.len(),
+            PeerRequestKind::Bodies,
+        );
+        let receipt_request_limit_avg = average_peer_request_limit(
+            receipt_request_limit_total,
+            self.peers.len(),
+            PeerRequestKind::Receipts,
+        );
 
         ExecutionNetworkStatus {
             max_peers: self.max_peers,
@@ -102,6 +126,10 @@ impl PeerManager {
             active_body_requests,
             active_receipt_requests,
             timeout_penalized_peers,
+            body_proven_peers,
+            receipt_proven_peers,
+            body_request_limit_avg,
+            receipt_request_limit_avg,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -758,6 +786,16 @@ pub(super) fn request_limit_initial(kind: PeerRequestKind) -> usize {
     }
 }
 
+fn average_peer_request_limit(total: usize, peers: usize, kind: PeerRequestKind) -> usize {
+    if peers == 0 {
+        request_limit_initial(kind)
+    } else {
+        total
+            .div_ceil(peers)
+            .clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
+    }
+}
+
 pub(super) fn inherited_peer_request_limit(
     limits: impl Iterator<Item = usize>,
     kind: PeerRequestKind,
@@ -1129,6 +1167,18 @@ mod tests {
                 PeerRequestKind::Bodies
             ),
             REQUEST_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn average_request_limit_reports_initial_without_peers() {
+        assert_eq!(
+            average_peer_request_limit(0, 0, PeerRequestKind::Bodies),
+            BODY_REQUEST_LIMIT_INITIAL
+        );
+        assert_eq!(
+            average_peer_request_limit(96, 2, PeerRequestKind::Receipts),
+            48
         );
     }
 
