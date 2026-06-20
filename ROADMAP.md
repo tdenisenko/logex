@@ -34,6 +34,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 ## Completed Since Last Run
 
+- Re-verified the Mac mini WireGuard/VPS gateway after a low-peer window: public egress is still `157.245.195.72`, the VPS forwards LogEx ports, public `/status` works through the VPS, LogEx advertises `--nat extip:157.245.195.72`, and inbound EL sockets are established on the tunnel address.
+- Rejected two uncommitted peer-ramp/request-tail experiments after live Mac mini benchmarks: lowering per-chunk serial fallback to 2 peers did not materially improve plan tails, and shortening outbound dial suppression to 5s increased churn without raising stable serving peers.
+- Lowered the dense body/receipt decoupled-pipeline threshold from 8 to 4 eligible peers. Warmed Mac mini samples improved the low-peer p50/p10 distribution versus the restored accepted baseline and kept paired fallback plans short, but the remaining sawtooth still requires deeper peer-tail scheduling work.
 - Confirmed historical validation is independent from CL/forward sync after a checkpoint-backed pivot, but found a remaining scheduling wait where completed historical fetches could be prepared synchronously inside the consensus loop.
 - Changed the ready-historical service path to spawn historical prepare tasks and return instead of awaiting validation/extraction immediately.
 - Validated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
@@ -125,7 +128,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 1. Reduce peer-tail sawtooth in dense historical sync.
    - Reason: The goal is to reduce full historical sync toward the 4-hour target without relying on short spikes.
-   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting and cross-plan active reservations improve feedback latency but do not complete this TODO until live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
+   - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting, cross-plan active reservations, and the lower dense-decoupled gate improve feedback latency and low-peer behavior but do not complete this TODO until live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
 
 2. Validate stale-forward catch-up fairness.
    - Reason: The consensus loop now drains ready historical work, spawns historical preparation without waiting in the same turn, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits stale forward catch-up to one block per turn while historical work remains. This still needs longer stale-resume runtime validation.
@@ -145,7 +148,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Keep the `master` body/receipt scheduler as the performance baseline until a live benchmark proves a replacement is better, then compare that result with earlier high-throughput commit states.
 - Preserve useful stabilization changes when they improve tail latency without sacrificing sustained throughput.
 - Historical storage should be density-aware: dense batches are already large enough to amortize compacted segment overhead, while sparse ranges need raw staging/coalescing to avoid tiny segment and disk-usage growth.
-- Dense body/receipt fetches should enter the decoupled body/receipt path with at least 8 eligible peers; remote benchmarks showed this reduces paired fallback latency without increasing the active dense fetch cap.
+- Dense body/receipt fetches should enter the decoupled body/receipt path with at least 4 eligible peers. Remote benchmarks showed this reduces low-peer paired fallback and improves p50/p10 throughput during warm-up, with the tradeoff that slow decoupled chunks still need better tail scheduling.
 - Limit parallel chunk requests per peer to 2 so one slow peer cannot occupy many chunk slots before timeout accounting demotes it; the tradeoff is slightly lower theoretical burst capacity for a better sustained floor.
 - Raise the process open-file soft limit at startup on Unix platforms. The client needs enough descriptors for P2P sockets plus storage segment reads/writes; relying on macOS's default soft limit of 256 is too fragile for long production runs.
 - WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
@@ -246,8 +249,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Several intuitive peer-tail tweaks improved one metric while worsening total sync behavior.
   - Resolution: Rejected them unless sustained logs/sec and plan failure rate both improved. Specifically, lower inherited request limits and lower prefix-redundancy peer thresholds were reverted after benchmarks showed more timeouts or worse p95 plan latency.
 
+- Challenge: Low serving-peer warm-up kept the dense downloader on the paired body/receipt path, causing head-of-line stalls even though the VPS path was healthy.
+  - Resolution: Lowered the dense decoupled-pipeline gate from 8 to 4 eligible peers after benchmarking showed better warmed low-peer p50/p10 throughput and short paired fallback plans. The remaining timeout sawtooth is still open.
+
 ## Dead Code and Obsolescence Cleanup
 
+- Reverted the uncommitted 2-peer serial fallback and 5s dial-suppression experiments after remote benchmarks failed to show a material improvement; only the lower dense decoupled gate remains from this run.
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
 - Inspected the storage regression in `crates/logex-storage/src/native/storage.rs`, `crates/logex-storage/src/native/segment.rs`, and `crates/logex-storage/src/partition.rs`.
 - Removed the obsolete broad v3 scheduler delta from the branch by restoring the proven master implementation before adding the narrower peer-load change.
@@ -279,7 +286,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`; `ea04889 fix: recover partial historical segment writes`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`; `ea04889 fix: recover partial historical segment writes`; `perf: enable dense decoupled sync earlier`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
