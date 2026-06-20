@@ -197,6 +197,20 @@ pub struct ExecutionNetworkStatus {
     pub saturated_peers: usize,
     /// Peers temporarily excluded from receipt requests after receipt-specific failures.
     pub receipt_quarantined_peers: usize,
+    /// Connected peers currently eligible for body requests after pause filtering.
+    pub body_request_ready_peers: usize,
+    /// Connected peers currently eligible for receipt requests after pause/quarantine filtering.
+    pub receipt_request_ready_peers: usize,
+    /// Connected peers temporarily paused for body requests.
+    pub body_request_paused_peers: usize,
+    /// Connected peers temporarily paused for receipt requests.
+    pub receipt_request_paused_peers: usize,
+    /// Connected peers currently carrying body request load from background plans.
+    pub active_body_requests: usize,
+    /// Connected peers currently carrying receipt request load from background plans.
+    pub active_receipt_requests: usize,
+    /// Connected peers with timeout penalties affecting request ranking.
+    pub timeout_penalized_peers: usize,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

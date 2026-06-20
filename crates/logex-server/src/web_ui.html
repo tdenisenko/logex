@@ -1183,6 +1183,9 @@
           <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
+          <div class="debug-item"><span class="k">Body request peers</span><span class="v" id="debugBodyRequestPeers">--</span></div>
+          <div class="debug-item"><span class="k">Receipt request peers</span><span class="v" id="debugReceiptRequestPeers">--</span></div>
+          <div class="debug-item"><span class="k">Peer request pressure</span><span class="v" id="debugPeerRequestPressure">--</span></div>
           <div class="debug-item"><span class="k">Log rate</span><span class="v" id="debugLogRate">--</span></div>
           <div class="debug-item"><span class="k">Block rate</span><span class="v" id="debugBlockRate">--</span></div>
           <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
@@ -3201,6 +3204,16 @@ function updateStatus(data) {
   setText('debugConnectedPeers', fmt(connectedPeers));
   setText('debugServingPeers', fmt(servingPeers));
   setText('debugPeerCandidates', fmt(numberOrNull(executionNetwork.queued_candidates) == null ? pendingPeers : executionNetwork.queued_candidates));
+  setText('debugBodyRequestPeers',
+    fmt(numberOrNull(executionNetwork.body_request_ready_peers)) + ' ready / ' +
+    fmt(numberOrNull(executionNetwork.body_request_paused_peers)) + ' paused');
+  setText('debugReceiptRequestPeers',
+    fmt(numberOrNull(executionNetwork.receipt_request_ready_peers)) + ' ready / ' +
+    fmt(numberOrNull(executionNetwork.receipt_request_paused_peers)) + ' paused');
+  setText('debugPeerRequestPressure',
+    fmt(numberOrNull(executionNetwork.active_body_requests)) + ' body / ' +
+    fmt(numberOrNull(executionNetwork.active_receipt_requests)) + ' receipt / ' +
+    fmt(numberOrNull(executionNetwork.timeout_penalized_peers)) + ' timed out');
   setText('debugLogRate', fmtLogRate(logRate));
   setText('debugBlockRate', fmtRate(blockRate));
   setParentHidden('debugRemainingLogs', historicalSyncDisabled);

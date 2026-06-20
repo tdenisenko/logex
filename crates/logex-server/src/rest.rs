@@ -1193,6 +1193,13 @@ mod tests {
                     known_peers: 11,
                     saturated_peers: 2,
                     receipt_quarantined_peers: 1,
+                    body_request_ready_peers: 4,
+                    receipt_request_ready_peers: 5,
+                    body_request_paused_peers: 6,
+                    receipt_request_paused_peers: 7,
+                    active_body_requests: 8,
+                    active_receipt_requests: 9,
+                    timeout_penalized_peers: 10,
                     connected_geth_peers: 2,
                     connected_nethermind_peers: 3,
                     connected_reth_peers: 1,
@@ -1363,6 +1370,19 @@ mod tests {
         assert_eq!(status["execution_network"]["connected_nethermind_peers"], 3);
         assert_eq!(status["execution_network"]["connected_reth_peers"], 1);
         assert_eq!(status["execution_network"]["serving_nethermind_peers"], 2);
+        assert_eq!(status["execution_network"]["body_request_ready_peers"], 4);
+        assert_eq!(
+            status["execution_network"]["receipt_request_ready_peers"],
+            5
+        );
+        assert_eq!(status["execution_network"]["body_request_paused_peers"], 6);
+        assert_eq!(
+            status["execution_network"]["receipt_request_paused_peers"],
+            7
+        );
+        assert_eq!(status["execution_network"]["active_body_requests"], 8);
+        assert_eq!(status["execution_network"]["active_receipt_requests"], 9);
+        assert_eq!(status["execution_network"]["timeout_penalized_peers"], 10);
         assert_eq!(status["raw_log_segment_backlog"], 2);
         assert_eq!(status["storage_profile_rewrite_backlog"], 5);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);

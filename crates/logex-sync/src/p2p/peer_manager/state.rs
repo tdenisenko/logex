@@ -51,8 +51,33 @@ impl PeerManager {
     /// Snapshot of execution-network peer retention and dial state for status/UI metrics.
     pub fn execution_network_status(&self) -> ExecutionNetworkStatus {
         let mut client_counts = ExecutionClientFamilyCounts::default();
+        let mut body_request_ready_peers = 0usize;
+        let mut receipt_request_ready_peers = 0usize;
+        let mut body_request_paused_peers = 0usize;
+        let mut receipt_request_paused_peers = 0usize;
+        let mut active_body_requests = 0usize;
+        let mut active_receipt_requests = 0usize;
+        let mut timeout_penalized_peers = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
+            let body_paused = peer_request_is_paused(peer, PeerRequestKind::Bodies);
+            let receipt_paused = peer_request_is_paused(peer, PeerRequestKind::Receipts);
+            if body_paused {
+                body_request_paused_peers = body_request_paused_peers.saturating_add(1);
+            } else {
+                body_request_ready_peers = body_request_ready_peers.saturating_add(1);
+            }
+            if receipt_paused {
+                receipt_request_paused_peers = receipt_request_paused_peers.saturating_add(1);
+            } else if !peer_receipts_are_quarantined(peer) {
+                receipt_request_ready_peers = receipt_request_ready_peers.saturating_add(1);
+            }
+            active_body_requests = active_body_requests.saturating_add(peer.body_active_requests);
+            active_receipt_requests =
+                active_receipt_requests.saturating_add(peer.receipt_active_requests);
+            if peer.consecutive_timeouts > 0 {
+                timeout_penalized_peers = timeout_penalized_peers.saturating_add(1);
+            }
         }
 
         ExecutionNetworkStatus {
@@ -70,6 +95,13 @@ impl PeerManager {
             known_peers: self.known_peers.len(),
             saturated_peers: self.saturated_peers.len(),
             receipt_quarantined_peers: self.receipt_quarantined_peers.len(),
+            body_request_ready_peers,
+            receipt_request_ready_peers,
+            body_request_paused_peers,
+            receipt_request_paused_peers,
+            active_body_requests,
+            active_receipt_requests,
+            timeout_penalized_peers,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,

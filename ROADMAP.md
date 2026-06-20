@@ -10,6 +10,8 @@ The Mac mini WireGuard/VPS path is healthy again after replacing the stale-inter
 
 Latest peer investigation confirmed the Mac mini is still using the VPS correctly: public egress is `157.245.195.72`, LogEx advertises `--nat extip:157.245.195.72`, public dashboard access works through the VPS, EL/CL DNAT rules are present on the VPS, and inbound EL sockets are established on `10.66.0.2:30303`. Low serving-peer windows are therefore a LogEx peer/request scheduling issue, not a WireGuard exposure issue. Current samples still show body/receipt request timeout clusters and underfilled serving sets during warm-up.
 
+The dashboard and `/status` now expose body-ready peers, receipt-ready peers, paused body/receipt peers, active body/receipt requests, and timeout-penalized peers in the advanced execution-network metrics. The latest sample showed discovery and VPS routing are healthy, while durable receipt-serving capacity shrinks under dense historical request pressure. A global in-flight cap experiment reduced request pressure but regressed logs/sec and was reverted.
+
 Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
 
 The active Mac mini client now runs from the main data directory `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Old `/Volumes/SSD 4TB/LogEx*` experiment directories were removed, leaving only the main data directory.
@@ -34,6 +36,10 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 ## Completed Since Last Run
 
+- Rechecked the Mac mini WireGuard/VPS path while peer counts were low: external routes still use `utun4`, public egress is `157.245.195.72`, LogEx still advertises `--nat extip:157.245.195.72`, and public `/status` works through the VPS.
+- Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
+- Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
+- Tested and rejected a global per-peer body/receipt in-flight cap. It reduced active request pressure but starved the downloader during warm-up and did not improve sustained logs/sec, so it was reverted before committing.
 - Re-verified the Mac mini WireGuard/VPS gateway after a low-peer window: public egress is still `157.245.195.72`, the VPS forwards LogEx ports, public `/status` works through the VPS, LogEx advertises `--nat extip:157.245.195.72`, and inbound EL sockets are established on the tunnel address.
 - Rejected two uncommitted peer-ramp/request-tail experiments after live Mac mini benchmarks: lowering per-chunk serial fallback to 2 peers did not materially improve plan tails, and shortening outbound dial suppression to 5s increased churn without raising stable serving peers.
 - Lowered the dense body/receipt decoupled-pipeline threshold from 8 to 4 eligible peers. Warmed Mac mini samples improved the low-peer p50/p10 distribution versus the restored accepted baseline and kept paired fallback plans short, but the remaining sawtooth still requires deeper peer-tail scheduling work.
@@ -256,6 +262,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Decoupled dense sync still had tail waits, so returning after a smaller contiguous prefix looked like a way to avoid waiting for slow non-prefix chunks.
   - Resolution: Rejected both tested early-return variants. Returning after one chunk caused tiny-batch overhead; returning after a 512-block prefix still produced worse valleys than waiting for the full dense return window. The next improvement should target peer request scheduling, not smaller accepted prefixes.
 
+- Challenge: Low connected-peer counts looked like a possible WireGuard/VPS exposure problem, but new request-pool metrics showed the bigger issue is usable body/receipt capacity shrinking during dense historical load.
+  - Resolution: Added request-readiness and request-pressure diagnostics to `/status` and the Advanced metrics UI. Tested a global active-request cap and rejected it because it reduced pressure but starved the downloader and did not improve sustained logs/sec. The next scheduler change should avoid overdriving receipt peers without globally suppressing fetch concurrency.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted the uncommitted 2-peer serial fallback, 5s dial-suppression, and decoupled early-return experiments after remote benchmarks failed to show a material improvement; only the lower dense decoupled gate remains from this run.
@@ -285,12 +294,13 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 - Reverted the uncommitted serving-peer timeout-retention experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking failed to show a material improvement.
 - Reverted the uncommitted inherited request-limit and prefix-redundancy experiments after remote benchmarks regressed timeout churn or low-throughput valleys; no code from those experiments remains.
+- Reverted the uncommitted global body/receipt active-request cap after Mac mini benchmarking showed worse warm-up throughput; only the request-pressure diagnostics remain from this pass.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`; `ea04889 fix: recover partial historical segment writes`; `4b8d869 perf: enable dense decoupled sync earlier`; `docs: record rejected early-return experiments`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`; `ea04889 fix: recover partial historical segment writes`; `4b8d869 perf: enable dense decoupled sync earlier`; `docs: record rejected early-return experiments`; `perf: expose peer request pressure metrics`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
