@@ -50,6 +50,8 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Delayed high-memory historical fetch depth until 24 serving peers. The remote sample kept logs/sec roughly flat while improving body/receipt p50/p95 versus adaptive fanout alone.
 - Added serving-peer fast-pool retention for dense body/receipt plans. Once a candidate set has at least 16 proven serving peers, the planner keeps that pool instead of mixing in compatible-but-unproven peers; the Mac mini run improved body/receipt latency distribution without breaking startup fallback behavior.
 - Tested and rejected a bounded unproven-peer probe budget on top of the serving fast pool. It raised serving peers above the 16-peer plateau, but body/receipt p95 regressed to about 20s and timeout failures nearly doubled, so the committed serving-only fast pool was restored on the Mac mini.
+- Tested and rejected a role-specific proven-peer fast pool. Body and receipt peers were filtered by body/receipt EWMA before falling back to the global serving flag, but the live run traded higher bursts for much worse tails: body/receipt p95 rose to about 21s and timeout failures spiked, so the accepted serving-only fast pool was restored.
+- Tested and rejected Nethermind-style tighter per-peer latency watermarks (`2s/3s`) for request-size adjustment. The benchmark gave only a marginal p95 improvement, slightly worse average body/receipt latency, and no timeout-churn improvement, so the existing `3s/5s` watermarks were restored.
 - Rechecked the Mac mini WireGuard/VPS path while peer counts were low: external routes still use `utun4`, public egress is `157.245.195.72`, LogEx still advertises `--nat extip:157.245.195.72`, and public `/status` works through the VPS.
 - Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
 - Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
@@ -268,6 +270,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 - Challenge: Filtering entirely to proven serving peers risks freezing peer promotion, so a small unproven-peer probe budget looked attractive.
   - Resolution: Tested the probe budget live and rejected it. Although serving peers increased, request tails and timeout counts worsened enough that sustained sync behavior was worse than the serving-only fast pool.
+
+- Challenge: The global serving flag can be set by header success, so narrowing body/receipt plans to role-proven peers looked like a cleaner candidate pool.
+  - Resolution: Tested role-specific body/receipt proof live and rejected it. It produced attractive peaks, but active request bursts and timeout churn overwhelmed the benefit, making sustained tail behavior worse than the accepted serving-only pool.
+
+- Challenge: Nethermind uses tighter latency watermarks for body/receipt request sizing, suggesting LogEx's looser `3s/5s` per-peer limits might be preserving slow request sizes too long.
+  - Resolution: Tested `2s/3s` watermarks live and rejected them. The improvement was too small to justify the code change and did not reduce timeout churn meaningfully.
 
 - Challenge: LogEx starts body/receipt peers at larger request sizes than Nethermind, which might overload newly connected peers.
   - Resolution: Tested lower initial body/receipt limits of `24`/`24`. The change improved latency tail but reduced sustained logs/sec, so it was reverted before committing. Future request-size work should be adaptive per peer and benchmarked against throughput, not just p95 latency.
