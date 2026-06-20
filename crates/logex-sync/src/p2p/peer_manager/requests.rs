@@ -3401,7 +3401,6 @@ fn request_failure_quarantines_receipt_peer(error: &RequestAttempt) -> bool {
     matches!(
         error,
         RequestAttempt::Disconnected
-            | RequestAttempt::Request(reth_network::p2p::error::RequestError::Timeout)
             | RequestAttempt::Request(reth_network::p2p::error::RequestError::ChannelClosed)
             | RequestAttempt::Request(reth_network::p2p::error::RequestError::ConnectionDropped)
     )
