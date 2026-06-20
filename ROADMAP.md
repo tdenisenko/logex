@@ -22,6 +22,8 @@ The consensus-mode scheduler now caps forward CL-anchor batches to a small fairn
 
 Historical fetch lookahead now tracks active body/receipt requests across concurrently spawned historical plans. New plans rank already-busy peers lower for the same request kind, and pipeline resets clear active counters so aborted fetch tasks cannot leave stale peer-load state behind. This further reduces runtime coupling, but full runtime independence still requires moving peer request scheduling/accounting out of the single mutable `SyncEngine` loop.
 
+Latest A/B check against the previous accepted commit on the same Mac mini data directory did not justify reverting active-request accounting. The active-accounting run was still under-peered and slow, but reduced body/receipt p95 latency and per-plan failures versus the previous commit in the matched short window. Current HEAD is deployed again on the Mac mini for continued warm-up and longer observation.
+
 ## Completed Since Last Run
 
 - Diagnosed the WireGuard outage as a stale utun/routes state: the interface existed, but the UDP path/handshake was stale, so the old wrapper did not force a restart.
@@ -87,6 +89,8 @@ Historical fetch lookahead now tracks active body/receipt requests across concur
 - Rebuilt and restarted the accepted branch code again on the Mac mini; no timeout-pause experiment code remains deployed.
 - Added cross-plan active body/receipt request accounting so concurrent historical lookahead plans can rank peers by current same-kind load instead of waiting for an entire fetch plan to complete before updating peer pressure.
 - Added active-request reset cleanup for aborted historical fetch pipelines and validated with `cargo fmt --all -- --check`, `cargo check -p logex-sync`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync --all-targets -- -D warnings`, and `cargo check --workspace`.
+- Ran a same-data-dir A/B check against the previous accepted commit. The previous commit showed worse body/receipt p95 latency and higher per-plan failure counts in the short warm-up window, so the active-request accounting change was kept.
+- Restored current branch HEAD on the Mac mini after the A/B check and restarted the client on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`.
 
 ## Remaining TODOs
 
