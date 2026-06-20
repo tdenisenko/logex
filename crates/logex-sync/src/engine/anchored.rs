@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
+const CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT: usize = 2;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
 const HISTORICAL_VALIDATION_LOG_WORK_WEIGHT: u64 = 4;
@@ -1149,6 +1150,15 @@ impl SyncEngine {
                 continue;
             }
 
+            let historical_ready_progressed = if !self.config.disable_historical_sync {
+                self.ingest_ready_historical_backfill_batches(
+                    CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT,
+                )
+                .await?
+            } else {
+                false
+            };
+
             let Some(consensus) = self.consensus.clone() else {
                 return Ok(());
             };
@@ -1168,6 +1178,9 @@ impl SyncEngine {
                     self.sync_status_peers();
                 } else {
                     self.set_runtime_state(NodeState::WaitingForConsensus);
+                }
+                if historical_ready_progressed {
+                    continue;
                 }
                 if !self.config.disable_historical_sync
                     && self.ingest_historical_backfill_batch().await?
@@ -1198,7 +1211,7 @@ impl SyncEngine {
             } else {
                 false
             };
-            if !(forward_progressed || historical_progressed)
+            if !(forward_progressed || historical_ready_progressed || historical_progressed)
                 && cancelable(
                     &mut self.shutdown,
                     tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
@@ -1209,6 +1222,61 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
         }
+    }
+
+    async fn ingest_ready_historical_backfill_batches(&mut self, limit: usize) -> Result<bool> {
+        if limit == 0 {
+            return Ok(false);
+        }
+
+        let mut progressed = false;
+        for _ in 0..limit {
+            if self.shutdown_requested() {
+                self.finish_shutdown()?;
+                return Ok(progressed);
+            }
+
+            let child_header = {
+                let storage = self.storage.read().await;
+                storage.historical_floor_header().cloned()
+            };
+            let Some(child_header) = child_header else {
+                break;
+            };
+            if child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+                break;
+            }
+
+            self.drain_historical_prepare_tasks().await?;
+            let expected_sequence = self.historical_prepare_expected_sequence;
+            if let Some(result) = self.historical_prepare_completed.remove(&expected_sequence) {
+                progressed |= self
+                    .ingest_historical_prepare_result(expected_sequence, result, true)
+                    .await?;
+                continue;
+            }
+
+            if self
+                .historical_prepare_handles
+                .get(&expected_sequence)
+                .is_some_and(|task| task.handle.is_finished())
+            {
+                let Some(task) = self.historical_prepare_handles.remove(&expected_sequence) else {
+                    continue;
+                };
+                progressed |= self.ingest_historical_prepared_task(task, true).await?;
+                continue;
+            }
+
+            if self.has_ready_historical_fetch_for(&child_header) {
+                progressed |= self.ingest_historical_backfill_batch().await?;
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(progressed)
     }
 
     async fn ingest_anchored_blocks(&mut self, anchors: Vec<ExecutionAnchor>) -> Result<bool> {

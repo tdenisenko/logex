@@ -12,7 +12,7 @@ Historical sync performance work has revalidated the earlier high-throughput com
 
 The active Mac mini client now runs from the main data directory `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Old `/Volumes/SSD 4TB/LogEx*` experiment directories were removed, leaving only the main data directory.
 
-Latest regression check: the apparent drop to roughly 20k logs/sec was caused by running from a stale data directory while the forward CL-anchored EL path was catching up to head. Once the forward path reached head, historical backfill returned to the prior high-throughput range on the same code/data path. Historical throughput experiments must compare runs only after forward catch-up is no longer consuming the main loop and peer request budget.
+Latest regression check: the apparent drop to roughly 20k logs/sec was caused by running from a stale data directory while the forward CL-anchored EL path was catching up to head. Once the forward path reached head, historical backfill returned to the prior high-throughput range on the same code/data path. The consensus sync loop now drains a bounded amount of already-ready historical work before each forward anchor batch so reverse sync is not stuck behind stale forward catch-up.
 
 ## Completed Since Last Run
 
@@ -44,6 +44,9 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
 - Validated locally with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
 - Reverted the temporary post-regression body/receipt fetch experiments made during the stale-data-dir investigation; the local and Mac mini source trees are back to the branch state before those experiments.
 - Confirmed the running Mac mini client was rebuilt and restarted from the reverted code, stayed near head, and recovered historical throughput during peer warm-up.
+- Added bounded historical-ready draining in the consensus loop so completed historical fetch/prepare work can be ingested before the next forward anchor batch while still preventing forward catch-up starvation.
+- Validated the scheduling fix with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Rebuilt and restarted the Mac mini client in tmux on `/Volumes/SSD 4TB/LogEx`; after peer warm-up it stayed near head and historical throughput recovered into the expected range.
 
 ## Remaining TODOs
 
@@ -51,9 +54,9 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
    - Reason: The goal is to reduce full historical sync toward the 4-hour target without relying on short spikes.
    - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately.
 
-2. Decouple or account for stale forward catch-up contention.
-   - Reason: When the stored head is stale, the consensus-anchored loop processes forward batches before historical backfill, so the dashboard's historical logs/sec can collapse even when individual historical batches are fast.
-   - Completion criteria: Either make forward catch-up and historical backfill run with explicit fair scheduling/request budgets, or expose separate metrics that distinguish historical batch throughput from wall-clock throughput while forward catch-up is active.
+2. Validate stale-forward catch-up fairness.
+   - Reason: The consensus loop now drains ready historical work before forward batches, but this needs a stale-resume runtime validation to confirm historical throughput no longer collapses while forward sync catches up.
+   - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while ready historical batches keep making steady progress.
 
 3. Match production-client P2P behavior more closely.
    - Reason: The target is Geth/Nethermind-class peer retention and sync performance.
@@ -74,7 +77,7 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
 - Raise the process open-file soft limit at startup on Unix platforms. The client needs enough descriptors for P2P sockets plus storage segment reads/writes; relying on macOS's default soft limit of 256 is too fragile for long production runs.
 - WireGuard health must be based on actual tunnel liveness, not just whether a utun interface exists.
 - Historical sync remains independent from CL live-head waiting after the checkpoint/pivot is established; only forward/live EL tracking depends on CL head and reorg handling.
-- Historical throughput regressions must be benchmarked separately from stale forward catch-up. The consensus-anchored loop currently gives the forward path first chance each iteration, then runs at most one historical backfill batch, so wall-clock historical logs/sec includes forward catch-up time.
+- Historical throughput regressions must account for stale forward catch-up. The consensus-anchored loop now drains up to two already-ready historical batches before forward anchor work, keeping historical progress independent in practice without starving live catch-up.
 
 ## Challenges and Resolutions
 
@@ -100,7 +103,7 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
   - Resolution: Added Unix startup logic to raise the soft file-descriptor limit to 16,384 where permitted. The restarted client confirmed the new limit in logs and continued running from the main data directory.
 
 - Challenge: A stale main data directory made historical throughput appear to regress to roughly 20k logs/sec.
-  - Resolution: Reverted the temporary fetch-path changes made during that investigation and compared logs/status across the same run. The forward path was still catching up to head, and historical batches were interleaved behind forward work; after head catch-up, historical throughput returned to the prior high range.
+  - Resolution: Reverted the temporary fetch-path changes made during that investigation and compared logs/status across the same run. The forward path was still catching up to head, and historical batches were interleaved behind forward work; after head catch-up, historical throughput returned to the prior high range. Added bounded ready-historical draining before forward anchor work to reduce this coupling.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -111,13 +114,14 @@ Latest regression check: the apparent drop to roughly 20k logs/sec was caused by
 - Reverted the failed 4s timeout experiment before committing; only the per-peer chunk cap remains from the latest pass.
 - Removed remote experiment data directories matching `/Volumes/SSD 4TB/LogEx*` except the main `/Volumes/SSD 4TB/LogEx` directory.
 - Reverted uncommitted body/receipt request-window and early-prefix experiments from `crates/logex-sync/src/p2p/peer_manager/requests.rs` after identifying stale forward catch-up as the actual cause of the low dashboard rate.
+- Inspected `crates/logex-sync/src/engine/anchored.rs` for stale forward/historical scheduling coupling and kept the fix scoped to ready historical work; no abandoned helper paths were left behind.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; descriptor-limit hardening in this branch.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; bounded historical-ready fairness fix in this branch.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
