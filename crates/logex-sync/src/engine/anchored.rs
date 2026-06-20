@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
+const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
 const CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT: usize = 2;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 16;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
@@ -1050,6 +1051,23 @@ fn historical_header_batch_matches_child(
         && batch.child_header.hash_slow() == child_header.hash_slow()
 }
 
+fn consensus_anchor_forward_batch_limit(
+    current_block: u64,
+    configured_limit: u64,
+    historical_backfill_active: bool,
+) -> u64 {
+    if current_block == 0 {
+        return 1;
+    }
+
+    let fairness_limit = if historical_backfill_active {
+        CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
+    } else {
+        CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
+    };
+    configured_limit.max(1).min(fairness_limit)
+}
+
 impl SyncEngine {
     pub(super) async fn run_consensus_sync(&mut self) -> Result<()> {
         self.refresh_consensus_status().await;
@@ -1178,13 +1196,13 @@ impl SyncEngine {
                 return Ok(());
             };
 
-            let anchor_batch_limit = if current == 0 {
-                1
-            } else {
-                self.config
-                    .header_batch_size
-                    .min(CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT)
-            };
+            let historical_backfill_active = !self.config.disable_historical_sync
+                && self.historical_resume_required_block().await.is_some();
+            let anchor_batch_limit = consensus_anchor_forward_batch_limit(
+                current,
+                self.config.header_batch_size,
+                historical_backfill_active,
+            );
             let anchors = self
                 .next_consensus_anchor_batch(current, &consensus, anchor_batch_limit)
                 .await;
@@ -3273,6 +3291,21 @@ mod tests {
         let anchors = vec![anchor_for(&first, 1)];
 
         assert!(contiguous_anchor_batch(98, false, &anchors, 16).is_empty());
+    }
+
+    #[test]
+    fn consensus_forward_batch_limit_yields_while_historical_backfill_is_active() {
+        assert_eq!(consensus_anchor_forward_batch_limit(0, 64, true), 1);
+        assert_eq!(
+            consensus_anchor_forward_batch_limit(100, 64, false),
+            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
+        );
+        assert_eq!(
+            consensus_anchor_forward_batch_limit(100, 64, true),
+            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
+        );
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 2, true), 2);
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 0, true), 1);
     }
 
     #[test]
