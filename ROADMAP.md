@@ -119,6 +119,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Added regression coverage for rebuilding a partially-applied active historical segment on open; validated with `cargo fmt --all -- --check` and `cargo test -p logex-storage`.
 - Rejected and reverted an uncommitted serving-peer timeout-retention experiment: the Mac mini benchmark remained under-peered and averaged about 125k logs/sec, so it did not justify keeping the change.
 - Rebuilt and restarted the Mac mini client in tmux from the storage-only code path on `/Volumes/SSD 4TB/LogEx`; public and local dashboard checks passed on port `18683`.
+- Rejected two additional peer-tail experiments after remote benchmarking: lower inherited request limits increased timeout churn, and lowering prefix-redundancy peer count to 8 worsened plan p95 and low-throughput valleys.
 
 ## Remaining TODOs
 
@@ -242,6 +243,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Low EL peer count could still have been caused by a broken VPS/WireGuard path.
   - Resolution: Verified public egress, public dashboard access, VPS WireGuard handshake, VPS DNAT/FORWARD rules, LogEx NAT flags, and inbound `30303` sockets. The gateway is healthy; the remaining peer problem is repeated body/receipt request timeouts and slow conversion from queued candidates to stable serving peers.
 
+- Challenge: Several intuitive peer-tail tweaks improved one metric while worsening total sync behavior.
+  - Resolution: Rejected them unless sustained logs/sec and plan failure rate both improved. Specifically, lower inherited request limits and lower prefix-redundancy peer thresholds were reverted after benchmarks showed more timeouts or worse p95 plan latency.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/engine/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -269,12 +273,13 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Inspected `crates/logex-sync/src/engine/anchored.rs` for remaining consensus-loop waits and kept the fix scoped to ready historical prepare spawning; no fallback path was removed because sparse/empty historical ranges still need it.
 - Removed no unrelated production code; the storage change reuses the prior compacted segment writer and retains the existing sparse staging path.
 - Reverted the uncommitted serving-peer timeout-retention experiment in `crates/logex-sync/src/p2p/peer_manager/{mod.rs,state.rs}` after benchmarking failed to show a material improvement.
+- Reverted the uncommitted inherited request-limit and prefix-redundancy experiments after remote benchmarks regressed timeout churn or low-throughput valleys; no code from those experiments remains.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`.
+- Commits made during this run: `fa7b806 perf: stabilize body receipt peer scheduling`; `2e29818 perf: adapt historical storage by log density`; `10d97ff perf: lower dense decoupled peer threshold`; `c10dcac perf: cap per-peer chunk concurrency`; `1f42521 fix: raise file descriptor limit at startup`; `9336a4b docs: record stale forward catch-up throughput diagnosis`; `f90d9ec perf: drain ready historical work before forward sync`; `2071657 perf: prime historical fetches before forward sync`; `perf: resume historical sync before consensus head`; `docs: update historical resume git workflow`; `docs: record rejected peer weakness experiment`; `perf: avoid post-forward historical waits`; `docs: clarify historical sync scheduling independence`; `8601d76 perf: stream historical request accounting`; `perf: limit forward catchup during historical sync`; `perf: account for active historical peer requests`; `perf: reduce stale forward catchup contention`; `ea04889 fix: recover partial historical segment writes`.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`.
 - Merge status: not merged
 - Blockers: none for local code validation; performance target still requires longer remote benchmarking and peer-tail mitigation.
