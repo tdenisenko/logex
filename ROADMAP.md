@@ -14,6 +14,8 @@ Current accepted request-scheduler candidate uses adaptive body/receipt fanout: 
 
 High-memory historical fetch depth now waits for at least 24 serving peers before using the six-plan lookahead. Medium lookahead still starts earlier, but restart warm-up avoids entering the deepest mode with only a small serving set. The Mac mini benchmark improved body/receipt p50 and p95 while keeping logs/sec roughly flat.
 
+Dense body/receipt candidate selection now switches to proven serving peers once a plan has at least 16 serving candidates. The Mac mini benchmark kept the VPS path healthy, warmed to normal connected-peer counts, and improved body/receipt latency versus the previous accepted baseline (`avg 6.39s`, `p50 5.73s`, `p95 11.72s` versus roughly `avg 9.30s`, `p50 8.40s`, `p95 16.43s`).
+
 The dashboard and `/status` now expose body-ready peers, receipt-ready peers, paused body/receipt peers, active body/receipt requests, and timeout-penalized peers in the advanced execution-network metrics. The latest sample showed discovery and VPS routing are healthy, while durable receipt-serving capacity shrinks under dense historical request pressure. A global in-flight cap experiment reduced request pressure but regressed logs/sec and was reverted.
 
 Historical sync performance work has revalidated the earlier high-throughput commits and isolated the main regression to the storage coalescing path introduced after `b7129fe`. The active candidate keeps sparse historical coalescing for disk efficiency, writes dense historical batches directly as compacted sealed segments, lowers the dense body/receipt decoupled-pipeline threshold so medium-sized serving pools avoid paired request head-of-line blocking, and caps parallel chunk requests per peer to reduce damage from slow peers. Mac mini benchmarks recovered 800k-900k+ logs/sec peaks and materially higher sustained throughput, while still showing periodic peer timeout clusters that remain the next bottleneck.
@@ -46,6 +48,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Benchmarked adaptive fanout on the Mac mini: body/receipt p50 improved to roughly 9s in the sampled run, active request spikes were reduced, and the client remained near head while historical backfill continued.
 - Retested dense historical fetch depth 8 on top of adaptive fanout and rejected it because low-peer active request counts again climbed into the 60-100 range.
 - Delayed high-memory historical fetch depth until 24 serving peers. The remote sample kept logs/sec roughly flat while improving body/receipt p50/p95 versus adaptive fanout alone.
+- Added serving-peer fast-pool retention for dense body/receipt plans. Once a candidate set has at least 16 proven serving peers, the planner keeps that pool instead of mixing in compatible-but-unproven peers; the Mac mini run improved body/receipt latency distribution without breaking startup fallback behavior.
 - Rechecked the Mac mini WireGuard/VPS path while peer counts were low: external routes still use `utun4`, public egress is `157.245.195.72`, LogEx still advertises `--nat extip:157.245.195.72`, and public `/status` works through the VPS.
 - Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
 - Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
@@ -183,6 +186,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Receipt request timeouts are treated as capacity/latency feedback, not proof that the peer cannot serve receipts. They still reduce the request limit, pause that request kind, and add timeout penalty, while incomplete or inconsistent receipt service still uses receipt quarantine.
 - Body/receipt chunk fanout should be peer-count aware. Low-peer restarts need conservative per-peer concurrency to avoid timeout bursts, while warmed peer sets can safely use higher fanout to avoid starving the downloader.
 - Deep historical fetch lookahead should wait for a serving pool large enough to absorb it. Medium lookahead is useful during warm-up, but six active fetch plans at low serving-peer counts can amplify slow-peer tail latency.
+- Dense body/receipt fast pools should prefer proven serving peers once there are enough of them. Compatible but unproven peers remain available during startup and underfilled serving windows, but they should not displace known serving peers in warmed dense plans.
 
 ## Challenges and Resolutions
 
@@ -257,6 +261,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 - Challenge: Low peer count could have been caused by WireGuard/VPS routing rather than LogEx peer acquisition.
   - Resolution: Verified the gateway path end to end. The Mac mini egresses through the VPS, the VPS forwards the expected ports, public dashboard access works through the VPS, and LogEx has inbound EL/CL sockets over `10.66.0.2`. The remaining low serving-peer windows are not caused by bypassing the VPS.
+
+- Challenge: Warmed EL peer count was healthy, but serving peers remained much lower than connected peers and slow body/receipt candidates still stretched plan tails.
+  - Resolution: Added a thresholded serving-peer fast pool for dense body/receipt plans. It preserves fallback diversity below 16 serving candidates, then filters to proven serving peers above that threshold; the first Mac mini benchmark improved body/receipt p50/p95 enough to keep the change.
 
 - Challenge: LogEx starts body/receipt peers at larger request sizes than Nethermind, which might overload newly connected peers.
   - Resolution: Tested lower initial body/receipt limits of `24`/`24`. The change improved latency tail but reduced sustained logs/sec, so it was reverted before committing. Future request-size work should be adaptive per peer and benchmarked against throughput, not just p95 latency.

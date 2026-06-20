@@ -24,6 +24,7 @@ const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
+const PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 4;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
@@ -491,6 +492,7 @@ impl PeerManager {
             .peer_ids_for_block_requests(Some(required_block), preferred_peers)
             .await;
         self.filter_paused_request_peers(&mut body_peer_ids, PeerRequestKind::Bodies);
+        retain_serving_body_receipt_candidate_pool_if_enough(&self.peers, &mut body_peer_ids);
         self.sort_peer_ids_by_request_performance(&mut body_peer_ids, PeerRequestKind::Bodies);
         limit_body_receipt_candidate_pool(&mut body_peer_ids);
         if body_peer_ids.is_empty() {
@@ -501,6 +503,7 @@ impl PeerManager {
             .peer_ids_for_receipt_requests(required_block, preferred_peers)
             .await;
         self.filter_paused_request_peers(&mut receipt_peer_ids, PeerRequestKind::Receipts);
+        retain_serving_body_receipt_candidate_pool_if_enough(&self.peers, &mut receipt_peer_ids);
         self.sort_peer_ids_by_request_performance(&mut receipt_peer_ids, PeerRequestKind::Receipts);
         limit_body_receipt_candidate_pool(&mut receipt_peer_ids);
         if receipt_peer_ids.is_empty() {
@@ -4159,6 +4162,28 @@ fn limit_body_receipt_candidate_pool(peer_ids: &mut Vec<PeerId>) {
     }
 }
 
+fn retain_serving_body_receipt_candidate_pool_if_enough(
+    peers: &HashMap<PeerId, ActivePeer>,
+    peer_ids: &mut Vec<PeerId>,
+) {
+    retain_preferred_items_if_enough(
+        peer_ids,
+        PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS,
+        |peer_id| peers.get(peer_id).is_some_and(|peer| peer.is_serving),
+    );
+}
+
+fn retain_preferred_items_if_enough<T>(
+    items: &mut Vec<T>,
+    min_preferred: usize,
+    is_preferred: impl Fn(&T) -> bool,
+) {
+    let preferred = items.iter().filter(|item| is_preferred(*item)).count();
+    if preferred >= min_preferred {
+        items.retain(is_preferred);
+    }
+}
+
 fn paired_body_receipt_chunk_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
     let request_limit = request_window_limit(peer_count, max_in_flight);
     if request_limit == 0 {
@@ -4508,6 +4533,24 @@ mod tests {
         peers.push(PeerId::repeat_byte(0xff));
         limit_body_receipt_candidate_pool(&mut peers);
         assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
+    }
+
+    #[test]
+    fn preferred_item_retention_keeps_fallbacks_until_threshold() {
+        let mut items = vec![1, 2, 3, 4, 5];
+
+        retain_preferred_items_if_enough(&mut items, 4, |item| item % 2 == 1);
+
+        assert_eq!(items, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn preferred_item_retention_filters_once_threshold_is_met() {
+        let mut items = vec![1, 2, 3, 4, 5];
+
+        retain_preferred_items_if_enough(&mut items, 3, |item| item % 2 == 1);
+
+        assert_eq!(items, vec![1, 3, 5]);
     }
 
     #[test]
