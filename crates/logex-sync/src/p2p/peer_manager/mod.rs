@@ -81,6 +81,7 @@ const UNPROVEN_RECEIPT_REQUEST_LIMIT: usize = 16;
 const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
 const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
 const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);
+const REQUEST_TIMEOUT_PAUSE_MAX_DURATION: Duration = Duration::from_secs(2 * 60);
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(60),
     medium: Duration::from_secs(60 * 3),

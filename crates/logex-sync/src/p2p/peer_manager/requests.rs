@@ -149,6 +149,7 @@ pub(crate) struct BodyReceiptRequestPlan {
 pub(crate) struct BodyReceiptRequestOutcome {
     total_hashes: usize,
     return_blocks: usize,
+    planned_return_blocks: usize,
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
     failures: ParallelChunkFailures,
     stats: TypedRequestStats,
@@ -654,6 +655,7 @@ impl PeerManager {
         let BodyReceiptRequestOutcome {
             total_hashes,
             return_blocks,
+            planned_return_blocks,
             chunks,
             failures: _,
             stats: _,
@@ -669,7 +671,7 @@ impl PeerManager {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
                 blocks,
-                planned_return_blocks: return_blocks,
+                planned_return_blocks,
             }))
         } else {
             bail!(
@@ -809,8 +811,8 @@ fn emit_body_receipt_request_accounting(
 }
 
 impl BodyReceiptRequestPlan {
-    pub(crate) fn return_blocks(&self) -> usize {
-        self.return_blocks
+    pub(crate) fn planned_prefix_blocks(&self) -> usize {
+        planned_body_receipt_prefix_blocks(&self.ranges, self.return_blocks, self.hashes.len())
     }
 
     pub(crate) fn with_accounting_tx(
@@ -937,6 +939,7 @@ impl BodyReceiptRequestPlan {
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
             return_blocks: self.return_blocks,
+            planned_return_blocks: self.planned_prefix_blocks(),
             chunks,
             failures,
             stats,
@@ -1246,6 +1249,7 @@ impl BodyReceiptRequestPlan {
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
             return_blocks: self.return_blocks,
+            planned_return_blocks: self.planned_prefix_blocks(),
             chunks,
             failures,
             stats,
@@ -4664,6 +4668,21 @@ fn body_receipt_plan_progress_target(return_blocks: usize) -> usize {
     return_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
 }
 
+fn planned_body_receipt_prefix_blocks(
+    ranges: &[std::ops::Range<usize>],
+    return_blocks: usize,
+    total_hashes: usize,
+) -> usize {
+    let min_return_blocks = body_receipt_plan_progress_target(return_blocks);
+    ranges
+        .iter()
+        .find(|range| range.end >= min_return_blocks)
+        .map(|range| range.end)
+        .unwrap_or(min_return_blocks)
+        .min(return_blocks)
+        .min(total_hashes)
+}
+
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
     return_blocks.min(prefix)
 }
@@ -5031,6 +5050,18 @@ mod tests {
     }
 
     #[test]
+    fn planned_body_receipt_prefix_blocks_uses_chunk_boundary() {
+        let ranges = vec![0..300, 300..690, 690..1_100, 1_100..1_500];
+
+        assert_eq!(
+            planned_body_receipt_prefix_blocks(&ranges, 1_500, 1_500),
+            1_100
+        );
+        assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 512, 1024), 512);
+        assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 1024, 640), 640);
+    }
+
+    #[test]
     fn body_receipt_residual_prefix_accepts_small_verified_progress() {
         assert_eq!(
             body_receipt_min_accepted_prefix_override(
@@ -5205,6 +5236,7 @@ mod tests {
         let mut outcome = BodyReceiptRequestOutcome {
             total_hashes: 4,
             return_blocks: 4,
+            planned_return_blocks: 4,
             chunks: BTreeMap::new(),
             failures: vec![ChunkRequestFailure {
                 role: ChunkRequestRole::Receipts,

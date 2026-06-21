@@ -67,6 +67,7 @@ pub(super) struct HistoricalFetchedBatch {
     headers: Vec<Header>,
     hashes: Vec<B256>,
     blocks: Vec<SourcedBodyReceipts>,
+    planned_return_blocks: usize,
     required_block: u64,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
@@ -107,6 +108,7 @@ pub(super) struct HistoricalIngestOutcome {
 
 pub(super) struct PreparedHistoricalBatch {
     requested_headers: usize,
+    planned_return_blocks: usize,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
     extracted: ingest::HistoricalExtractedBatch,
@@ -123,6 +125,7 @@ pub(super) struct PreparedHistoricalBatch {
 
 pub(super) struct WrittenHistoricalBatch {
     requested_headers: usize,
+    planned_return_blocks: usize,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
     outcome: HistoricalIngestOutcome,

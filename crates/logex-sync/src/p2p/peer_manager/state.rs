@@ -486,8 +486,13 @@ impl PeerManager {
             RequestAttempt::Request(request_error) => match request_error {
                 reth_network::p2p::error::RequestError::Timeout => {
                     self.reduce_peer_request_limit(peer_id, kind);
-                    self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
-                    self.record_timeout(peer_id) >= MAX_CONSECUTIVE_TIMEOUTS
+                    let consecutive_timeouts = self.record_timeout(peer_id);
+                    self.pause_peer_requests(
+                        peer_id,
+                        kind,
+                        request_timeout_pause_duration(consecutive_timeouts),
+                    );
+                    consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
                 }
                 reth_network::p2p::error::RequestError::BadResponse => {
                     self.network
@@ -1108,6 +1113,12 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
     }
 }
 
+fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
+    REQUEST_KIND_PAUSE_DURATION
+        .saturating_mul(consecutive_timeouts.max(1))
+        .min(REQUEST_TIMEOUT_PAUSE_MAX_DURATION)
+}
+
 fn peer_active_request_count(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
     match kind {
         PeerRequestKind::Headers => 0,
@@ -1448,5 +1459,21 @@ mod tests {
         assert_eq!(load_adjusted_peer_rate(120.0, 0), 120.0);
         assert_eq!(load_adjusted_peer_rate(120.0, 1), 60.0);
         assert_eq!(load_adjusted_peer_rate(120.0, 2), 40.0);
+    }
+
+    #[test]
+    fn timeout_pause_scales_with_repeated_timeouts() {
+        assert_eq!(
+            request_timeout_pause_duration(0),
+            REQUEST_KIND_PAUSE_DURATION
+        );
+        assert_eq!(
+            request_timeout_pause_duration(2),
+            REQUEST_KIND_PAUSE_DURATION * 2
+        );
+        assert_eq!(
+            request_timeout_pause_duration(100),
+            REQUEST_TIMEOUT_PAUSE_MAX_DURATION
+        );
     }
 }

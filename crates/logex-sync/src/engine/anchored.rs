@@ -65,6 +65,8 @@ const HISTORICAL_SPARSE_ROWS_PER_BLOCK: f64 = 100.0;
 const HISTORICAL_DENSE_ROWS_PER_BLOCK: f64 = 300.0;
 const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
+const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
+const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 1;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 #[cfg(target_os = "linux")]
@@ -377,7 +379,7 @@ fn historical_fetch_pipeline_depth_for_serving_peers(
         && historical_allows_high_memory_pipeline(total_memory_bytes)
     {
         HISTORICAL_HIGH_MEMORY_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
-    } else if serving_peers >= HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS
+    } else if serving_peers >= HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS
         && historical_allows_medium_memory_pipeline(total_memory_bytes)
     {
         HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
@@ -943,6 +945,7 @@ async fn process_historical_batch(
         headers,
         hashes,
         blocks,
+        planned_return_blocks,
         required_block,
         header_elapsed,
         body_receipt_elapsed,
@@ -982,6 +985,7 @@ async fn process_historical_batch(
 
     Ok(Ok(PreparedHistoricalBatch {
         requested_headers,
+        planned_return_blocks,
         header_elapsed,
         body_receipt_elapsed,
         extracted,
@@ -1003,6 +1007,7 @@ async fn write_prepared_historical_batch(
 ) -> Result<WrittenHistoricalBatch> {
     let PreparedHistoricalBatch {
         requested_headers,
+        planned_return_blocks,
         header_elapsed,
         body_receipt_elapsed,
         extracted,
@@ -1022,6 +1027,7 @@ async fn write_prepared_historical_batch(
 
     Ok(WrittenHistoricalBatch {
         requested_headers,
+        planned_return_blocks,
         header_elapsed,
         body_receipt_elapsed,
         outcome,
@@ -1055,7 +1061,6 @@ fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<
         .cloned()
 }
 
-#[cfg(test)]
 fn historical_residual_header_batch(
     header_peer: PeerId,
     headers: &[Header],
@@ -1367,10 +1372,20 @@ impl SyncEngine {
             .ingest_ready_historical_backfill_batches(CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT)
             .await?;
         if ready_progressed {
+            if self.historical_backfill_has_no_queued_work() {
+                self.prime_historical_backfill_pipeline_limited(
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                )
+                .await?;
+            }
             return Ok(true);
         }
         let pipeline_primed = self.prime_historical_backfill_pipeline().await?;
         Ok(pipeline_primed)
+    }
+
+    fn historical_backfill_has_no_queued_work(&self) -> bool {
+        self.pending_historical_fetch_count() == 0 && self.pending_historical_prepare_count() == 0
     }
 
     async fn ingest_ready_historical_backfill_batches(&mut self, limit: usize) -> Result<bool> {
@@ -1443,6 +1458,14 @@ impl SyncEngine {
     }
 
     async fn prime_historical_backfill_pipeline(&mut self) -> Result<bool> {
+        self.prime_historical_backfill_pipeline_limited(usize::MAX)
+            .await
+    }
+
+    async fn prime_historical_backfill_pipeline_limited(
+        &mut self,
+        max_new_fetches: usize,
+    ) -> Result<bool> {
         let child_header = {
             let storage = self.storage.read().await;
             storage.historical_floor_header().cloned()
@@ -1481,8 +1504,14 @@ impl SyncEngine {
             return Ok(true);
         }
 
-        self.ensure_historical_fetch_pipeline(child_header).await?;
-        let prepare_progressed = self.spawn_ready_historical_prepare_tasks().await?;
+        self.ensure_historical_fetch_pipeline_limited(child_header, max_new_fetches)
+            .await?;
+        let prepare_progressed = if max_new_fetches == usize::MAX {
+            self.spawn_ready_historical_prepare_tasks().await?
+        } else {
+            self.spawn_ready_historical_prepare_tasks_without_refill()
+                .await?
+        };
 
         Ok(self.active_historical_fetch_count() != active_fetches
             || self.pending_historical_fetch_count() != pending_fetches
@@ -2075,8 +2104,11 @@ impl SyncEngine {
                 let Some(next_child_header) = self.historical_fetch_expected_child.clone() else {
                     break;
                 };
-                self.ensure_historical_fetch_pipeline(next_child_header)
-                    .await?;
+                self.ensure_historical_fetch_pipeline_limited(
+                    next_child_header,
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                )
+                .await?;
             }
             self.drain_historical_fetch_outcomes();
         }
@@ -2443,18 +2475,46 @@ impl SyncEngine {
                 if !completion.blocks.is_empty() && completion.blocks.len() <= headers.len() =>
             {
                 let consumed_blocks = completion.blocks.len();
-                let planned_return_blocks = completion.planned_return_blocks;
-                let next_child_header = consumed_blocks
-                    .checked_sub(1)
-                    .and_then(|index| headers.get(index))
-                    .cloned();
+                let planned_return_blocks = completion
+                    .planned_return_blocks
+                    .min(headers.len())
+                    .min(hashes.len())
+                    .max(consumed_blocks);
+                let residual_header_batch = historical_residual_header_batch(
+                    header_peer,
+                    &headers,
+                    &hashes,
+                    consumed_blocks,
+                    planned_return_blocks,
+                );
+                let residual_blocks = residual_header_batch
+                    .as_ref()
+                    .map(|batch| batch.headers.len())
+                    .unwrap_or_default();
                 if consumed_blocks < planned_return_blocks {
                     tracing::debug!(
                         consumed_blocks,
                         planned_return_blocks,
-                        "historical body/receipt pipeline completed partial prefix; remaining blocks will be fetched by the async lookahead"
+                        residual_blocks,
+                        "historical body/receipt pipeline completed partial prefix; residual gap will be filled before queued lookahead"
                     );
                 }
+                let batch_planned_return_blocks = if residual_blocks > 0 {
+                    planned_return_blocks
+                } else {
+                    consumed_blocks
+                };
+                let next_child_header = if residual_blocks > 0 {
+                    planned_return_blocks
+                        .checked_sub(1)
+                        .and_then(|index| headers.get(index))
+                        .cloned()
+                } else {
+                    consumed_blocks
+                        .checked_sub(1)
+                        .and_then(|index| headers.get(index))
+                        .cloned()
+                };
                 Ok(Some((
                     sequence,
                     HistoricalFetchedBatch {
@@ -2462,10 +2522,11 @@ impl SyncEngine {
                         headers,
                         hashes,
                         blocks: completion.blocks,
+                        planned_return_blocks: batch_planned_return_blocks,
                         required_block,
                         header_elapsed,
                         body_receipt_elapsed,
-                        residual_header_batch: None,
+                        residual_header_batch,
                     },
                     next_child_header,
                 )))
@@ -2543,7 +2604,7 @@ impl SyncEngine {
             let body_receipt_plan =
                 body_receipt_plan.with_accounting_tx(self.historical_request_accounting_tx.clone());
             let planned_next_child_header = body_receipt_plan
-                .return_blocks()
+                .planned_prefix_blocks()
                 .min(header_batch.headers.len())
                 .checked_sub(1)
                 .and_then(|index| header_batch.headers.get(index))
@@ -2811,6 +2872,7 @@ impl SyncEngine {
             self.note_serving_peer(*peer_id, &mut newly_serving_peers);
         }
         let requested_headers = written.requested_headers;
+        let planned_return_blocks = written.planned_return_blocks.min(requested_headers);
         let header_elapsed = written.header_elapsed;
         let body_receipt_elapsed = written.body_receipt_elapsed;
         let processing_elapsed = written.processing_elapsed;
@@ -2821,6 +2883,7 @@ impl SyncEngine {
         let lowest_block = written.lowest_block;
         let highest_block = written.highest_block;
         let block_count = written.block_count;
+        let partial_prefix = block_count < planned_return_blocks;
         let extraction_elapsed = written.outcome.extraction_elapsed;
         let write_elapsed = written.outcome.write_elapsed;
         let residual_header_batch = written.residual_header_batch.take();
@@ -2845,11 +2908,27 @@ impl SyncEngine {
             self.refresh_historical_status().await;
             return Ok(true);
         }
-        let refill_elapsed = Duration::ZERO;
+        let residual_gap_filled = partial_prefix && residual_blocks > 0;
+        let should_reset_fetch_pipeline = partial_prefix && !residual_gap_filled;
+        if should_reset_fetch_pipeline {
+            self.reset_historical_fetch_pipeline();
+        }
+        let refill_started = std::time::Instant::now();
+        let refilled_fetch_pipeline =
+            if should_reset_fetch_pipeline || self.pending_historical_fetch_count() == 0 {
+                self.prime_historical_backfill_pipeline_limited(
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                )
+                .await?
+            } else {
+                false
+            };
+        let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 
         tracing::debug!(
             requested_headers,
+            planned_return_blocks,
             sequence,
             lowest_block,
             highest_block,
@@ -2858,7 +2937,10 @@ impl SyncEngine {
             fetch_peer_capacity = self.historical_fetch_peer_capacity(),
             serving_peers = self.peers.serving_peer_count(),
             residual_blocks,
+            partial_prefix,
+            residual_gap_filled,
             prefetched,
+            refilled_fetch_pipeline,
             prefetched_next = queued_next_fetches > 0,
             queued_next_fetches,
             active_fetches = self.active_historical_fetch_count(),
@@ -3762,6 +3844,7 @@ mod tests {
             headers,
             hashes,
             blocks: Vec::new(),
+            planned_return_blocks: 5,
             required_block: 100,
             header_elapsed: Duration::ZERO,
             body_receipt_elapsed: Duration::ZERO,
@@ -3796,6 +3879,22 @@ mod tests {
         );
         assert_eq!(
             historical_fetch_pipeline_depth_for_serving_peers(
+                HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS - 1,
+                medium_memory,
+                None,
+            ),
+            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(
+                HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS,
+                medium_memory,
+                None,
+            ),
+            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
+        );
+        assert_eq!(
+            historical_fetch_pipeline_depth_for_serving_peers(
                 HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS - 1,
                 high_pipeline_memory,
                 None,
@@ -3824,7 +3923,7 @@ mod tests {
                 high_pipeline_memory,
                 None,
             ),
-            HISTORICAL_LOW_PEER_FETCH_PIPELINE_DEPTH
+            HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH
         );
         assert_eq!(
             historical_fetch_window_blocks_for_serving_peers(
