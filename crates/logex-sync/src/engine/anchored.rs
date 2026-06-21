@@ -67,6 +67,7 @@ const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
+const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 #[cfg(target_os = "linux")]
@@ -360,6 +361,24 @@ fn historical_header_window_reached_gas_target(
 ) -> bool {
     let gas_target = HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET.saturating_mul(target_count as u128);
     header_count >= HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS && cumulative_gas >= gas_target
+}
+
+fn historical_header_prefix_len_for_gas_target(headers: &[Header], target_count: u64) -> usize {
+    let mut cumulative_gas = 0u128;
+    for (index, header) in headers.iter().enumerate() {
+        cumulative_gas = cumulative_gas.saturating_add(u128::from(header.gas_used()));
+        let header_count = index.saturating_add(1);
+        if header.number() == EXECUTION_HISTORY_TARGET_BLOCK
+            || historical_header_window_reached_gas_target(
+                header_count,
+                cumulative_gas,
+                target_count,
+            )
+        {
+            return header_count;
+        }
+    }
+    headers.len()
 }
 
 fn historical_fetch_pipeline_depth_for_serving_peers(
@@ -2656,6 +2675,81 @@ impl SyncEngine {
             .historical_fetch_window_blocks()
             .min(child_header.number() - EXECUTION_HISTORY_TARGET_BLOCK);
         let header_started = std::time::Instant::now();
+
+        if target_count > page_limit
+            && self.peers.peer_count() >= HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS
+        {
+            let required_block = child_header.number().saturating_sub(target_count);
+            match cancelable(
+                &mut self.shutdown,
+                self.peers.get_headers_reverse_pages(
+                    child_header.number(),
+                    target_count,
+                    page_limit,
+                    required_block,
+                ),
+            )
+            .await
+            {
+                Some(Ok(pages)) if !pages.is_empty() => {
+                    let header_peer = pages
+                        .first()
+                        .map(|(peer_id, _)| *peer_id)
+                        .unwrap_or(PeerId::ZERO);
+                    let mut headers = pages
+                        .into_iter()
+                        .flat_map(|(_, page_headers)| page_headers)
+                        .collect::<Vec<_>>();
+                    match validate_reverse_downloaded_headers_with_hashes(&child_header, &headers) {
+                        Ok(mut hashes) => {
+                            let keep =
+                                historical_header_prefix_len_for_gas_target(&headers, target_count);
+                            headers.truncate(keep);
+                            hashes.truncate(keep);
+                            let required_block = headers
+                                .last()
+                                .map(|header| header.number())
+                                .unwrap_or_else(|| child_header.number().saturating_sub(1));
+                            return Ok(Some(HistoricalHeaderBatch {
+                                child_header,
+                                header_peer,
+                                headers,
+                                hashes,
+                                required_block,
+                                header_elapsed: header_started.elapsed(),
+                            }));
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                child_block = child_header.number(),
+                                header_peer = %header_peer,
+                                %error,
+                                "parallel historical reverse header validation failed"
+                            );
+                            self.peers.report_invalid_block_data(header_peer, "headers");
+                            self.refresh_connectivity_state();
+                        }
+                    }
+                }
+                Some(Ok(_)) => {
+                    self.refresh_connectivity_state();
+                }
+                Some(Err(error)) => {
+                    tracing::debug!(
+                        error = %error,
+                        child_block = child_header.number(),
+                        requested_headers = target_count,
+                        "parallel historical reverse header request failed"
+                    );
+                    self.refresh_connectivity_state();
+                }
+                None => {
+                    self.finish_shutdown()?;
+                    return Ok(None);
+                }
+            }
+        }
+
         let mut remaining = target_count;
         let mut page_child_header = child_header.clone();
         let mut header_peer = PeerId::ZERO;
@@ -3803,6 +3897,22 @@ mod tests {
             gas_target,
             target_count,
         ));
+    }
+
+    #[test]
+    fn historical_header_prefix_trim_matches_gas_target() {
+        let target_count = HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS as u64;
+        let mut headers = (0..(HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS + 8))
+            .map(|index| header(10_000 - index as u64, B256::ZERO, index as u8))
+            .collect::<Vec<_>>();
+        for header in &mut headers {
+            header.gas_used = HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET as u64;
+        }
+
+        assert_eq!(
+            historical_header_prefix_len_for_gas_target(&headers, target_count),
+            HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS
+        );
     }
 
     #[test]

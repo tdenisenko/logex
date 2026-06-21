@@ -193,6 +193,17 @@ struct RequestPeerSnapshot {
     version: EthVersion,
 }
 
+struct HeaderPageResult {
+    page_index: usize,
+    requested: u64,
+    success: Option<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+        Duration,
+    )>,
+    failures: Vec<(PeerId, RequestAttempt)>,
+}
+
 #[derive(Debug, Clone)]
 enum ChunkFailureKind {
     Request(RequestAttempt),
@@ -251,6 +262,128 @@ impl PeerManager {
         let request = HeadersRequest::falling(start, count);
         self.get_headers_from_peers(request, required_block, None, None)
             .await
+    }
+
+    pub(crate) async fn get_headers_reverse_pages(
+        &mut self,
+        child_block: u64,
+        total_count: u64,
+        page_limit: u64,
+        required_block: u64,
+    ) -> Result<
+        Vec<(
+            PeerId,
+            Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+        )>,
+    > {
+        self.drain_events_now();
+        if child_block == 0 || total_count == 0 || page_limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut peer_ids = self
+            .peer_ids_for_block_requests(Some(required_block), &[])
+            .await;
+        self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Headers);
+        if peer_ids.is_empty() {
+            bail!("no peers available to handle reverse header page request")
+        }
+
+        let peers = peer_ids
+            .iter()
+            .filter_map(|peer_id| {
+                self.peers
+                    .get(peer_id)
+                    .map(|peer| (*peer_id, peer.sender.clone()))
+            })
+            .collect::<Vec<_>>();
+        if peers.is_empty() {
+            bail!("no connected peers available to handle reverse header page request")
+        }
+
+        let mut attempts = futures_util::stream::FuturesUnordered::new();
+        let mut offset = 0u64;
+        let mut page_index = 0usize;
+        while offset < total_count {
+            let Some(start_block) = child_block
+                .checked_sub(1)
+                .and_then(|block| block.checked_sub(offset))
+            else {
+                break;
+            };
+            let request_count = page_limit.min(total_count - offset);
+            let request =
+                HeadersRequest::falling(BlockHashOrNumber::Number(start_block), request_count);
+            let mut candidates = peers.clone();
+            if !candidates.is_empty() {
+                let shift = page_index % candidates.len();
+                candidates.rotate_left(shift);
+            }
+            attempts
+                .push(request_header_page_from_candidates(page_index, request, candidates).boxed());
+            offset = offset.saturating_add(request_count);
+            page_index = page_index.saturating_add(1);
+        }
+
+        let mut page_results = Vec::new();
+        while let Some(result) = attempts.next().await {
+            page_results.push(result);
+        }
+        page_results.sort_by_key(|result| result.page_index);
+
+        let mut dead_peers = HashSet::new();
+        let mut saw_empty_response = false;
+        let mut pages = Vec::new();
+        for result in page_results {
+            for (peer_id, error) in result.failures {
+                let should_drop = self.on_request_error(peer_id, PeerRequestKind::Headers, &error);
+                debug!(peer = %peer_id, ?error, "reverse header page request failed");
+                if should_drop {
+                    dead_peers.insert(peer_id);
+                }
+            }
+
+            let Some((peer_id, headers, elapsed)) = result.success else {
+                break;
+            };
+            if headers.len() > result.requested as usize {
+                self.on_invalid_response_length(
+                    peer_id,
+                    "headers",
+                    result.requested as usize,
+                    headers.len(),
+                );
+                dead_peers.insert(peer_id);
+                break;
+            }
+            if headers.is_empty() && result.requested > 0 {
+                saw_empty_response = true;
+                self.on_zero_progress_response(
+                    peer_id,
+                    PeerRequestKind::Headers,
+                    "headers",
+                    result.requested as usize,
+                );
+                break;
+            }
+            self.record_peer_request_success(
+                peer_id,
+                PeerRequestKind::Headers,
+                headers.len(),
+                elapsed,
+            );
+            pages.push((peer_id, headers));
+        }
+
+        self.advance_request_cursor();
+        self.remove_dead_peers(&dead_peers);
+        if pages.is_empty() && saw_empty_response {
+            return Ok(Vec::new());
+        }
+        if pages.is_empty() {
+            bail!("no peers available to handle reverse header page request")
+        }
+        Ok(pages)
     }
 
     /// Request a single block header by hash or number.
@@ -3913,6 +4046,71 @@ fn complete_body_receipt_chunk_attempt(
         entry.get_mut().attempts -= 1;
     } else {
         entry.remove();
+    }
+}
+
+async fn request_header_page_from_candidates(
+    page_index: usize,
+    request: HeadersRequest,
+    candidates: Vec<(
+        PeerId,
+        PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    )>,
+) -> HeaderPageResult {
+    let requested = request.limit;
+    let mut failures = Vec::new();
+    for (peer_id, sender) in candidates {
+        let started_at = Instant::now();
+        match request_headers_with_sender(sender, request.clone()).await {
+            Ok(headers) => {
+                return HeaderPageResult {
+                    page_index,
+                    requested,
+                    success: Some((peer_id, headers, started_at.elapsed())),
+                    failures,
+                };
+            }
+            Err(error) => failures.push((peer_id, error)),
+        }
+    }
+
+    HeaderPageResult {
+        page_index,
+        requested,
+        success: None,
+        failures,
+    }
+}
+
+async fn request_headers_with_sender(
+    sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    request: HeadersRequest,
+) -> std::result::Result<
+    Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    RequestAttempt,
+> {
+    let (response_tx, response_rx) = oneshot::channel();
+    sender
+        .to_session_tx
+        .send(PeerRequest::GetBlockHeaders {
+            request: GetBlockHeaders {
+                start_block: request.start,
+                limit: request.limit,
+                skip: 0,
+                direction: request.direction,
+            },
+            response: response_tx,
+        })
+        .await
+        .map_err(|_| RequestAttempt::Disconnected)?;
+
+    match timeout(REQUEST_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(response))) => Ok(response.into_value()),
+        Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
+        Ok(Err(_)) => Err(RequestAttempt::Disconnected),
+        Err(_) => Err(RequestAttempt::Request(
+            reth_network::p2p::error::RequestError::Timeout,
+        )),
     }
 }
 
