@@ -71,6 +71,8 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Reconfirmed WireGuard/VPS health while peer counts were low: Mac mini public egress uses `157.245.195.72`, default egress routes through WireGuard, LogEx is listening on the expected ports with the VPS NAT flag, the VPS has active DNAT/FORWARD counters, and inbound EL sockets are established on `10.66.0.2:30303`.
 - Tested and rejected a 2s body/receipt hedge delay. The experiment reduced body/receipt p95 latency and failures per plan, but sustained logs/sec did not beat the accepted baseline and low-percentile throughput was worse, so the code was reverted locally and redeployed on the Mac mini.
 - Tested and rejected prioritizing fresh discovery candidates that advertise a compatible fork id ahead of no-fork-id candidates. The idea matched the observed high `missing_fork_id_candidates` count, but the live run warmed more slowly and averaged lower logs/sec than the accepted baseline, so the code was reverted locally and redeployed on the Mac mini.
+- Tested and rejected preserving ranked peer order for equal-load body/receipt attempts. The live run produced higher early spikes, but increased timeout churn and did not improve the late-window throughput floor, so the code was reverted and the accepted baseline was redeployed.
+- Rechecked the low-peer window after the accepted baseline restart. WireGuard/VPS routing, NAT flags, listeners, and DNAT/FORWARD rules were healthy; EL connected peers warmed from 13 to 30 over the sample, while serving peers stayed around 11-14 and `connected + pending_dials` stayed near the configured target. The issue remains useful peer conversion and body/receipt request-tail behavior, not VPS exposure.
 - Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
 - Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
 - Tested and rejected a global per-peer body/receipt in-flight cap. It reduced active request pressure but starved the downloader during warm-up and did not improve sustained logs/sec, so it was reverted before committing.
@@ -337,6 +339,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: Discovery produced many candidates without fork-id information, so prioritizing compatible-fork candidates looked like a safer way to spend dial slots.
   - Resolution: Tested fork-id-prioritized fresh candidate selection with unit coverage, then reverted it after the Mac mini benchmark showed lower warm-up throughput and no serving-peer improvement versus the accepted baseline.
 
+- Challenge: Keeping the ranked peer order within equal active-load groups looked like a way to favor the current fastest body/receipt peers instead of rotating all plans through the pool.
+  - Resolution: Tested the change live and rejected it. It raised some early peaks, but increased failures per plan and the later throughput floor regressed, so the accepted rotation behavior was restored.
+
+- Challenge: The latest restart again showed low EL connected peers, raising concern that the VPS full tunnel had degraded.
+  - Resolution: Verified public egress through `157.245.195.72`, public dashboard access, Mac listener sockets, VPS DNAT/FORWARD rules, and active inbound EL sessions on `10.66.0.2:30303`. A multi-minute sample showed connected peers rising while serving peers lagged, so the remaining issue is EL candidate quality and pending-dial/serving-peer conversion.
+
 - Challenge: Raising the serving-fast-pool threshold seemed likely to promote more connected peers into useful body/receipt peers.
   - Resolution: Tested the threshold at 24 and rejected it because the remote warm-up regressed connected/serving counts and increased timeout penalties. The accepted threshold of 16 was restored and redeployed.
 
@@ -396,6 +404,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Inspected `crates/logex-sync/src/engine/anchored.rs` and kept only the medium lookahead threshold change after benchmarking. No broader dial-limit or global request-cap experiment was retained.
 - Reverted and redeployed the uncommitted 2s body/receipt hedge-delay experiment after live benchmarking showed no sustained logs/sec improvement; no code from that experiment remains.
 - Reverted and redeployed the uncommitted fork-id-prioritized candidate-selection experiment after live benchmarking showed worse warm-up throughput; no code from that experiment remains.
+- Reverted and redeployed the uncommitted ranked-prefix body/receipt peer ordering experiment after live benchmarking showed higher timeout churn and no durable throughput-floor improvement; no code from that experiment remains.
 
 ## Git Workflow
 
