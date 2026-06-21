@@ -8,7 +8,7 @@ Active branch: `perf/historical-sync-throughput-v3`
 
 Draft PR: `https://github.com/tdenisenko/logex/pull/95`
 
-The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. Historical sync is progressing through older, sparse blocks. Recent live samples show the old multi-minute zero-progress condition is addressed, but throughput still has sawtooth behavior caused by body/receipt peer tail latency and low useful serving-peer count during parts of the run.
+The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. Historical sync is progressing through older, sparse blocks. The latest scheduler candidate removed stale lookahead discards and repeated fetch-pipeline resets; live samples reached roughly `75k` logs/sec and `1.4k` blocks/sec in sparse blocks with buffers full rather than idle.
 
 ## Completed Since Last Run
 
@@ -26,6 +26,11 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Verified the remote client remains live on port `18683`.
   - Short live sample: historical floor moved from `4,823,839` to `4,804,572`; throughput recovered from about `11k` logs/sec to about `219k` logs/sec as serving peers rose from `8` to `11`.
 - Added and ran focused tests for planned body/receipt prefix accounting and timeout pause scaling.
+- Fixed historical lookahead refill cursor selection while prepared batches are queued.
+  - Hot-path refills now continue from the fetch pipeline cursor instead of comparing against the older storage floor and resetting useful lookahead.
+  - The critical refill limit is now two fetches so ingestion can keep downloads ahead without deep synchronous planning.
+- Deployed the scheduler candidate on the Mac mini without resetting `/Volumes/SSD 4TB/LogEx`.
+  - Live log check: `0` stale historical fetch discards and `0` historical reset logs after deployment.
 
 ## Remaining TODOs
 
@@ -51,7 +56,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Benchmark changes by sustained throughput and tail behavior, not peak logs/sec alone. A short 800k+ logs/sec spike is not enough if the same change increases low-throughput minutes.
 - Dense historical batches should use fast compacted writes; sparse historical ranges should retain coalescing to avoid tiny segment growth.
 - Residual historical gaps should be filled before queued lookahead rather than resetting the whole pipeline when the verified prefix is valid.
-- Critical-path refills should be bounded. Deep historical priming is allowed when the engine has no ready work, but ingest should not synchronously spend many seconds planning headers.
+- Critical-path refills should be bounded but continuous. Deep historical priming is allowed when the engine has no ready work, while ingest now tops up a small amount of fetch work from the pipeline cursor.
 - Timeout handling should treat repeated body/receipt timeouts as capacity feedback. Peers are paused and down-ranked before being reused, rather than immediately dropped for every timeout.
 - If historical sync reaches genesis during optimization work, stop the client cleanly, copy `/Volumes/SSD 4TB/LogEx` to a backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
 
@@ -68,14 +73,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Added residual header batches and residual ingestion before queued lookahead can advance the floor.
 
 - Challenge: Queue refill could run expensive header planning on the ingest path.
-  - Resolution: Added a limited refill path for critical sections while preserving full priming outside the hot path.
+  - Resolution: Added a limited refill path for critical sections, then fixed it to follow the fetch pipeline cursor while prepared batches are queued.
 
 - Challenge: Slow body/receipt peers could be reused too quickly after repeated timeouts.
   - Resolution: Timeout pauses now scale with repeated timeouts up to a capped duration.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill variant remains.
+- Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
 - Inspected the body/receipt request accounting path in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the obsolete `return_blocks()` accessor was replaced with planned-prefix accounting.
 - Inspected timeout handling in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained change is limited to adaptive pause duration and focused unit coverage.
 - No remote data directories were removed during this run. The main data directory remains `/Volumes/SSD 4TB/LogEx`.
@@ -84,7 +89,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `43e67bf perf: reduce historical sync scheduler stalls`; pending commit `perf: reduce historical sync idle gaps`
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`; pending commit for the refill-cursor scheduler fix
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.

@@ -662,11 +662,18 @@ impl PeerManager {
             accounting_forwarded: _,
         } = outcome;
 
-        let blocks = take_contiguous_body_receipt_prefix(return_blocks, chunks);
+        let completion_return_blocks = body_receipt_completion_return_blocks(
+            return_blocks,
+            planned_return_blocks,
+            total_hashes,
+        );
+        let blocks = take_contiguous_body_receipt_prefix(completion_return_blocks, chunks);
 
         let min_accepted_prefix = min_accepted_prefix_override
-            .map(|prefix| body_receipt_min_accepted_prefix_override(return_blocks, prefix))
-            .unwrap_or_else(|| body_receipt_min_accepted_prefix(return_blocks));
+            .map(|prefix| {
+                body_receipt_min_accepted_prefix_override(completion_return_blocks, prefix)
+            })
+            .unwrap_or_else(|| body_receipt_min_accepted_prefix(completion_return_blocks));
         if blocks.len() >= min_accepted_prefix {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
@@ -4683,6 +4690,14 @@ fn planned_body_receipt_prefix_blocks(
         .min(total_hashes)
 }
 
+fn body_receipt_completion_return_blocks(
+    return_blocks: usize,
+    planned_return_blocks: usize,
+    total_hashes: usize,
+) -> usize {
+    planned_return_blocks.min(return_blocks).min(total_hashes)
+}
+
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
     return_blocks.min(prefix)
 }
@@ -5059,6 +5074,19 @@ mod tests {
         );
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 512, 1024), 512);
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 1024, 640), 640);
+    }
+
+    #[test]
+    fn body_receipt_completion_return_blocks_caps_to_planned_prefix() {
+        assert_eq!(
+            body_receipt_completion_return_blocks(5_000, 1_024, 5_000),
+            1_024
+        );
+        assert_eq!(body_receipt_completion_return_blocks(512, 1_024, 512), 512);
+        assert_eq!(
+            body_receipt_completion_return_blocks(1_024, 1_024, 640),
+            640
+        );
     }
 
     #[test]

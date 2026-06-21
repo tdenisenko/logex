@@ -66,7 +66,7 @@ const HISTORICAL_DENSE_ROWS_PER_BLOCK: f64 = 300.0;
 const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
-const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 1;
+const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 #[cfg(target_os = "linux")]
@@ -509,6 +509,14 @@ fn historical_fetch_budget_has_capacity(
     } else {
         completed_fetches < buffer_depth
     }
+}
+
+fn historical_fetch_refill_should_use_pipeline_child(
+    pending_prepares: usize,
+    fetch_expected_sequence: u64,
+    prepare_expected_sequence: u64,
+) -> bool {
+    pending_prepares > 0 || fetch_expected_sequence > prepare_expected_sequence
 }
 
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
@@ -1504,7 +1512,10 @@ impl SyncEngine {
             return Ok(true);
         }
 
-        self.ensure_historical_fetch_pipeline_limited(child_header, max_new_fetches)
+        let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
+            return Ok(false);
+        };
+        self.ensure_historical_fetch_pipeline_limited(fetch_child_header, max_new_fetches)
             .await?;
         let prepare_progressed = if max_new_fetches == usize::MAX {
             self.spawn_ready_historical_prepare_tasks().await?
@@ -2137,6 +2148,18 @@ impl SyncEngine {
                 expected.number() == child_header.number()
                     && expected.hash_slow() == child_header.hash_slow()
             })
+    }
+
+    fn historical_fetch_refill_child(&self, storage_child_header: &Header) -> Option<Header> {
+        if historical_fetch_refill_should_use_pipeline_child(
+            self.pending_historical_prepare_count(),
+            self.historical_fetch_expected_sequence,
+            self.historical_prepare_expected_sequence,
+        ) {
+            return self.historical_fetch_expected_child.clone();
+        }
+
+        Some(storage_child_header.clone())
     }
 
     fn pending_historical_fetch_count(&self) -> usize {
@@ -2914,15 +2937,9 @@ impl SyncEngine {
             self.reset_historical_fetch_pipeline();
         }
         let refill_started = std::time::Instant::now();
-        let refilled_fetch_pipeline =
-            if should_reset_fetch_pipeline || self.pending_historical_fetch_count() == 0 {
-                self.prime_historical_backfill_pipeline_limited(
-                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
-                )
-                .await?
-            } else {
-                false
-            };
+        let refilled_fetch_pipeline = self
+            .prime_historical_backfill_pipeline_limited(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT)
+            .await?;
         let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 
@@ -4199,6 +4216,13 @@ mod tests {
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
         ));
+    }
+
+    #[test]
+    fn historical_fetch_refill_follows_pipeline_when_prepares_are_queued() {
+        assert!(!historical_fetch_refill_should_use_pipeline_child(0, 3, 3));
+        assert!(historical_fetch_refill_should_use_pipeline_child(1, 3, 3));
+        assert!(historical_fetch_refill_should_use_pipeline_child(0, 4, 3));
     }
 
     #[test]
