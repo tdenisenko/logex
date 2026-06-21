@@ -153,6 +153,11 @@ pub(super) struct HistoricalPrepareTask {
 pub(super) type HistoricalPrepareResult =
     Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>;
 
+pub(super) struct HistoricalCompletedPrepare {
+    next_child_header: Option<Header>,
+    result: HistoricalPrepareResult,
+}
+
 /// The sync engine: orchestrates P2P block fetching, validation, and ingestion.
 pub struct SyncEngine {
     config: SyncConfig,
@@ -176,7 +181,7 @@ pub struct SyncEngine {
     historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
     historical_prepare_expected_sequence: u64,
     historical_prepare_handles: BTreeMap<u64, HistoricalPrepareTask>,
-    historical_prepare_completed: BTreeMap<u64, HistoricalPrepareResult>,
+    historical_prepare_completed: BTreeMap<u64, HistoricalCompletedPrepare>,
     historical_rows_per_block_ewma: Option<f64>,
     last_historical_allocator_trim: Option<Instant>,
     connected_once: bool,

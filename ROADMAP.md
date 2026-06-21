@@ -10,6 +10,8 @@ Latest accepted benchmark change: pipelined historical body/receipt request time
 
 Latest scheduler smoothing change: historical prepare lookahead and ready-batch drain were raised from 2 to 4. The Mac mini benchmark improved the last-200-batch average from roughly 122k to 170k logs/sec, p50 from roughly 66k to 110k logs/sec, and p95 batch gap from roughly 9.0s to 5.7s without partial or failed historical batches. Further work is still needed to reach the 800k+ target and improve Nethermind serving conversion.
 
+Latest accepted dense-sync scheduler fix: completed historical prepare tasks now preserve their planned next-child header so the fetch pipeline is refilled before the prepared batch is ingested, and body/receipt candidate selection prefers globally idle peers when enough alternatives exist. On the Mac mini this improved the parsed benchmark window from roughly 374k to 555k average logs/sec, raised p95 per-batch logs/sec to roughly 877k, and reduced p95 batch gaps from roughly 32s to roughly 14s. Remaining dips are still dominated by clustered body/receipt request timeouts, not disk, CPU, CL gating, or broken WireGuard routing.
+
 The Mac mini WireGuard/VPS path is healthy again after replacing the stale-interface wrapper with a health-checking LaunchDaemon script. The wrapper now treats a tunnel as healthy only if the VPS tunnel IP responds or the WireGuard handshake is recent; otherwise it restarts the tunnel and restores the full-tunnel routes while preserving LAN access.
 
 Latest peer investigation confirmed the Mac mini is still using the VPS correctly: public egress is `157.245.195.72`, LogEx advertises `--nat extip:157.245.195.72`, public dashboard access works through the VPS, EL/CL DNAT rules are present on the VPS, and inbound EL sockets are established on `10.66.0.2:30303`. Low serving-peer windows are therefore a LogEx peer/request scheduling issue, not a WireGuard exposure issue. Current samples still show body/receipt request timeout clusters and underfilled serving sets during warm-up.
@@ -56,6 +58,11 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 ## Completed Since Last Run
 
+- Preserved the historical fetch pipeline across completed prepare tasks by carrying the prepared task's next-child header through the completed-result queue.
+- Added idle-peer preference to dense body/receipt candidate selection so concurrently spawned historical fetch plans spread requests away from peers already busy with the same request kind.
+- Revalidated the Mac mini VPS path while throughput dipped: public egress stayed `157.245.195.72`, connected/serving peers were healthy, and the slow window coincided with request-tail clusters rather than broken NAT.
+- Benchmarked the accepted scheduler fix on the Mac mini without resetting `/Volumes/SSD 4TB/LogEx`: average parsed per-batch throughput improved to roughly 555k logs/sec, max reached roughly 904k logs/sec, and p95 batch gaps dropped to roughly 14s.
+- Validated the accepted scheduler fix with `cargo fmt --all -- --check`, `cargo test -p logex-sync p2p::peer_manager::requests`, `cargo test -p logex-sync historical_fetch`, and `cargo clippy -p logex-sync --all-targets -- -D warnings`.
 - Verified the Mac mini is still using the VPS path correctly while throughput dipped: public egress is `157.245.195.72`, default traffic routes over WireGuard, the public dashboard responds through the VPS, and connected Nethermind peers are present. Low logs/sec windows are therefore not explained by broken NAT.
 - Tested and rejected a bounded unproven body/receipt probe-lane experiment. It did not durably convert Nethermind peers into serving peers or improve sustained throughput, so it was reverted locally and on the Mac mini.
 - Lowered the pipelined body/receipt request timeout from 6s to 4s after benchmarking showed materially lower historical batch-gap and body/receipt p95 latency without introducing partial historical batches.

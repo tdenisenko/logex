@@ -1313,9 +1313,9 @@ impl SyncEngine {
 
             self.drain_historical_prepare_tasks().await?;
             let expected_sequence = self.historical_prepare_expected_sequence;
-            if let Some(result) = self.historical_prepare_completed.remove(&expected_sequence) {
+            if let Some(completed) = self.historical_prepare_completed.remove(&expected_sequence) {
                 progressed |= self
-                    .ingest_historical_prepare_result(expected_sequence, result, true)
+                    .ingest_historical_completed_prepare(expected_sequence, completed, true)
                     .await?;
                 continue;
             }
@@ -1751,12 +1751,12 @@ impl SyncEngine {
 
         self.drain_historical_prepare_tasks().await?;
         let expected_prepare_sequence = self.historical_prepare_expected_sequence;
-        if let Some(result) = self
+        if let Some(completed) = self
             .historical_prepare_completed
             .remove(&expected_prepare_sequence)
         {
             return self
-                .ingest_historical_prepare_result(expected_prepare_sequence, result, true)
+                .ingest_historical_completed_prepare(expected_prepare_sequence, completed, true)
                 .await;
         }
         if let Some(task) = self
@@ -1851,7 +1851,13 @@ impl SyncEngine {
                 .handle
                 .await
                 .map_err(|error| eyre::eyre!("historical prepare worker failed: {error}"))?;
-            self.historical_prepare_completed.insert(sequence, result);
+            self.historical_prepare_completed.insert(
+                sequence,
+                HistoricalCompletedPrepare {
+                    next_child_header: task.next_child_header,
+                    result,
+                },
+            );
         }
         Ok(())
     }
@@ -2445,14 +2451,8 @@ impl SyncEngine {
         prefetched: bool,
     ) -> Result<bool> {
         let sequence = task.sequence;
-        let immediate_next_child_header = task.next_child_header.clone();
-        if let Some(immediate_next_child_header) = immediate_next_child_header
-            && immediate_next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
-            && self.peers.peer_count() > 0
-        {
-            self.ensure_historical_fetch_pipeline(immediate_next_child_header)
-                .await?;
-        }
+        self.refill_historical_fetch_pipeline_from_prepare(task.next_child_header.clone())
+            .await?;
 
         let mut handle = task.handle;
         let prepared = loop {
@@ -2481,6 +2481,32 @@ impl SyncEngine {
 
         self.ingest_historical_prepare_result(sequence, prepared, prefetched)
             .await
+    }
+
+    async fn ingest_historical_completed_prepare(
+        &mut self,
+        sequence: u64,
+        completed: HistoricalCompletedPrepare,
+        prefetched: bool,
+    ) -> Result<bool> {
+        self.refill_historical_fetch_pipeline_from_prepare(completed.next_child_header)
+            .await?;
+        self.ingest_historical_prepare_result(sequence, completed.result, prefetched)
+            .await
+    }
+
+    async fn refill_historical_fetch_pipeline_from_prepare(
+        &mut self,
+        next_child_header: Option<Header>,
+    ) -> Result<()> {
+        if let Some(next_child_header) = next_child_header
+            && next_child_header.number() > EXECUTION_HISTORY_TARGET_BLOCK
+            && self.peers.peer_count() > 0
+        {
+            self.ensure_historical_fetch_pipeline(next_child_header)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn ingest_historical_prepare_result(
