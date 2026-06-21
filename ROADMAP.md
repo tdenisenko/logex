@@ -6,6 +6,8 @@ LogEx verifies CL from a recent checkpoint, uses CL-authenticated execution head
 
 Active branch: `perf/historical-sync-throughput-v3`.
 
+Latest live-stall fix: reverse historical backfill no longer waits behind repeated stale forward-sync retries for minutes at a time. While historical backfill is incomplete, CL-anchored forward header/body/receipt requests use short bounded attempts, failed forward retries enter a cooldown, ready historical batches are drained before and after forward work, and stale forward catch-up uses 4-block batches instead of 1-block batches. The Mac mini sample after deployment showed forward progress in multi-block steps while historical backfill continued, but shorter idle gaps still remain and are the next scheduler bottleneck.
+
 Latest accepted benchmark change: pipelined historical body/receipt request timeout was lowered from 6s to 4s. On the Mac mini run this reduced batch-gap p95 from the long accepted baseline's roughly 40s to roughly 8s and body/receipt p95 from roughly 9.8s to roughly 7.7s, with no observed failed or partial historical batches in the sampled window. This is only a tail-latency improvement; the main remaining bottleneck is still underfilled historical downloads when serving peers are thin or slow.
 
 Latest scheduler smoothing change: historical prepare lookahead and ready-batch drain were raised from 2 to 4. The Mac mini benchmark improved the last-200-batch average from roughly 122k to 170k logs/sec, p50 from roughly 66k to 110k logs/sec, and p95 batch gap from roughly 9.0s to 5.7s without partial or failed historical batches. Further work is still needed to reach the 800k+ target and improve Nethermind serving conversion.
@@ -58,6 +60,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 
 ## Completed Since Last Run
 
+- Diagnosed the latest zero logs/sec window on the Mac mini as cooperative-loop starvation: historical fetch/prepare/ingest counters were all idle while 20+ serving peers were available and stale forward catch-up was holding the single engine loop.
+- Added `/status` diagnostics for historical fetch, prepare, and ingest queues so live samples can distinguish peer-tail latency, validation/write time, and scheduler idleness.
+- Bounded stale forward-sync header/body/receipt request attempts while historical backfill is active, added a retry cooldown after unsuccessful forward attempts, and stopped ready historical progress from suppressing live forward attempts indefinitely.
+- Raised stale forward catch-up from 1 to 4 CL-anchored blocks per eligible turn after bounding request phases, so forward can still close a stale restart gap while historical backfill remains active.
+- Deployed the fix to the Mac mini on `/Volumes/SSD 4TB/LogEx` with the tmux-managed client and observed forward progress in multi-block steps while historical backfill continued. Longer benchmarking is still required because shorter idle gaps remain.
+- Validated the change locally with `cargo fmt --all`, `cargo check -p logex-sync -p logex-types -p logex-server`, `cargo test -p logex-sync p2p::peer_manager::requests`, and `cargo test -p logex-sync historical_fetch`.
 - Preserved the historical fetch pipeline across completed prepare tasks by carrying the prepared task's next-child header through the completed-result queue.
 - Added idle-peer preference to dense body/receipt candidate selection so concurrently spawned historical fetch plans spread requests away from peers already busy with the same request kind.
 - Revalidated the Mac mini VPS path while throughput dipped: public egress stayed `157.245.195.72`, connected/serving peers were healthy, and the slow window coincided with request-tail clusters rather than broken NAT.
@@ -204,8 +212,8 @@ Consensus-mode historical resume also now stays alive when the consensus store i
    - Completion criteria: Use body/receipt plan latency, active fetch count, buffer depth, serving-peer mix, CPU, memory, disk, and network observations to reduce timeout-cluster low-throughput minutes without increasing failure churn or memory risk. Benchmark only after forward catch-up is at head, or report forward catch-up contention separately. Chunk-level accounting, cross-plan active reservations, adaptive request fanout, and the lower dense-decoupled gate improve feedback latency and low-peer behavior but do not complete this TODO until longer live benchmarking shows sustained throughput and tail-latency improvement. If this remains insufficient, compare a full peer-request scheduler actor against the accepted baseline.
 
 2. Validate stale-forward catch-up fairness.
-   - Reason: The consensus loop now drains ready historical work, spawns historical preparation without waiting in the same turn, primes historical downloads before forward batches, can resume verified historical backfill before CL head tracking is ready, and limits stale forward catch-up to one block per turn while historical work remains. This still needs longer stale-resume runtime validation.
-   - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync still reaches head while historical fetches stay active and historical batches keep making steady progress. If cooperative scheduling still materially suppresses historical throughput during forward catch-up, split peer request scheduling/accounting into an actor so forward and historical workers can submit work independently.
+   - Reason: The consensus loop now drains ready historical work, bounds stale forward request phases, cools down failed forward retries, and uses 4-block stale forward batches while historical backfill remains incomplete. This removed the observed multi-minute zero-throughput stall, but shorter idle gaps still appear under live peer-tail pressure.
+   - Completion criteria: Restart from a stale but valid data directory or reproduce the condition in a controlled test and confirm forward sync reaches head while historical fetches stay active and historical batches keep making steady progress. If cooperative scheduling still materially suppresses historical throughput during forward catch-up, split peer request scheduling/accounting into an actor so forward and historical workers can submit work independently.
 
 3. Match production-client P2P behavior more closely.
    - Reason: The target is Geth/Nethermind-class peer retention and sync performance.
@@ -244,8 +252,12 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Persisted execution peers must be based on advertised/discovered dial addresses, not session remote socket ports. Inbound session source ports are often ephemeral and should not be treated as reusable outbound endpoints.
 - Unproven peers should be probed with smaller body/receipt request limits than proven serving peers. This keeps peer discovery broad while avoiding large dense-range assignments to peers before they have demonstrated useful latency.
 - Body/receipt request-size growth should target production-client-style latency watermarks. The current accepted `2s/3s` watermarks reduce slow-peer tails versus the prior `3s/5s` setting while still allowing fast proven peers to grow toward larger request limits.
+- Stale forward catch-up must be bounded while historical backfill is incomplete. Forward sync still follows CL anchors, but unsuccessful forward request phases should cool down so reverse historical backfill can keep using available peers instead of reporting zero logs/sec while the shared engine loop waits on live-path peers.
 
 ## Challenges and Resolutions
+
+- Challenge: Historical logs/sec could fall to effectively zero for minutes even with 20+ serving execution peers.
+  - Resolution: Added queue diagnostics and found the historical pipeline was idle while stale forward catch-up owned the cooperative engine loop. Bounded stale forward request attempts, added retry cooldown, let forward and historical work both get turns, and increased stale forward batches to 4 after requests were bounded. Longer work remains to remove shorter idle gaps completely.
 
 - Challenge: WireGuard suddenly stopped working without a recent config edit.
   - Resolution: Identified the stale-interface failure mode and installed a health-checking wrapper that restarts the tunnel when ping/handshake checks fail.

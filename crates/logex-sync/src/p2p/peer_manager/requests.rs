@@ -14,8 +14,8 @@ use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
-const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_secs(3);
-const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_millis(1_500);
+const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
@@ -26,6 +26,7 @@ const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
 const PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS: usize = 12;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS: usize = 16;
+const PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 4;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
@@ -40,6 +41,7 @@ const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
+const PARALLEL_CHUNK_SALVAGE_PEER_LIMIT: usize = 4;
 const PARALLEL_REQUESTS_PER_PEER_LOW: usize = 1;
 const PARALLEL_REQUESTS_PER_PEER_HIGH: usize = 2;
 const PARALLEL_HIGH_FANOUT_MIN_PEERS: usize = 32;
@@ -139,6 +141,7 @@ pub(crate) struct BodyReceiptRequestPlan {
     body_peer_ids: Vec<PeerId>,
     receipt_peer_ids: Vec<PeerId>,
     max_in_flight: usize,
+    peer_rotation: usize,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
     accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
 }
@@ -178,14 +181,6 @@ struct BodyReceiptActiveRequestGuard {
     active: bool,
 }
 
-impl BodyReceiptRequestOutcome {
-    pub(crate) fn has_accepted_contiguous_prefix(&self) -> bool {
-        let contiguous_blocks = contiguous_chunk_blocks(&self.chunks);
-        let min_accepted_prefix = body_receipt_min_accepted_prefix(self.return_blocks);
-        contiguous_blocks >= min_accepted_prefix
-    }
-}
-
 pub(crate) struct BodyReceiptRequestCompletion {
     pub(crate) blocks: Vec<SourcedBodyReceipts>,
     pub(crate) planned_return_blocks: usize,
@@ -215,8 +210,28 @@ impl PeerManager {
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     )> {
         let request = HeadersRequest::rising(start_block.into(), count);
-        self.get_headers_from_peers(request, Some(start_block))
+        self.get_headers_from_peers(request, Some(start_block), None, None)
             .await
+    }
+
+    pub async fn get_headers_with_limits(
+        &mut self,
+        start_block: u64,
+        count: u64,
+        request_timeout: Duration,
+        max_attempts: usize,
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        let request = HeadersRequest::rising(start_block.into(), count);
+        self.get_headers_from_peers(
+            request,
+            Some(start_block),
+            Some(request_timeout),
+            Some(max_attempts),
+        )
+        .await
     }
 
     /// Request block headers ending at `start_block` in descending block order.
@@ -233,7 +248,8 @@ impl PeerManager {
             BlockHashOrNumber::Hash(_) => None,
         };
         let request = HeadersRequest::falling(start, count);
-        self.get_headers_from_peers(request, required_block).await
+        self.get_headers_from_peers(request, required_block, None, None)
+            .await
     }
 
     /// Request a single block header by hash or number.
@@ -249,7 +265,7 @@ impl PeerManager {
             BlockHashOrNumber::Hash(_) => None,
         };
         let (peer_id, mut headers) = self
-            .get_headers_from_peers(HeadersRequest::one(id), required_block)
+            .get_headers_from_peers(HeadersRequest::one(id), required_block, None, None)
             .await?;
         Ok((peer_id, headers.pop()))
     }
@@ -282,6 +298,36 @@ impl PeerManager {
         hashes: Vec<B256>,
         required_block: u64,
         preferred_peers: &[PeerId],
+    ) -> Result<Vec<SourcedBlockBody>> {
+        self.get_bodies_prefer_peers_inner(hashes, required_block, preferred_peers, None, None)
+            .await
+    }
+
+    pub async fn get_bodies_prefer_peers_with_limits(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+        request_timeout: Duration,
+        max_attempts: usize,
+    ) -> Result<Vec<SourcedBlockBody>> {
+        self.get_bodies_prefer_peers_inner(
+            hashes,
+            required_block,
+            preferred_peers,
+            Some(request_timeout),
+            Some(max_attempts),
+        )
+        .await
+    }
+
+    async fn get_bodies_prefer_peers_inner(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+        request_timeout: Option<Duration>,
+        max_attempts: Option<usize>,
     ) -> Result<Vec<SourcedBlockBody>> {
         self.drain_events_now();
         if hashes.is_empty() {
@@ -335,11 +381,17 @@ impl PeerManager {
             }
         }
 
-        for peer_id in peer_ids {
+        for (attempt_index, peer_id) in peer_ids.into_iter().enumerate() {
+            if max_attempts.is_some_and(|limit| attempt_index >= limit.max(1)) {
+                break;
+            }
             while !remaining_hashes.is_empty() {
                 let request_hashes = remaining_hashes.clone();
                 let started_at = Instant::now();
-                let bodies = match self.request_bodies(peer_id, request_hashes.clone()).await {
+                let bodies = match self
+                    .request_bodies_with_timeout(peer_id, request_hashes.clone(), request_timeout)
+                    .await
+                {
                     Ok(bodies) => bodies,
                     Err(error) => {
                         let should_drop =
@@ -526,6 +578,7 @@ impl PeerManager {
             &body_peer_ids,
             &receipt_peer_ids,
             receipt_gas_used.as_deref(),
+            rows_per_block,
         );
         if ranges.len() < 2 {
             return Ok(None);
@@ -569,6 +622,7 @@ impl PeerManager {
             body_peer_ids,
             receipt_peer_ids,
             max_in_flight,
+            peer_rotation: self.request_cursor,
             peers,
             accounting_tx: None,
         }))
@@ -770,7 +824,7 @@ impl BodyReceiptRequestPlan {
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
         if self.should_use_decoupled_dense_pipeline() {
             let outcome = self.execute_decoupled_dense().await;
-            if !outcome.chunks.is_empty() {
+            if !outcome.chunks.is_empty() || !outcome.failures.is_empty() {
                 return outcome;
             }
             debug!(
@@ -802,10 +856,18 @@ impl BodyReceiptRequestPlan {
             .cloned()
             .filter_map(|range| body_receipt_prefix_range(range, return_blocks))
             .collect::<Vec<_>>();
-        let bodies_request =
-            self.request_decoupled_body_chunks(&self.body_peer_ids, hashes.clone(), ranges.clone());
-        let receipts_request =
-            self.request_decoupled_sourced_receipt_chunks(&self.receipt_peer_ids, hashes, ranges);
+        let bodies_request = self.request_decoupled_body_chunks(
+            &self.body_peer_ids,
+            hashes.clone(),
+            ranges.clone(),
+            self.peer_rotation,
+        );
+        let receipts_request = self.request_decoupled_sourced_receipt_chunks(
+            &self.receipt_peer_ids,
+            hashes,
+            ranges,
+            self.peer_rotation,
+        );
         let (bodies_result, receipts_result) = tokio::join!(bodies_request, receipts_request);
 
         let mut chunks = BTreeMap::new();
@@ -903,7 +965,7 @@ impl BodyReceiptRequestPlan {
             let mut in_flight = HashMap::<usize, InFlightBodyReceiptChunk>::new();
             let mut peer_state = BodyReceiptPlanPeerState::default();
             let mut hedge_count = 0usize;
-            let min_return_blocks = self.return_blocks;
+            let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
             let max_scheduled_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
@@ -1461,6 +1523,7 @@ impl BodyReceiptRequestPlan {
         peer_ids: &[PeerId],
         hashes: Vec<B256>,
         ranges: Vec<std::ops::Range<usize>>,
+        peer_rotation: usize,
     ) -> std::result::Result<Option<ParallelBodies>, ParallelChunkError> {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
@@ -1476,11 +1539,14 @@ impl BodyReceiptRequestPlan {
         if max_in_flight == 0 {
             return Ok(None);
         }
+        let early_accepted_prefix = decoupled_dense_early_accepted_prefix(hashes.len());
 
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
+        let redundant_prefix_chunks =
+            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len());
         for _ in 0..max_in_flight {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
@@ -1490,7 +1556,30 @@ impl BodyReceiptRequestPlan {
                 &mut attempts,
                 peer_ids,
                 &hashes,
-                chunk_index,
+                rotated_chunk_index(chunk_index, peer_rotation),
+                range,
+            );
+        }
+        for (duplicate_index, range) in ranges
+            .iter()
+            .take(redundant_prefix_chunks)
+            .cloned()
+            .enumerate()
+        {
+            let base_chunk_index = range_indices_by_start
+                .get(&range.start)
+                .copied()
+                .unwrap_or_default();
+            schedule_decoupled_body_chunk(
+                self,
+                &mut attempts,
+                peer_ids,
+                &hashes,
+                rotated_chunk_index(
+                    base_chunk_index
+                        + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
+                    peer_rotation,
+                ),
                 range,
             );
         }
@@ -1502,12 +1591,24 @@ impl BodyReceiptRequestPlan {
             attempts.next().await
         {
             let request_failed = result.is_err();
+            let chunk_already_completed = chunks.contains_key(&range.start);
             match result {
                 Ok(bodies) => {
                     stats.push((peer_id, bodies.len(), elapsed));
-                    chunks.insert(range.start, (peer_id, bodies));
+                    if !chunk_already_completed {
+                        chunks.insert(range.start, (peer_id, bodies));
+                    }
                 }
                 Err(kind) => {
+                    if chunk_already_completed {
+                        trace!(
+                            peer = %peer_id,
+                            requested,
+                            ?kind,
+                            "late duplicate body chunk request failed after chunk completion"
+                        );
+                        continue;
+                    }
                     let failure = ChunkRequestFailure {
                         role: ChunkRequestRole::Bodies,
                         peer_id,
@@ -1528,6 +1629,9 @@ impl BodyReceiptRequestPlan {
             }
 
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
+                break;
+            }
+            if contiguous_sourced_chunk_items(&chunks) >= early_accepted_prefix {
                 break;
             }
 
@@ -1557,14 +1661,17 @@ impl BodyReceiptRequestPlan {
                 &mut attempts,
                 &chunk_peer_ids,
                 &hashes,
-                chunk_index,
+                rotated_chunk_index(chunk_index, peer_rotation),
                 range,
             );
         }
 
-        if !missing_chunk_ranges(&ranges, &chunks).is_empty() {
+        let min_accepted_prefix = body_receipt_min_accepted_prefix(hashes.len());
+        let missing_prefix_ranges =
+            missing_prefix_chunk_ranges(&ranges, &chunks, min_accepted_prefix);
+        if !missing_prefix_ranges.is_empty() {
             bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Bodies));
-            for range in missing_chunk_ranges(&ranges, &chunks) {
+            for range in missing_prefix_ranges {
                 let base_chunk_index = range_indices_by_start
                     .get(&range.start)
                     .copied()
@@ -1572,9 +1679,15 @@ impl BodyReceiptRequestPlan {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    rotated_chunk_index(
+                        base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                        peer_rotation,
+                    ),
                 );
-                for peer_id in retry_peer_ids {
+                for peer_id in retry_peer_ids
+                    .into_iter()
+                    .take(PARALLEL_CHUNK_SALVAGE_PEER_LIMIT)
+                {
                     let request_hashes = hashes[range.clone()].to_vec();
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
@@ -1631,6 +1744,7 @@ impl BodyReceiptRequestPlan {
         peer_ids: &[PeerId],
         hashes: Vec<B256>,
         ranges: Vec<std::ops::Range<usize>>,
+        peer_rotation: usize,
     ) -> std::result::Result<Option<ParallelSourcedReceipts>, ParallelChunkError> {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
@@ -1646,11 +1760,14 @@ impl BodyReceiptRequestPlan {
         if max_in_flight == 0 {
             return Ok(None);
         }
+        let early_accepted_prefix = decoupled_dense_early_accepted_prefix(hashes.len());
 
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
+        let redundant_prefix_chunks =
+            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len());
         for _ in 0..max_in_flight {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
@@ -1660,7 +1777,30 @@ impl BodyReceiptRequestPlan {
                 &mut attempts,
                 peer_ids,
                 &hashes,
-                chunk_index,
+                rotated_chunk_index(chunk_index, peer_rotation),
+                range,
+            );
+        }
+        for (duplicate_index, range) in ranges
+            .iter()
+            .take(redundant_prefix_chunks)
+            .cloned()
+            .enumerate()
+        {
+            let base_chunk_index = range_indices_by_start
+                .get(&range.start)
+                .copied()
+                .unwrap_or_default();
+            schedule_decoupled_receipt_chunk(
+                self,
+                &mut attempts,
+                peer_ids,
+                &hashes,
+                rotated_chunk_index(
+                    base_chunk_index
+                        + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
+                    peer_rotation,
+                ),
                 range,
             );
         }
@@ -1672,12 +1812,24 @@ impl BodyReceiptRequestPlan {
             attempts.next().await
         {
             let request_failed = result.is_err();
+            let chunk_already_completed = chunks.contains_key(&range.start);
             match result {
                 Ok(receipts) => {
                     stats.push((peer_id, receipts.len(), elapsed));
-                    chunks.insert(range.start, (peer_id, receipts));
+                    if !chunk_already_completed {
+                        chunks.insert(range.start, (peer_id, receipts));
+                    }
                 }
                 Err(kind) => {
+                    if chunk_already_completed {
+                        trace!(
+                            peer = %peer_id,
+                            requested,
+                            ?kind,
+                            "late duplicate receipt chunk request failed after chunk completion"
+                        );
+                        continue;
+                    }
                     let failure = ChunkRequestFailure {
                         role: ChunkRequestRole::Receipts,
                         peer_id,
@@ -1698,6 +1850,9 @@ impl BodyReceiptRequestPlan {
             }
 
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
+                break;
+            }
+            if contiguous_sourced_chunk_items(&chunks) >= early_accepted_prefix {
                 break;
             }
 
@@ -1727,14 +1882,17 @@ impl BodyReceiptRequestPlan {
                 &mut attempts,
                 &chunk_peer_ids,
                 &hashes,
-                chunk_index,
+                rotated_chunk_index(chunk_index, peer_rotation),
                 range,
             );
         }
 
-        if !missing_chunk_ranges(&ranges, &chunks).is_empty() {
+        let min_accepted_prefix = body_receipt_min_accepted_prefix(hashes.len());
+        let missing_prefix_ranges =
+            missing_prefix_chunk_ranges(&ranges, &chunks, min_accepted_prefix);
+        if !missing_prefix_ranges.is_empty() {
             bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Receipts));
-            for range in missing_chunk_ranges(&ranges, &chunks) {
+            for range in missing_prefix_ranges {
                 let base_chunk_index = range_indices_by_start
                     .get(&range.start)
                     .copied()
@@ -1742,9 +1900,15 @@ impl BodyReceiptRequestPlan {
                 let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
                 rotate_request_candidates(
                     &mut retry_peer_ids,
-                    base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                    rotated_chunk_index(
+                        base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
+                        peer_rotation,
+                    ),
                 );
-                for peer_id in retry_peer_ids {
+                for peer_id in retry_peer_ids
+                    .into_iter()
+                    .take(PARALLEL_CHUNK_SALVAGE_PEER_LIMIT)
+                {
                     let request_hashes = hashes[range.clone()].to_vec();
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
@@ -2073,6 +2237,8 @@ impl PeerManager {
         &mut self,
         request: HeadersRequest,
         required_block: Option<u64>,
+        request_timeout: Option<Duration>,
+        max_attempts: Option<usize>,
     ) -> Result<(
         PeerId,
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
@@ -2084,9 +2250,15 @@ impl PeerManager {
         let mut dead_peers = HashSet::new();
         let mut saw_empty_response = false;
 
-        for peer_id in peer_ids {
+        for (attempt_index, peer_id) in peer_ids.into_iter().enumerate() {
+            if max_attempts.is_some_and(|limit| attempt_index >= limit.max(1)) {
+                break;
+            }
             let started_at = Instant::now();
-            match self.request_headers(peer_id, request.clone()).await {
+            match self
+                .request_headers_with_timeout(peer_id, request.clone(), request_timeout)
+                .await
+            {
                 Ok(headers) => {
                     if headers.len() > request.limit as usize {
                         self.on_invalid_response_length(
@@ -2151,7 +2323,7 @@ impl PeerManager {
             >,
         >,
     )> {
-        self.get_receipts_inner(hashes, required_block, None, &[])
+        self.get_receipts_inner(hashes, required_block, None, &[], None, None)
             .await
     }
 
@@ -2206,6 +2378,37 @@ impl PeerManager {
             required_block,
             Some(expected_receipt_counts),
             preferred_peers,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn get_receipts_matching_counts_prefer_peers_with_limits(
+        &mut self,
+        hashes: Vec<B256>,
+        required_block: u64,
+        expected_receipt_counts: &[usize],
+        preferred_peers: &[PeerId],
+        request_timeout: Duration,
+        max_attempts: usize,
+    ) -> Result<(
+        PeerId,
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+    )> {
+        self.get_receipts_inner(
+            hashes,
+            required_block,
+            Some(expected_receipt_counts),
+            preferred_peers,
+            Some(request_timeout),
+            Some(max_attempts),
         )
         .await
     }
@@ -2216,6 +2419,8 @@ impl PeerManager {
         required_block: u64,
         expected_receipt_counts: Option<&[usize]>,
         preferred_peers: &[PeerId],
+        request_timeout: Option<Duration>,
+        max_attempts: Option<usize>,
     ) -> Result<(
         PeerId,
         Vec<
@@ -2285,7 +2490,10 @@ impl PeerManager {
             }
         }
 
-        for peer_id in peer_ids {
+        for (attempt_index, peer_id) in peer_ids.into_iter().enumerate() {
+            if max_attempts.is_some_and(|limit| attempt_index >= limit.max(1)) {
+                break;
+            }
             let version = match self.peers.get(&peer_id) {
                 Some(peer) => {
                     trace!(
@@ -2307,7 +2515,10 @@ impl PeerManager {
 
             if version >= EthVersion::Eth70 {
                 let started_at = Instant::now();
-                match self.request_receipts70(peer_id, hashes.clone()).await {
+                match self
+                    .request_receipts70(peer_id, hashes.clone(), request_timeout)
+                    .await
+                {
                     Ok(receipts) => {
                         if let Err(error) = validate_receipt_response_counts(
                             "receipts70",
@@ -2352,10 +2563,15 @@ impl PeerManager {
                 let request_hashes = remaining_hashes.clone();
                 let started_at = Instant::now();
                 let attempt = if version >= EthVersion::Eth69 {
-                    self.request_receipts69(peer_id, request_hashes.clone())
+                    self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
                         .await
                 } else {
-                    self.request_receipts(peer_id, request_hashes.clone()).await
+                    self.request_receipts_with_timeout(
+                        peer_id,
+                        request_hashes.clone(),
+                        request_timeout,
+                    )
+                    .await
                 };
 
                 match attempt {
@@ -2508,12 +2724,16 @@ impl PeerManager {
         body_peer_ids: &[PeerId],
         receipt_peer_ids: &[PeerId],
         receipt_gas_used: Option<&[u64]>,
+        rows_per_block: Option<f64>,
     ) -> Vec<std::ops::Range<usize>> {
         if body_peer_ids.is_empty() || receipt_peer_ids.is_empty() {
             return Vec::new();
         }
 
-        let chunk_cap = body_receipt_chunk_cap(body_peer_ids.len().min(receipt_peer_ids.len()));
+        let chunk_cap = body_receipt_chunk_cap(
+            body_peer_ids.len().min(receipt_peer_ids.len()),
+            rows_per_block,
+        );
         chunk_ranges_with_optional_gas(
             total_items,
             |chunk_index| {
@@ -2540,7 +2760,8 @@ impl PeerManager {
         }
 
         self.dynamic_chunk_ranges_with(total_items, |chunk_index| {
-            let peer_id = peer_ids[chunk_index % peer_ids.len()];
+            let peer_id =
+                peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             self.peer_request_limit(peer_id, kind)
         })
     }
@@ -2598,7 +2819,8 @@ impl PeerManager {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
-            let peer_id = peer_ids[chunk_index % peer_ids.len()];
+            let peer_id =
+                peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
             attempts.push(
                 async move {
@@ -2667,7 +2889,8 @@ impl PeerManager {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
-            let peer_id = peer_ids[chunk_index % peer_ids.len()];
+            let peer_id =
+                peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
             attempts.push(
                 async move {
@@ -2808,7 +3031,8 @@ impl PeerManager {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
-            let peer_id = peer_ids[chunk_index % peer_ids.len()];
+            let peer_id =
+                peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
             let expected_receipt_counts =
                 expected_receipt_counts.map(|expected| expected[range.clone()].to_vec());
@@ -2883,7 +3107,8 @@ impl PeerManager {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
-            let peer_id = peer_ids[chunk_index % peer_ids.len()];
+            let peer_id =
+                peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
             let expected_receipt_counts =
                 expected_receipt_counts.map(|expected| expected[range.clone()].to_vec());
@@ -3032,7 +3257,7 @@ impl PeerManager {
 
         if version >= EthVersion::Eth70 {
             let receipts = self
-                .request_receipts70(peer_id, hashes.clone())
+                .request_receipts70(peer_id, hashes.clone(), None)
                 .await
                 .map_err(ChunkFailureKind::Request)?;
             validate_receipt_response_counts(
@@ -3052,7 +3277,7 @@ impl PeerManager {
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
             let response = if version >= EthVersion::Eth69 {
-                self.request_receipts69(peer_id, request_hashes.clone())
+                self.request_receipts69(peer_id, request_hashes.clone(), None)
                     .await
             } else {
                 self.request_receipts(peer_id, request_hashes.clone()).await
@@ -3195,23 +3420,28 @@ impl PeerManager {
         }
     }
 
-    pub(super) async fn request_headers(
+    pub(super) async fn request_headers_with_timeout(
         &self,
         peer_id: PeerId,
         request: HeadersRequest,
+        request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
         RequestAttempt,
     > {
-        self.request_with_channel(peer_id, &move |response| PeerRequest::GetBlockHeaders {
-            request: GetBlockHeaders {
-                start_block: request.start,
-                limit: request.limit,
-                skip: 0,
-                direction: request.direction,
+        self.request_with_channel(
+            peer_id,
+            &move |response| PeerRequest::GetBlockHeaders {
+                request: GetBlockHeaders {
+                    start_block: request.start,
+                    limit: request.limit,
+                    skip: 0,
+                    direction: request.direction,
+                },
+                response,
             },
-            response,
-        })
+            request_timeout,
+        )
         .await
     }
 
@@ -3223,10 +3453,27 @@ impl PeerManager {
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
         RequestAttempt,
     > {
-        self.request_with_channel(peer_id, &move |response| PeerRequest::GetBlockBodies {
-            request: GetBlockBodies(hashes.clone()),
-            response,
-        })
+        self.request_bodies_with_timeout(peer_id, hashes, None)
+            .await
+    }
+
+    pub(super) async fn request_bodies_with_timeout(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+        request_timeout: Option<Duration>,
+    ) -> std::result::Result<
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
+        RequestAttempt,
+    > {
+        self.request_with_channel(
+            peer_id,
+            &move |response| PeerRequest::GetBlockBodies {
+                request: GetBlockBodies(hashes.clone()),
+                response,
+            },
+            request_timeout,
+        )
         .await
     }
 
@@ -3234,6 +3481,7 @@ impl PeerManager {
         &self,
         peer_id: PeerId,
         make_request: &MakeRequest,
+        request_timeout: Option<Duration>,
     ) -> std::result::Result<T, RequestAttempt>
     where
         W: IntoResponseValue<T>,
@@ -3253,7 +3501,7 @@ impl PeerManager {
             .await
             .map_err(|_| RequestAttempt::Disconnected)?;
 
-        match timeout(REQUEST_TIMEOUT, response_rx).await {
+        match timeout(request_timeout.unwrap_or(REQUEST_TIMEOUT), response_rx).await {
             Ok(Ok(Ok(response))) => Ok(response.into_value()),
             Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
             Ok(Err(_)) => Err(RequestAttempt::Disconnected),
@@ -3277,10 +3525,33 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
-        self.request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts {
-            request: GetReceipts(hashes.clone()),
-            response,
-        })
+        self.request_receipts_with_timeout(peer_id, hashes, None)
+            .await
+    }
+
+    pub(super) async fn request_receipts_with_timeout(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+        request_timeout: Option<Duration>,
+    ) -> std::result::Result<
+        Vec<
+            Vec<
+                alloy_consensus::ReceiptWithBloom<
+                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
+                >,
+            >,
+        >,
+        RequestAttempt,
+    > {
+        self.request_with_channel(
+            peer_id,
+            &move |response| PeerRequest::GetReceipts {
+                request: GetReceipts(hashes.clone()),
+                response,
+            },
+            request_timeout,
+        )
         .await
     }
 
@@ -3288,6 +3559,7 @@ impl PeerManager {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
+        request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -3299,10 +3571,14 @@ impl PeerManager {
         RequestAttempt,
     > {
         let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
-            .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts69 {
-                request: GetReceipts(hashes.clone()),
-                response,
-            })
+            .request_with_channel(
+                peer_id,
+                &move |response| PeerRequest::GetReceipts69 {
+                    request: GetReceipts(hashes.clone()),
+                    response,
+                },
+                request_timeout,
+            )
             .await?;
         let mut bloom_cache = ReceiptBloomCache::default();
         Ok(logex_receipt_batches_with_cached_blooms(
@@ -3315,6 +3591,7 @@ impl PeerManager {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
+        request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -3333,13 +3610,17 @@ impl PeerManager {
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
             let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
-                .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
-                    request: GetReceipts70 {
-                        first_block_receipt_index,
-                        block_hashes: request_hashes.clone(),
+                .request_with_channel(
+                    peer_id,
+                    &move |response| PeerRequest::GetReceipts70 {
+                        request: GetReceipts70 {
+                            first_block_receipt_index,
+                            block_hashes: request_hashes.clone(),
+                        },
+                        response,
                     },
-                    response,
-                })
+                    request_timeout,
+                )
                 .await?;
 
             let (updated_block_index, updated_receipt_index) = merge_receipts70_response(
@@ -3462,6 +3743,17 @@ fn missing_chunk_ranges<T>(
                 .is_none_or(|(_, items)| items.len() != range.len())
         })
         .cloned()
+        .collect()
+}
+
+fn missing_prefix_chunk_ranges<T>(
+    ranges: &[std::ops::Range<usize>],
+    chunks: &BTreeMap<usize, (PeerId, Vec<T>)>,
+    min_accepted_prefix: usize,
+) -> Vec<std::ops::Range<usize>> {
+    missing_chunk_ranges(ranges, chunks)
+        .into_iter()
+        .filter(|range| range.start < min_accepted_prefix)
         .collect()
 }
 
@@ -3698,6 +3990,10 @@ fn schedule_decoupled_body_chunk<'a>(
         }
         .boxed(),
     );
+}
+
+fn rotated_chunk_index(chunk_index: usize, peer_rotation: usize) -> usize {
+    chunk_index.wrapping_add(peer_rotation)
 }
 
 fn schedule_decoupled_receipt_chunk<'a>(
@@ -4193,9 +4489,10 @@ fn retain_serving_body_receipt_candidate_pool_if_enough(
     peers: &HashMap<PeerId, ActivePeer>,
     peer_ids: &mut Vec<PeerId>,
 ) {
-    retain_preferred_items_if_enough(
+    retain_preferred_items_with_limited_fallbacks_if_enough(
         peer_ids,
         PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS,
+        PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS,
         |peer_id| peers.get(peer_id).is_some_and(|peer| peer.is_serving),
     );
 }
@@ -4209,6 +4506,30 @@ fn retain_preferred_items_if_enough<T>(
     if preferred >= min_preferred {
         items.retain(is_preferred);
     }
+}
+
+fn retain_preferred_items_with_limited_fallbacks_if_enough<T>(
+    items: &mut Vec<T>,
+    min_preferred: usize,
+    fallback_limit: usize,
+    is_preferred: impl Fn(&T) -> bool,
+) {
+    let preferred = items.iter().filter(|item| is_preferred(*item)).count();
+    if preferred < min_preferred {
+        return;
+    }
+
+    let mut fallback_count = 0usize;
+    items.retain(|item| {
+        if is_preferred(item) {
+            return true;
+        }
+        if fallback_count < fallback_limit {
+            fallback_count += 1;
+            return true;
+        }
+        false
+    });
 }
 
 fn body_receipt_active_requests(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
@@ -4271,7 +4592,7 @@ fn chunk_ranges_with_optional_gas(
     ranges
 }
 
-fn body_receipt_chunk_cap(_peer_pair_count: usize) -> usize {
+fn body_receipt_chunk_cap(_peer_pair_count: usize, _rows_per_block: Option<f64>) -> usize {
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT
 }
 
@@ -4339,6 +4660,10 @@ fn body_receipt_min_accepted_prefix(return_blocks: usize) -> usize {
     return_blocks.min(prefix)
 }
 
+fn body_receipt_plan_progress_target(return_blocks: usize) -> usize {
+    return_blocks.min(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS)
+}
+
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
     return_blocks.min(prefix)
 }
@@ -4394,6 +4719,35 @@ fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count
     }
 
     PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS
+}
+
+fn decoupled_initial_prefix_redundancy_count(
+    ranges: &[std::ops::Range<usize>],
+    min_return_blocks: usize,
+    peer_count: usize,
+) -> usize {
+    body_receipt_scheduled_chunk_limit(ranges, min_return_blocks)
+        .min(body_receipt_prefix_hedge_spare_attempts(
+            min_return_blocks,
+            peer_count,
+        ))
+        .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
+}
+
+fn decoupled_dense_early_accepted_prefix(return_blocks: usize) -> usize {
+    let target = (return_blocks / 2).max(body_receipt_min_accepted_prefix(return_blocks));
+    return_blocks.min(target)
+}
+
+fn contiguous_sourced_chunk_items<T>(chunks: &BTreeMap<usize, (PeerId, Vec<T>)>) -> usize {
+    let mut expected_start = 0usize;
+    for (start, (_, items)) in chunks {
+        if *start != expected_start {
+            break;
+        }
+        expected_start = expected_start.saturating_add(items.len());
+    }
+    expected_start
 }
 
 #[cfg(test)]
@@ -4589,9 +4943,23 @@ mod tests {
     }
 
     #[test]
+    fn preferred_item_retention_keeps_bounded_probe_fallbacks() {
+        let mut items = vec![1, 2, 3, 4, 5, 6, 7];
+
+        retain_preferred_items_with_limited_fallbacks_if_enough(&mut items, 3, 2, |item| {
+            item % 2 == 1
+        });
+
+        assert_eq!(items, vec![1, 2, 3, 4, 5, 7]);
+    }
+
+    #[test]
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
-        assert_eq!(body_receipt_chunk_cap(31), 128);
-        assert_eq!(body_receipt_chunk_cap(32), 128);
+        assert_eq!(body_receipt_chunk_cap(31, None), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(50.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(100.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(250.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(1500.0)), 128);
         assert_eq!(body_receipt_chunk_limit(128, 128, 128), 128);
         assert_eq!(body_receipt_chunk_limit(16, 128, 128), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 128), 8);
@@ -4647,6 +5015,19 @@ mod tests {
         assert_eq!(body_receipt_min_accepted_prefix(128), 64);
         assert_eq!(body_receipt_min_accepted_prefix(1024), 64);
         assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
+    }
+
+    #[test]
+    fn body_receipt_plan_progress_target_bounds_large_windows() {
+        assert_eq!(body_receipt_plan_progress_target(32), 32);
+        assert_eq!(
+            body_receipt_plan_progress_target(PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS),
+            PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
+        );
+        assert_eq!(
+            body_receipt_plan_progress_target(10_000),
+            PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
+        );
     }
 
     #[test]
@@ -4766,6 +5147,44 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn decoupled_prefix_redundancy_requires_large_peer_pool() {
+        let ranges = vec![0..128, 128..256, 256..384, 384..512, 512..640];
+
+        assert_eq!(
+            decoupled_initial_prefix_redundancy_count(
+                &ranges,
+                PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
+                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS - 1,
+            ),
+            0
+        );
+        assert_eq!(
+            decoupled_initial_prefix_redundancy_count(
+                &ranges,
+                PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
+                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS,
+            ),
+            PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS
+        );
+    }
+
+    #[test]
+    fn decoupled_dense_early_prefix_keeps_batches_reasonably_large() {
+        assert_eq!(decoupled_dense_early_accepted_prefix(1024), 512);
+        assert_eq!(decoupled_dense_early_accepted_prefix(128), 64);
+        assert_eq!(decoupled_dense_early_accepted_prefix(32), 32);
+
+        let peer = PeerId::repeat_byte(0x11);
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, (peer, vec![1u8; 128]));
+        chunks.insert(256, (peer, vec![1u8; 128]));
+        assert_eq!(contiguous_sourced_chunk_items(&chunks), 128);
+
+        chunks.insert(128, (peer, vec![1u8; 128]));
+        assert_eq!(contiguous_sourced_chunk_items(&chunks), 384);
     }
 
     #[test]
@@ -4904,6 +5323,20 @@ mod tests {
         chunks.insert(4, (peer, vec![5u8, 6]));
 
         assert_eq!(missing_chunk_ranges(&ranges, &chunks), vec![4..8, 8..12]);
+    }
+
+    #[test]
+    fn missing_prefix_chunk_ranges_only_repairs_required_prefix() {
+        let peer = PeerId::repeat_byte(0x11);
+        let ranges = vec![0..4, 4..8, 8..12, 12..16];
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, (peer, vec![1u8, 2, 3, 4]));
+        chunks.insert(8, (peer, vec![9u8, 10, 11, 12]));
+
+        assert_eq!(
+            missing_prefix_chunk_ranges(&ranges, &chunks, 10),
+            vec![4..8]
+        );
     }
 
     #[test]

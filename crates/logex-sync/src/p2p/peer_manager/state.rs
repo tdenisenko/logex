@@ -20,6 +20,24 @@ impl PeerManager {
         self.peers.values().filter(|peer| peer.is_serving).count()
     }
 
+    /// Number of connected peers that are currently eligible for body and
+    /// receipt requests. Unproven peers still use lower request limits.
+    pub fn body_receipt_request_ready_peer_count(&self) -> usize {
+        let mut body_ready = 0usize;
+        let mut receipt_ready = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_ready = body_ready.saturating_add(1);
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_ready = receipt_ready.saturating_add(1);
+            }
+        }
+        body_ready.min(receipt_ready)
+    }
+
     /// Highest advertised canonical block across connected peers.
     pub fn highest_peer_block(&self) -> Option<u64> {
         self.peers
@@ -130,6 +148,19 @@ impl PeerManager {
             receipt_proven_peers,
             body_request_limit_avg,
             receipt_request_limit_avg,
+            historical_fetch_active: 0,
+            historical_fetch_completed: 0,
+            historical_fetch_pending: 0,
+            historical_fetch_expected_sequence: 0,
+            historical_fetch_next_sequence: 0,
+            historical_prepare_active: 0,
+            historical_prepare_ready: 0,
+            historical_prepare_completed: 0,
+            historical_prepare_pending: 0,
+            historical_prepare_expected_sequence: 0,
+            historical_ingest_active: false,
+            historical_ingest_sequence: None,
+            historical_ingest_elapsed_ms: None,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,

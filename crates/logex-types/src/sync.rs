@@ -219,6 +219,34 @@ pub struct ExecutionNetworkStatus {
     pub body_request_limit_avg: usize,
     /// Average adaptive receipt request block limit across connected peers.
     pub receipt_request_limit_avg: usize,
+    /// Historical fetch tasks currently in flight.
+    pub historical_fetch_active: usize,
+    /// Historical fetch outcomes buffered and waiting for ordered ingest.
+    pub historical_fetch_completed: usize,
+    /// Historical fetch tasks plus buffered outcomes.
+    pub historical_fetch_pending: usize,
+    /// Historical fetch sequence currently required by ordered ingest.
+    pub historical_fetch_expected_sequence: u64,
+    /// Next historical fetch sequence that will be assigned to a new plan.
+    pub historical_fetch_next_sequence: u64,
+    /// Historical prepare tasks currently in flight.
+    pub historical_prepare_active: usize,
+    /// Historical prepare tasks whose join handles are already ready.
+    pub historical_prepare_ready: usize,
+    /// Historical prepare outcomes buffered and waiting for ordered ingest.
+    pub historical_prepare_completed: usize,
+    /// Historical prepare tasks plus buffered outcomes.
+    pub historical_prepare_pending: usize,
+    /// Historical prepare sequence currently required by ordered ingest.
+    pub historical_prepare_expected_sequence: u64,
+    /// Whether the ordered historical ingest path is currently writing a prepared batch.
+    pub historical_ingest_active: bool,
+    /// Historical prepare sequence currently being written, when an ingest is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_ingest_sequence: Option<u64>,
+    /// Milliseconds elapsed since the active historical ingest started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_ingest_elapsed_ms: Option<u64>,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.
