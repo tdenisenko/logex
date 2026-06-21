@@ -76,8 +76,10 @@ pub(super) const REQUEST_LIMIT_MIN: usize = 1;
 pub(super) const REQUEST_LIMIT_MAX: usize = 128;
 pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 48;
 pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 48;
-const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(3);
-const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(5);
+const UNPROVEN_BODY_REQUEST_LIMIT: usize = 16;
+const UNPROVEN_RECEIPT_REQUEST_LIMIT: usize = 16;
+const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
+const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
 const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(60),

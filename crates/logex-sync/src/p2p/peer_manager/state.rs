@@ -683,12 +683,12 @@ impl PeerManager {
             return request_limit_initial(kind);
         };
 
-        match kind {
+        let limit = match kind {
             PeerRequestKind::Headers => request_limit_initial(kind),
             PeerRequestKind::Bodies => peer.body_request_limit,
             PeerRequestKind::Receipts => peer.receipt_request_limit,
-        }
-        .clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
+        };
+        effective_peer_request_limit(kind, peer.is_serving, limit)
     }
 
     fn adjust_peer_request_limit_after_success(
@@ -787,6 +787,23 @@ pub(super) fn request_limit_initial(kind: PeerRequestKind) -> usize {
         PeerRequestKind::Bodies => BODY_REQUEST_LIMIT_INITIAL,
         PeerRequestKind::Receipts => RECEIPT_REQUEST_LIMIT_INITIAL,
     }
+}
+
+fn unproven_request_limit(kind: PeerRequestKind) -> usize {
+    match kind {
+        PeerRequestKind::Headers => 1,
+        PeerRequestKind::Bodies => UNPROVEN_BODY_REQUEST_LIMIT,
+        PeerRequestKind::Receipts => UNPROVEN_RECEIPT_REQUEST_LIMIT,
+    }
+}
+
+fn effective_peer_request_limit(kind: PeerRequestKind, is_serving: bool, limit: usize) -> usize {
+    let limit = if is_serving {
+        limit
+    } else {
+        limit.min(unproven_request_limit(kind))
+    };
+    limit.clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
 }
 
 fn average_peer_request_limit(total: usize, peers: usize, kind: PeerRequestKind) -> usize {
@@ -1169,6 +1186,30 @@ mod tests {
                 [usize::MAX, usize::MAX].into_iter(),
                 PeerRequestKind::Bodies
             ),
+            REQUEST_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn unproven_body_receipt_peers_start_with_smaller_request_limits() {
+        assert_eq!(
+            effective_peer_request_limit(
+                PeerRequestKind::Bodies,
+                false,
+                BODY_REQUEST_LIMIT_INITIAL
+            ),
+            UNPROVEN_BODY_REQUEST_LIMIT
+        );
+        assert_eq!(
+            effective_peer_request_limit(
+                PeerRequestKind::Receipts,
+                false,
+                RECEIPT_REQUEST_LIMIT_INITIAL
+            ),
+            UNPROVEN_RECEIPT_REQUEST_LIMIT
+        );
+        assert_eq!(
+            effective_peer_request_limit(PeerRequestKind::Bodies, true, REQUEST_LIMIT_MAX),
             REQUEST_LIMIT_MAX
         );
     }
