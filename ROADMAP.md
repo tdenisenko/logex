@@ -73,6 +73,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Tested and rejected prioritizing fresh discovery candidates that advertise a compatible fork id ahead of no-fork-id candidates. The idea matched the observed high `missing_fork_id_candidates` count, but the live run warmed more slowly and averaged lower logs/sec than the accepted baseline, so the code was reverted locally and redeployed on the Mac mini.
 - Tested and rejected preserving ranked peer order for equal-load body/receipt attempts. The live run produced higher early spikes, but increased timeout churn and did not improve the late-window throughput floor, so the code was reverted and the accepted baseline was redeployed.
 - Rechecked the low-peer window after the accepted baseline restart. WireGuard/VPS routing, NAT flags, listeners, and DNAT/FORWARD rules were healthy; EL connected peers warmed from 13 to 30 over the sample, while serving peers stayed around 11-14 and `connected + pending_dials` stayed near the configured target. The issue remains useful peer conversion and body/receipt request-tail behavior, not VPS exposure.
+- Tested and rejected using body/receipt-ready peers to raise historical fetch capacity after the 16-serving-peer floor. It increased active body/receipt pressure once the threshold was crossed, but timeout failures per plan rose sharply and the throughput gain was not durable enough to keep.
 - Added advanced execution-network diagnostics for body/receipt request readiness, paused peers, active body/receipt requests, and timeout-penalized peers.
 - Deployed the diagnostics to the Mac mini and confirmed the low-peer window is not hidden WireGuard breakage: queued candidates and pending dials are plentiful, but dense body/receipt work quickly produces paused/quarantined receipt peers and timeout penalties.
 - Tested and rejected a global per-peer body/receipt in-flight cap. It reduced active request pressure but starved the downloader during warm-up and did not improve sustained logs/sec, so it was reverted before committing.
@@ -345,6 +346,9 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Challenge: The latest restart again showed low EL connected peers, raising concern that the VPS full tunnel had degraded.
   - Resolution: Verified public egress through `157.245.195.72`, public dashboard access, Mac listener sockets, VPS DNAT/FORWARD rules, and active inbound EL sessions on `10.66.0.2:30303`. A multi-minute sample showed connected peers rising while serving peers lagged, so the remaining issue is EL candidate quality and pending-dial/serving-peer conversion.
 
+- Challenge: The connected pool was larger than the proven serving pool, suggesting fetch depth/window tiering might be too conservative once enough peers were body/receipt-ready.
+  - Resolution: Tested a bounded ready-peer capacity boost after the 16-serving-peer floor. The candidate raised active fetch pressure, but failures per plan roughly doubled versus the accepted run, so the change was reverted and the accepted baseline was redeployed.
+
 - Challenge: Raising the serving-fast-pool threshold seemed likely to promote more connected peers into useful body/receipt peers.
   - Resolution: Tested the threshold at 24 and rejected it because the remote warm-up regressed connected/serving counts and increased timeout penalties. The accepted threshold of 16 was restored and redeployed.
 
@@ -405,6 +409,7 @@ Consensus-mode historical resume also now stays alive when the consensus store i
 - Reverted and redeployed the uncommitted 2s body/receipt hedge-delay experiment after live benchmarking showed no sustained logs/sec improvement; no code from that experiment remains.
 - Reverted and redeployed the uncommitted fork-id-prioritized candidate-selection experiment after live benchmarking showed worse warm-up throughput; no code from that experiment remains.
 - Reverted and redeployed the uncommitted ranked-prefix body/receipt peer ordering experiment after live benchmarking showed higher timeout churn and no durable throughput-floor improvement; no code from that experiment remains.
+- Reverted and redeployed the uncommitted body/receipt-ready fetch-capacity experiment after live benchmarking showed higher failure churn without a durable throughput-floor improvement; no code from that experiment remains.
 
 ## Git Workflow
 
