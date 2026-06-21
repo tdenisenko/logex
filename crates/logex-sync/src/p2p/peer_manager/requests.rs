@@ -637,6 +637,7 @@ impl PeerManager {
             None,
             required_block,
             preferred_peers,
+            &[],
         )
         .await
     }
@@ -655,6 +656,27 @@ impl PeerManager {
             rows_per_block,
             required_block,
             preferred_peers,
+            &[],
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_bodies_and_receipts_request_for_hashes_and_gas_excluding(
+        &mut self,
+        hashes: Vec<B256>,
+        gas_used: Vec<u64>,
+        rows_per_block: Option<f64>,
+        required_block: u64,
+        preferred_peers: &[PeerId],
+        excluded_peers: &[PeerId],
+    ) -> Result<Option<BodyReceiptRequestPlan>> {
+        self.prepare_bodies_and_receipts_request_inner(
+            hashes,
+            Some(gas_used),
+            rows_per_block,
+            required_block,
+            preferred_peers,
+            excluded_peers,
         )
         .await
     }
@@ -666,6 +688,7 @@ impl PeerManager {
         rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
+        excluded_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.drain_events_now();
         if hashes.is_empty() {
@@ -678,6 +701,7 @@ impl PeerManager {
         let mut body_peer_ids = self
             .peer_ids_for_block_requests(Some(required_block), preferred_peers)
             .await;
+        body_peer_ids.retain(|peer_id| !excluded_peers.contains(peer_id));
         self.filter_paused_request_peers(&mut body_peer_ids, PeerRequestKind::Bodies);
         retain_idle_body_receipt_candidate_pool_if_enough(
             &self.peers,
@@ -694,6 +718,7 @@ impl PeerManager {
         let mut receipt_peer_ids = self
             .peer_ids_for_receipt_requests(required_block, preferred_peers)
             .await;
+        receipt_peer_ids.retain(|peer_id| !excluded_peers.contains(peer_id));
         self.filter_paused_request_peers(&mut receipt_peer_ids, PeerRequestKind::Receipts);
         retain_idle_body_receipt_candidate_pool_if_enough(
             &self.peers,

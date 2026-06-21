@@ -67,6 +67,7 @@ const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
+const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
 const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
@@ -381,6 +382,49 @@ fn historical_header_prefix_len_for_gas_target(headers: &[Header], target_count:
     headers.len()
 }
 
+type ReverseHeaderPageValidationResult =
+    std::result::Result<(PeerId, Vec<Header>, Vec<B256>), (PeerId, HeaderValidationError)>;
+
+fn validate_reverse_header_pages_with_hashes(
+    child_header: &Header,
+    pages: Vec<(PeerId, Vec<Header>)>,
+) -> ReverseHeaderPageValidationResult {
+    let mut page_child_header = child_header.clone();
+    let mut header_peer = PeerId::ZERO;
+    let mut headers = Vec::new();
+    let mut hashes = Vec::new();
+
+    for (page_peer, page_headers) in pages {
+        if page_headers.is_empty() {
+            continue;
+        }
+        let page_hashes =
+            validate_reverse_downloaded_headers_with_hashes(&page_child_header, &page_headers)
+                .map_err(|error| (page_peer, error))?;
+
+        if header_peer == PeerId::ZERO {
+            header_peer = page_peer;
+        }
+        if let Some(next_child_header) = page_headers.last().cloned() {
+            page_child_header = next_child_header;
+        }
+        hashes.extend(page_hashes);
+        headers.extend(page_headers);
+    }
+
+    if headers.is_empty() {
+        return Err((
+            PeerId::ZERO,
+            HeaderValidationError::ReverseStartBlockMismatch {
+                expected: child_header.number().saturating_sub(1),
+                got: child_header.number(),
+            },
+        ));
+    }
+
+    Ok((header_peer, headers, hashes))
+}
+
 fn historical_fetch_pipeline_depth_for_serving_peers(
     serving_peers: usize,
     total_memory_bytes: Option<u64>,
@@ -528,6 +572,25 @@ fn historical_fetch_budget_has_capacity(
     } else {
         completed_fetches < buffer_depth
     }
+}
+
+fn historical_critical_refill_buffer_floor(available_memory_bytes: Option<u64>) -> usize {
+    historical_prepare_buffer_depth(available_memory_bytes)
+        .saturating_add(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT)
+}
+
+fn historical_critical_refill_has_enough_buffer(
+    active_fetches: usize,
+    pending_fetches: usize,
+    pending_prepares: usize,
+    available_memory_bytes: Option<u64>,
+) -> bool {
+    if active_fetches < HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT {
+        return false;
+    }
+
+    pending_fetches.saturating_add(pending_prepares)
+        >= historical_critical_refill_buffer_floor(available_memory_bytes)
 }
 
 fn historical_fetch_refill_should_use_pipeline_child(
@@ -1529,6 +1592,16 @@ impl SyncEngine {
         self.drain_historical_prepare_tasks().await?;
         if self.recover_historical_sequence_gap(&child_header) {
             return Ok(true);
+        }
+        if max_new_fetches != usize::MAX
+            && historical_critical_refill_has_enough_buffer(
+                self.active_historical_fetch_count(),
+                self.pending_historical_fetch_count(),
+                self.pending_historical_prepare_count(),
+                historical_available_memory_bytes(),
+            )
+        {
+            return Ok(false);
         }
 
         let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
@@ -2692,16 +2765,8 @@ impl SyncEngine {
             .await
             {
                 Some(Ok(pages)) if !pages.is_empty() => {
-                    let header_peer = pages
-                        .first()
-                        .map(|(peer_id, _)| *peer_id)
-                        .unwrap_or(PeerId::ZERO);
-                    let mut headers = pages
-                        .into_iter()
-                        .flat_map(|(_, page_headers)| page_headers)
-                        .collect::<Vec<_>>();
-                    match validate_reverse_downloaded_headers_with_hashes(&child_header, &headers) {
-                        Ok(mut hashes) => {
+                    match validate_reverse_header_pages_with_hashes(&child_header, pages) {
+                        Ok((header_peer, mut headers, mut hashes)) => {
                             let keep =
                                 historical_header_prefix_len_for_gas_target(&headers, target_count);
                             headers.truncate(keep);
@@ -2719,14 +2784,16 @@ impl SyncEngine {
                                 header_elapsed: header_started.elapsed(),
                             }));
                         }
-                        Err(error) => {
+                        Err((header_peer, error)) => {
                             tracing::warn!(
                                 child_block = child_header.number(),
                                 header_peer = %header_peer,
                                 %error,
                                 "parallel historical reverse header validation failed"
                             );
-                            self.peers.report_invalid_block_data(header_peer, "headers");
+                            if header_peer != PeerId::ZERO {
+                                self.peers.report_invalid_block_data(header_peer, "headers");
+                            }
                             self.refresh_connectivity_state();
                         }
                     }
@@ -3146,6 +3213,7 @@ impl SyncEngine {
 
         let mut remaining_headers = headers;
         let mut remaining_hashes = hashes;
+        let mut excluded_residual_peers = Vec::new();
         while !remaining_headers.is_empty() {
             if remaining_headers
                 .iter()
@@ -3161,99 +3229,138 @@ impl SyncEngine {
                 break;
             }
 
-            let body_receipt_started = std::time::Instant::now();
-            let body_receipt_gas_used = remaining_headers
-                .iter()
-                .map(|header| header.gas_used())
-                .collect();
-            let blocks = match self
-                .peers
-                .prepare_bodies_and_receipts_request_for_hashes_and_gas(
-                    remaining_hashes.clone(),
-                    body_receipt_gas_used,
-                    self.historical_rows_per_block_ewma,
-                    required_block,
-                    &[header_peer],
-                )
-                .await?
-            {
-                Some(plan) => {
-                    let outcome = plan.execute().await;
-                    match self
-                        .peers
-                        .complete_residual_bodies_and_receipts_request(outcome)
-                    {
-                        Ok(Some(completion))
-                            if !completion.blocks.is_empty()
-                                && completion.blocks.len() <= remaining_headers.len() =>
-                        {
-                            completion.blocks
-                        }
-                        Ok(Some(completion)) => {
-                            tracing::debug!(
-                                headers = remaining_headers.len(),
-                                blocks = completion.blocks.len(),
-                                "historical residual parallel body/receipt response was unusable"
-                            );
-                            return Ok(false);
-                        }
-                        Ok(None) => return Ok(false),
-                        Err(error) => {
-                            tracing::debug!(
-                                error = %error,
-                                "historical residual parallel body/receipt request failed"
-                            );
-                            self.refresh_connectivity_state();
-                            return Ok(false);
-                        }
-                    }
-                }
-                None => return Ok(false),
-            };
-            let body_receipt_elapsed = body_receipt_started.elapsed();
-            let block_count = blocks.len();
-            if block_count == 0 || block_count > remaining_headers.len() {
-                return Ok(false);
-            }
-            let chunk_headers = remaining_headers[..block_count].to_vec();
-            let chunk_hashes = remaining_hashes[..block_count].to_vec();
-            let remaining_after_chunk = remaining_headers.len().saturating_sub(block_count);
-            if remaining_after_chunk > 0 {
-                tracing::debug!(
-                    headers = remaining_headers.len(),
-                    blocks = block_count,
-                    remaining_blocks = remaining_after_chunk,
-                    "historical residual parallel body/receipt response made partial progress"
-                );
-            }
-
             let (
                 extracted,
                 mut peer_notes,
                 lowest_block,
                 highest_block,
                 block_count,
+                remaining_after_chunk,
+                body_receipt_elapsed,
                 validation_queue_elapsed,
                 validation_elapsed,
-            ) = match validate_and_extract_historical_blocks_streaming(
-                &chunk_headers,
-                &chunk_hashes,
-                blocks,
-            )
-            .await?
-            {
-                Ok(processed) => processed,
-                Err(failure) => {
-                    tracing::warn!(
-                        block_number = failure.block_number,
-                        block_hash = %failure.block_hash,
-                        peer = %failure.peer,
-                        error = %failure.message,
-                        "historical residual block validation failed"
-                    );
-                    self.peers
-                        .report_invalid_block_data(failure.peer, failure.response_kind);
+            ) = loop {
+                let body_receipt_started = std::time::Instant::now();
+                let body_receipt_gas_used = remaining_headers
+                    .iter()
+                    .map(|header| header.gas_used())
+                    .collect();
+                let blocks = match self
+                    .peers
+                    .prepare_bodies_and_receipts_request_for_hashes_and_gas_excluding(
+                        remaining_hashes.clone(),
+                        body_receipt_gas_used,
+                        self.historical_rows_per_block_ewma,
+                        required_block,
+                        &[header_peer],
+                        &excluded_residual_peers,
+                    )
+                    .await?
+                {
+                    Some(plan) => {
+                        let outcome = plan.execute().await;
+                        match self
+                            .peers
+                            .complete_residual_bodies_and_receipts_request(outcome)
+                        {
+                            Ok(Some(completion))
+                                if !completion.blocks.is_empty()
+                                    && completion.blocks.len() <= remaining_headers.len() =>
+                            {
+                                completion.blocks
+                            }
+                            Ok(Some(completion)) => {
+                                tracing::debug!(
+                                    headers = remaining_headers.len(),
+                                    blocks = completion.blocks.len(),
+                                    excluded_peers = excluded_residual_peers.len(),
+                                    "historical residual parallel body/receipt response was unusable"
+                                );
+                                return Ok(false);
+                            }
+                            Ok(None) => return Ok(false),
+                            Err(error) => {
+                                tracing::debug!(
+                                    error = %error,
+                                    excluded_peers = excluded_residual_peers.len(),
+                                    "historical residual parallel body/receipt request failed"
+                                );
+                                self.refresh_connectivity_state();
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    None => return Ok(false),
+                };
+                let body_receipt_elapsed = body_receipt_started.elapsed();
+                let block_count = blocks.len();
+                if block_count == 0 || block_count > remaining_headers.len() {
                     return Ok(false);
+                }
+                let chunk_headers = remaining_headers[..block_count].to_vec();
+                let chunk_hashes = remaining_hashes[..block_count].to_vec();
+                let remaining_after_chunk = remaining_headers.len().saturating_sub(block_count);
+                if remaining_after_chunk > 0 {
+                    tracing::debug!(
+                        headers = remaining_headers.len(),
+                        blocks = block_count,
+                        remaining_blocks = remaining_after_chunk,
+                        "historical residual parallel body/receipt response made partial progress"
+                    );
+                }
+
+                match validate_and_extract_historical_blocks_streaming(
+                    &chunk_headers,
+                    &chunk_hashes,
+                    blocks,
+                )
+                .await?
+                {
+                    Ok((
+                        extracted,
+                        peer_notes,
+                        lowest_block,
+                        highest_block,
+                        block_count,
+                        validation_queue_elapsed,
+                        validation_elapsed,
+                    )) => {
+                        break (
+                            extracted,
+                            peer_notes,
+                            lowest_block,
+                            highest_block,
+                            block_count,
+                            remaining_after_chunk,
+                            body_receipt_elapsed,
+                            validation_queue_elapsed,
+                            validation_elapsed,
+                        );
+                    }
+                    Err(failure) => {
+                        tracing::warn!(
+                            block_number = failure.block_number,
+                            block_hash = %failure.block_hash,
+                            peer = %failure.peer,
+                            error = %failure.message,
+                            excluded_peers = excluded_residual_peers.len(),
+                            "historical residual block validation failed; retrying residual gap with peer excluded"
+                        );
+                        self.peers
+                            .report_invalid_block_data(failure.peer, failure.response_kind);
+                        if !excluded_residual_peers.contains(&failure.peer) {
+                            excluded_residual_peers.push(failure.peer);
+                        }
+                        if excluded_residual_peers.len()
+                            >= HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT
+                        {
+                            tracing::warn!(
+                                excluded_peers = excluded_residual_peers.len(),
+                                "historical residual validation retry limit reached"
+                            );
+                            return Ok(false);
+                        }
+                    }
                 }
             };
 
@@ -3726,8 +3833,12 @@ mod tests {
         let mut header = Header {
             number,
             parent_hash,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            transactions_root: EMPTY_ROOT_HASH,
+            receipts_root: EMPTY_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: 1_700_000_000 + number,
+            withdrawals_root: Some(EMPTY_ROOT_HASH),
             ..Default::default()
         };
         header.extra_data = vec![marker].into();
@@ -3912,6 +4023,53 @@ mod tests {
         assert_eq!(
             historical_header_prefix_len_for_gas_target(&headers, target_count),
             HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS
+        );
+    }
+
+    #[test]
+    fn reverse_header_pages_validate_across_page_boundaries() {
+        let h100 = header(100, B256::ZERO, 0x01);
+        let h101 = header(101, h100.hash_slow(), 0x02);
+        let h102 = header(102, h101.hash_slow(), 0x03);
+        let h103 = header(103, h102.hash_slow(), 0x04);
+        let h104 = header(104, h103.hash_slow(), 0x05);
+
+        let (_, headers, hashes) = validate_reverse_header_pages_with_hashes(
+            &h104,
+            vec![
+                (PeerId::ZERO, vec![h103.clone(), h102.clone()]),
+                (PeerId::ZERO, vec![h101.clone(), h100.clone()]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers.iter().map(Header::number).collect::<Vec<_>>(),
+            vec![103, 102, 101, 100]
+        );
+        assert_eq!(
+            hashes,
+            headers.iter().map(Header::hash_slow).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reverse_header_pages_reject_broken_boundary() {
+        let h100 = header(100, B256::ZERO, 0x01);
+        let h101 = header(101, h100.hash_slow(), 0x02);
+        let h102 = header(102, h101.hash_slow(), 0x03);
+        let h103 = header(103, h102.hash_slow(), 0x04);
+        let h104 = header(104, h103.hash_slow(), 0x05);
+
+        assert!(
+            validate_reverse_header_pages_with_hashes(
+                &h104,
+                vec![
+                    (PeerId::ZERO, vec![h103.clone(), h102.clone()]),
+                    (PeerId::ZERO, vec![h100]),
+                ],
+            )
+            .is_err()
         );
     }
 
@@ -4325,6 +4483,55 @@ mod tests {
             0,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
+    }
+
+    #[test]
+    fn historical_critical_refill_counts_prepared_work_as_buffer() {
+        let floor = historical_critical_refill_buffer_floor(None);
+        assert_eq!(
+            floor,
+            HISTORICAL_PREPARE_BUFFER_DEPTH_LIMIT + HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        );
+        assert!(historical_critical_refill_has_enough_buffer(
+            2,
+            2,
+            floor - 2,
+            None
+        ));
+        assert!(!historical_critical_refill_has_enough_buffer(
+            1,
+            1,
+            floor - 2,
+            None
+        ));
+        assert!(!historical_critical_refill_has_enough_buffer(
+            1,
+            2,
+            floor - 2,
+            None
+        ));
+    }
+
+    #[test]
+    fn historical_critical_refill_uses_smaller_floor_under_low_memory() {
+        let low_memory = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1);
+        let floor = historical_critical_refill_buffer_floor(low_memory);
+        assert_eq!(
+            floor,
+            HISTORICAL_PREPARE_LOOKAHEAD_DEPTH + HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        );
+        assert!(historical_critical_refill_has_enough_buffer(
+            2, 0, floor, low_memory
+        ));
+        assert!(!historical_critical_refill_has_enough_buffer(
+            1, 0, floor, low_memory
+        ));
+        assert!(!historical_critical_refill_has_enough_buffer(
+            2,
+            0,
+            floor - 1,
+            low_memory
         ));
     }
 

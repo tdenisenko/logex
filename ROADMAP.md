@@ -8,7 +8,7 @@ Active branch: `perf/historical-sync-throughput-v3`
 
 Draft PR: `https://github.com/tdenisenko/logex/pull/95`
 
-The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. Historical sync is progressing through older, sparse blocks. The latest scheduler candidate removed stale lookahead discards and repeated fetch-pipeline resets; parallel reverse-header pages reduced header refill latency and live samples reached roughly `2.5k` blocks/sec in sparse blocks.
+The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A full historical sync reached genesis and was preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; a fresh sync run is now testing dense recent-block throughput with the same peer metadata restored.
 
 ## Completed Since Last Run
 
@@ -34,12 +34,19 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Added parallel reverse-header page fetches for multi-page historical windows.
   - Header pages are requested concurrently by block number and then validated as one chained prefix against the known child header before any body/receipt data is trusted.
   - Live log check: `0` stale fetch discards, `0` historical reset logs, and `0` parallel header validation failures after deployment.
+- Fixed restart warm-up and residual tail handling in historical sync.
+  - The historical density estimate now starts empty instead of assuming dense blocks, so sparse-range resumes do not begin with bad window sizing.
+  - Residual body/receipt validation failures are retried with the bad peer excluded before resetting lookahead.
+  - Critical refill now keeps active network fetches above the minimum before treating prepared work as enough buffer.
+- Completed and preserved a full historical sync.
+  - The completed data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`.
+  - A fresh `/Volumes/SSD 4TB/LogEx` was created, peer metadata was restored, and the client was restarted on port `18683`.
 
 ## Remaining TODOs
 
 1. Reduce peer-tail sawtooth in dense historical sync.
    - Reason: The full-sync target is below 4 hours, and current throughput still dips when body/receipt peers time out or under-serve.
-   - Completion criteria: Sustained benchmark windows show materially lower low-throughput minutes without increasing timeout churn, memory pressure, or invalid partial batches. Track logs/sec, blocks/sec, body/receipt p95 latency, active fetch depth, timeout-penalized peers, serving-peer count, CPU, memory, disk, and network.
+   - Completion criteria: Sustained benchmark windows show materially lower low-throughput minutes without increasing timeout churn, memory pressure, or invalid partial batches. Track logs/sec, blocks/sec, body/receipt p95 latency, residual-gap frequency, active fetch depth, timeout-penalized peers, serving-peer count, CPU, memory, disk, and network.
 
 2. Decide whether the EL request scheduler needs an actor split.
    - Reason: Reverse fetch tasks are asynchronous, but planning, ingestion, and peer accounting still share mutable `SyncEngine`/`PeerManager` ownership.
@@ -62,7 +69,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Critical-path refills should be bounded but continuous. Deep historical priming is allowed when the engine has no ready work, while ingest now tops up a small amount of fetch work from the pipeline cursor.
 - Multi-page reverse-header windows can be fetched concurrently by number, provided the concatenated result is validated against the known child header before use.
 - Timeout handling should treat repeated body/receipt timeouts as capacity feedback. Peers are paused and down-ranked before being reused, rather than immediately dropped for every timeout.
-- If historical sync reaches genesis during optimization work, stop the client cleanly, copy `/Volumes/SSD 4TB/LogEx` to a backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
+- If historical sync reaches genesis during optimization work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
 
 ## Challenges and Resolutions
 
@@ -85,19 +92,24 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Challenge: Slow body/receipt peers could be reused too quickly after repeated timeouts.
   - Resolution: Timeout pauses now scale with repeated timeouts up to a capped duration.
 
+- Challenge: Dense recent ranges still show body/receipt tail latency.
+  - Resolution: Active fetch starvation was fixed, but dense windows still often return partial prefixes that require residual repair.
+  - Remaining: Benchmark smaller/adaptive dense windows or a residual scheduler that does not serialize queued lookahead.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
 - Inspected the body/receipt request accounting path in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the obsolete `return_blocks()` accessor was replaced with planned-prefix accounting.
 - Inspected the new reverse-header page request path; the old sequential path remains as fallback for low-peer, single-page, or failed parallel cases.
+- Inspected current historical scheduler changes after the full-sync backup; no obsolete experiment files or dead branches were added locally.
 - Inspected timeout handling in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained change is limited to adaptive pause duration and focused unit coverage.
-- No remote data directories were removed during this run. The main data directory remains `/Volumes/SSD 4TB/LogEx`.
+- The completed remote data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; `/Volumes/SSD 4TB/LogEx` now contains the fresh active run.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`; pending commit for parallel header pages
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`; pending commit for residual retry and active-fetch refill fixes
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
@@ -105,6 +117,6 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 ## Known Issues or Risks
 
 - Historical sync can still show low-throughput windows when serving peers are few or body/receipt requests time out in clusters.
-- Current samples are from old sparse block ranges, so logs/sec can understate block throughput. Dense-range changes still need longer benchmark windows.
-- The remote run should not be reset unless a code change requires it or full historical sync reaches genesis and is backed up first.
+- Dense recent blocks still expose body/receipt peer-tail latency and residual-gap serialization; this is the current bottleneck.
+- The current fresh remote run should not be reset again unless a code change requires it or full historical sync reaches genesis and is backed up first.
 - The full request-scheduler actor split may be necessary if cooperative scheduling cannot keep downloads saturated.
