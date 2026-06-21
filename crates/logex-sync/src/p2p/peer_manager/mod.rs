@@ -143,6 +143,7 @@ struct ExecutionPeerSessionMetrics {
 struct ActivePeer {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     remote_record: NodeRecord,
+    remote_record_is_dialable: bool,
     remote_status: UnifiedStatus,
     client_version: Arc<str>,
     version: EthVersion,

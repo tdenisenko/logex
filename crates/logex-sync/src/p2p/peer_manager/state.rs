@@ -576,7 +576,10 @@ impl PeerManager {
         let (became_serving, productive) = if let Some(peer) = self.peers.get_mut(&peer_id) {
             let became_serving = !peer.is_serving;
             peer.is_serving = true;
-            (became_serving, became_serving.then_some(peer.remote_record))
+            (
+                became_serving,
+                (became_serving && peer.remote_record_is_dialable).then_some(peer.remote_record),
+            )
         } else {
             (false, None)
         };
