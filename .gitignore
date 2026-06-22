@@ -9,3 +9,6 @@
 
 # Local archives
 /old-docs/
+
+# Local machine operations
+/local-ops/
