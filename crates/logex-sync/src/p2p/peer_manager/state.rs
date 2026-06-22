@@ -20,6 +20,24 @@ impl PeerManager {
         self.peers.values().filter(|peer| peer.is_serving).count()
     }
 
+    /// Number of connected peers that are currently eligible for body and
+    /// receipt requests. Unproven peers still use lower request limits.
+    pub fn body_receipt_request_ready_peer_count(&self) -> usize {
+        let mut body_ready = 0usize;
+        let mut receipt_ready = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_ready = body_ready.saturating_add(1);
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_ready = receipt_ready.saturating_add(1);
+            }
+        }
+        body_ready.min(receipt_ready)
+    }
+
     /// Highest advertised canonical block across connected peers.
     pub fn highest_peer_block(&self) -> Option<u64> {
         self.peers
@@ -51,9 +69,58 @@ impl PeerManager {
     /// Snapshot of execution-network peer retention and dial state for status/UI metrics.
     pub fn execution_network_status(&self) -> ExecutionNetworkStatus {
         let mut client_counts = ExecutionClientFamilyCounts::default();
+        let mut body_request_ready_peers = 0usize;
+        let mut receipt_request_ready_peers = 0usize;
+        let mut body_request_paused_peers = 0usize;
+        let mut receipt_request_paused_peers = 0usize;
+        let mut active_body_requests = 0usize;
+        let mut active_receipt_requests = 0usize;
+        let mut timeout_penalized_peers = 0usize;
+        let mut body_proven_peers = 0usize;
+        let mut receipt_proven_peers = 0usize;
+        let mut body_request_limit_total = 0usize;
+        let mut receipt_request_limit_total = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
+            let body_paused = peer_request_is_paused(peer, PeerRequestKind::Bodies);
+            let receipt_paused = peer_request_is_paused(peer, PeerRequestKind::Receipts);
+            if peer.body_blocks_per_sec > 0.0 {
+                body_proven_peers = body_proven_peers.saturating_add(1);
+            }
+            if peer.receipt_blocks_per_sec > 0.0 {
+                receipt_proven_peers = receipt_proven_peers.saturating_add(1);
+            }
+            body_request_limit_total =
+                body_request_limit_total.saturating_add(peer.body_request_limit);
+            receipt_request_limit_total =
+                receipt_request_limit_total.saturating_add(peer.receipt_request_limit);
+            if body_paused {
+                body_request_paused_peers = body_request_paused_peers.saturating_add(1);
+            } else {
+                body_request_ready_peers = body_request_ready_peers.saturating_add(1);
+            }
+            if receipt_paused {
+                receipt_request_paused_peers = receipt_request_paused_peers.saturating_add(1);
+            } else if !peer_receipts_are_quarantined(peer) {
+                receipt_request_ready_peers = receipt_request_ready_peers.saturating_add(1);
+            }
+            active_body_requests = active_body_requests.saturating_add(peer.body_active_requests);
+            active_receipt_requests =
+                active_receipt_requests.saturating_add(peer.receipt_active_requests);
+            if peer.consecutive_timeouts > 0 {
+                timeout_penalized_peers = timeout_penalized_peers.saturating_add(1);
+            }
         }
+        let body_request_limit_avg = average_peer_request_limit(
+            body_request_limit_total,
+            self.peers.len(),
+            PeerRequestKind::Bodies,
+        );
+        let receipt_request_limit_avg = average_peer_request_limit(
+            receipt_request_limit_total,
+            self.peers.len(),
+            PeerRequestKind::Receipts,
+        );
 
         ExecutionNetworkStatus {
             max_peers: self.max_peers,
@@ -70,6 +137,30 @@ impl PeerManager {
             known_peers: self.known_peers.len(),
             saturated_peers: self.saturated_peers.len(),
             receipt_quarantined_peers: self.receipt_quarantined_peers.len(),
+            body_request_ready_peers,
+            receipt_request_ready_peers,
+            body_request_paused_peers,
+            receipt_request_paused_peers,
+            active_body_requests,
+            active_receipt_requests,
+            timeout_penalized_peers,
+            body_proven_peers,
+            receipt_proven_peers,
+            body_request_limit_avg,
+            receipt_request_limit_avg,
+            historical_fetch_active: 0,
+            historical_fetch_completed: 0,
+            historical_fetch_pending: 0,
+            historical_fetch_expected_sequence: 0,
+            historical_fetch_next_sequence: 0,
+            historical_prepare_active: 0,
+            historical_prepare_ready: 0,
+            historical_prepare_completed: 0,
+            historical_prepare_pending: 0,
+            historical_prepare_expected_sequence: 0,
+            historical_ingest_active: false,
+            historical_ingest_sequence: None,
+            historical_ingest_elapsed_ms: None,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -299,6 +390,7 @@ impl PeerManager {
             PeerRequestKind::Bodies => peer.body_blocks_per_sec,
             PeerRequestKind::Receipts => peer.receipt_blocks_per_sec,
         };
+        let active_requests = peer_active_request_count(peer, kind);
         let base_rate = if measured_rate > 0.0 {
             measured_rate
         } else {
@@ -306,7 +398,38 @@ impl PeerManager {
         };
         let serving_bonus = if peer.is_serving { 4.0 } else { 0.0 };
         let timeout_penalty = f64::from(peer.consecutive_timeouts) * 8.0;
-        base_rate + serving_bonus - timeout_penalty
+        load_adjusted_peer_rate(base_rate, active_requests) + serving_bonus - timeout_penalty
+    }
+
+    pub(super) fn apply_body_receipt_active_request_deltas(
+        &mut self,
+        deltas: Vec<BodyReceiptActiveRequest>,
+    ) {
+        for delta in deltas {
+            let Some(peer) = self.peers.get_mut(&delta.peer_id) else {
+                continue;
+            };
+            let active_requests = match delta.kind {
+                PeerRequestKind::Headers => continue,
+                PeerRequestKind::Bodies => &mut peer.body_active_requests,
+                PeerRequestKind::Receipts => &mut peer.receipt_active_requests,
+            };
+            match delta.delta {
+                BodyReceiptActiveRequestDelta::Started => {
+                    *active_requests = active_requests.saturating_add(1);
+                }
+                BodyReceiptActiveRequestDelta::Finished => {
+                    *active_requests = active_requests.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clear_body_receipt_active_requests(&mut self) {
+        for peer in self.peers.values_mut() {
+            peer.body_active_requests = 0;
+            peer.receipt_active_requests = 0;
+        }
     }
 
     pub(super) fn record_peer_request_success(
@@ -363,8 +486,13 @@ impl PeerManager {
             RequestAttempt::Request(request_error) => match request_error {
                 reth_network::p2p::error::RequestError::Timeout => {
                     self.reduce_peer_request_limit(peer_id, kind);
-                    self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
-                    self.record_timeout(peer_id) >= MAX_CONSECUTIVE_TIMEOUTS
+                    let consecutive_timeouts = self.record_timeout(peer_id);
+                    self.pause_peer_requests(
+                        peer_id,
+                        kind,
+                        request_timeout_pause_duration(consecutive_timeouts),
+                    );
+                    consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
                 }
                 reth_network::p2p::error::RequestError::BadResponse => {
                     self.network
@@ -484,7 +612,10 @@ impl PeerManager {
         let (became_serving, productive) = if let Some(peer) = self.peers.get_mut(&peer_id) {
             let became_serving = !peer.is_serving;
             peer.is_serving = true;
-            (became_serving, became_serving.then_some(peer.remote_record))
+            (
+                became_serving,
+                (became_serving && peer.remote_record_is_dialable).then_some(peer.remote_record),
+            )
         } else {
             (false, None)
         };
@@ -588,12 +719,12 @@ impl PeerManager {
             return request_limit_initial(kind);
         };
 
-        match kind {
+        let limit = match kind {
             PeerRequestKind::Headers => request_limit_initial(kind),
             PeerRequestKind::Bodies => peer.body_request_limit,
             PeerRequestKind::Receipts => peer.receipt_request_limit,
-        }
-        .clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
+        };
+        effective_peer_request_limit(kind, peer.is_serving, limit)
     }
 
     fn adjust_peer_request_limit_after_success(
@@ -691,6 +822,33 @@ pub(super) fn request_limit_initial(kind: PeerRequestKind) -> usize {
         PeerRequestKind::Headers => 1,
         PeerRequestKind::Bodies => BODY_REQUEST_LIMIT_INITIAL,
         PeerRequestKind::Receipts => RECEIPT_REQUEST_LIMIT_INITIAL,
+    }
+}
+
+fn unproven_request_limit(kind: PeerRequestKind) -> usize {
+    match kind {
+        PeerRequestKind::Headers => 1,
+        PeerRequestKind::Bodies => UNPROVEN_BODY_REQUEST_LIMIT,
+        PeerRequestKind::Receipts => UNPROVEN_RECEIPT_REQUEST_LIMIT,
+    }
+}
+
+fn effective_peer_request_limit(kind: PeerRequestKind, is_serving: bool, limit: usize) -> usize {
+    let limit = if is_serving {
+        limit
+    } else {
+        limit.min(unproven_request_limit(kind))
+    };
+    limit.clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
+}
+
+fn average_peer_request_limit(total: usize, peers: usize, kind: PeerRequestKind) -> usize {
+    if peers == 0 {
+        request_limit_initial(kind)
+    } else {
+        total
+            .div_ceil(peers)
+            .clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
     }
 }
 
@@ -955,6 +1113,24 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
     }
 }
 
+fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
+    REQUEST_KIND_PAUSE_DURATION
+        .saturating_mul(consecutive_timeouts.max(1))
+        .min(REQUEST_TIMEOUT_PAUSE_MAX_DURATION)
+}
+
+fn peer_active_request_count(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
+    match kind {
+        PeerRequestKind::Headers => 0,
+        PeerRequestKind::Bodies => peer.body_active_requests,
+        PeerRequestKind::Receipts => peer.receipt_active_requests,
+    }
+}
+
+fn load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
+    base_rate / (1.0 + active_requests as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,6 +1229,42 @@ mod tests {
                 PeerRequestKind::Bodies
             ),
             REQUEST_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn unproven_body_receipt_peers_start_with_smaller_request_limits() {
+        assert_eq!(
+            effective_peer_request_limit(
+                PeerRequestKind::Bodies,
+                false,
+                BODY_REQUEST_LIMIT_INITIAL
+            ),
+            UNPROVEN_BODY_REQUEST_LIMIT
+        );
+        assert_eq!(
+            effective_peer_request_limit(
+                PeerRequestKind::Receipts,
+                false,
+                RECEIPT_REQUEST_LIMIT_INITIAL
+            ),
+            UNPROVEN_RECEIPT_REQUEST_LIMIT
+        );
+        assert_eq!(
+            effective_peer_request_limit(PeerRequestKind::Bodies, true, REQUEST_LIMIT_MAX),
+            REQUEST_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn average_request_limit_reports_initial_without_peers() {
+        assert_eq!(
+            average_peer_request_limit(0, 0, PeerRequestKind::Bodies),
+            BODY_REQUEST_LIMIT_INITIAL
+        );
+        assert_eq!(
+            average_peer_request_limit(96, 2, PeerRequestKind::Receipts),
+            48
         );
     }
 
@@ -1239,6 +1451,29 @@ mod tests {
         assert_eq!(
             advertised_status_range(cached, head),
             Some((10, 10, B256::repeat_byte(0x10)))
+        );
+    }
+
+    #[test]
+    fn active_request_load_reduces_peer_score_without_blacklisting() {
+        assert_eq!(load_adjusted_peer_rate(120.0, 0), 120.0);
+        assert_eq!(load_adjusted_peer_rate(120.0, 1), 60.0);
+        assert_eq!(load_adjusted_peer_rate(120.0, 2), 40.0);
+    }
+
+    #[test]
+    fn timeout_pause_scales_with_repeated_timeouts() {
+        assert_eq!(
+            request_timeout_pause_duration(0),
+            REQUEST_KIND_PAUSE_DURATION
+        );
+        assert_eq!(
+            request_timeout_pause_duration(2),
+            REQUEST_KIND_PAUSE_DURATION * 2
+        );
+        assert_eq!(
+            request_timeout_pause_duration(100),
+            REQUEST_TIMEOUT_PAUSE_MAX_DURATION
         );
     }
 }

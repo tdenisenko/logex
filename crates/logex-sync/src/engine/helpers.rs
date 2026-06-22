@@ -6,13 +6,40 @@ use reth_chainspec::{EthChainSpec, MAINNET};
 use std::future::Future;
 
 impl SyncEngine {
+    fn execution_network_status(&self) -> logex_types::ExecutionNetworkStatus {
+        let mut status = self.peers.execution_network_status();
+        status.historical_fetch_active = self.historical_fetch_handles.len();
+        status.historical_fetch_completed = self.historical_fetch_completed.len();
+        status.historical_fetch_pending =
+            status.historical_fetch_active + status.historical_fetch_completed;
+        status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;
+        status.historical_fetch_next_sequence = self.historical_fetch_next_sequence;
+        status.historical_prepare_active = self.historical_prepare_handles.len();
+        status.historical_prepare_ready = self
+            .historical_prepare_handles
+            .values()
+            .filter(|task| task.handle.is_finished())
+            .count()
+            + self.historical_prepare_completed.len();
+        status.historical_prepare_completed = self.historical_prepare_completed.len();
+        status.historical_prepare_pending =
+            status.historical_prepare_active + status.historical_prepare_completed;
+        status.historical_prepare_expected_sequence = self.historical_prepare_expected_sequence;
+        status.historical_ingest_active = self.historical_ingest_sequence.is_some();
+        status.historical_ingest_sequence = self.historical_ingest_sequence;
+        status.historical_ingest_elapsed_ms = self
+            .historical_ingest_started_at
+            .map(|started_at| started_at.elapsed().as_millis() as u64);
+        status
+    }
+
     pub(super) fn sync_status_peers(&self) {
         let state = {
             let status = self.sync_status.lock().unwrap();
             status.node_state
         };
         self.progress
-            .update_execution_network_state(self.peers.execution_network_status());
+            .update_execution_network_state(self.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -23,7 +50,7 @@ impl SyncEngine {
 
     pub(super) fn set_runtime_state(&self, state: NodeState) {
         self.progress
-            .update_execution_network_state(self.peers.execution_network_status());
+            .update_execution_network_state(self.execution_network_status());
         self.progress.update_network_state(
             state,
             self.peers.peer_count(),
@@ -157,14 +184,6 @@ pub(super) fn should_switch_to_live_without_target(
     consecutive_empty: u32,
 ) -> bool {
     target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
-}
-
-pub(super) fn should_run_historical_backfill(
-    current_block: u64,
-    _target_block: u64,
-    _max_live_lag: u64,
-) -> bool {
-    current_block > 0
 }
 
 pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
@@ -366,20 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn historical_backfill_runs_independently_of_live_lag() {
-        assert!(!should_run_historical_backfill(0, 0, 32));
-        assert!(should_run_historical_backfill(100, 0, 32));
-        assert!(should_run_historical_backfill(100, 132, 32));
-        assert!(should_run_historical_backfill(140, 132, 32));
-        assert!(should_run_historical_backfill(100, 133, 32));
-    }
-
-    #[test]
     fn historical_backfill_peer_floor_scales_with_configured_pool() {
         assert_eq!(historical_backfill_peer_floor(0), 0);
         assert_eq!(historical_backfill_peer_floor(1), 1);
-        assert_eq!(historical_backfill_peer_floor(8), 2);
-        assert_eq!(historical_backfill_peer_floor(100), 4);
+        assert_eq!(historical_backfill_peer_floor(8), 1);
+        assert_eq!(historical_backfill_peer_floor(100), 1);
     }
 
     #[test]

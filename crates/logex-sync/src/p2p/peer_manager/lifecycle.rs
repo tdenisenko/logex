@@ -315,12 +315,11 @@ impl PeerManager {
             return;
         }
 
-        let mut record = self
-            .pending
-            .remove(&info.peer_id)
-            .unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
+        let advertised_record = self.pending.remove(&info.peer_id);
+        let remote_record_is_dialable = advertised_record.is_some();
+        let record =
+            advertised_record.unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
         self.pending_dials.remove(&info.peer_id);
-        record = record.with_tcp_port(info.remote_addr.port());
 
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
@@ -335,6 +334,7 @@ impl PeerManager {
         let peer = ActivePeer {
             sender: messages,
             remote_record: record,
+            remote_record_is_dialable,
             remote_status: *info.status,
             client_version: info.client_version,
             version: info.version,
@@ -343,6 +343,8 @@ impl PeerManager {
             header_blocks_per_sec: 0.0,
             body_blocks_per_sec: 0.0,
             receipt_blocks_per_sec: 0.0,
+            body_active_requests: 0,
+            receipt_active_requests: 0,
             body_request_limit,
             receipt_request_limit,
             body_paused_until: None,
@@ -420,6 +422,7 @@ impl PeerManager {
         if let Some(peer) = peer.as_ref()
             && peer.is_serving
             && !peer_receipts_are_quarantined(peer)
+            && peer.remote_record_is_dialable
         {
             self.remember_productive(peer.remote_record);
         }
@@ -429,7 +432,10 @@ impl PeerManager {
     }
 
     pub(super) fn requeue_disconnected_peer(&mut self, peer: &ActivePeer) {
-        if !self.network_activated || peer.remote_record.tcp_port == 0 {
+        if !self.network_activated
+            || !peer.remote_record_is_dialable
+            || peer.remote_record.tcp_port == 0
+        {
             return;
         }
 

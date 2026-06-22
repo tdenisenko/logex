@@ -40,8 +40,10 @@ mod lifecycle;
 mod requests;
 mod state;
 
-use self::requests::RequestAttempt;
-pub(crate) use self::requests::{BodyReceiptRequestOutcome, BodyReceiptRequestPlan};
+use self::requests::{BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, RequestAttempt};
+pub(crate) use self::requests::{
+    BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
+};
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
     is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
@@ -74,9 +76,12 @@ pub(super) const REQUEST_LIMIT_MIN: usize = 1;
 pub(super) const REQUEST_LIMIT_MAX: usize = 128;
 pub(super) const BODY_REQUEST_LIMIT_INITIAL: usize = 48;
 pub(super) const RECEIPT_REQUEST_LIMIT_INITIAL: usize = 48;
-const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(3);
-const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(5);
-const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(20);
+const UNPROVEN_BODY_REQUEST_LIMIT: usize = 16;
+const UNPROVEN_RECEIPT_REQUEST_LIMIT: usize = 16;
+const REQUEST_LIMIT_LOWER_LATENCY: Duration = Duration::from_secs(2);
+const REQUEST_LIMIT_UPPER_LATENCY: Duration = Duration::from_secs(3);
+const REQUEST_KIND_PAUSE_DURATION: Duration = Duration::from_secs(8);
+const REQUEST_TIMEOUT_PAUSE_MAX_DURATION: Duration = Duration::from_secs(60);
 const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
     low: Duration::from_secs(60),
     medium: Duration::from_secs(60 * 3),
@@ -141,6 +146,7 @@ struct ExecutionPeerSessionMetrics {
 struct ActivePeer {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     remote_record: NodeRecord,
+    remote_record_is_dialable: bool,
     remote_status: UnifiedStatus,
     client_version: Arc<str>,
     version: EthVersion,
@@ -149,6 +155,8 @@ struct ActivePeer {
     header_blocks_per_sec: f64,
     body_blocks_per_sec: f64,
     receipt_blocks_per_sec: f64,
+    body_active_requests: usize,
+    receipt_active_requests: usize,
     body_request_limit: usize,
     receipt_request_limit: usize,
     body_paused_until: Option<Instant>,
