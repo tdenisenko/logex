@@ -2,16 +2,14 @@
 
 ## Current Status
 
-LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. The current historical sync branch is ready as a mergeable baseline improvement; the next performance milestone is a larger geth/Nethermind-style live request scheduler.
+LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. PR #95 is merged as the current historical sync baseline; this branch starts the larger geth/Nethermind-style live request scheduler milestone.
 
 The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A previous full-sync data directory is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`. If the current historical sync reaches genesis during performance work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, recreate `/Volumes/SSD 4TB/LogEx`, restore peer metadata if available, and continue testing from a fresh run.
 
 ## Completed Since Last Run
 
-- Confirmed the branch still beats current `master` on the Mac mini data dir: `master` sampled at about 105k completed logs/sec with a 28s max gap, while the retained branch baseline sampled about 124k-175k completed logs/sec with lower max gaps in comparable windows.
-- Rejected and reverted additional small tuning experiments that did not beat the retained baseline: 3s pipelined timeout, larger dense return windows, and lower high-memory pipeline threshold.
-- Fixed a clippy `if_same_then_else` warning in historical density sizing without changing behavior.
-- Restored the remote Mac mini source and running binary to the retained branch baseline after comparison. The client is running in `tmux` and remains on port `18683`.
+- Merged PR #95 into `master` as the new historical sync baseline after local validation and passing GitHub CI.
+- Created `perf/historical-sync-live-scheduler` for the next scheduler-focused performance pass.
 
 ## Remaining TODOs
 
@@ -33,7 +31,7 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Keep changes only when live benchmarks beat the current baseline on sustained throughput and tail behavior, not peak logs/sec alone.
 - Dense body/receipt plans should prefer full verified prefixes when sufficiently peered; half-prefix acceptance was rejected because residual repair serialized the pipeline.
 - Simple duplicate-request pressure at low peer counts is not beneficial on the current Mac mini run; it increased failures and reduced completed throughput.
-- The current branch should merge as the new baseline because it improves over `master` and contains no retained failed experiments.
+- PR #95 is the new comparison baseline for future historical sync experiments.
 - The next meaningful performance path is scheduler architecture, not more local threshold tweaks.
 
 ## Challenges and Resolutions
@@ -57,13 +55,13 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 
 ## Git Workflow
 
-- Current branch: `perf/historical-sync-throughput-v3`
-- New branch created this run: no
+- Current branch: `perf/historical-sync-live-scheduler`
+- New branch created this run: yes
 - Commits made during this run: pending
-- Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`; ready to update and merge after this roadmap/clippy commit.
-- Merge status: pending
-- Validation: `cargo fmt --check`, `cargo test --workspace --quiet`, and `cargo clippy --workspace --all-targets -- -D warnings` pass locally.
-- Blockers: none for this PR; the 4-hour target remains follow-up scheduler work.
+- Pull request status: pending draft PR for scheduler work
+- Merge status: PR #95 merged into `master`; scheduler branch not merged
+- Validation: inherited from merged baseline; scheduler branch currently has roadmap-only setup changes.
+- Blockers: none; implementation is pending.
 
 ## Known Issues or Risks
 
