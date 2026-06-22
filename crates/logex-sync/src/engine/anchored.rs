@@ -1533,20 +1533,11 @@ impl SyncEngine {
             .ingest_ready_historical_backfill_batches(CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT)
             .await?;
         if ready_progressed {
-            if self.historical_backfill_has_no_queued_work() {
-                self.prime_historical_backfill_pipeline_limited(
-                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
-                )
-                .await?;
-            }
+            self.prime_historical_backfill_pipeline().await?;
             return Ok(true);
         }
         let pipeline_primed = self.prime_historical_backfill_pipeline().await?;
         Ok(pipeline_primed)
-    }
-
-    fn historical_backfill_has_no_queued_work(&self) -> bool {
-        self.pending_historical_fetch_count() == 0 && self.pending_historical_prepare_count() == 0
     }
 
     async fn ingest_ready_historical_backfill_batches(&mut self, limit: usize) -> Result<bool> {
@@ -3280,13 +3271,13 @@ impl SyncEngine {
                     match outcome {
                         Some(outcome) => {
                             self.store_historical_fetch_outcome(outcome);
-                            self.spawn_ready_historical_prepare_tasks().await?;
+                            self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                         }
                         None => break Err(eyre::eyre!("historical fetch channel closed")),
                     }
                 }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
-                    self.spawn_ready_historical_prepare_tasks().await?;
+                    self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && self.shutdown_requested() {
@@ -3351,9 +3342,7 @@ impl SyncEngine {
             self.reset_historical_fetch_pipeline();
         }
         let refill_started = std::time::Instant::now();
-        let refilled_fetch_pipeline = self
-            .prime_historical_backfill_pipeline_limited(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT)
-            .await?;
+        let refilled_fetch_pipeline = self.prime_historical_backfill_pipeline().await?;
         let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 
