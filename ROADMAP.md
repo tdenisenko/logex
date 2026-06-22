@@ -72,6 +72,12 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Rejected global plan-creation cursor rotation.
   - Advancing the global peer cursor at plan creation produced high peaks but increased fallback count and failure density.
   - The experiment was reverted before commit; the remote was restored to the committed source before testing local plan rotation.
+- Lowered the idle body/receipt candidate threshold for dense fetch planning.
+  - Plans now prefer idle body/receipt candidates when at least four are available, instead of waiting for twelve idle candidates.
+  - A live Mac mini comparison improved completed-log throughput over the last 200 batches from about `174k` logs/sec to about `193k` logs/sec, with `0` resets and no fallback growth after warm-up.
+- Rejected two follow-up experiments after live testing.
+  - Raising the critical refill active-fetch floor improved active-fetch distribution but introduced fallback growth and lower-throughput points.
+  - Reducing the combined body/receipt request timeout from `2s` to `1.5s` reduced some waits but increased timeout/paused-peer churn and trailed the committed local-rotation baseline.
 
 ## Remaining TODOs
 
@@ -106,6 +112,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - When lookahead contains completed historical body/receipt batches but the expected sequence stalls, retry only that expected sequence first. Full fetch-pipeline reset remains a fallback, but the preferred path preserves already completed future work.
 - Decoupled dense body/receipt plans should stream peer feedback as chunks complete. The async plan still owns its request snapshot, but live peer scoring should not wait for the entire fetch plan before learning that a peer timed out or disconnected.
 - Sibling historical fetches can diversify local peer rotation, but the global peer cursor should continue advancing only on accepted completions. Global cursor movement at plan creation degraded dense-sync failure behavior.
+- Dense body/receipt planning should prefer idle peers earlier when there are enough idle candidates. Waiting for twelve idle candidates kept low-peer runs pinned to already-busy peers; a four-idle threshold improved completed-log throughput modestly without increasing resets.
 
 ## Challenges and Resolutions
 
@@ -144,6 +151,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Added a local per-fetch rotation offset so sibling fetches distribute chunk starts across the candidate set while preserving the global cursor semantics.
   - Remaining: A request-scheduler actor or live chunk queue may still be needed to cancel or reassign already-launched work when peer state changes mid-plan.
 
+- Challenge: Already busy body/receipt peers stayed in the candidate set during low-peer dense runs.
+  - Resolution: Lowered the idle-candidate preference threshold from twelve to four so the planner uses idle candidates sooner when active-request accounting says enough are available.
+  - Remaining: In-flight chunks against a peer that later times out still cannot be cancelled or reassigned mid-plan.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
@@ -159,12 +170,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected decoupled body/receipt accounting in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the obsolete end-of-plan accounting send was removed when per-chunk accounting was added, avoiding duplicate peer scoring.
 - Inspected the rejected global plan-rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the change was reverted locally and the remote source was restored before the retained local-rotation test.
 - Moved accidental remote-only rsync copies of `anchored.rs` and `requests.rs` out of the remote source tree into `/Users/gremlinmaster/logex-src/run/deploy-misplaced-files`; no local repository files were added.
+- Inspected and rejected the critical refill active-floor experiment in `crates/logex-sync/src/engine/anchored.rs`; the local diff was reverted after live testing showed fallback growth.
+- Inspected and rejected the `1.5s` body/receipt timeout experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the local diff was reverted after live testing showed more timeout churn.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`; pending commit for local per-fetch peer rotation
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`, `891868a perf: diversify historical fetch peer rotation`; pending commit for idle candidate threshold
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
