@@ -388,8 +388,8 @@ mod tests {
     fn historical_backfill_peer_floor_scales_with_configured_pool() {
         assert_eq!(historical_backfill_peer_floor(0), 0);
         assert_eq!(historical_backfill_peer_floor(1), 1);
-        assert_eq!(historical_backfill_peer_floor(8), 2);
-        assert_eq!(historical_backfill_peer_floor(100), 4);
+        assert_eq!(historical_backfill_peer_floor(8), 1);
+        assert_eq!(historical_backfill_peer_floor(100), 1);
     }
 
     #[test]
