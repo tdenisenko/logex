@@ -20,6 +20,8 @@ const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
+const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
+    PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
@@ -991,7 +993,7 @@ impl BodyReceiptRequestPlan {
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
         if self.should_use_decoupled_dense_pipeline() {
             let outcome = self.execute_decoupled_dense().await;
-            if !outcome.chunks.is_empty() || !outcome.failures.is_empty() {
+            if !outcome.chunks.is_empty() {
                 return outcome;
             }
             debug!(
@@ -1001,6 +1003,12 @@ impl BodyReceiptRequestPlan {
                 stats = outcome.stats.len(),
                 "decoupled body/receipt pipeline did not produce a prefix, falling back"
             );
+            let mut fallback = self.execute_paired().await;
+            if !outcome.accounting_forwarded {
+                fallback.stats.extend(outcome.stats);
+                fallback.failures.extend(outcome.failures);
+            }
+            return fallback;
         }
 
         self.execute_paired().await
@@ -1077,9 +1085,27 @@ impl BodyReceiptRequestPlan {
             }
         };
 
+        debug!(
+            total_hashes = self.hashes.len(),
+            return_blocks = self.return_blocks,
+            accepted_prefix = decoupled_dense_accepted_prefix(
+                return_blocks,
+                self.body_peer_ids.len().min(self.receipt_peer_ids.len())
+            ),
+            body_prefix_blocks = bodies.as_ref().map_or(0, Vec::len),
+            receipt_prefix_blocks = receipts.as_ref().map_or(0, Vec::len),
+            failures = failures.len(),
+            stats = stats.len(),
+            "decoupled dense body/receipt plan completed"
+        );
+
         if let (Some(mut bodies), Some(mut receipts)) = (bodies, receipts) {
             let prefix_len = bodies.len().min(receipts.len());
-            if prefix_len >= body_receipt_min_accepted_prefix(self.return_blocks) {
+            let accepted_prefix = decoupled_dense_accepted_prefix(
+                return_blocks,
+                self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
+            );
+            if prefix_len >= accepted_prefix {
                 bodies.truncate(prefix_len);
                 receipts.truncate(prefix_len);
                 match body_receipt_blocks_if_sourced_counts_match(&bodies, receipts, prefix_len) {
@@ -1708,7 +1734,7 @@ impl BodyReceiptRequestPlan {
         if max_in_flight == 0 {
             return Ok(None);
         }
-        let early_accepted_prefix = decoupled_dense_early_accepted_prefix(hashes.len());
+        let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
 
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
@@ -1800,7 +1826,7 @@ impl BodyReceiptRequestPlan {
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
                 break;
             }
-            if contiguous_sourced_chunk_items(&chunks) >= early_accepted_prefix {
+            if contiguous_sourced_chunk_items(&chunks) >= accepted_prefix {
                 break;
             }
 
@@ -1929,7 +1955,7 @@ impl BodyReceiptRequestPlan {
         if max_in_flight == 0 {
             return Ok(None);
         }
-        let early_accepted_prefix = decoupled_dense_early_accepted_prefix(hashes.len());
+        let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
 
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
@@ -2021,7 +2047,7 @@ impl BodyReceiptRequestPlan {
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
                 break;
             }
-            if contiguous_sourced_chunk_items(&chunks) >= early_accepted_prefix {
+            if contiguous_sourced_chunk_items(&chunks) >= accepted_prefix {
                 break;
             }
 
@@ -4991,7 +5017,11 @@ fn decoupled_initial_prefix_redundancy_count(
         .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
 }
 
-fn decoupled_dense_early_accepted_prefix(return_blocks: usize) -> usize {
+fn decoupled_dense_accepted_prefix(return_blocks: usize, peer_count: usize) -> usize {
+    if peer_count >= PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS {
+        return return_blocks;
+    }
+
     let target = (return_blocks / 2).max(body_receipt_min_accepted_prefix(return_blocks));
     return_blocks.min(target)
 }
@@ -5454,10 +5484,27 @@ mod tests {
     }
 
     #[test]
-    fn decoupled_dense_early_prefix_keeps_batches_reasonably_large() {
-        assert_eq!(decoupled_dense_early_accepted_prefix(1024), 512);
-        assert_eq!(decoupled_dense_early_accepted_prefix(128), 64);
-        assert_eq!(decoupled_dense_early_accepted_prefix(32), 32);
+    fn decoupled_dense_prefix_targets_full_windows_with_enough_peers() {
+        assert_eq!(
+            decoupled_dense_accepted_prefix(1024, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS - 1),
+            512
+        );
+        assert_eq!(
+            decoupled_dense_accepted_prefix(1024, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
+            1024
+        );
+        assert_eq!(
+            decoupled_dense_accepted_prefix(128, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS - 1),
+            64
+        );
+        assert_eq!(
+            decoupled_dense_accepted_prefix(128, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
+            128
+        );
+        assert_eq!(
+            decoupled_dense_accepted_prefix(32, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
+            32
+        );
 
         let peer = PeerId::repeat_byte(0x11);
         let mut chunks = BTreeMap::new();

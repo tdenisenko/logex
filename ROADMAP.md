@@ -41,12 +41,16 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Completed and preserved a full historical sync.
   - The completed data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`.
   - A fresh `/Volumes/SSD 4TB/LogEx` was created, peer metadata was restored, and the client was restarted on port `18683`.
+- Tightened dense body/receipt prefix acceptance.
+  - Dense decoupled body/receipt plans now require a full planned prefix once enough peers are available instead of accepting a half-window and forcing residual repair.
+  - If the decoupled plan cannot produce a valid prefix, the paired fallback still runs instead of returning an empty result.
+  - Live dense-range samples recovered into the `270k`-`546k` logs/sec range with no zero-throughput period in the latest short window.
 
 ## Remaining TODOs
 
 1. Reduce peer-tail sawtooth in dense historical sync.
    - Reason: The full-sync target is below 4 hours, and current throughput still dips when body/receipt peers time out or under-serve.
-   - Completion criteria: Sustained benchmark windows show materially lower low-throughput minutes without increasing timeout churn, memory pressure, or invalid partial batches. Track logs/sec, blocks/sec, body/receipt p95 latency, residual-gap frequency, active fetch depth, timeout-penalized peers, serving-peer count, CPU, memory, disk, and network.
+   - Completion criteria: Sustained benchmark windows show materially lower low-throughput minutes without increasing timeout churn, memory pressure, or invalid partial batches. Track logs/sec, blocks/sec, body/receipt p95 latency, decoupled fallback frequency, active fetch depth, timeout-penalized peers, serving-peer count, CPU, memory, disk, and network.
 
 2. Decide whether the EL request scheduler needs an actor split.
    - Reason: Reverse fetch tasks are asynchronous, but planning, ingestion, and peer accounting still share mutable `SyncEngine`/`PeerManager` ownership.
@@ -70,6 +74,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Multi-page reverse-header windows can be fetched concurrently by number, provided the concatenated result is validated against the known child header before use.
 - Timeout handling should treat repeated body/receipt timeouts as capacity feedback. Peers are paused and down-ranked before being reused, rather than immediately dropped for every timeout.
 - If historical sync reaches genesis during optimization work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
+- Dense decoupled body/receipt fetches should prefer full planned prefixes when at least four peers can serve both roles. Accepting half-prefixes looked productive in isolation but created serialized residual repairs and worse end-to-end throughput.
 
 ## Challenges and Resolutions
 
@@ -93,8 +98,8 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Timeout pauses now scale with repeated timeouts up to a capped duration.
 
 - Challenge: Dense recent ranges still show body/receipt tail latency.
-  - Resolution: Active fetch starvation was fixed, but dense windows still often return partial prefixes that require residual repair.
-  - Remaining: Benchmark smaller/adaptive dense windows or a residual scheduler that does not serialize queued lookahead.
+  - Resolution: Active fetch starvation was fixed, and dense decoupled plans now reject partial prefixes when enough peers exist.
+  - Remaining: Paired fallback can still return short prefixes during bad peer/tail episodes; benchmark better fallback retry and peer-selection behavior.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -103,13 +108,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected the new reverse-header page request path; the old sequential path remains as fallback for low-peer, single-page, or failed parallel cases.
 - Inspected current historical scheduler changes after the full-sync backup; no obsolete experiment files or dead branches were added locally.
 - Inspected timeout handling in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained change is limited to adaptive pause duration and focused unit coverage.
+- Inspected dense body/receipt request handling in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the retained change removes the obsolete early half-prefix acceptance for adequately peered dense plans.
 - The completed remote data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; `/Volumes/SSD 4TB/LogEx` now contains the fresh active run.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`; pending commit for residual retry and active-fetch refill fixes
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`; pending commit for dense body/receipt full-prefix acceptance
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
