@@ -977,6 +977,27 @@ fn emit_body_receipt_request_accounting(
     });
 }
 
+fn emit_body_receipt_role_success(
+    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    peer_id: PeerId,
+    kind: PeerRequestKind,
+    blocks: usize,
+    elapsed: Duration,
+) {
+    emit_body_receipt_request_accounting(
+        accounting_tx,
+        vec![(peer_id, kind, blocks, elapsed)],
+        Vec::new(),
+    );
+}
+
+fn emit_body_receipt_role_failure(
+    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    failure: ChunkRequestFailure,
+) {
+    emit_body_receipt_request_accounting(accounting_tx, Vec::new(), vec![failure]);
+}
+
 impl BodyReceiptRequestPlan {
     pub(crate) fn planned_prefix_blocks(&self) -> usize {
         planned_body_receipt_prefix_blocks(&self.ranges, self.return_blocks, self.hashes.len())
@@ -1124,8 +1145,6 @@ impl BodyReceiptRequestPlan {
                 }
             }
         }
-
-        emit_body_receipt_request_accounting(&self.accounting_tx, stats.clone(), failures.clone());
 
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
@@ -1790,6 +1809,13 @@ impl BodyReceiptRequestPlan {
             match result {
                 Ok(bodies) => {
                     stats.push((peer_id, bodies.len(), elapsed));
+                    emit_body_receipt_role_success(
+                        &self.accounting_tx,
+                        peer_id,
+                        PeerRequestKind::Bodies,
+                        bodies.len(),
+                        elapsed,
+                    );
                     if !chunk_already_completed {
                         chunks.insert(range.start, (peer_id, bodies));
                     }
@@ -1810,6 +1836,7 @@ impl BodyReceiptRequestPlan {
                         requested,
                         kind: kind.clone(),
                     };
+                    emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
                     if chunk_failure_disables_role_peer(&failure) {
                         bad_peers.insert(peer_id);
                     }
@@ -1894,7 +1921,15 @@ impl BodyReceiptRequestPlan {
                         .await
                     {
                         Ok(bodies) => {
-                            stats.push((peer_id, bodies.len(), started_at.elapsed()));
+                            let elapsed = started_at.elapsed();
+                            stats.push((peer_id, bodies.len(), elapsed));
+                            emit_body_receipt_role_success(
+                                &self.accounting_tx,
+                                peer_id,
+                                PeerRequestKind::Bodies,
+                                bodies.len(),
+                                elapsed,
+                            );
                             chunks.insert(range.start, (peer_id, bodies));
                             break;
                         }
@@ -1905,6 +1940,7 @@ impl BodyReceiptRequestPlan {
                                 requested,
                                 kind: kind.clone(),
                             };
+                            emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
                             if chunk_failure_disables_role_peer(&failure) {
                                 bad_peers.insert(peer_id);
                             }
@@ -2009,6 +2045,13 @@ impl BodyReceiptRequestPlan {
             match result {
                 Ok(receipts) => {
                     stats.push((peer_id, receipts.len(), elapsed));
+                    emit_body_receipt_role_success(
+                        &self.accounting_tx,
+                        peer_id,
+                        PeerRequestKind::Receipts,
+                        receipts.len(),
+                        elapsed,
+                    );
                     if !chunk_already_completed {
                         chunks.insert(range.start, (peer_id, receipts));
                     }
@@ -2029,6 +2072,7 @@ impl BodyReceiptRequestPlan {
                         requested,
                         kind: kind.clone(),
                     };
+                    emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
                     if chunk_failure_disables_role_peer(&failure) {
                         bad_peers.insert(peer_id);
                     }
@@ -2113,7 +2157,15 @@ impl BodyReceiptRequestPlan {
                         .await
                     {
                         Ok(receipts) => {
-                            stats.push((peer_id, receipts.len(), started_at.elapsed()));
+                            let elapsed = started_at.elapsed();
+                            stats.push((peer_id, receipts.len(), elapsed));
+                            emit_body_receipt_role_success(
+                                &self.accounting_tx,
+                                peer_id,
+                                PeerRequestKind::Receipts,
+                                receipts.len(),
+                                elapsed,
+                            );
                             chunks.insert(range.start, (peer_id, receipts));
                             break;
                         }
@@ -2124,6 +2176,7 @@ impl BodyReceiptRequestPlan {
                                 requested,
                                 kind: kind.clone(),
                             };
+                            emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
                             if chunk_failure_disables_role_peer(&failure) {
                                 bad_peers.insert(peer_id);
                             }

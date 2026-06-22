@@ -56,6 +56,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Rejected the lower dense-pipeline activation threshold experiment.
   - Lowering the activation threshold created more active fetches earlier, but it also triggered head-of-line stalls and a worse timeout cluster.
   - The change was reverted before commit and was not retained.
+- Forwarded dense decoupled body/receipt accounting per chunk.
+  - Success and failure feedback now reaches the live peer manager as decoupled body/receipt chunks finish instead of waiting for the whole fetch plan.
+  - This allows request pauses, demotion, and active-request counters to affect subsequent lookahead preparation sooner.
+  - A live run kept moving without resets or decoupled fallback and repeatedly reached the `500k`-`800k` logs/sec range, though serving-peer churn still caused lower windows.
 
 ## Remaining TODOs
 
@@ -88,6 +92,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Dense decoupled body/receipt fetches should prefer full planned prefixes when at least four peers can serve both roles. Accepting half-prefixes looked productive in isolation but created serialized residual repairs and worse end-to-end throughput.
 - Timeout backoff should protect throughput without starving the candidate pool. Shorter first-timeout pauses with retained scaling produced better ready-peer capacity during the dense test window than the prior 20-second first pause.
 - When lookahead contains completed historical body/receipt batches but the expected sequence stalls, retry only that expected sequence first. Full fetch-pipeline reset remains a fallback, but the preferred path preserves already completed future work.
+- Decoupled dense body/receipt plans should stream peer feedback as chunks complete. The async plan still owns its request snapshot, but live peer scoring should not wait for the entire fetch plan before learning that a peer timed out or disconnected.
 
 ## Challenges and Resolutions
 
@@ -118,6 +123,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Added per-attempt fetch handles and selective expected-sequence retry before the full reset fallback.
   - Remaining: Timeout churn is still high, so peer/request selection needs further work to raise sustained throughput.
 
+- Challenge: Decoupled dense fetches delayed peer feedback until plan completion.
+  - Resolution: Decoupled body/receipt chunks now emit role-specific success/failure accounting as each chunk completes.
+  - Remaining: The active fetch depth still falls too low when serving-peer count is small, which can leave the downloader underutilized during peer churn.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
@@ -130,12 +139,13 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - The completed remote data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; `/Volumes/SSD 4TB/LogEx` now contains the fresh active run.
 - Inspected the rejected dense fetch-depth threshold experiment in `crates/logex-sync/src/engine/anchored.rs`; the threshold change was reverted after remote testing showed worse head-of-line behavior.
 - Inspected the selective retry diff in `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/engine/mod.rs`; the retained code is limited to active fetch attempt tracking and targeted retry.
+- Inspected decoupled body/receipt accounting in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the obsolete end-of-plan accounting send was removed when per-chunk accounting was added, avoiding duplicate peer scoring.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`; pending commit for selective stalled-fetch retry
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`; pending commit for decoupled chunk accounting
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
