@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. PR #95 is merged as the current historical sync baseline; this branch starts the larger geth/Nethermind-style live request scheduler milestone.
 
-The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A previous full-sync data directory is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`. If the current historical sync reaches genesis during performance work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, recreate `/Volumes/SSD 4TB/LogEx`, restore peer metadata if available, and continue testing from a fresh run.
+The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A previous full-sync data directory is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`. If the current historical sync reaches genesis during performance work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a new timestamped full-sync backup, delete the older full-sync backup only after the new backup is confirmed, recreate `/Volumes/SSD 4TB/LogEx`, restore peer metadata if available, and continue testing from a fresh run.
 
 ## Completed Since Last Run
 
@@ -25,6 +25,7 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Fixed the write-overlap loop so it does not await new fetch planning while an ordered storage write is already ready to complete.
 - Added memory-bounded post-ingest fetch top-up so the historical downloader refills toward the computed pipeline depth after ordered progress instead of staying capped at two active fetches.
   - The mature Mac mini top-up run reached six active fetches and 17 queued fetches, eliminated 20s+ gaps in parsed windows, and held roughly 530-575 completed blocks/sec in the current low-log-density range while the dashboard EWMA climbed above 850 blocks/sec.
+- Tested and rejected sparse reverse-header lookahead caching; it reduced some header fetches but increased refill latency and long gaps in live benchmark windows.
 
 ## Remaining TODOs
 
@@ -53,6 +54,7 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Historical storage writes can safely overlap with continued fetch/prepare orchestration because the ordered storage write owns an `Arc` clone and the floor advances only after the write succeeds.
 - Consecutive prepared historical batches may be coalesced only when they are already completed, sequence-contiguous, and have no residual header gap; this preserves ordered verification and avoids delaying residual repair.
 - Ordered-write overlap loops should only drain/promote already available fetch outcomes; top-up to the full memory-aware fetch depth belongs after ordered progress, where the pipeline can safely spend time planning more work without delaying a completed write.
+- Wider reverse-header lookahead is not a substitute for a live scheduler; in sparse ranges it can create stale or unused lookahead and worsen tail latency.
 
 ## Challenges and Resolutions
 
@@ -86,6 +88,12 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Challenge: the first write-overlap implementation could still block on refill planning before observing that the storage write had completed.
   - Resolution: changed the write-await select loop to promote already-fetched work without refilling during the write, then perform a bounded full-depth top-up after ordered progress.
   - Remaining: storage/extraction and ordered commit latency still pace low-density ranges; a deeper live request scheduler is still needed for the 4-hour target.
+- Challenge: sparse reverse-header lookahead looked like a low-risk way to reduce serial header fetches.
+  - Resolution: benchmarked and reverted it because mature windows showed higher refill latency and more long gaps than the accepted baseline.
+  - Remaining: header planning needs to be part of a real live scheduler, not a wider cache on the current ordered pipeline.
+- Challenge: remote restarts can look stuck after HTTP/gRPC stop while the P2P network drains sessions.
+  - Resolution: restored the client with a longer restart grace window and confirmed the process exits cleanly.
+  - Remaining: in-flight historical work should become more promptly cancelable during shutdown.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -93,13 +101,14 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected decoupled redundancy, half-prefix, timeout, and larger-prefix experiments were reverted.
 - Inspected peer request scoring in `crates/logex-sync/src/p2p/peer_manager/state.rs`; existing EWMA speed, active-load adjustment, serving bonus, and timeout penalty remain in use.
 - Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, medium-depth, prepare-buffer-depth, and six-batch coalescing experiments were reverted locally and remotely.
+- Rejected sparse reverse-header lookahead caching after live benchmarks showed worse refill latency and more long gaps.
 - Kept code was inspected for obsolete experiment leftovers; only ordered write overlap and bounded four-batch coalescing remain in the local diff.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: yes
-- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; `cd4f074 perf: overlap historical writes with fetch work`; `6e907cc test: cover historical write coalescing`; current commit adds full-depth post-ingest fetch top-up
+- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; `cd4f074 perf: overlap historical writes with fetch work`; `6e907cc test: cover historical write coalescing`; `69373e8 perf: refill historical pipeline after writes`
 - Pull request status: draft PR #96 open for scheduler work
 - Merge status: PR #95 merged into `master`; scheduler branch not merged
 - Validation: `cargo fmt --check`; `git diff --check`; `cargo clippy -p logex-sync --all-targets -- -D warnings`; `cargo test -p logex-sync historical_critical_refill --quiet`; `cargo test -p logex-sync historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy --quiet`; `cargo test -p logex-sync request_window_limit --quiet`; `cargo test -p logex-sync decoupled_prefix --quiet`; `cargo test -p logex-sync decoupled --quiet`; `cargo test -p logex-sync body_receipt_return_blocks --quiet`; `cargo test -p logex-sync body_receipt_min_accepted_prefix --quiet`; `cargo test -p logex-sync historical_fetch_buffer --quiet`; `cargo test -p logex-sync historical_fetch_refill --quiet`; `cargo test -p logex-sync --quiet`. Rejected experiments were benchmarked live and reverted.
@@ -110,3 +119,4 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Current historical sync remains peer-tail bound and can still show low-throughput windows.
 - The running Mac mini data directory must be backed up and rotated if it reaches genesis during continued optimization.
 - A larger request-scheduler refactor may be required to approach the 4-hour full-sync target.
+- Shutdown is clean but can take longer than short restart scripts expect while the P2P network drains sessions.
