@@ -71,6 +71,8 @@ const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS: usize = 4;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
+const HISTORICAL_WRITE_COALESCE_MAX_BATCHES: usize = 4;
+const HISTORICAL_WRITE_COALESCE_TARGET_ROWS: u64 = 500_000;
 const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
 const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
@@ -1165,6 +1167,44 @@ async fn write_prepared_historical_batch(
     })
 }
 
+fn prepared_historical_batch_row_count(prepared: &PreparedHistoricalBatch) -> u64 {
+    prepared
+        .extracted
+        .chunks
+        .iter()
+        .map(|chunk| chunk.row_count)
+        .sum()
+}
+
+fn prepared_historical_batch_can_coalesce(prepared: &PreparedHistoricalBatch) -> bool {
+    prepared.residual_header_batch.is_none() && prepared.block_count > 0
+}
+
+fn merge_prepared_historical_batch(
+    base: &mut PreparedHistoricalBatch,
+    mut next: PreparedHistoricalBatch,
+) {
+    base.requested_headers = base
+        .requested_headers
+        .saturating_add(next.requested_headers);
+    base.planned_return_blocks = base
+        .planned_return_blocks
+        .saturating_add(next.planned_return_blocks);
+    base.header_elapsed = base.header_elapsed.max(next.header_elapsed);
+    base.body_receipt_elapsed = base.body_receipt_elapsed.max(next.body_receipt_elapsed);
+    base.extracted.chunks.append(&mut next.extracted.chunks);
+    base.peer_notes.append(&mut next.peer_notes);
+    base.lowest_block = base.lowest_block.min(next.lowest_block);
+    base.highest_block = base.highest_block.max(next.highest_block);
+    base.block_count = base.block_count.saturating_add(next.block_count);
+    base.prepare_queue_elapsed = base.prepare_queue_elapsed.max(next.prepare_queue_elapsed);
+    base.validation_elapsed = base.validation_elapsed.max(next.validation_elapsed);
+    base.validation_queue_elapsed = base
+        .validation_queue_elapsed
+        .max(next.validation_queue_elapsed);
+    base.processing_elapsed = base.processing_elapsed.max(next.processing_elapsed);
+}
+
 fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<Header> {
     if let Some(residual_child) = batch
         .residual_header_batch
@@ -2209,6 +2249,70 @@ impl SyncEngine {
         self.historical_prepare_handles.len()
     }
 
+    fn coalesce_ready_historical_prepares(
+        &mut self,
+        sequence: u64,
+        prepared: &mut PreparedHistoricalBatch,
+    ) -> usize {
+        if !prepared_historical_batch_can_coalesce(prepared) {
+            return 1;
+        }
+
+        let mut merged_batches = 1usize;
+        let mut merged_rows = prepared_historical_batch_row_count(prepared);
+        while merged_batches < HISTORICAL_WRITE_COALESCE_MAX_BATCHES
+            && merged_rows < HISTORICAL_WRITE_COALESCE_TARGET_ROWS
+        {
+            let next_sequence = sequence.saturating_add(merged_batches as u64);
+            let Some(completed) = self.historical_prepare_completed.remove(&next_sequence) else {
+                break;
+            };
+            let HistoricalCompletedPrepare {
+                next_child_header,
+                result,
+            } = completed;
+            let next_prepared = match result {
+                Ok(Ok(next_prepared)) => next_prepared,
+                result => {
+                    self.historical_prepare_completed.insert(
+                        next_sequence,
+                        HistoricalCompletedPrepare {
+                            next_child_header,
+                            result,
+                        },
+                    );
+                    break;
+                }
+            };
+            if !prepared_historical_batch_can_coalesce(&next_prepared) {
+                self.historical_prepare_completed.insert(
+                    next_sequence,
+                    HistoricalCompletedPrepare {
+                        next_child_header,
+                        result: Ok(Ok(next_prepared)),
+                    },
+                );
+                break;
+            }
+
+            merged_rows =
+                merged_rows.saturating_add(prepared_historical_batch_row_count(&next_prepared));
+            merge_prepared_historical_batch(prepared, next_prepared);
+            merged_batches = merged_batches.saturating_add(1);
+        }
+
+        if merged_batches > 1 {
+            tracing::debug!(
+                sequence,
+                merged_batches,
+                merged_rows,
+                "coalesced ready historical prepared batches for one ordered storage write"
+            );
+        }
+
+        merged_batches
+    }
+
     async fn spawn_ready_historical_prepare_tasks(&mut self) -> Result<bool> {
         self.spawn_ready_historical_prepare_tasks_inner(true).await
     }
@@ -3158,17 +3262,47 @@ impl SyncEngine {
                 return Ok(false);
             }
         };
+        let mut prepared = prepared;
+        let coalesced_batches = self.coalesce_ready_historical_prepares(sequence, &mut prepared);
         self.historical_ingest_sequence = Some(sequence);
         self.historical_ingest_started_at = Some(std::time::Instant::now());
         self.sync_status_peers();
-        let write_result =
-            write_prepared_historical_batch(prepared, Arc::clone(&self.storage)).await;
+        let mut write_task = Box::pin(write_prepared_historical_batch(
+            prepared,
+            Arc::clone(&self.storage),
+        ));
+        let write_result = loop {
+            tokio::select! {
+                result = &mut write_task => {
+                    break result;
+                }
+                outcome = self.historical_fetch_rx.recv() => {
+                    match outcome {
+                        Some(outcome) => {
+                            self.store_historical_fetch_outcome(outcome);
+                            self.spawn_ready_historical_prepare_tasks().await?;
+                        }
+                        None => break Err(eyre::eyre!("historical fetch channel closed")),
+                    }
+                }
+                _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
+                    self.spawn_ready_historical_prepare_tasks().await?;
+                }
+                changed = self.shutdown.changed() => {
+                    if changed.is_ok() && self.shutdown_requested() {
+                        self.finish_shutdown()?;
+                        return Ok(false);
+                    }
+                }
+            }
+        };
         self.historical_ingest_sequence = None;
         self.historical_ingest_started_at = None;
         self.sync_status_peers();
         let mut written = write_result?;
         written.prepare_wait_elapsed = prepare_wait_started.elapsed();
-        self.historical_prepare_expected_sequence = sequence.saturating_add(1);
+        self.historical_prepare_expected_sequence =
+            sequence.saturating_add(coalesced_batches as u64);
         let overlap_elapsed = overlap_started.elapsed();
         let mut newly_serving_peers = HashSet::new();
         for peer_id in &written.peer_notes {
@@ -3234,6 +3368,7 @@ impl SyncEngine {
             fetch_peer_capacity = self.historical_fetch_peer_capacity(),
             serving_peers = self.peers.serving_peer_count(),
             residual_blocks,
+            coalesced_batches,
             partial_prefix,
             residual_gap_filled,
             prefetched,

@@ -17,6 +17,11 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
   - Raising the dense return threshold from 100 to 300 rows/block caused larger header requests but only slightly larger verified prefixes in the current range, so completed logs/sec stayed near baseline.
   - Raising the medium-peer fetch pipeline depth from 4 to 6 increased max active fetches but did not raise average active fetches or completed logs/sec enough to justify the added memory pressure.
 - Restored the remote Mac mini client to the clean PR #95 baseline and left it running on `/Volumes/SSD 4TB/LogEx`.
+- Added ordered historical write overlap and bounded prepared-batch coalescing:
+  - While a prepared batch is being written, the engine now continues draining fetch outcomes and spawning/refilling ready prepare work.
+  - Consecutive already-prepared batches with no residual gap are coalesced into one ordered storage write, capped at four batches or roughly 500k rows.
+  - Live Mac mini benchmarks improved completed block throughput in the older, lower-log-density range from roughly 390-480 blocks/sec baseline windows to roughly 660 blocks/sec in longer coalesced windows.
+- Tested and rejected raising the coalescing cap from four to six batches; it increased write/process latency and max gaps without enough throughput gain.
 
 ## Remaining TODOs
 
@@ -42,6 +47,8 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - The next meaningful performance path is scheduler architecture, not more local threshold tweaks.
 - Geth and Nethermind both use peer allocation based on measured speed and allocation/idle state; LogEx should follow that direction with a live body/receipt work queue rather than more static fanout or timeout tuning.
 - Medium-density batches are currently limited by low-peer fetch windows and prefix completion behavior more than by the dense-row threshold alone; changing only the threshold is insufficient.
+- Historical storage writes can safely overlap with continued fetch/prepare orchestration because the ordered storage write owns an `Arc` clone and the floor advances only after the write succeeds.
+- Consecutive prepared historical batches may be coalesced only when they are already completed, sequence-contiguous, and have no residual header gap; this preserves ordered verification and avoids delaying residual repair.
 
 ## Challenges and Resolutions
 
@@ -66,22 +73,29 @@ The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A
 - Challenge: medium-peer runs appeared capped at four active fetches.
   - Resolution: tested a depth-6 medium-peer pipeline; max active fetches rose to 6, but average active fetches stayed near 2.2 because prepared buffers filled, and completed logs/sec did not materially improve.
   - Remaining: deeper lookahead alone is not enough; scheduling must coordinate fetch, prepare, and ingest pressure together.
+- Challenge: the engine paused orchestration while awaiting each ordered storage write.
+  - Resolution: changed the write await into a select loop that continues draining fetch outcomes and refilling prepare work, then coalesces already-ready contiguous prepared batches into one bounded ordered write.
+  - Remaining: active fetches can still dip when local commits are large; a true live request queue is still needed for peer-tail latency.
+- Challenge: larger coalesced writes looked like a possible storage optimization.
+  - Resolution: tested a six-batch coalescing cap and reverted it because it increased write/process latency and max gaps relative to the four-batch cap.
+  - Remaining: future coalescing changes should be adaptive and benchmarked against full-run time, not just peak dashboard rates.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected timeout/window/depth experiments were reverted, and duplicated density-branch logic was removed for clippy.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected decoupled redundancy, half-prefix, timeout, and larger-prefix experiments were reverted.
 - Inspected peer request scoring in `crates/logex-sync/src/p2p/peer_manager/state.rs`; existing EWMA speed, active-load adjustment, serving bonus, and timeout penalty remain in use.
-- Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, and medium-depth experiments were reverted locally and remotely; no obsolete experimental code from this pass remains in the local diff.
+- Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, medium-depth, prepare-buffer-depth, and six-batch coalescing experiments were reverted locally and remotely.
+- Kept code was inspected for obsolete experiment leftovers; only ordered write overlap and bounded four-batch coalescing remain in the local diff.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: yes
-- Commits made during this run: pending
+- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; performance commit pending
 - Pull request status: pending draft PR for scheduler work
 - Merge status: PR #95 merged into `master`; scheduler branch not merged
-- Validation: `cargo fmt --check`; `cargo test -p logex-sync historical_critical_refill --quiet`; `cargo test -p logex-sync historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy --quiet`; `cargo test -p logex-sync request_window_limit --quiet`; `cargo test -p logex-sync decoupled_prefix --quiet`; `cargo test -p logex-sync decoupled --quiet`; `cargo test -p logex-sync body_receipt_return_blocks --quiet`; `cargo test -p logex-sync body_receipt_min_accepted_prefix --quiet`; `cargo test -p logex-sync --quiet`. Rejected experiments were benchmarked live and reverted.
+- Validation: `cargo fmt --check`; `cargo test -p logex-sync historical_critical_refill --quiet`; `cargo test -p logex-sync historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy --quiet`; `cargo test -p logex-sync request_window_limit --quiet`; `cargo test -p logex-sync decoupled_prefix --quiet`; `cargo test -p logex-sync decoupled --quiet`; `cargo test -p logex-sync body_receipt_return_blocks --quiet`; `cargo test -p logex-sync body_receipt_min_accepted_prefix --quiet`; `cargo test -p logex-sync historical_fetch_buffer --quiet`; `cargo test -p logex-sync historical_fetch_refill --quiet`; `cargo test -p logex-sync --quiet`. Rejected experiments were benchmarked live and reverted.
 - Blockers: none; implementation is pending.
 
 ## Known Issues or Risks
