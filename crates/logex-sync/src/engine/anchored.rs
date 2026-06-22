@@ -635,9 +635,7 @@ fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize
 
 fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u64> {
     let rows_per_block = rows_per_block?;
-    if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
-        Some(historical_dense_density_fetch_window(rows_per_block))
-    } else if rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK {
+    if rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK {
         Some(historical_dense_density_fetch_window(rows_per_block))
     } else if rows_per_block >= HISTORICAL_SPARSE_ROWS_PER_BLOCK {
         Some(historical_medium_density_fetch_window(rows_per_block))
