@@ -38,8 +38,9 @@ const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
-const HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
-const HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS: u64 = 512;
+const HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS: u64 = 512;
+const HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS: u64 = 1_024;
+const HISTORICAL_DENSE_DENSITY_TARGET_FETCH_ROWS: f64 = 500_000.0;
 const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
@@ -635,9 +636,9 @@ fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize
 fn historical_density_fetch_window_cap(rows_per_block: Option<f64>) -> Option<u64> {
     let rows_per_block = rows_per_block?;
     if rows_per_block >= HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK {
-        Some(HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS)
+        Some(historical_dense_density_fetch_window(rows_per_block))
     } else if rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK {
-        Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
+        Some(historical_dense_density_fetch_window(rows_per_block))
     } else if rows_per_block >= HISTORICAL_SPARSE_ROWS_PER_BLOCK {
         Some(historical_medium_density_fetch_window(rows_per_block))
     } else {
@@ -677,6 +678,17 @@ fn historical_medium_density_fetch_window(rows_per_block: f64) -> u64 {
         .floor()
         .max(HISTORICAL_LOW_PEER_FETCH_WINDOW_BLOCKS as f64)
         .min(HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS as f64) as u64
+}
+
+fn historical_dense_density_fetch_window(rows_per_block: f64) -> u64 {
+    if rows_per_block <= 0.0 {
+        return HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS;
+    }
+
+    (HISTORICAL_DENSE_DENSITY_TARGET_FETCH_ROWS / rows_per_block)
+        .floor()
+        .max(HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS as f64)
+        .min(HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS as f64) as u64
 }
 
 fn update_historical_density_ewma(current: Option<f64>, rows: u64, blocks: usize) -> Option<f64> {
@@ -4383,7 +4395,7 @@ mod tests {
         );
         assert_eq!(
             historical_density_fetch_window_cap(Some(400.0)),
-            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(400.0)),
@@ -4391,19 +4403,16 @@ mod tests {
         );
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
-            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
         );
-        assert_eq!(
-            historical_density_fetch_window_cap(Some(900.0)),
-            Some(HISTORICAL_DENSE_FETCH_WINDOW_BLOCKS)
-        );
+        assert_eq!(historical_density_fetch_window_cap(Some(900.0)), Some(555));
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
-            Some(HISTORICAL_VERY_DENSE_FETCH_WINDOW_BLOCKS)
+            Some(HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS)
         );
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),

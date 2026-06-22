@@ -82,6 +82,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Timer-based decoupled prefix hedging increased duplicate pressure, timeout churn, and completed-batch gaps.
   - Treating low-peer decoupled prefixes as smaller completed batches removed residual fills but collapsed completed throughput.
   - Paired low-peer fallback and idle-peer decoupled hedging did not beat the committed baseline; both were reverted locally and on the Mac mini.
+- Added adaptive dense historical fetch windows.
+  - Dense recent ranges now target roughly `500k` logs per fetch, bounded from `512` to `1024` blocks, instead of forcing every dense window to `512` blocks.
+  - Live Mac mini testing improved completed throughput from roughly `125k` logs/sec to roughly `213k` logs/sec over the latest 100 completed batches.
+  - The change is retained, but gaps remain and the next bottleneck is smoother request scheduling plus peer recovery during low serving-peer windows.
 
 ## Remaining TODOs
 
@@ -117,6 +121,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Decoupled dense body/receipt plans should stream peer feedback as chunks complete. The async plan still owns its request snapshot, but live peer scoring should not wait for the entire fetch plan before learning that a peer timed out or disconnected.
 - Sibling historical fetches can diversify local peer rotation, but the global peer cursor should continue advancing only on accepted completions. Global cursor movement at plan creation degraded dense-sync failure behavior.
 - Dense body/receipt planning should prefer idle peers earlier when there are enough idle candidates. Waiting for twelve idle candidates kept low-peer runs pinned to already-busy peers; a four-idle threshold improved completed-log throughput modestly without increasing resets.
+- Dense fetch windows should target rows/log density rather than a fixed block count. Fixed `512`-block windows left too much per-batch overhead in moderately dense ranges; adaptive windows keep very dense ranges bounded while allowing up to `1024` blocks when memory and density allow.
 
 ## Challenges and Resolutions
 
@@ -163,6 +168,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Rejected and reverted timer hedges, low-peer smaller-prefix completion, paired low-peer fallback, and idle-peer duplicate hedges after live tests.
   - Remaining: The next meaningful path is a live request scheduler/queue modeled closer to geth and Nethermind: assign queued chunks to currently idle peers by measured capacity, keep timed-out peers busy/stale, and reassign work without overloading the same peer.
 
+- Challenge: Fixed dense fetch windows made local per-batch overhead dominate in moderately dense ranges.
+  - Resolution: Dense historical windows now target a row budget and can grow to `1024` blocks when the observed rows-per-block density allows it.
+  - Remaining: Larger batches improved completed throughput but did not eliminate peer/request gaps, so request scheduling still needs work.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
@@ -181,12 +190,13 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected and rejected the critical refill active-floor experiment in `crates/logex-sync/src/engine/anchored.rs`; the local diff was reverted after live testing showed fallback growth.
 - Inspected and rejected the `1.5s` body/receipt timeout experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the local diff was reverted after live testing showed more timeout churn.
 - Inspected and rejected decoupled prefix hedge, low-peer planned-prefix shrink, paired low-peer fallback, and idle-peer decoupled hedge experiments in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; all local diffs were reverted and the remote source was restored to the committed baseline.
+- Inspected dense fetch sizing in `crates/logex-sync/src/engine/anchored.rs`; replaced the obsolete fixed dense `512`-block cap with adaptive row-targeted sizing and focused unit coverage.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`, `891868a perf: diversify historical fetch peer rotation`, `34b076b perf: prefer idle peers for dense historical fetches`; rejected follow-up experiments remain uncommitted.
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`, `891868a perf: diversify historical fetch peer rotation`, `34b076b perf: prefer idle peers for dense historical fetches`, `perf: adapt dense historical fetch windows`; rejected follow-up experiments remain uncommitted.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
@@ -195,5 +205,6 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 
 - Historical sync can still show low-throughput windows when serving peers are few or body/receipt requests time out in clusters.
 - Dense recent blocks still expose body/receipt peer-tail latency and timeout-pause churn; this is the current bottleneck.
+- Adaptive dense windows improved completed throughput, but the latest run still had completed-batch gaps during low-peer windows, so it is not yet the final performance architecture.
 - The current fresh remote run should not be reset again unless a code change requires it or full historical sync reaches genesis and is backed up first.
 - The full request-scheduler actor split may be necessary if cooperative scheduling cannot keep downloads saturated.
