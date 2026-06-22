@@ -49,6 +49,13 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Decoupled body/receipt sub-plans now salvage up to the same accepted prefix as the outer plan, eliminating the common path where a half-prefix was fetched and then rejected.
   - First timeout pauses were reduced while retaining scaling backoff, request-limit reduction, and peer demotion.
   - A live follow-up window stayed mostly in the `340k`-`770k` logs/sec range with no zero-throughput stall.
+- Added selective retry for stalled expected historical fetches.
+  - The engine now retries only the expected body/receipt fetch that blocks ingestion instead of resetting all active and buffered lookahead work.
+  - Late outcomes are tagged by fetch attempt and ignored if they belong to an aborted retry, preventing stale completions from corrupting the active pipeline.
+  - Live dense-range sampling showed `11` selective retries, `0` full head-of-line resets, `0` stale completions, and continued movement between roughly `203k` and `758k` logs/sec.
+- Rejected the lower dense-pipeline activation threshold experiment.
+  - Lowering the activation threshold created more active fetches earlier, but it also triggered head-of-line stalls and a worse timeout cluster.
+  - The change was reverted before commit and was not retained.
 
 ## Remaining TODOs
 
@@ -80,6 +87,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - If historical sync reaches genesis during optimization work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
 - Dense decoupled body/receipt fetches should prefer full planned prefixes when at least four peers can serve both roles. Accepting half-prefixes looked productive in isolation but created serialized residual repairs and worse end-to-end throughput.
 - Timeout backoff should protect throughput without starving the candidate pool. Shorter first-timeout pauses with retained scaling produced better ready-peer capacity during the dense test window than the prior 20-second first pause.
+- When lookahead contains completed historical body/receipt batches but the expected sequence stalls, retry only that expected sequence first. Full fetch-pipeline reset remains a fallback, but the preferred path preserves already completed future work.
 
 ## Challenges and Resolutions
 
@@ -106,6 +114,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Active fetch starvation was fixed; dense decoupled plans now reject partial prefixes when enough peers exist, and sub-plan salvage targets the same prefix.
   - Remaining: Slow-peer timeout clusters still create throughput valleys, though the latest shorter-pause sample avoided zero-throughput stalls.
 
+- Challenge: A single stalled expected fetch could force a full historical lookahead reset even when later fetches were already complete.
+  - Resolution: Added per-attempt fetch handles and selective expected-sequence retry before the full reset fallback.
+  - Remaining: Timeout churn is still high, so peer/request selection needs further work to raise sustained throughput.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
@@ -116,12 +128,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected dense body/receipt request handling in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the retained change removes the obsolete early half-prefix acceptance for adequately peered dense plans.
 - Inspected timeout backoff and body/receipt candidate filtering in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained experiment keeps demotion and scaling pauses but shortens the first timeout pause.
 - The completed remote data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; `/Volumes/SSD 4TB/LogEx` now contains the fresh active run.
+- Inspected the rejected dense fetch-depth threshold experiment in `crates/logex-sync/src/engine/anchored.rs`; the threshold change was reverted after remote testing showed worse head-of-line behavior.
+- Inspected the selective retry diff in `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/engine/mod.rs`; the retained code is limited to active fetch attempt tracking and targeted retry.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`; pending commit for decoupled salvage and timeout backoff tuning
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`; pending commit for selective stalled-fetch retry
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
@@ -129,6 +143,6 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 ## Known Issues or Risks
 
 - Historical sync can still show low-throughput windows when serving peers are few or body/receipt requests time out in clusters.
-- Dense recent blocks still expose body/receipt peer-tail latency and residual-gap serialization; this is the current bottleneck.
+- Dense recent blocks still expose body/receipt peer-tail latency and timeout-pause churn; this is the current bottleneck.
 - The current fresh remote run should not be reset again unless a code change requires it or full historical sync reaches genesis and is backed up first.
 - The full request-scheduler actor split may be necessary if cooperative scheduling cannot keep downloads saturated.

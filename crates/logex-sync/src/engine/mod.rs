@@ -89,9 +89,15 @@ pub(super) struct HistoricalFetchPlan {
     body_receipt_plan: BodyReceiptRequestPlan,
 }
 
+pub(super) struct HistoricalFetchHandle {
+    attempt: u64,
+    handle: JoinHandle<()>,
+}
+
 pub(super) struct HistoricalFetchOutcome {
     generation: u64,
     sequence: u64,
+    attempt: u64,
     header_batch: HistoricalHeaderBatch,
     body_receipt_elapsed: Duration,
     outcome: BodyReceiptRequestOutcome,
@@ -180,11 +186,12 @@ pub struct SyncEngine {
     historical_request_accounting_tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
     historical_request_accounting_rx: mpsc::UnboundedReceiver<BodyReceiptRequestAccounting>,
     historical_fetch_generation: u64,
+    historical_fetch_next_attempt: u64,
     historical_fetch_next_sequence: u64,
     historical_fetch_expected_sequence: u64,
     historical_fetch_expected_child: Option<Header>,
     historical_fetch_planned_child: Option<Header>,
-    historical_fetch_handles: HashMap<u64, JoinHandle<()>>,
+    historical_fetch_handles: HashMap<u64, HistoricalFetchHandle>,
     historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
     historical_prepare_expected_sequence: u64,
     historical_prepare_handles: BTreeMap<u64, HistoricalPrepareTask>,
@@ -226,6 +233,7 @@ impl SyncEngine {
             historical_request_accounting_tx,
             historical_request_accounting_rx,
             historical_fetch_generation: 0,
+            historical_fetch_next_attempt: 0,
             historical_fetch_next_sequence: 0,
             historical_fetch_expected_sequence: 0,
             historical_fetch_expected_child: None,

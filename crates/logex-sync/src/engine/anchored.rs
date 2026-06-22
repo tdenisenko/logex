@@ -2073,11 +2073,12 @@ impl SyncEngine {
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
-        for (_, handle) in self.historical_fetch_handles.drain() {
-            handle.abort();
+        for (_, fetch) in self.historical_fetch_handles.drain() {
+            fetch.handle.abort();
         }
         self.reset_historical_prepare_pipeline();
         self.historical_fetch_generation = self.historical_fetch_generation.wrapping_add(1);
+        self.historical_fetch_next_attempt = 0;
         self.historical_fetch_next_sequence = 0;
         self.historical_fetch_expected_sequence = 0;
         self.historical_prepare_expected_sequence = self.historical_fetch_expected_sequence;
@@ -2102,8 +2103,26 @@ impl SyncEngine {
             return;
         }
 
+        let Some(fetch) = self.historical_fetch_handles.get(&outcome.sequence) else {
+            return;
+        };
+        if fetch.attempt != outcome.attempt {
+            tracing::trace!(
+                sequence = outcome.sequence,
+                outcome_attempt = outcome.attempt,
+                active_attempt = fetch.attempt,
+                "discarding stale historical fetch outcome"
+            );
+            return;
+        }
         self.historical_fetch_handles.remove(&outcome.sequence);
         if outcome.sequence < self.historical_fetch_expected_sequence {
+            return;
+        }
+        if self
+            .historical_fetch_completed
+            .contains_key(&outcome.sequence)
+        {
             return;
         }
         self.peers
@@ -2355,10 +2374,25 @@ impl SyncEngine {
         .unwrap_or(capped_window)
     }
 
+    fn next_historical_fetch_attempt(&mut self) -> u64 {
+        let attempt = self.historical_fetch_next_attempt;
+        self.historical_fetch_next_attempt = self.historical_fetch_next_attempt.wrapping_add(1);
+        attempt
+    }
+
     fn spawn_historical_fetch_plan(&mut self, plan: HistoricalFetchPlan) {
-        let generation = self.historical_fetch_generation;
         let sequence = self.historical_fetch_next_sequence;
         self.historical_fetch_next_sequence = self.historical_fetch_next_sequence.saturating_add(1);
+        self.spawn_historical_fetch_plan_at_sequence(sequence, plan);
+    }
+
+    fn spawn_historical_fetch_plan_at_sequence(
+        &mut self,
+        sequence: u64,
+        plan: HistoricalFetchPlan,
+    ) {
+        let generation = self.historical_fetch_generation;
+        let attempt = self.next_historical_fetch_attempt();
         let tx = self.historical_fetch_tx.clone();
         let handle = tokio::spawn(async move {
             let body_receipt_started = std::time::Instant::now();
@@ -2366,12 +2400,50 @@ impl SyncEngine {
             let _ = tx.send(HistoricalFetchOutcome {
                 generation,
                 sequence,
+                attempt,
                 header_batch: plan.header_batch,
                 body_receipt_elapsed: body_receipt_started.elapsed(),
                 outcome,
             });
         });
-        self.historical_fetch_handles.insert(sequence, handle);
+        if let Some(previous) = self
+            .historical_fetch_handles
+            .insert(sequence, HistoricalFetchHandle { attempt, handle })
+        {
+            previous.handle.abort();
+        }
+    }
+
+    async fn retry_expected_historical_fetch(&mut self, child_header: &Header) -> Result<bool> {
+        let sequence = self.historical_fetch_expected_sequence;
+        let Some(fetch) = self.historical_fetch_handles.remove(&sequence) else {
+            return Ok(false);
+        };
+        fetch.handle.abort();
+        self.drain_historical_request_accounting();
+        tokio::task::yield_now().await;
+        self.drain_historical_request_accounting();
+
+        let Some(plan) = self
+            .prepare_historical_fetch_plan(child_header.clone())
+            .await?
+        else {
+            tracing::debug!(
+                sequence,
+                child_block = child_header.number(),
+                "unable to prepare selective historical fetch retry"
+            );
+            return Ok(false);
+        };
+        tracing::debug!(
+            sequence,
+            child_block = child_header.number(),
+            completed_fetches = self.historical_fetch_completed.len(),
+            active_fetches = self.active_historical_fetch_count(),
+            "retrying stalled expected historical fetch without resetting lookahead"
+        );
+        self.spawn_historical_fetch_plan_at_sequence(sequence, plan);
+        Ok(true)
     }
 
     async fn ensure_historical_fetch_pipeline(&mut self, child_header: Header) -> Result<()> {
@@ -2515,6 +2587,12 @@ impl SyncEngine {
                 && self.historical_fetch_completed.len()
                     >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
             {
+                if expected_fetch_is_active
+                    && self.retry_expected_historical_fetch(child_header).await?
+                {
+                    wait_started = Instant::now();
+                    continue;
+                }
                 tracing::debug!(
                     expected_sequence = self.historical_fetch_expected_sequence,
                     completed_fetches = self.historical_fetch_completed.len(),
