@@ -1878,6 +1878,9 @@ impl BodyReceiptRequestPlan {
                 continue;
             };
             let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
+            if chunk_peer_ids.is_empty() {
+                continue;
+            }
             schedule_decoupled_body_chunk(
                 self,
                 &mut attempts,
@@ -2114,6 +2117,9 @@ impl BodyReceiptRequestPlan {
                 continue;
             };
             let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
+            if chunk_peer_ids.is_empty() {
+                continue;
+            }
             schedule_decoupled_receipt_chunk(
                 self,
                 &mut attempts,
@@ -3952,16 +3958,11 @@ fn peer_ids_excluding(peer_ids: &[PeerId], bad_peers: &HashSet<PeerId>) -> Vec<P
         return peer_ids.to_vec();
     }
 
-    let filtered: Vec<_> = peer_ids
+    peer_ids
         .iter()
         .copied()
         .filter(|peer_id| !bad_peers.contains(peer_id))
-        .collect();
-    if filtered.is_empty() {
-        peer_ids.to_vec()
-    } else {
-        filtered
-    }
+        .collect()
 }
 
 fn disabled_chunk_peers(
@@ -5743,6 +5744,26 @@ mod tests {
             disabled_chunk_peers(&failures, ChunkRequestRole::Bodies),
             HashSet::from([body_peer])
         );
+    }
+
+    #[test]
+    fn peer_ids_excluding_returns_only_available_peers() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+
+        assert_eq!(
+            peer_ids_excluding(&[first, second, third], &HashSet::from([second])),
+            vec![first, third]
+        );
+    }
+
+    #[test]
+    fn peer_ids_excluding_returns_empty_when_all_peers_are_bad() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+
+        assert!(peer_ids_excluding(&[first, second], &HashSet::from([first, second])).is_empty());
     }
 
     #[test]
