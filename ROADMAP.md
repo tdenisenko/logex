@@ -78,6 +78,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Rejected two follow-up experiments after live testing.
   - Raising the critical refill active-fetch floor improved active-fetch distribution but introduced fallback growth and lower-throughput points.
   - Reducing the combined body/receipt request timeout from `2s` to `1.5s` reduced some waits but increased timeout/paused-peer churn and trailed the committed local-rotation baseline.
+- Rejected three plan-local dense body/receipt hedge experiments after live testing.
+  - Timer-based decoupled prefix hedging increased duplicate pressure, timeout churn, and completed-batch gaps.
+  - Treating low-peer decoupled prefixes as smaller completed batches removed residual fills but collapsed completed throughput.
+  - Paired low-peer fallback and idle-peer decoupled hedging did not beat the committed baseline; both were reverted locally and on the Mac mini.
 
 ## Remaining TODOs
 
@@ -87,7 +91,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 
 2. Decide whether the EL request scheduler needs an actor split.
    - Reason: Reverse fetch tasks are asynchronous, but planning, ingestion, and peer accounting still share mutable `SyncEngine`/`PeerManager` ownership.
-   - Completion criteria: Either live benchmarks prove cooperative scheduling is sufficient, or a request-scheduler actor is implemented and benchmarked against the current branch.
+   - Completion criteria: Either live benchmarks prove cooperative scheduling is sufficient, or a request-scheduler actor/live chunk queue is implemented and benchmarked against the current branch.
 
 3. Match production-client peer behavior where it improves measured throughput.
    - Reason: Geth and Nethermind dominate the network, and LogEx needs comparable peer retention and request behavior.
@@ -155,6 +159,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Lowered the idle-candidate preference threshold from twelve to four so the planner uses idle candidates sooner when active-request accounting says enough are available.
   - Remaining: In-flight chunks against a peer that later times out still cannot be cancelled or reassigned mid-plan.
 
+- Challenge: Plan-local hedges reduced some visible symptoms but worsened completed-batch throughput.
+  - Resolution: Rejected and reverted timer hedges, low-peer smaller-prefix completion, paired low-peer fallback, and idle-peer duplicate hedges after live tests.
+  - Remaining: The next meaningful path is a live request scheduler/queue modeled closer to geth and Nethermind: assign queued chunks to currently idle peers by measured capacity, keep timed-out peers busy/stale, and reassign work without overloading the same peer.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected the historical scheduler changes in `crates/logex-sync/src/engine/anchored.rs`; no rejected deep-refill or storage-floor-reset variant remains.
@@ -172,12 +180,13 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Moved accidental remote-only rsync copies of `anchored.rs` and `requests.rs` out of the remote source tree into `/Users/gremlinmaster/logex-src/run/deploy-misplaced-files`; no local repository files were added.
 - Inspected and rejected the critical refill active-floor experiment in `crates/logex-sync/src/engine/anchored.rs`; the local diff was reverted after live testing showed fallback growth.
 - Inspected and rejected the `1.5s` body/receipt timeout experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the local diff was reverted after live testing showed more timeout churn.
+- Inspected and rejected decoupled prefix hedge, low-peer planned-prefix shrink, paired low-peer fallback, and idle-peer decoupled hedge experiments in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; all local diffs were reverted and the remote source was restored to the committed baseline.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`, `891868a perf: diversify historical fetch peer rotation`; pending commit for idle candidate threshold
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`, `891868a perf: diversify historical fetch peer rotation`, `34b076b perf: prefer idle peers for dense historical fetches`; rejected follow-up experiments remain uncommitted.
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
