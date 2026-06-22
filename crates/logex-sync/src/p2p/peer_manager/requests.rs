@@ -1861,9 +1861,7 @@ impl BodyReceiptRequestPlan {
             );
         }
 
-        let min_accepted_prefix = body_receipt_min_accepted_prefix(hashes.len());
-        let missing_prefix_ranges =
-            missing_prefix_chunk_ranges(&ranges, &chunks, min_accepted_prefix);
+        let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
         if !missing_prefix_ranges.is_empty() {
             bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Bodies));
             for range in missing_prefix_ranges {
@@ -1925,7 +1923,7 @@ impl BodyReceiptRequestPlan {
 
         let bodies = sourced_bodies_from_chunks(hashes.len(), chunks);
 
-        if bodies.len() >= body_receipt_min_accepted_prefix(hashes.len()) {
+        if bodies.len() >= accepted_prefix {
             Ok(Some((bodies, stats, failures)))
         } else if failures.is_empty() {
             Ok(None)
@@ -2082,9 +2080,7 @@ impl BodyReceiptRequestPlan {
             );
         }
 
-        let min_accepted_prefix = body_receipt_min_accepted_prefix(hashes.len());
-        let missing_prefix_ranges =
-            missing_prefix_chunk_ranges(&ranges, &chunks, min_accepted_prefix);
+        let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
         if !missing_prefix_ranges.is_empty() {
             bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Receipts));
             for range in missing_prefix_ranges {
@@ -2145,7 +2141,7 @@ impl BodyReceiptRequestPlan {
         }
 
         let receipts = sourced_receipts_from_chunks(hashes.len(), chunks);
-        if receipts.len() >= body_receipt_min_accepted_prefix(hashes.len()) {
+        if receipts.len() >= accepted_prefix {
             Ok(Some((receipts, stats, failures)))
         } else if failures.is_empty() {
             Ok(None)

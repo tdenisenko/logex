@@ -45,6 +45,10 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Dense decoupled body/receipt plans now require a full planned prefix once enough peers are available instead of accepting a half-window and forcing residual repair.
   - If the decoupled plan cannot produce a valid prefix, the paired fallback still runs instead of returning an empty result.
   - Live dense-range samples recovered into the `270k`-`546k` logs/sec range with no zero-throughput period in the latest short window.
+- Aligned decoupled salvage and timeout pause behavior with dense full-prefix sync.
+  - Decoupled body/receipt sub-plans now salvage up to the same accepted prefix as the outer plan, eliminating the common path where a half-prefix was fetched and then rejected.
+  - First timeout pauses were reduced while retaining scaling backoff, request-limit reduction, and peer demotion.
+  - A live follow-up window stayed mostly in the `340k`-`770k` logs/sec range with no zero-throughput stall.
 
 ## Remaining TODOs
 
@@ -75,6 +79,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Timeout handling should treat repeated body/receipt timeouts as capacity feedback. Peers are paused and down-ranked before being reused, rather than immediately dropped for every timeout.
 - If historical sync reaches genesis during optimization work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, then recreate a fresh `/Volumes/SSD 4TB/LogEx` for continued performance experiments.
 - Dense decoupled body/receipt fetches should prefer full planned prefixes when at least four peers can serve both roles. Accepting half-prefixes looked productive in isolation but created serialized residual repairs and worse end-to-end throughput.
+- Timeout backoff should protect throughput without starving the candidate pool. Shorter first-timeout pauses with retained scaling produced better ready-peer capacity during the dense test window than the prior 20-second first pause.
 
 ## Challenges and Resolutions
 
@@ -98,8 +103,8 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Resolution: Timeout pauses now scale with repeated timeouts up to a capped duration.
 
 - Challenge: Dense recent ranges still show body/receipt tail latency.
-  - Resolution: Active fetch starvation was fixed, and dense decoupled plans now reject partial prefixes when enough peers exist.
-  - Remaining: Paired fallback can still return short prefixes during bad peer/tail episodes; benchmark better fallback retry and peer-selection behavior.
+  - Resolution: Active fetch starvation was fixed; dense decoupled plans now reject partial prefixes when enough peers exist, and sub-plan salvage targets the same prefix.
+  - Remaining: Slow-peer timeout clusters still create throughput valleys, though the latest shorter-pause sample avoided zero-throughput stalls.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -109,13 +114,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected current historical scheduler changes after the full-sync backup; no obsolete experiment files or dead branches were added locally.
 - Inspected timeout handling in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained change is limited to adaptive pause duration and focused unit coverage.
 - Inspected dense body/receipt request handling in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the retained change removes the obsolete early half-prefix acceptance for adequately peered dense plans.
+- Inspected timeout backoff and body/receipt candidate filtering in `crates/logex-sync/src/p2p/peer_manager/state.rs`; the retained experiment keeps demotion and scaling pauses but shortens the first timeout pause.
 - The completed remote data directory was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`; `/Volumes/SSD 4TB/LogEx` now contains the fresh active run.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`; pending commit for dense body/receipt full-prefix acceptance
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`; pending commit for decoupled salvage and timeout backoff tuning
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.
