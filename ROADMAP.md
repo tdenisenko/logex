@@ -60,6 +60,18 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
   - Success and failure feedback now reaches the live peer manager as decoupled body/receipt chunks finish instead of waiting for the whole fetch plan.
   - This allows request pauses, demotion, and active-request counters to affect subsequent lookahead preparation sooner.
   - A live run kept moving without resets or decoupled fallback and repeatedly reached the `500k`-`800k` logs/sec range, though serving-peer churn still caused lower windows.
+- Kept dense recent-block downloads ahead with fewer serving peers.
+  - Dense low-peer windows can now keep four historical fetches active when memory is healthy, avoiding underfilled pipelines during peer churn.
+  - A more aggressive activation experiment was rejected because it caused head-of-line stalls and worse timeout clustering.
+- Avoided rescheduling failed dense chunk peers inside the same plan.
+  - Decoupled body/receipt retries now stop when every role candidate is already marked bad instead of falling back to the same failed peer set.
+  - Live sampling showed no resets or fallbacks and improved failure density versus the prior committed build.
+- Added local peer-rotation offsets for sibling historical fetches.
+  - Simultaneous historical fetch plans now spread their static body/receipt chunk assignment across the candidate set without advancing the global peer cursor.
+  - A five-minute Mac mini sample stayed between roughly `398k` and `558k` logs/sec, with `0` resets and no additional fallback growth after warm-up.
+- Rejected global plan-creation cursor rotation.
+  - Advancing the global peer cursor at plan creation produced high peaks but increased fallback count and failure density.
+  - The experiment was reverted before commit; the remote was restored to the committed source before testing local plan rotation.
 
 ## Remaining TODOs
 
@@ -93,6 +105,7 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Timeout backoff should protect throughput without starving the candidate pool. Shorter first-timeout pauses with retained scaling produced better ready-peer capacity during the dense test window than the prior 20-second first pause.
 - When lookahead contains completed historical body/receipt batches but the expected sequence stalls, retry only that expected sequence first. Full fetch-pipeline reset remains a fallback, but the preferred path preserves already completed future work.
 - Decoupled dense body/receipt plans should stream peer feedback as chunks complete. The async plan still owns its request snapshot, but live peer scoring should not wait for the entire fetch plan before learning that a peer timed out or disconnected.
+- Sibling historical fetches can diversify local peer rotation, but the global peer cursor should continue advancing only on accepted completions. Global cursor movement at plan creation degraded dense-sync failure behavior.
 
 ## Challenges and Resolutions
 
@@ -125,7 +138,11 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 
 - Challenge: Decoupled dense fetches delayed peer feedback until plan completion.
   - Resolution: Decoupled body/receipt chunks now emit role-specific success/failure accounting as each chunk completes.
-  - Remaining: The active fetch depth still falls too low when serving-peer count is small, which can leave the downloader underutilized during peer churn.
+  - Remaining: Static peer snapshots inside active fetch plans still limit how quickly already-launched chunks can react to a newly bad peer.
+
+- Challenge: Simultaneous dense fetch plans reused the same peer rotation.
+  - Resolution: Added a local per-fetch rotation offset so sibling fetches distribute chunk starts across the candidate set while preserving the global cursor semantics.
+  - Remaining: A request-scheduler actor or live chunk queue may still be needed to cancel or reassign already-launched work when peer state changes mid-plan.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -140,12 +157,14 @@ The Mac mini production-like run is active on `/Volumes/SSD 4TB/LogEx` with HTTP
 - Inspected the rejected dense fetch-depth threshold experiment in `crates/logex-sync/src/engine/anchored.rs`; the threshold change was reverted after remote testing showed worse head-of-line behavior.
 - Inspected the selective retry diff in `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/engine/mod.rs`; the retained code is limited to active fetch attempt tracking and targeted retry.
 - Inspected decoupled body/receipt accounting in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the obsolete end-of-plan accounting send was removed when per-chunk accounting was added, avoiding duplicate peer scoring.
+- Inspected the rejected global plan-rotation experiment in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the change was reverted locally and the remote source was restored before the retained local-rotation test.
+- Moved accidental remote-only rsync copies of `anchored.rs` and `requests.rs` out of the remote source tree into `/Users/gremlinmaster/logex-src/run/deploy-misplaced-files`; no local repository files were added.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-throughput-v3`
 - New branch created this run: no
-- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`; pending commit for decoupled chunk accounting
+- Commits made during this run: `4f6c6fe perf: reduce historical sync idle gaps`, `f9d115e perf: keep historical fetch refills ahead`, `544d79d perf: parallelize historical header pages`, `2559a40 perf: require full dense body receipt prefixes`, `ef495d3 perf: tune dense body receipt recovery`, `6da077c perf: retry stalled historical fetches selectively`, `b0023d7 perf: stream decoupled request accounting`, `c3ad0f8 perf: keep dense sync fetches ahead with few peers`, `f410b55 perf: avoid rescheduling failed dense chunk peers`; pending commit for local per-fetch peer rotation
 - Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`
 - Merge status: not merged
 - Blockers: performance target is not met yet; live benchmarking still needs peer-tail improvements.

@@ -2824,8 +2824,9 @@ impl SyncEngine {
             .await?;
 
         Ok(body_receipt_plan.map(|body_receipt_plan| {
-            let body_receipt_plan =
-                body_receipt_plan.with_accounting_tx(self.historical_request_accounting_tx.clone());
+            let body_receipt_plan = body_receipt_plan
+                .with_peer_rotation_offset(self.historical_fetch_next_sequence as usize)
+                .with_accounting_tx(self.historical_request_accounting_tx.clone());
             let planned_next_child_header = body_receipt_plan
                 .planned_prefix_blocks()
                 .min(header_batch.headers.len())

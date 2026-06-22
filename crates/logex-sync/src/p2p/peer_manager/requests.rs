@@ -1011,6 +1011,11 @@ impl BodyReceiptRequestPlan {
         self
     }
 
+    pub(crate) fn with_peer_rotation_offset(mut self, offset: usize) -> Self {
+        self.peer_rotation = self.peer_rotation.wrapping_add(offset);
+        self
+    }
+
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
         if self.should_use_decoupled_dense_pipeline() {
             let outcome = self.execute_decoupled_dense().await;
