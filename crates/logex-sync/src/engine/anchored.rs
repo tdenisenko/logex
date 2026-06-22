@@ -44,6 +44,8 @@ const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
+const HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH: usize =
+    HISTORICAL_MEDIUM_PEER_FETCH_PIPELINE_DEPTH;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT: usize = 12;
 const HISTORICAL_DENSE_FETCH_BUFFER_EXTRA: usize = 6;
@@ -66,6 +68,7 @@ const HISTORICAL_DENSE_ROWS_PER_BLOCK: f64 = 300.0;
 const HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK: f64 = 1_500.0;
 const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
+const HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS: usize = 4;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
 const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
 const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
@@ -533,6 +536,24 @@ fn historical_dense_fetch_pipeline_depth_boost(
     (HISTORICAL_DENSE_ROWS_PER_BLOCK..HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)
         .contains(&rows_per_block)
         .then_some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
+}
+
+fn historical_dense_low_peer_fetch_pipeline_depth_boost(
+    serving_peers: usize,
+    total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
+    rows_per_block: Option<f64>,
+) -> Option<usize> {
+    if serving_peers < HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS
+        || !historical_allows_medium_memory_pipeline(total_memory_bytes)
+        || historical_available_memory_is_low(available_memory_bytes)
+    {
+        return None;
+    }
+
+    let rows_per_block = rows_per_block?;
+    (rows_per_block >= HISTORICAL_DENSE_ROWS_PER_BLOCK)
+        .then_some(HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH)
 }
 
 fn historical_fetch_buffer_depth(
@@ -2485,10 +2506,19 @@ impl SyncEngine {
             available_memory_bytes,
             self.historical_rows_per_block_ewma,
         );
+        let dense_low_peer_pipeline_boost = historical_dense_low_peer_fetch_pipeline_depth_boost(
+            peer_capacity,
+            historical_total_memory_bytes(),
+            available_memory_bytes,
+            self.historical_rows_per_block_ewma,
+        );
         let base_pipeline_depth = sparse_pipeline_boost
             .map(|boost| base_pipeline_depth.max(boost))
             .unwrap_or(base_pipeline_depth);
         let base_pipeline_depth = dense_pipeline_boost
+            .map(|boost| base_pipeline_depth.max(boost))
+            .unwrap_or(base_pipeline_depth);
+        let base_pipeline_depth = dense_low_peer_pipeline_boost
             .map(|boost| base_pipeline_depth.max(boost))
             .unwrap_or(base_pipeline_depth);
         let density_pipeline_cap =
@@ -4436,9 +4466,37 @@ mod tests {
     #[test]
     fn historical_dense_density_can_boost_fetch_pipeline_depth() {
         let high_memory = Some(HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
+        let medium_memory = Some(HISTORICAL_MEDIUM_PIPELINE_MIN_TOTAL_MEMORY_BYTES);
         let healthy_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES);
         let low_available = Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1);
 
+        assert_eq!(
+            historical_dense_low_peer_fetch_pipeline_depth_boost(
+                HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS,
+                medium_memory,
+                healthy_available,
+                Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
+            ),
+            Some(HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH)
+        );
+        assert_eq!(
+            historical_dense_low_peer_fetch_pipeline_depth_boost(
+                HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS - 1,
+                medium_memory,
+                healthy_available,
+                Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
+            ),
+            None
+        );
+        assert_eq!(
+            historical_dense_low_peer_fetch_pipeline_depth_boost(
+                HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS,
+                medium_memory,
+                low_available,
+                Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
+            ),
+            None
+        );
         assert_eq!(
             historical_dense_fetch_pipeline_depth_boost(
                 HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
