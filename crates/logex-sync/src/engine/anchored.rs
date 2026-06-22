@@ -4079,8 +4079,9 @@ fn locate_consensus_reorg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256, Bytes};
     use logex_cl::AnchorRecord;
+    use logex_types::{LogRow, Source};
     use tempfile::TempDir;
 
     fn header(number: u64, parent_hash: B256, marker: u8) -> Header {
@@ -4110,6 +4111,76 @@ mod tests {
             },
             finalized: false,
             parent_beacon_root: None,
+        }
+    }
+
+    fn log_row(block_number: u64, marker: u8) -> LogRow {
+        LogRow {
+            block_number,
+            block_hash: B256::repeat_byte(marker),
+            timestamp: 1_700_000_000 + block_number,
+            tx_hash: B256::repeat_byte(marker.wrapping_add(1)),
+            tx_index: 0,
+            log_index: marker as u32,
+            address: Address::repeat_byte(marker),
+            topic0: Some(B256::repeat_byte(0xdd)),
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: Bytes::new(),
+            data_len: 0,
+            source: Source::Receipt,
+        }
+    }
+
+    fn prepared_batch(
+        lowest_block: u64,
+        block_count: usize,
+        row_count: usize,
+    ) -> PreparedHistoricalBatch {
+        let lowest_header = header(lowest_block, B256::ZERO, lowest_block as u8);
+        let rows = (0..row_count)
+            .map(|index| {
+                log_row(
+                    lowest_block + (index as u64 % block_count.max(1) as u64),
+                    index as u8,
+                )
+            })
+            .collect::<Vec<_>>();
+        PreparedHistoricalBatch {
+            requested_headers: block_count,
+            planned_return_blocks: block_count,
+            header_elapsed: Duration::from_millis(10),
+            body_receipt_elapsed: Duration::from_millis(20),
+            extracted: super::ingest::HistoricalExtractedBatch {
+                chunks: vec![super::ingest::HistoricalExtractedChunk {
+                    rows,
+                    row_count: row_count as u64,
+                    block_count,
+                    lowest_header,
+                    extraction_elapsed: Duration::from_millis(30),
+                }],
+            },
+            peer_notes: vec![PeerId::ZERO],
+            lowest_block,
+            highest_block: lowest_block + block_count.saturating_sub(1) as u64,
+            block_count,
+            prepare_queue_elapsed: Duration::from_millis(40),
+            validation_elapsed: Duration::from_millis(50),
+            validation_queue_elapsed: Duration::from_millis(60),
+            processing_elapsed: Duration::from_millis(70),
+            residual_header_batch: None,
+        }
+    }
+
+    fn residual_header_batch(child_header: Header) -> HistoricalHeaderBatch {
+        HistoricalHeaderBatch {
+            child_header,
+            header_peer: PeerId::ZERO,
+            headers: Vec::new(),
+            hashes: Vec::new(),
+            required_block: 0,
+            header_elapsed: Duration::ZERO,
         }
     }
 
@@ -4819,6 +4890,38 @@ mod tests {
         assert!(!historical_fetch_refill_should_use_pipeline_child(0, 3, 3));
         assert!(historical_fetch_refill_should_use_pipeline_child(1, 3, 3));
         assert!(historical_fetch_refill_should_use_pipeline_child(0, 4, 3));
+    }
+
+    #[test]
+    fn prepared_historical_batch_row_count_sums_extracted_chunks() {
+        let prepared = prepared_batch(1_000, 16, 42);
+
+        assert_eq!(prepared_historical_batch_row_count(&prepared), 42);
+        assert!(prepared_historical_batch_can_coalesce(&prepared));
+    }
+
+    #[test]
+    fn prepared_historical_batch_coalescing_rejects_residual_gaps() {
+        let mut prepared = prepared_batch(1_000, 16, 42);
+        prepared.residual_header_batch = Some(residual_header_batch(header(999, B256::ZERO, 1)));
+
+        assert!(!prepared_historical_batch_can_coalesce(&prepared));
+    }
+
+    #[test]
+    fn merge_prepared_historical_batch_preserves_ordered_metadata() {
+        let mut base = prepared_batch(1_000, 16, 42);
+        let next = prepared_batch(980, 20, 70);
+
+        merge_prepared_historical_batch(&mut base, next);
+
+        assert_eq!(base.requested_headers, 36);
+        assert_eq!(base.planned_return_blocks, 36);
+        assert_eq!(base.block_count, 36);
+        assert_eq!(base.lowest_block, 980);
+        assert_eq!(base.highest_block, 1_015);
+        assert_eq!(prepared_historical_batch_row_count(&base), 112);
+        assert_eq!(base.extracted.chunks.len(), 2);
     }
 
     #[test]
