@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. PR #95 is merged as the current historical sync baseline; this branch is the scheduler-focused historical sync performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route because dashboard-only routing starved EL P2P peers. The latest full-sync backup is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260622-154101`. The current accepted branch change improves medium-peer decoupled dense body/receipt completion by allowing partial prefixes only after outstanding decoupled attempts have drained.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route because dashboard-only routing starved EL P2P peers. The latest full-sync backup is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260622-154101`. The current accepted branch change improves medium-peer decoupled dense body/receipt completion by allowing partial prefixes only after outstanding decoupled attempts have drained and by using the paired chunk path below eight ready body/receipt peers.
 
 ## Completed Since Last Run
 
@@ -35,6 +35,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Full-prefix acceptance is now required only when the peer pool is large enough for prefix redundancy.
   - Medium peer counts can accept a partial prefix only after outstanding decoupled chunk attempts finish or fail, avoiding the peer-health regression caused by early cancellation.
   - Live Mac mini sample improved from roughly 127k wall-clock rows/sec with a zero-progress interval to roughly 160k wall-clock rows/sec with no zero-progress interval in the measured window.
+- Tested and kept an eight-peer gate for decoupled dense body/receipt mode:
+  - The four-peer gate repeatedly entered decoupled mode with sparse ready pools, often fetched bodies or receipts asymmetrically, then duplicated work through paired fallback.
+  - The eight-peer gate reduced fallbacks and request failures in the same live range, improving the immediate restored run from roughly 41k to roughly 112k wall-clock logs/sec.
+- Tested and rejected a dense low-peer fetch-depth increase from four to six active fetches; it raised request pressure, caused a hard zero-progress interval with active fetches, and was reverted locally and remotely.
 
 ## Remaining TODOs
 
@@ -61,6 +65,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Geth and Nethermind both use peer allocation based on measured speed and allocation/idle state; LogEx should follow that direction with a live body/receipt work queue rather than more static fanout or timeout tuning.
 - Partial decoupled dense prefixes are useful only when they do not cancel in-flight chunk requests. Early partial-prefix completion was rejected because it harmed peer health; drained partial-prefix completion was kept because it removed fallbacks without producing the same collapse.
 - Keep the special dense body/receipt chunk timeout at 2s for now. A 3s timeout reduced responsiveness and created zero-progress windows during live testing.
+- Decoupled dense body/receipt mode should require at least eight ready peers. Below that, paired chunk requests are more stable because they keep body/receipt matching local to a chunk and avoid asymmetric decoupled fallbacks.
 - Medium-density batches are currently limited by low-peer fetch windows and prefix completion behavior more than by the dense-row threshold alone; changing only the threshold is insufficient.
 - Historical storage writes can safely overlap with continued fetch/prepare orchestration because the ordered storage write owns an `Arc` clone and the floor advances only after the write succeeds.
 - Consecutive prepared historical batches may be coalesced only when they are already completed, sequence-contiguous, and have no residual header gap; this preserves ordered verification and avoids delaying residual repair.
@@ -115,13 +120,16 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: longer per-chunk timeouts looked like a way to reduce false timeouts.
   - Resolution: benchmarked 3s body/receipt chunk timeouts and reverted because they caused zero-progress windows with peers available.
   - Remaining: future timeout work should be adaptive per peer, not a static global increase.
+- Challenge: decoupled dense mode was still entered with only four ready body/receipt peers.
+  - Resolution: raised the decoupled dense gate to eight ready peers after live tests showed fewer fallbacks and request failures than the restored four-peer run.
+  - Remaining: serving-peer churn can still collapse throughput and needs a live request scheduler with better peer assignment/reassignment.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected timeout/window/depth experiments were reverted, duplicated density-branch logic was removed for clippy, and the obsolete `historical_backfill_has_no_queued_work` helper was removed after post-ingest top-up replaced it.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected early partial-prefix, static timeout, decoupled redundancy, and larger-prefix experiments were reverted. The kept request change is limited to drained partial-prefix acceptance plus tests.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected early partial-prefix, static timeout, lower decoupled threshold, decoupled redundancy, and larger-prefix experiments were reverted. The kept request changes are drained partial-prefix acceptance plus the eight-peer decoupled gate.
 - Inspected peer request scoring in `crates/logex-sync/src/p2p/peer_manager/state.rs`; existing EWMA speed, active-load adjustment, serving bonus, and timeout penalty remain in use.
-- Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, medium-depth, prepare-buffer-depth, and six-batch coalescing experiments were reverted locally and remotely.
+- Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, medium-depth, dense low-peer depth, prepare-buffer-depth, and six-batch coalescing experiments were reverted locally and remotely.
 - Rejected sparse reverse-header lookahead caching after live benchmarks showed worse refill latency and more long gaps.
 - Kept code was inspected for obsolete experiment leftovers; only ordered write overlap and bounded four-batch coalescing remain in the local diff.
 
@@ -129,7 +137,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: yes
-- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; `cd4f074 perf: overlap historical writes with fetch work`; `6e907cc test: cover historical write coalescing`; `69373e8 perf: refill historical pipeline after writes`; `964c219 docs: record rejected scheduler lookahead`; pending checkpoint for drained partial-prefix acceptance
+- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; `cd4f074 perf: overlap historical writes with fetch work`; `6e907cc test: cover historical write coalescing`; `69373e8 perf: refill historical pipeline after writes`; `964c219 docs: record rejected scheduler lookahead`; `b6ff235 chore: document local routing handoff`; `6992ee0 perf: reduce historical peer-tail stalls`; pending checkpoint for the eight-peer decoupled gate
 - Pull request status: draft PR #96 open for scheduler work
 - Merge status: PR #95 merged into `master`; scheduler branch not merged
 - Validation: `cargo fmt --check`; `git diff --check`; `cargo clippy -p logex-sync --all-targets -- -D warnings`; `cargo test -p logex-sync historical_critical_refill --quiet`; `cargo test -p logex-sync historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy --quiet`; `cargo test -p logex-sync request_window_limit --quiet`; `cargo test -p logex-sync decoupled_prefix --quiet`; `cargo test -p logex-sync decoupled --quiet`; `cargo test -p logex-sync body_receipt_return_blocks --quiet`; `cargo test -p logex-sync body_receipt_min_accepted_prefix --quiet`; `cargo test -p logex-sync historical_fetch_buffer --quiet`; `cargo test -p logex-sync historical_fetch_refill --quiet`; `cargo test -p logex-sync --quiet`. Latest checkpoint additionally ran `cargo test -p logex-sync decoupled -- --nocapture`, remote release builds, and live Mac mini before/after samples.
