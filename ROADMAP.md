@@ -34,6 +34,8 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Accepted conservative write-time critical refill after the sequence fix:
   - Baseline run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-135947.log`: average ~197k logs/sec, p50 ~161k, 29 low windows under 100k, refill p90 ~7.7s.
   - Write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-142945.log`: average ~229k logs/sec, p50 ~188k, 5 low windows under 100k, refill p90 ~6.9s, zero sequence resets.
+- Replaced the generic write-time refill guard with a write-specific refill path that keeps active downloads full even when prepared work is buffered:
+  - Direct write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-145347.log`: average ~311k logs/sec, p50 ~266k, p90 ~582k, refill p90 ~3.1s, zero sequence resets.
 
 ## Remaining TODOs
 
@@ -61,7 +63,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Dense body/receipt planned windows are capped at 512 blocks. This keeps the request plan complete, avoids residual backfill, and reduces slow-tail chunk latency better than partial-prefix early return or 384-block windows.
 - Dense lookahead caps at 7 active fetches. Depth 8 improves bursts but increases pending backlog and timeout churn; depth 7 provided the better sustained/stability balance in live tests.
 - Dense body/receipt chunk caps now shrink with log density when at least 16 peers are available: sparse ranges keep 128-block chunks, dense ranges cap at 48 blocks, and very dense ranges cap at 32 blocks. Live testing showed this reduced tail timeouts and improved sustained logs/sec.
-- During ordered historical writes, the engine may refill a bounded critical fetch path. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
+- During ordered historical writes, the engine uses a write-specific bounded refill path. It keeps active downloads full without treating a full prepared queue as sufficient by itself, while the normal fetch buffer still enforces memory limits. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -97,7 +99,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Resolution: accepted adaptive dense chunk caps after live testing showed higher average/median logs/sec and fewer timeout mentions.
   - Remaining: make chunk sizing more fully adaptive once the live scheduler exists.
 - Challenge: refilling during writes previously caused false historical sequence-gap resets.
-  - Resolution: counted the active ingest sequence as owned by the pipeline and added regression coverage before accepting bounded write-time refill.
+  - Resolution: counted the active ingest sequence as owned by the pipeline and added regression coverage before accepting bounded write-time refill. A follow-up write-specific refill path reduced refill tail latency further by not letting a full prepared queue starve active downloads.
   - Remaining: refill tails still exist at high peer counts; chunk-level reassignment remains the larger scheduler task.
 
 ## Dead Code and Obsolescence Cleanup
@@ -113,7 +115,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; pending commit for bounded write-time refill and sequence ownership hardening.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; pending commit for direct write-time refill.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples.

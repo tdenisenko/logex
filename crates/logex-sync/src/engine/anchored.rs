@@ -1731,6 +1731,48 @@ impl SyncEngine {
             || prepare_progressed)
     }
 
+    async fn refill_historical_fetch_pipeline_during_write(&mut self) -> Result<bool> {
+        let child_header = {
+            let storage = self.storage.read().await;
+            storage.historical_floor_header().cloned()
+        };
+        let Some(child_header) = child_header else {
+            return Ok(false);
+        };
+        if child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK {
+            return Ok(false);
+        }
+
+        if self.peers.peer_count() == 0 {
+            self.refresh_connectivity_state();
+            return Ok(false);
+        }
+
+        let active_fetches = self.active_historical_fetch_count();
+        let pending_fetches = self.pending_historical_fetch_count();
+        let pending_prepares = self.pending_historical_prepare_count();
+
+        self.drain_historical_prepare_tasks().await?;
+        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header);
+        let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
+            return Ok(false);
+        };
+        self.ensure_historical_fetch_pipeline_limited(
+            fetch_child_header,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+        )
+        .await?;
+        let prepare_progressed = self
+            .spawn_ready_historical_prepare_tasks_without_refill()
+            .await?;
+
+        Ok(self.active_historical_fetch_count() != active_fetches
+            || self.pending_historical_fetch_count() != pending_fetches
+            || self.pending_historical_prepare_count() != pending_prepares
+            || recovered_sequence_gap
+            || prepare_progressed)
+    }
+
     async fn ingest_anchored_blocks(
         &mut self,
         anchors: Vec<ExecutionAnchor>,
@@ -3369,10 +3411,8 @@ impl SyncEngine {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                     if last_write_refill.elapsed() >= HISTORICAL_WRITE_REFILL_INTERVAL {
                         last_write_refill = std::time::Instant::now();
-                        self.prime_historical_backfill_pipeline_limited(
-                            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
-                        )
-                        .await?;
+                        self.refill_historical_fetch_pipeline_during_write()
+                            .await?;
                     }
                 }
                 changed = self.shutdown.changed() => {
