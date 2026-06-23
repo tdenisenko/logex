@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, and reducing dense body/receipt planned windows to 512 blocks to avoid slow peer tails.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, and using 7 dense lookahead fetches when memory and peer count allow.
 
 ## Completed Since Last Run
 
@@ -20,7 +20,11 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Baseline lower-density run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-103208.log`: average ~81k logs/sec, p50 ~83k, body/receipt avg ~20.1s, decoupled failures avg ~34/plan.
   - 512-window run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-105803.log`: average ~129k logs/sec, p50 ~110k, body/receipt avg ~15.2s, decoupled failures avg ~6/plan.
 - Rejected 384-block dense windows because smaller batches reduced overall logs/sec and block/sec compared with the 512-window candidate.
-- Deployed the accepted 512-window variant and confirmed the client resumed historical sync after restart.
+- Accepted dense lookahead depth 7:
+  - Depth 6 with 512-window cap: steady average ~135k logs/sec, ~379 blocks/sec.
+  - Depth 7 run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-114125.log`: steady average ~216k logs/sec, ~576 blocks/sec, no plan timeouts or pipeline failures.
+  - Depth 8 was rejected because it raised timeout churn and produced plan timeouts/pipeline failure despite higher bursts.
+- Deployed the accepted 512-window/depth-7 variant and confirmed the client resumed historical sync after restart.
 
 ## Remaining TODOs
 
@@ -46,6 +50,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Body/receipt plans use a 45s plan timeout with faster fanout; shorter global plan timeouts caused avoidable plan failures in live runs.
 - Candidate pools switch to two chunk requests per peer at 16 peers because dense gas-bounded windows otherwise took multiple request waves even with idle local CPU and disk.
 - Dense body/receipt planned windows are capped at 512 blocks. This keeps the request plan complete, avoids residual backfill, and reduces slow-tail chunk latency better than partial-prefix early return or 384-block windows.
+- Dense lookahead caps at 7 active fetches. Depth 8 improves bursts but increases pending backlog and timeout churn; depth 7 provided the better sustained/stability balance in live tests.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout or payload-size changes.
 
 ## Challenges and Resolutions
@@ -71,10 +76,14 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: lower-density historical ranges had high body/receipt tail latency and many decoupled request failures.
   - Resolution: reduced dense planned windows from 1024 to 512 blocks after live testing showed higher sustained throughput, lower fetch latency, and fewer per-plan failures.
   - Remaining: a live scheduler is still needed because low-throughput windows remain when peer tail latency spikes.
+- Challenge: increasing dense lookahead to 8 produced high bursts but worsened timeout churn and plan stability.
+  - Resolution: tested depth 7 as an intermediate setting and accepted it after live benchmarking showed higher sustained throughput than depth 6 without the depth-8 plan failures.
+  - Remaining: replace static depth tuning with a live scheduler that reacts to peer tail latency and resource pressure.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, and batched accounting remains.
+- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense lookahead depth 8 was replaced by accepted depth 7.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, and the 512-window cap remain.
 - No obsolete experiment code remains in the local worktree.
 
@@ -82,7 +91,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap after live benchmarking.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync p2p::peer_manager::requests::tests`; multiple remote release builds and live Mac mini benchmark samples.
