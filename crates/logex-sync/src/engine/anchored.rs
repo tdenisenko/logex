@@ -625,6 +625,22 @@ fn historical_fetch_refill_should_use_pipeline_child(
     pending_prepares > 0 || fetch_expected_sequence > prepare_expected_sequence
 }
 
+fn historical_advanced_fetch_position(
+    mut sequence: u64,
+    mut child: Option<Header>,
+    mut next_child_for_sequence: impl FnMut(u64) -> Option<Option<Header>>,
+) -> (u64, Option<Header>) {
+    while let Some(next_child) = next_child_for_sequence(sequence) {
+        sequence = sequence.saturating_add(1);
+        child = next_child;
+    }
+    (sequence, child)
+}
+
+fn historical_next_completed_fetch_sequence<T>(completed: &BTreeMap<u64, T>) -> Option<u64> {
+    completed.keys().next().copied()
+}
+
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
     if historical_available_memory_is_low(available_memory_bytes) {
         HISTORICAL_PREPARE_LOOKAHEAD_DEPTH
@@ -2331,24 +2347,19 @@ impl SyncEngine {
             let Some(outcome) = self.historical_fetch_completed.remove(&sequence) else {
                 break;
             };
-            let expected_sequence = sequence == self.historical_fetch_expected_sequence;
-            let Some((sequence, batch, next_child_header)) =
+            let Some((sequence, batch, _next_child_header)) =
                 self.materialize_historical_fetch_outcome(outcome)?
             else {
-                if expected_sequence {
-                    self.reset_historical_fetch_pipeline();
-                }
+                self.reset_historical_fetch_pipeline();
                 progressed = true;
                 break;
             };
-            if expected_sequence {
-                self.advance_historical_fetch_sequence(next_child_header);
-            }
             let task = spawn_historical_prepare_task(sequence, batch);
             self.historical_prepare_handles.insert(sequence, task);
+            let advanced_expected = self.advance_historical_fetch_sequence_through_materialized();
             progressed = true;
 
-            if expected_sequence && refill_fetch_pipeline {
+            if advanced_expected && refill_fetch_pipeline {
                 let Some(next_child_header) = self.historical_fetch_expected_child.clone() else {
                     break;
                 };
@@ -2365,9 +2376,7 @@ impl SyncEngine {
     }
 
     fn next_historical_fetch_sequence_to_prepare(&self) -> Option<u64> {
-        self.historical_fetch_completed
-            .contains_key(&self.historical_fetch_expected_sequence)
-            .then_some(self.historical_fetch_expected_sequence)
+        historical_next_completed_fetch_sequence(&self.historical_fetch_completed)
     }
 
     fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> bool {
@@ -2883,6 +2892,29 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence =
             self.historical_fetch_expected_sequence.saturating_add(1);
         self.historical_fetch_expected_child = next_child_header;
+    }
+
+    fn materialized_historical_next_child(&self, sequence: u64) -> Option<Option<Header>> {
+        self.historical_prepare_handles
+            .get(&sequence)
+            .map(|task| task.next_child_header.clone())
+            .or_else(|| {
+                self.historical_prepare_completed
+                    .get(&sequence)
+                    .map(|completed| completed.next_child_header.clone())
+            })
+    }
+
+    fn advance_historical_fetch_sequence_through_materialized(&mut self) -> bool {
+        let expected_sequence = self.historical_fetch_expected_sequence;
+        let (advanced_sequence, advanced_child) = historical_advanced_fetch_position(
+            self.historical_fetch_expected_sequence,
+            self.historical_fetch_expected_child.clone(),
+            |sequence| self.materialized_historical_next_child(sequence),
+        );
+        self.historical_fetch_expected_sequence = advanced_sequence;
+        self.historical_fetch_expected_child = advanced_child;
+        advanced_sequence != expected_sequence
     }
 
     async fn prepare_historical_fetch_plan(
@@ -4879,6 +4911,39 @@ mod tests {
         assert!(!historical_fetch_refill_should_use_pipeline_child(0, 3, 3));
         assert!(historical_fetch_refill_should_use_pipeline_child(1, 3, 3));
         assert!(historical_fetch_refill_should_use_pipeline_child(0, 4, 3));
+    }
+
+    #[test]
+    fn historical_next_completed_fetch_sequence_picks_earliest_ready_fetch() {
+        let mut completed = BTreeMap::new();
+        completed.insert(7, ());
+        completed.insert(3, ());
+        completed.insert(5, ());
+
+        assert_eq!(
+            historical_next_completed_fetch_sequence(&completed),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn historical_advanced_fetch_position_walks_contiguous_materialized_sequences() {
+        let h90 = header(90, B256::ZERO, 0x01);
+        let h80 = header(80, h90.hash_slow(), 0x02);
+        let h60 = header(60, h80.hash_slow(), 0x03);
+        let mut materialized = BTreeMap::new();
+        materialized.insert(10, Some(h90.clone()));
+        materialized.insert(11, Some(h80.clone()));
+        materialized.insert(13, Some(h60));
+
+        let (sequence, child) = historical_advanced_fetch_position(
+            10,
+            Some(header(100, B256::ZERO, 0x04)),
+            |sequence| materialized.get(&sequence).cloned(),
+        );
+
+        assert_eq!(sequence, 12);
+        assert_eq!(child.map(|header| header.number()), Some(80));
     }
 
     #[test]

@@ -21,7 +21,7 @@ const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
-    PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS;
+    PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
@@ -1858,7 +1858,11 @@ impl BodyReceiptRequestPlan {
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
                 break;
             }
-            if contiguous_sourced_chunk_items(&chunks) >= accepted_prefix {
+            if decoupled_dense_can_stop_early(
+                contiguous_sourced_chunk_items(&chunks),
+                accepted_prefix,
+                hashes.len(),
+            ) {
                 break;
             }
 
@@ -2097,7 +2101,11 @@ impl BodyReceiptRequestPlan {
             if missing_chunk_ranges(&ranges, &chunks).is_empty() {
                 break;
             }
-            if contiguous_sourced_chunk_items(&chunks) >= accepted_prefix {
+            if decoupled_dense_can_stop_early(
+                contiguous_sourced_chunk_items(&chunks),
+                accepted_prefix,
+                hashes.len(),
+            ) {
                 break;
             }
 
@@ -5081,6 +5089,14 @@ fn decoupled_dense_accepted_prefix(return_blocks: usize, peer_count: usize) -> u
     return_blocks.min(target)
 }
 
+fn decoupled_dense_can_stop_early(
+    completed_prefix: usize,
+    accepted_prefix: usize,
+    return_blocks: usize,
+) -> bool {
+    accepted_prefix >= return_blocks && completed_prefix >= accepted_prefix
+}
+
 fn contiguous_sourced_chunk_items<T>(chunks: &BTreeMap<usize, (PeerId, Vec<T>)>) -> usize {
     let mut expected_start = 0usize;
     for (start, (_, items)) in chunks {
@@ -5569,6 +5585,13 @@ mod tests {
 
         chunks.insert(128, (peer, vec![1u8; 128]));
         assert_eq!(contiguous_sourced_chunk_items(&chunks), 384);
+    }
+
+    #[test]
+    fn decoupled_dense_only_stops_early_for_full_prefix_targets() {
+        assert!(decoupled_dense_can_stop_early(1024, 1024, 1024));
+        assert!(!decoupled_dense_can_stop_early(512, 512, 1024));
+        assert!(!decoupled_dense_can_stop_early(511, 512, 1024));
     }
 
     #[test]
