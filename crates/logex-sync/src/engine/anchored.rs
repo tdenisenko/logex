@@ -55,6 +55,7 @@ const HISTORICAL_PREPARE_BUFFER_DEPTH_LIMIT: usize = 8;
 const HISTORICAL_PREPARE_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 const HISTORICAL_FETCH_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY: Duration = Duration::from_secs(4);
+const HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY: Duration = Duration::from_secs(30);
 const HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
@@ -582,6 +583,13 @@ fn historical_fetch_buffer_depth(
     pipeline_depth
         .saturating_add(extra)
         .min(HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT)
+}
+
+fn historical_expected_fetch_retry_permitted(
+    expected_fetch_is_active: bool,
+    waited: Duration,
+) -> bool {
+    !expected_fetch_is_active || waited >= HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
 }
 
 fn historical_fetch_budget_has_capacity(
@@ -2729,26 +2737,35 @@ impl SyncEngine {
                 && self.historical_fetch_completed.len()
                     >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
             {
-                if expected_fetch_is_active
+                let waited = wait_started.elapsed();
+                let retry_permitted =
+                    historical_expected_fetch_retry_permitted(expected_fetch_is_active, waited);
+                if retry_permitted
+                    && expected_fetch_is_active
                     && self.retry_expected_historical_fetch(child_header).await?
                 {
                     wait_started = Instant::now();
                     continue;
                 }
-                tracing::debug!(
-                    expected_sequence = self.historical_fetch_expected_sequence,
-                    completed_fetches = self.historical_fetch_completed.len(),
-                    active_fetches = self.active_historical_fetch_count(),
-                    expected_fetch_is_active,
-                    elapsed_ms = wait_started.elapsed().as_millis(),
-                    child_block = child_header.number(),
-                    "resetting historical fetch pipeline after expected fetch head-of-line stall"
-                );
-                self.reset_historical_fetch_pipeline();
-                self.ensure_historical_fetch_pipeline(child_header.clone())
-                    .await?;
-                wait_started = Instant::now();
-                continue;
+                if retry_permitted {
+                    tracing::debug!(
+                        expected_sequence = self.historical_fetch_expected_sequence,
+                        completed_fetches = self.historical_fetch_completed.len(),
+                        active_fetches = self.active_historical_fetch_count(),
+                        expected_fetch_is_active,
+                        elapsed_ms = wait_started.elapsed().as_millis(),
+                        child_block = child_header.number(),
+                        "resetting historical fetch pipeline after expected fetch head-of-line stall"
+                    );
+                    self.reset_historical_fetch_pipeline();
+                    self.ensure_historical_fetch_pipeline(child_header.clone())
+                        .await?;
+                    wait_started = Instant::now();
+                    continue;
+                }
+                // Later lookahead finished first, but the required batch is still running.
+                // Keep the original request alive so slow peer tails cannot be amplified into
+                // an abort/retry loop on the one sequence that can advance the floor.
             }
 
             tokio::select! {
@@ -4828,6 +4845,22 @@ mod tests {
             historical_fetch_buffer_depth(8, None, Some(HISTORICAL_SPARSE_ROWS_PER_BLOCK)),
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT
         );
+    }
+
+    #[test]
+    fn active_expected_fetch_gets_time_to_finish_before_retry() {
+        assert!(!historical_expected_fetch_retry_permitted(
+            true,
+            HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
+        ));
+        assert!(historical_expected_fetch_retry_permitted(
+            true,
+            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
+        ));
+        assert!(historical_expected_fetch_retry_permitted(
+            false,
+            HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
+        ));
     }
 
     #[test]
