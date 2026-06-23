@@ -42,6 +42,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-154649.log`: average ~266k logs/sec, p50 ~225k, p90 ~483k.
   - Threshold run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-155604.log`: average ~342k logs/sec, p50 ~309k, p90 ~576k, with no sequence resets or plan failures.
   - The tradeoff is more request timeout churn and higher body/receipt tail latency, but sustained floor progress improved under the current 300/300 Mbps network constraint.
+- Rejected lowering the decoupled dense body/receipt minimum peer count from 8 to 4. The experiment made more plans use the decoupled path and reduced body/receipt plan latency, but it overfilled prepared work, reduced active download depth, and lowered warmed progress versus the committed baseline.
 
 ## Remaining TODOs
 
@@ -114,6 +115,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: lowering the existing high-pipeline peer threshold globally would also widen fetch windows too early.
   - Resolution: introduced a separate dense pipeline activation threshold and kept the existing high-window threshold unchanged.
   - Remaining: live scheduling should eventually replace these static thresholds.
+- Challenge: forcing more request plans through the decoupled dense path can outrun ordered prepare/write ingestion.
+  - Resolution: rejected the 4-peer decoupled eligibility experiment after live testing showed lower progress despite lower request-plan latency.
+  - Remaining: further improvements should keep fetch, prepare, and write stages balanced instead of optimizing request latency alone.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -123,6 +127,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected depth-8 and 32-block dense chunk retests were reverted and the remote client was restored to the accepted depth-7 / 48-block dense chunk build.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/mod.rs`; rejected shorter request-pause experiment was reverted.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected lower decoupled dense peer eligibility and restored the committed request-plan baseline on the remote client.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
