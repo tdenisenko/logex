@@ -2,163 +2,79 @@
 
 ## Current Status
 
-LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. PR #95 is merged as the current historical sync baseline; this branch is the scheduler-focused historical sync performance pass.
+LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route because dashboard-only routing starved EL P2P peers. The latest full-sync backup is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260622-154101`. The current accepted branch changes improve dense historical sync by refilling after sequence-gap recovery, using the paired chunk path below eight ready body/receipt peers, and reducing dense fetch windows to target roughly 250k rows per fetch so low/medium peer runs avoid long 1024-block head-of-line stalls.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The accepted branch state has improved dense historical sync by reducing head-of-line stalls, avoiding sparse decoupled receipt fetches, and increasing dense low-peer lookahead to six active fetches. The latest restored baseline run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-011559.log`.
 
 ## Completed Since Last Run
 
-- Merged PR #95 into `master` as the new historical sync baseline after local validation and passing GitHub CI.
-- Created `perf/historical-sync-live-scheduler` for the next scheduler-focused performance pass.
-- Benchmarked and rejected five narrow scheduler/window tweaks on the Mac mini:
-  - Increasing the critical historical fetch refill width from 2 to 4 kept more fetches buffered but did not materially improve completed logs/sec and increased local extraction/write pressure.
-  - Lowering the high-fanout body/receipt threshold from 32 peers to 16 peers increased request pressure and timeouts without improving completed throughput.
-  - Adding per-plan least-loaded peer selection to the decoupled dense body/receipt path did not materially beat the baseline completed-batch rate once peers recovered.
-  - Raising the dense return threshold from 100 to 300 rows/block caused larger header requests but only slightly larger verified prefixes in the current range, so completed logs/sec stayed near baseline.
-  - Raising the medium-peer fetch pipeline depth from 4 to 6 increased max active fetches but did not raise average active fetches or completed logs/sec enough to justify the added memory pressure.
-- Restored the remote Mac mini client to the clean PR #95 baseline and left it running on `/Volumes/SSD 4TB/LogEx`.
-- Added ordered historical write overlap and bounded prepared-batch coalescing:
-  - While a prepared batch is being written, the engine now continues draining fetch outcomes and spawning/refilling ready prepare work.
-  - Consecutive already-prepared batches with no residual gap are coalesced into one ordered storage write, capped at four batches or roughly 500k rows.
-  - Live Mac mini benchmarks improved completed block throughput in the older, lower-log-density range from roughly 390-480 blocks/sec baseline windows to roughly 660 blocks/sec in longer coalesced windows.
-- Tested and rejected raising the coalescing cap from four to six batches; it increased write/process latency and max gaps without enough throughput gain.
-- Fixed the write-overlap loop so it does not await new fetch planning while an ordered storage write is already ready to complete.
-- Added memory-bounded post-ingest fetch top-up so the historical downloader refills toward the computed pipeline depth after ordered progress instead of staying capped at two active fetches.
-  - The mature Mac mini top-up run reached six active fetches and 17 queued fetches, eliminated 20s+ gaps in parsed windows, and held roughly 530-575 completed blocks/sec in the current low-log-density range while the dashboard EWMA climbed above 850 blocks/sec.
-- Tested and rejected sparse reverse-header lookahead caching; it reduced some header fetches but increased refill latency and long gaps in live benchmark windows.
-- Created gitignored local routing scripts in `local-ops/` to switch between full-VPS mode and dashboard-only VPS mode from the project checkout. The Mac mini and VPS are still in full-VPS mode until the dashboard-only script is run with local admin privileges.
-- Verified full-VPS routing after the dashboard-only test, then resumed live Mac mini benchmarks.
-- Benchmarked and rejected two more request-scheduler experiments:
-  - Raising dense fetch depth/buffer limits increased active request pressure, triggered peer disconnects and request timeouts, and stalled historical progress.
-  - Raising the body/receipt chunk timeout from 2s to 3s created zero-progress windows while peers were available, so the timeout was restored to 2s.
-- Kept a safer decoupled dense prefix change:
-  - Full-prefix acceptance is now required only when the peer pool is large enough for prefix redundancy.
-  - Medium peer counts can accept a partial prefix only after outstanding decoupled chunk attempts finish or fail, avoiding the peer-health regression caused by early cancellation.
-  - Live Mac mini sample improved from roughly 127k wall-clock rows/sec with a zero-progress interval to roughly 160k wall-clock rows/sec with no zero-progress interval in the measured window.
-- Tested and kept an eight-peer gate for decoupled dense body/receipt mode:
-  - The four-peer gate repeatedly entered decoupled mode with sparse ready pools, often fetched bodies or receipts asymmetrically, then duplicated work through paired fallback.
-  - The eight-peer gate reduced fallbacks and request failures in the same live range, improving the immediate restored run from roughly 41k to roughly 112k wall-clock logs/sec.
-- Tested and rejected a dense low-peer fetch-depth increase from four to six active fetches; it raised request pressure, caused a hard zero-progress interval with active fetches, and was reverted locally and remotely.
-- Fixed historical sequence-gap recovery so a recovered gap no longer returns before queuing replacement fetches. This removed the misleading `refilled_fetch_pipeline=true` with zero active/queued fetches symptom, but did not by itself solve peer-tail latency.
-- Tested and rejected lowering the serving-pool filter threshold to eight peers with fewer fallback probes; it caused peer recovery to stall after restart and was reverted locally and remotely.
-- Kept a dense-window reduction for log-dense ranges:
-  - Dense fetches now target roughly 250k rows with a 256-block minimum instead of roughly 500k rows with a 512-block minimum.
-  - The Mac mini live run improved parsed wall-clock throughput to roughly 285k logs/sec overall and roughly 339k logs/sec in the latest 3-minute window, while body/receipt plan p90 dropped to roughly 11s.
+- Confirmed full VPS routing and public NAT behavior after the network handoff; the remote client advertises `157.245.195.72` for EL/CL P2P and the dashboard remains on port `18683`.
+- Benchmarked the referenced high-throughput run at `/Users/gremlinmaster/logex-src/run/logex-pr96-spec-prepare-fresh-20260622-154837.log`:
+  - Recent dense range: p50 ~482k logs/sec, p90 ~702k, max ~1.01m.
+  - Current lower-density range is not directly comparable by logs/sec alone because rows/block are roughly half the dense-run value.
+- Kept the existing accepted scheduler improvement already committed as `57aa4a1 perf: deepen dense historical fetch lookahead`.
+- Tested and rejected three additional experiments:
+  - Larger dense fetch payloads (`500k` target rows, `1536` max blocks) caused long active-fetch stalls and peer readiness drops.
+  - Longer global body/receipt chunk timeouts (`3s` and `2.5s`) reduced some prefix failures but lowered sustained p50 throughput or created zero-progress windows.
+  - High-peer-only dense depth `8` did not activate in the measured run and produced no proven improvement.
+- Restored the remote Mac mini client and local worktree to the accepted baseline after each rejected experiment.
 
 ## Remaining TODOs
 
-1. Replace static historical body/receipt plan boundaries with a live request scheduler.
-   - Reason: current dense sync is still peer-tail bound. A slow prefix request can stall completed batches even when later work or other peers are available.
-   - Completion criteria: implement or prove unnecessary a geth/Nethermind-style queue that reserves chunks for idle peers, reassigns timed-out work without resetting useful lookahead, preserves ordered verified ingestion, and improves sustained full-run throughput without more timeout churn.
+1. Build a live body/receipt request scheduler.
+   - Reason: historical sync is still peer-tail bound; static fetch plans can stall on a slow prefix while other peers and later work are available.
+   - Completion criteria: chunks are assigned to idle peers, timed-out work is reassigned without discarding useful lookahead, ordered verified ingestion is preserved, and sustained full-run throughput improves without extra peer churn.
 
-2. Improve dense historical sync benchmark stability.
-   - Reason: peak logs/sec can be high, but low-throughput windows still make the full-sync ETA too long.
-   - Completion criteria: sustained benchmark windows approach the 800k+ logs/sec target with materially lower max gaps while tracking active fetch depth, body/receipt latency, failures, serving peers, CPU, memory, disk, and network.
+2. Improve full-run historical sync stability and throughput.
+   - Reason: peaks can reach the 800k+ logs/sec range, but low-throughput windows still keep the end-to-end sync time above the target.
+   - Completion criteria: benchmark windows show materially lower max gaps and sustained throughput near the target while tracking active fetches, body/receipt latency, failures, serving peers, CPU, memory, disk, and network.
 
 3. Complete EL production hardening.
-   - Reason: performance work must not weaken restart safety, checkpoint freshness, forward sync, or verified query correctness.
-   - Completion criteria: tests or smokes cover recent-checkpoint enforcement, restart/resume, CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
+   - Reason: performance work must not weaken restart safety, checkpoint freshness, forward sync, reorg handling, or query correctness.
+   - Completion criteria: tests or smokes cover recent-checkpoint enforcement, stale restart rejection, CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
 
 ## Design Decisions
 
-- Historical reverse sync remains independent of CL live-head tracking after a valid checkpoint-backed pivot exists.
-- Keep changes only when live benchmarks beat the current baseline on sustained throughput and tail behavior, not peak logs/sec alone.
-- Dense body/receipt plans should prefer full verified prefixes when sufficiently peered; half-prefix acceptance was rejected because residual repair serialized the pipeline.
-- Simple duplicate-request pressure at low peer counts is not beneficial on the current Mac mini run; it increased failures and reduced completed throughput.
-- PR #95 is the new comparison baseline for future historical sync experiments.
-- The next meaningful performance path is scheduler architecture, not more local threshold tweaks.
-- Geth and Nethermind both use peer allocation based on measured speed and allocation/idle state; LogEx should follow that direction with a live body/receipt work queue rather than more static fanout or timeout tuning.
-- Partial decoupled dense prefixes are useful only when they do not cancel in-flight chunk requests. Early partial-prefix completion was rejected because it harmed peer health; drained partial-prefix completion was kept because it removed fallbacks without producing the same collapse.
-- Keep the special dense body/receipt chunk timeout at 2s for now. A 3s timeout reduced responsiveness and created zero-progress windows during live testing.
-- Decoupled dense body/receipt mode should require at least eight ready peers. Below that, paired chunk requests are more stable because they keep body/receipt matching local to a chunk and avoid asymmetric decoupled fallbacks.
-- Medium-density batches are currently limited by low-peer fetch windows and prefix completion behavior more than by the dense-row threshold alone; changing only the threshold is insufficient.
-- Dense fetch windows should target row count, not block count alone. In log-dense ranges, smaller verified windows reduce ordered head-of-line delay and improved wall-clock throughput despite more batches.
-- Historical storage writes can safely overlap with continued fetch/prepare orchestration because the ordered storage write owns an `Arc` clone and the floor advances only after the write succeeds.
-- Consecutive prepared historical batches may be coalesced only when they are already completed, sequence-contiguous, and have no residual header gap; this preserves ordered verification and avoids delaying residual repair.
-- Ordered-write overlap loops should only drain/promote already available fetch outcomes; top-up to the full memory-aware fetch depth belongs after ordered progress, where the pipeline can safely spend time planning more work without delaying a completed write.
-- Wider reverse-header lookahead is not a substitute for a live scheduler; in sparse ranges it can create stale or unused lookahead and worsen tail latency.
-- Performance experiments should run in dashboard-only VPS mode unless public P2P exposure through the VPS is explicitly needed; this keeps dashboard access public while avoiding paid VPS egress for historical downloads.
+- Keep performance changes only when live Mac mini benchmarks show sustained improvement, not just higher peaks.
+- Historical reverse sync remains independent of CL live-head tracking after a valid recent checkpoint-backed pivot exists.
+- Logs/sec is useful for dense ranges, but block/sec and rows/block must be considered in lower-density historical ranges.
+- Static global timeout increases are rejected for now; future timeout work should be adaptive per peer/request kind.
+- The next meaningful path is a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not more isolated threshold tweaks.
 
 ## Challenges and Resolutions
 
-- Challenge: historical sync could idle when connected peers dropped below four.
-  - Resolution: lowered the historical backfill connected-peer floor cap to `1`.
-  - Remaining: throughput can still dip when the active body/receipt prefix is held by slow peers.
-- Challenge: request-level hedging and partial-prefix experiments looked plausible but worsened real runs.
-  - Resolution: reverted all unhelpful experiments locally and remotely after measurement.
-  - Remaining: a live work queue with per-peer assignment and reassignment is still needed to attack peer-tail latency cleanly.
-- Challenge: `master` needed a same-data comparison before concluding this branch.
-  - Resolution: temporarily deployed `master` (`b504fe4`) to the Mac mini, measured completed-batch throughput, then restored the branch source and binary.
-  - Remaining: none for this PR.
-- Challenge: small scheduler threshold changes were tempting but did not improve sustained throughput.
-  - Resolution: tested each change on the live Mac mini data dir with isolated logs, then reverted locally and remotely when completed-batch windows failed to beat baseline materially.
-  - Remaining: implement a real live request scheduler that can keep useful lookahead while reassigning slow prefix work.
-- Challenge: decoupled dense body/receipt plans looked under-balanced by rotation-only peer assignment.
-  - Resolution: tested least-loaded per-plan peer selection; the live run stayed near baseline and was reverted.
-  - Remaining: peer assignment needs to be coordinated across active fetch plans, not only inside one plan.
-- Challenge: 1024-block completions looked like a possible medium-density bottleneck.
-  - Resolution: tested a higher dense-row threshold; it did not produce materially larger completed prefixes or better sustained throughput in the current range and was reverted.
-  - Remaining: any larger-window work should be tied to a bounded live scheduler and memory-aware row targets.
-- Challenge: medium-peer runs appeared capped at four active fetches.
-  - Resolution: tested a depth-6 medium-peer pipeline; max active fetches rose to 6, but average active fetches stayed near 2.2 because prepared buffers filled, and completed logs/sec did not materially improve.
-  - Remaining: deeper lookahead alone is not enough; scheduling must coordinate fetch, prepare, and ingest pressure together.
-- Challenge: the engine paused orchestration while awaiting each ordered storage write.
-  - Resolution: changed the write await into a select loop that continues draining fetch outcomes and refilling prepare work, then coalesces already-ready contiguous prepared batches into one bounded ordered write.
-  - Remaining: active fetches can still dip when local commits are large; a true live request queue is still needed for peer-tail latency.
-- Challenge: larger coalesced writes looked like a possible storage optimization.
-  - Resolution: tested a six-batch coalescing cap and reverted it because it increased write/process latency and max gaps relative to the four-batch cap.
-  - Remaining: future coalescing changes should be adaptive and benchmarked against full-run time, not just peak dashboard rates.
-- Challenge: the first write-overlap implementation could still block on refill planning before observing that the storage write had completed.
-  - Resolution: changed the write-await select loop to promote already-fetched work without refilling during the write, then perform a bounded full-depth top-up after ordered progress.
-  - Remaining: storage/extraction and ordered commit latency still pace low-density ranges; a deeper live request scheduler is still needed for the 4-hour target.
-- Challenge: sparse reverse-header lookahead looked like a low-risk way to reduce serial header fetches.
-  - Resolution: benchmarked and reverted it because mature windows showed higher refill latency and more long gaps than the accepted baseline.
-  - Remaining: header planning needs to be part of a real live scheduler, not a wider cache on the current ordered pipeline.
-- Challenge: remote restarts can look stuck after HTTP/gRPC stop while the P2P network drains sessions.
-  - Resolution: restored the client with a longer restart grace window and confirmed the process exits cleanly.
-  - Remaining: in-flight historical work should become more promptly cancelable during shutdown.
-- Challenge: the Mac mini was still full-tunneled through the VPS, which would make continued benchmarking expensive.
-  - Resolution: added project-local, gitignored scripts to switch between full-VPS and dashboard-only routing, verified the Mac and VPS are still full-tunneled, and stopped LogEx pending the local privileged switch.
-  - Remaining: dashboard-only mode is available for dashboard exposure, but full-VPS mode is currently required for useful P2P benchmark coverage.
-- Challenge: accepting partial dense prefixes immediately looked like a way to reduce peer-tail waits.
-  - Resolution: benchmarked and rejected early completion because it cancelled in-flight chunk requests, caused receipt peer collapse, and stalled progress.
-  - Remaining: retained only the drained partial-prefix variant, which waits for outstanding decoupled attempts before accepting a smaller contiguous prefix.
-- Challenge: longer per-chunk timeouts looked like a way to reduce false timeouts.
-  - Resolution: benchmarked 3s body/receipt chunk timeouts and reverted because they caused zero-progress windows with peers available.
-  - Remaining: future timeout work should be adaptive per peer, not a static global increase.
-- Challenge: decoupled dense mode was still entered with only four ready body/receipt peers.
-  - Resolution: raised the decoupled dense gate to eight ready peers after live tests showed fewer fallbacks and request failures than the restored four-peer run.
-  - Remaining: serving-peer churn can still collapse throughput and needs a live request scheduler with better peer assignment/reassignment.
-- Challenge: sequence-gap recovery could reset lookahead but return before queuing replacement historical fetches.
-  - Resolution: kept recovery as progress but continued through the normal refill path.
-  - Remaining: this fixes a correctness/scheduler edge case but does not remove peer-tail waits inside individual body/receipt plans.
-- Challenge: 1024-block dense windows caused long ordered stalls when only a small serving pool was ready after restart.
-  - Resolution: reduced dense fetch row targets and minimum window size; live plan p90 improved from roughly 20s to roughly 11s.
-  - Remaining: request plans still need live reassignment to reach the 800k+ logs/sec target.
+- Challenge: the referenced 1m logs/sec run occurred in a much denser block range than the current resumed run.
+  - Resolution: compared rows/block, body/receipt latency, active fetch depth, failures, and serving peer counts instead of judging by logs/sec alone.
+  - Remaining: future benchmark reports should normalize by density or include both logs/sec and block/sec.
+- Challenge: larger dense fetch payloads looked like a way to amortize slow peer round trips.
+  - Resolution: reverted after live testing showed long active-fetch stalls and readiness drops.
+  - Remaining: larger payloads should only be reconsidered inside a live scheduler that can reassign slow chunks.
+- Challenge: longer request timeouts reduced some hard prefix failures but made slow peers hold work longer.
+  - Resolution: reverted `3s` and `2.5s` timeout experiments and restored the accepted `2s` timeout.
+  - Remaining: implement adaptive per-peer timeout/backoff if further evidence supports it.
+- Challenge: high-peer depth `8` could not be proven because the run did not reach the activation threshold.
+  - Resolution: reverted the unproven change rather than leaving speculative code in the branch.
+  - Remaining: retest higher depth only with a controlled run that actually reaches high serving-peer counts.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected timeout/window/depth experiments were reverted, duplicated density-branch logic was removed for clippy, and the obsolete `historical_backfill_has_no_queued_work` helper was removed after post-ingest top-up replaced it. The kept engine changes are sequence-gap refill continuation and dense row-targeted fetch windows.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected early partial-prefix, static timeout, lower decoupled threshold, decoupled redundancy, larger-prefix, and serving-pool threshold experiments were reverted. The kept request changes are drained partial-prefix acceptance plus the eight-peer decoupled gate.
-- Inspected peer request scoring in `crates/logex-sync/src/p2p/peer_manager/state.rs`; existing EWMA speed, active-load adjustment, serving bonus, and timeout penalty remain in use.
-- Rejected refill-width, fanout-threshold, decoupled least-loaded peer assignment, dense-return-threshold, medium-depth, dense low-peer depth, prepare-buffer-depth, and six-batch coalescing experiments were reverted locally and remotely.
-- Rejected sparse reverse-header lookahead caching after live benchmarks showed worse refill latency and more long gaps.
-- Kept code was inspected for obsolete experiment leftovers; only ordered write overlap and bounded four-batch coalescing remain in the local diff.
+- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense-window and high-peer-depth experiments were reverted locally and remotely.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected `3s` and `2.5s` timeout experiments were reverted locally and remotely.
+- No additional dead production code was removed in this pass; no rejected experiment code remains in the local worktree.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
-- New branch created this run: yes
-- Commits made during this run: `578b643 docs: record scheduler benchmark findings`; `cd4f074 perf: overlap historical writes with fetch work`; `6e907cc test: cover historical write coalescing`; `69373e8 perf: refill historical pipeline after writes`; `964c219 docs: record rejected scheduler lookahead`; `b6ff235 chore: document local routing handoff`; `6992ee0 perf: reduce historical peer-tail stalls`; `6e8afbe perf: avoid sparse decoupled receipt fetches`; pending checkpoint for dense-window/sequence-gap refill changes
-- Pull request status: draft PR #96 open for scheduler work
-- Merge status: PR #95 merged into `master`; scheduler branch not merged
-- Validation: `cargo fmt --check`; `git diff --check`; `cargo clippy -p logex-sync --all-targets -- -D warnings`; `cargo test -p logex-sync historical_critical_refill --quiet`; `cargo test -p logex-sync historical_fetch_budget_keeps_active_downloads_full_when_memory_is_healthy --quiet`; `cargo test -p logex-sync request_window_limit --quiet`; `cargo test -p logex-sync decoupled_prefix --quiet`; `cargo test -p logex-sync decoupled --quiet`; `cargo test -p logex-sync body_receipt_return_blocks --quiet`; `cargo test -p logex-sync body_receipt_min_accepted_prefix --quiet`; `cargo test -p logex-sync historical_fetch_buffer --quiet`; `cargo test -p logex-sync historical_fetch_refill --quiet`; `cargo test -p logex-sync --quiet`. Latest checkpoint additionally ran `cargo test -p logex-sync decoupled -- --nocapture`, `cargo test -p logex-sync body_receipt -- --nocapture`, `cargo test -p logex-sync historical -- --nocapture`, remote release builds, and live Mac mini before/after samples.
-- Blockers: no current branch blocker; sustained throughput is improved but still below the 800k+ logs/sec target.
+- New branch created this run: no
+- Commits made during this run: roadmap checkpoint documenting rejected experiments; rejected code experiments were not committed.
+- Pull request status: draft PR #96 remains open for scheduler work.
+- Merge status: not merged; throughput target and scheduler work remain incomplete.
+- Validation run this pass: `cargo fmt --check`; `cargo test -p logex-sync historical_density -- --nocapture`; `cargo test -p logex-sync historical_fetch_window -- --nocapture`; `cargo test -p logex-sync decoupled -- --nocapture`; `cargo check -p logex-sync`; multiple remote release builds and live Mac mini benchmark samples.
+- Blockers: no external blocker; the remaining work is architectural scheduler work.
 
 ## Known Issues or Risks
 
-- Current historical sync remains peer-tail bound and can still show low-throughput windows.
-- Dashboard-only routing exposes the dashboard but does not provide enough inbound P2P capability for performance benchmarking; use full-VPS routing for current EL P2P tests.
-- The current Mac mini data directory is fresh for the next run; the latest full-sync backup is `/Volumes/SSD 4TB/LogEx-full-sync-20260622-154101`.
-- A larger request-scheduler refactor may be required to approach the 4-hour full-sync target.
-- Shutdown is clean but can take longer than short restart scripts expect while the P2P network drains sessions.
+- Historical sync is still peer-tail bound and can show low-throughput windows even when active fetches are full.
+- Current performance is sensitive to block log density, peer mix, and warm-up state; short samples can be misleading.
+- Full VPS routing is currently required for useful P2P benchmarking, but it has VPS bandwidth cost.
+- A larger scheduler refactor is likely required to reach the target full-sync time.
