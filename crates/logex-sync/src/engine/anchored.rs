@@ -53,6 +53,7 @@ const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 4;
 const HISTORICAL_PREPARE_COMPLETED_BUFFER_EXTRA: usize = 4;
 const HISTORICAL_PREPARE_BUFFER_DEPTH_LIMIT: usize = 8;
 const HISTORICAL_PREPARE_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
+const HISTORICAL_WRITE_REFILL_INTERVAL: Duration = Duration::from_millis(500);
 const HISTORICAL_FETCH_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY: Duration = Duration::from_secs(4);
 const HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -646,6 +647,30 @@ fn historical_advanced_fetch_position(
 
 fn historical_next_completed_fetch_sequence<T>(completed: &BTreeMap<u64, T>) -> Option<u64> {
     completed.keys().next().copied()
+}
+
+fn historical_sequence_available(
+    sequence: u64,
+    active_sequences: impl Iterator<Item = u64>,
+    completed_sequences: impl Iterator<Item = u64>,
+    in_progress_sequence: Option<u64>,
+) -> bool {
+    active_sequences
+        .chain(completed_sequences)
+        .any(|candidate| candidate == sequence)
+        || in_progress_sequence == Some(sequence)
+}
+
+fn has_historical_sequence_after(
+    sequence: u64,
+    active_sequences: impl Iterator<Item = u64>,
+    completed_sequences: impl Iterator<Item = u64>,
+    in_progress_sequence: Option<u64>,
+) -> bool {
+    active_sequences
+        .chain(completed_sequences)
+        .any(|candidate| candidate > sequence)
+        || in_progress_sequence.is_some_and(|candidate| candidate > sequence)
 }
 
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
@@ -2427,27 +2452,39 @@ impl SyncEngine {
     }
 
     fn historical_prepare_sequence_available(&self, sequence: u64) -> bool {
-        self.historical_prepare_handles.contains_key(&sequence)
-            || self.historical_prepare_completed.contains_key(&sequence)
+        historical_sequence_available(
+            sequence,
+            self.historical_prepare_handles.keys().copied(),
+            self.historical_prepare_completed.keys().copied(),
+            self.historical_ingest_sequence,
+        )
     }
 
     fn has_historical_prepare_after(&self, sequence: u64) -> bool {
-        self.historical_prepare_handles
-            .keys()
-            .chain(self.historical_prepare_completed.keys())
-            .any(|candidate| *candidate > sequence)
+        has_historical_sequence_after(
+            sequence,
+            self.historical_prepare_handles.keys().copied(),
+            self.historical_prepare_completed.keys().copied(),
+            self.historical_ingest_sequence,
+        )
     }
 
     fn historical_fetch_sequence_available(&self, sequence: u64) -> bool {
-        self.historical_fetch_handles.contains_key(&sequence)
-            || self.historical_fetch_completed.contains_key(&sequence)
+        historical_sequence_available(
+            sequence,
+            self.historical_fetch_handles.keys().copied(),
+            self.historical_fetch_completed.keys().copied(),
+            None,
+        )
     }
 
     fn has_historical_fetch_after(&self, sequence: u64) -> bool {
-        self.historical_fetch_handles
-            .keys()
-            .chain(self.historical_fetch_completed.keys())
-            .any(|candidate| *candidate > sequence)
+        has_historical_sequence_after(
+            sequence,
+            self.historical_fetch_handles.keys().copied(),
+            self.historical_fetch_completed.keys().copied(),
+            None,
+        )
     }
 
     fn historical_sequence_gap_requires_reset(&self) -> bool {
@@ -3313,6 +3350,7 @@ impl SyncEngine {
             prepared,
             Arc::clone(&self.storage),
         ));
+        let mut last_write_refill = std::time::Instant::now();
         let write_result = loop {
             tokio::select! {
                 result = &mut write_task => {
@@ -3329,6 +3367,13 @@ impl SyncEngine {
                 }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
+                    if last_write_refill.elapsed() >= HISTORICAL_WRITE_REFILL_INTERVAL {
+                        last_write_refill = std::time::Instant::now();
+                        self.prime_historical_backfill_pipeline_limited(
+                            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                        )
+                        .await?;
+                    }
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && self.shutdown_requested() {
@@ -4956,6 +5001,37 @@ mod tests {
             historical_next_completed_fetch_sequence(&completed),
             Some(3)
         );
+    }
+
+    #[test]
+    fn historical_sequence_availability_counts_in_progress_sequence() {
+        let active = BTreeMap::from([(8, ())]);
+        let completed = BTreeMap::from([(9, ())]);
+
+        assert!(historical_sequence_available(
+            7,
+            active.keys().copied(),
+            completed.keys().copied(),
+            Some(7)
+        ));
+        assert!(!historical_sequence_available(
+            7,
+            active.keys().copied(),
+            completed.keys().copied(),
+            None
+        ));
+        assert!(has_historical_sequence_after(
+            6,
+            active.keys().copied(),
+            completed.keys().copied(),
+            Some(7)
+        ));
+        assert!(!has_historical_sequence_after(
+            9,
+            active.keys().copied(),
+            completed.keys().copied(),
+            Some(7)
+        ));
     }
 
     #[test]

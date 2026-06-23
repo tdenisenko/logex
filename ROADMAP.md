@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, and capping dense body/receipt chunks to reduce peer-tail latency.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, and refilling the critical fetch path while ordered writes are in progress.
 
 ## Completed Since Last Run
 
@@ -29,6 +29,11 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Baseline depth-7 run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-114125.log`: average ~221k logs/sec, p50 ~185k, ~603 blocks/sec, 1813 timeout mentions.
   - Adaptive chunk-cap run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-131037.log`: average ~251k logs/sec, p50 ~240k, ~739 blocks/sec, 742 timeout mentions.
 - Deployed the accepted adaptive chunk-cap variant and confirmed the client resumed historical sync after restart.
+- Rejected timed duplicate prefix hedging because it reduced body/receipt latency but lowered sustained progress by reducing useful active fetch depth.
+- Rejected naive write-time refill after it caused sequence-gap resets; kept the root-cause fix that treats the sequence currently being written as owned by the pipeline.
+- Accepted conservative write-time critical refill after the sequence fix:
+  - Baseline run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-135947.log`: average ~197k logs/sec, p50 ~161k, 29 low windows under 100k, refill p90 ~7.7s.
+  - Write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-142945.log`: average ~229k logs/sec, p50 ~188k, 5 low windows under 100k, refill p90 ~6.9s, zero sequence resets.
 
 ## Remaining TODOs
 
@@ -56,6 +61,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Dense body/receipt planned windows are capped at 512 blocks. This keeps the request plan complete, avoids residual backfill, and reduces slow-tail chunk latency better than partial-prefix early return or 384-block windows.
 - Dense lookahead caps at 7 active fetches. Depth 8 improves bursts but increases pending backlog and timeout churn; depth 7 provided the better sustained/stability balance in live tests.
 - Dense body/receipt chunk caps now shrink with log density when at least 16 peers are available: sparse ranges keep 128-block chunks, dense ranges cap at 48 blocks, and very dense ranges cap at 32 blocks. Live testing showed this reduced tail timeouts and improved sustained logs/sec.
+- During ordered historical writes, the engine may refill a bounded critical fetch path. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -90,12 +96,15 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: dense body/receipt chunks still had peer-tail latency, especially around 48-64 block requests.
   - Resolution: accepted adaptive dense chunk caps after live testing showed higher average/median logs/sec and fewer timeout mentions.
   - Remaining: make chunk sizing more fully adaptive once the live scheduler exists.
+- Challenge: refilling during writes previously caused false historical sequence-gap resets.
+  - Resolution: counted the active ingest sequence as owned by the pipeline and added regression coverage before accepting bounded write-time refill.
+  - Remaining: refill tails still exist at high peer counts; chunk-level reassignment remains the larger scheduler task.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, and batched accounting remains.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense lookahead depth 8 was replaced by accepted depth 7.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected 20s retry, larger fetch buffer, and critical-refill experiments were reverted.
+- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected 20s retry, larger fetch buffer, timed duplicate prefix hedge, and unguarded critical-refill experiments were reverted or replaced by the bounded write-refill implementation.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/mod.rs`; rejected shorter request-pause experiment was reverted.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
 - No obsolete experiment code remains in the local worktree.
@@ -104,7 +113,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; pending commit for adaptive dense chunk caps.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; pending commit for bounded write-time refill and sequence ownership hardening.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples.
