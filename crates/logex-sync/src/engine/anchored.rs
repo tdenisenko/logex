@@ -62,6 +62,7 @@ const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 20;
+const HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_DEEP_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
 const HISTORICAL_WIDE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 80;
 const HISTORICAL_SPARSE_LOOKAHEAD_MIN_SERVING_PEERS: usize = 48;
@@ -529,7 +530,7 @@ fn historical_dense_fetch_pipeline_depth_boost(
     available_memory_bytes: Option<u64>,
     rows_per_block: Option<f64>,
 ) -> Option<usize> {
-    if serving_peers < HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS
+    if serving_peers < HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS
         || !historical_allows_high_memory_pipeline(total_memory_bytes)
         || historical_available_memory_is_low(available_memory_bytes)
     {
@@ -4835,7 +4836,7 @@ mod tests {
         );
         assert_eq!(
             historical_dense_fetch_pipeline_depth_boost(
-                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
+                HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS,
                 high_memory,
                 healthy_available,
                 Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
@@ -4844,7 +4845,7 @@ mod tests {
         );
         assert_eq!(
             historical_dense_fetch_pipeline_depth_boost(
-                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS - 1,
+                HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS - 1,
                 high_memory,
                 healthy_available,
                 Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
@@ -4853,7 +4854,7 @@ mod tests {
         );
         assert_eq!(
             historical_dense_fetch_pipeline_depth_boost(
-                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
+                HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS,
                 high_memory,
                 low_available,
                 Some(HISTORICAL_DENSE_ROWS_PER_BLOCK),
@@ -4862,7 +4863,7 @@ mod tests {
         );
         assert_eq!(
             historical_dense_fetch_pipeline_depth_boost(
-                HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS,
+                HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS,
                 high_memory,
                 healthy_available,
                 Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK),
