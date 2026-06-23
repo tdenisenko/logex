@@ -36,6 +36,8 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-142945.log`: average ~229k logs/sec, p50 ~188k, 5 low windows under 100k, refill p90 ~6.9s, zero sequence resets.
 - Replaced the generic write-time refill guard with a write-specific refill path that keeps active downloads full even when prepared work is buffered:
   - Direct write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-145347.log`: average ~311k logs/sec, p50 ~266k, p90 ~582k, refill p90 ~3.1s, zero sequence resets.
+- Rejected 32-block dense chunk caps for medium-density ranges. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-151531.log` reduced refill time but also shrank batches, lowered average throughput, and did not improve the end-to-end rate.
+- Rejected re-testing dense lookahead depth 8 after write-time refill. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-153321.log` filled the network more aggressively but had worse body/receipt latency and lower average progress than the accepted depth-7 build.
 
 ## Remaining TODOs
 
@@ -101,12 +103,16 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: refilling during writes previously caused false historical sequence-gap resets.
   - Resolution: counted the active ingest sequence as owned by the pipeline and added regression coverage before accepting bounded write-time refill. A follow-up write-specific refill path reduced refill tail latency further by not letting a full prepared queue starve active downloads.
   - Remaining: refill tails still exist at high peer counts; chunk-level reassignment remains the larger scheduler task.
+- Challenge: after the write-refill fix, remaining low-throughput windows can be network-bound rather than scheduler-idle.
+  - Resolution: sampled interface counters during live sync. The WireGuard tunnel reached the effective 300 Mbps class ceiling during some lower logs/sec windows, so logs/sec must be interpreted alongside bandwidth, blocks/sec, and rows/block.
+  - Remaining: add better durable bandwidth/resource telemetry before making more static scheduler changes.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, and batched accounting remains.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense lookahead depth 8 was replaced by accepted depth 7.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected 20s retry, larger fetch buffer, timed duplicate prefix hedge, and unguarded critical-refill experiments were reverted or replaced by the bounded write-refill implementation.
+- Inspected `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected depth-8 and 32-block dense chunk retests were reverted and the remote client was restored to the accepted depth-7 / 48-block dense chunk build.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/mod.rs`; rejected shorter request-pause experiment was reverted.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
 - No obsolete experiment code remains in the local worktree.
@@ -115,7 +121,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; pending commit for direct write-time refill.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; pending roadmap note for rejected follow-up experiments.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples.
