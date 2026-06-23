@@ -45,7 +45,7 @@ const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
-const HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 6;
+const HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 4;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 5;
 const HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT: usize = 12;
 const HISTORICAL_DENSE_FETCH_BUFFER_EXTRA: usize = 6;
@@ -2223,9 +2223,13 @@ impl SyncEngine {
     }
 
     fn drain_historical_request_accounting(&mut self) {
+        let mut accountings = Vec::new();
         while let Ok(accounting) = self.historical_request_accounting_rx.try_recv() {
+            accountings.push(accounting);
+        }
+        if !accountings.is_empty() {
             self.peers
-                .apply_body_receipt_request_accounting_event(accounting);
+                .apply_body_receipt_request_accounting_events(accountings);
         }
     }
 

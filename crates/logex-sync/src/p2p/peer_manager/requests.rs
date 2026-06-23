@@ -15,8 +15,8 @@ use super::*;
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_millis(1_500);
-const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(25);
+const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
@@ -46,7 +46,7 @@ const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_CHUNK_SALVAGE_PEER_LIMIT: usize = 4;
 const PARALLEL_REQUESTS_PER_PEER_LOW: usize = 1;
 const PARALLEL_REQUESTS_PER_PEER_HIGH: usize = 2;
-const PARALLEL_HIGH_FANOUT_MIN_PEERS: usize = 32;
+const PARALLEL_HIGH_FANOUT_MIN_PEERS: usize = 16;
 const MAX_PARALLEL_BODY_RECEIPT_REQUESTS: usize = 128;
 const MAX_PARALLEL_BODY_REQUESTS: usize = 64;
 const MIN_PARALLEL_BODY_REQUEST_BLOCKS: usize = 64;
@@ -861,16 +861,22 @@ impl PeerManager {
         self.apply_body_receipt_request_accounting_parts(stats, failures);
     }
 
-    pub(crate) fn apply_body_receipt_request_accounting_event(
+    pub(crate) fn apply_body_receipt_request_accounting_events(
         &mut self,
-        accounting: BodyReceiptRequestAccounting,
+        accountings: impl IntoIterator<Item = BodyReceiptRequestAccounting>,
     ) {
-        let BodyReceiptRequestAccounting {
-            stats,
-            failures,
-            active_requests,
-        } = accounting;
-        self.apply_body_receipt_active_request_deltas(active_requests);
+        let mut stats = Vec::new();
+        let mut failures = Vec::new();
+        for accounting in accountings {
+            let BodyReceiptRequestAccounting {
+                stats: event_stats,
+                failures: event_failures,
+                active_requests,
+            } = accounting;
+            self.apply_body_receipt_active_request_deltas(active_requests);
+            stats.extend(event_stats);
+            failures.extend(event_failures);
+        }
         self.apply_body_receipt_request_accounting_parts(stats, failures);
     }
 
@@ -3594,29 +3600,7 @@ impl PeerManager {
         failures: ParallelChunkFailures,
         dead_peers: &mut HashSet<PeerId>,
     ) {
-        let mut request_failures =
-            HashMap::<(PeerId, ChunkRequestRole), ChunkRequestFailure>::new();
-        let mut other_failures = Vec::new();
-        for failure in failures {
-            if matches!(failure.kind, ChunkFailureKind::Request(_)) {
-                match request_failures.entry((failure.peer_id, failure.role)) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(failure);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if chunk_request_failure_severity(&failure)
-                            > chunk_request_failure_severity(entry.get())
-                        {
-                            entry.insert(failure);
-                        }
-                    }
-                }
-            } else {
-                other_failures.push(failure);
-            }
-        }
-
-        for failure in request_failures.into_values().chain(other_failures) {
+        for failure in coalesce_parallel_chunk_failures(failures) {
             match failure.kind {
                 ChunkFailureKind::Request(error) => {
                     let quarantine_receipts = failure.role == ChunkRequestRole::Receipts
@@ -3955,6 +3939,34 @@ fn chunk_request_failure_severity(failure: &ChunkRequestFailure) -> u8 {
         | RequestAttempt::Request(reth_network::p2p::error::RequestError::ChannelClosed)
         | RequestAttempt::Request(reth_network::p2p::error::RequestError::ConnectionDropped) => 1,
     }
+}
+
+fn coalesce_parallel_chunk_failures(failures: ParallelChunkFailures) -> ParallelChunkFailures {
+    let mut request_failures = HashMap::<(PeerId, ChunkRequestRole), ChunkRequestFailure>::new();
+    let mut other_failures = Vec::new();
+    for failure in failures {
+        if matches!(failure.kind, ChunkFailureKind::Request(_)) {
+            match request_failures.entry((failure.peer_id, failure.role)) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(failure);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if chunk_request_failure_severity(&failure)
+                        > chunk_request_failure_severity(entry.get())
+                    {
+                        entry.insert(failure);
+                    }
+                }
+            }
+        } else {
+            other_failures.push(failure);
+        }
+    }
+
+    request_failures
+        .into_values()
+        .chain(other_failures)
+        .collect()
 }
 
 fn request_failure_quarantines_receipt_peer(error: &RequestAttempt) -> bool {
@@ -5257,6 +5269,14 @@ mod tests {
         assert_eq!(request_window_limit(1, 16), 1);
         assert_eq!(request_window_limit(2, 16), 2);
         assert_eq!(request_window_limit(8, 16), 8);
+        assert_eq!(
+            request_window_limit(PARALLEL_HIGH_FANOUT_MIN_PEERS - 1, 128),
+            15
+        );
+        assert_eq!(
+            request_window_limit(PARALLEL_HIGH_FANOUT_MIN_PEERS, 128),
+            32
+        );
         assert_eq!(request_window_limit(32, 128), 64);
     }
 
@@ -5468,16 +5488,34 @@ mod tests {
             0
         );
         assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 512, 4, 8, 15),
+            body_receipt_initial_prefix_redundancy_count(
+                &ranges,
+                512,
+                4,
+                8,
+                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS - 1
+            ),
             0
         );
     }
 
     #[test]
     fn body_receipt_prefix_hedges_get_spare_capacity_for_dense_peer_sets() {
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 16), 4);
+        assert_eq!(
+            body_receipt_prefix_hedge_spare_attempts(
+                1024,
+                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+            ),
+            4
+        );
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(1025, 32), 0);
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1024, 15), 0);
+        assert_eq!(
+            body_receipt_prefix_hedge_spare_attempts(
+                1024,
+                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS - 1
+            ),
+            0
+        );
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(0, 32), 0);
     }
 
@@ -5663,6 +5701,69 @@ mod tests {
         assert_eq!(accounting.stats.len(), 1);
         assert_eq!(accounting.failures.len(), 1);
         assert!(accounting.active_requests.is_empty());
+    }
+
+    #[test]
+    fn parallel_chunk_failures_coalesce_duplicate_request_penalties() {
+        let peer = PeerId::repeat_byte(0x11);
+        let other_peer = PeerId::repeat_byte(0x22);
+
+        let failures = coalesce_parallel_chunk_failures(vec![
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Receipts,
+                peer_id: peer,
+                requested: 64,
+                kind: ChunkFailureKind::Request(RequestAttempt::Disconnected),
+            },
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Receipts,
+                peer_id: peer,
+                requested: 16,
+                kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::Timeout,
+                )),
+            },
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Bodies,
+                peer_id: peer,
+                requested: 32,
+                kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::BadResponse,
+                )),
+            },
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Bodies,
+                peer_id: other_peer,
+                requested: 32,
+                kind: ChunkFailureKind::Incomplete { returned: 0 },
+            },
+        ]);
+
+        assert_eq!(failures.len(), 3);
+        assert!(failures.iter().any(|failure| {
+            failure.peer_id == peer
+                && failure.role == ChunkRequestRole::Receipts
+                && matches!(
+                    failure.kind,
+                    ChunkFailureKind::Request(RequestAttempt::Request(
+                        reth_network::p2p::error::RequestError::Timeout
+                    ))
+                )
+        }));
+        assert!(failures.iter().any(|failure| {
+            failure.peer_id == peer
+                && failure.role == ChunkRequestRole::Bodies
+                && matches!(
+                    failure.kind,
+                    ChunkFailureKind::Request(RequestAttempt::Request(
+                        reth_network::p2p::error::RequestError::BadResponse
+                    ))
+                )
+        }));
+        assert!(failures.iter().any(|failure| {
+            failure.peer_id == other_peer
+                && matches!(failure.kind, ChunkFailureKind::Incomplete { returned: 0 })
+        }));
     }
 
     #[test]
