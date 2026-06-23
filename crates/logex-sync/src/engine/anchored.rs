@@ -38,9 +38,9 @@ const HISTORICAL_MEDIUM_PEER_FETCH_WINDOW_BLOCKS: u64 = 2_048;
 const HISTORICAL_HIGH_MEMORY_FETCH_WINDOW_BLOCKS: u64 = 5_000;
 const HISTORICAL_DEEP_FETCH_WINDOW_BLOCKS: u64 = 4_096;
 const HISTORICAL_WIDE_FETCH_WINDOW_BLOCKS: u64 = 5_000;
-const HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS: u64 = 512;
+const HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS: u64 = 256;
 const HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS: u64 = 1_024;
-const HISTORICAL_DENSE_DENSITY_TARGET_FETCH_ROWS: f64 = 500_000.0;
+const HISTORICAL_DENSE_DENSITY_TARGET_FETCH_ROWS: f64 = 250_000.0;
 const HISTORICAL_MEDIUM_DENSITY_TARGET_FETCH_ROWS: f64 = 750_000.0;
 const HISTORICAL_MEDIUM_DENSITY_MAX_FETCH_WINDOW_BLOCKS: u64 = 10_000;
 const HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
@@ -1668,9 +1668,7 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.drain_historical_prepare_tasks().await?;
-        if self.recover_historical_sequence_gap(&child_header) {
-            return Ok(true);
-        }
+        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header);
         if max_new_fetches != usize::MAX
             && historical_critical_refill_has_enough_buffer(
                 self.active_historical_fetch_count(),
@@ -1697,6 +1695,7 @@ impl SyncEngine {
         Ok(self.active_historical_fetch_count() != active_fetches
             || self.pending_historical_fetch_count() != pending_fetches
             || self.pending_historical_prepare_count() != pending_prepares
+            || recovered_sequence_gap
             || prepare_progressed)
     }
 
@@ -4618,23 +4617,20 @@ mod tests {
             historical_density_fetch_window_cap(Some(200.0)),
             Some(3_750)
         );
-        assert_eq!(
-            historical_density_fetch_window_cap(Some(400.0)),
-            Some(HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS)
-        );
+        assert_eq!(historical_density_fetch_window_cap(Some(400.0)), Some(625));
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(400.0)),
             Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
         );
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
-            Some(HISTORICAL_DENSE_FETCH_WINDOW_MAX_BLOCKS)
+            Some(833)
         );
         assert_eq!(
             historical_density_fetch_pipeline_depth_cap(Some(HISTORICAL_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_DENSE_FETCH_PIPELINE_DEPTH)
         );
-        assert_eq!(historical_density_fetch_window_cap(Some(900.0)), Some(555));
+        assert_eq!(historical_density_fetch_window_cap(Some(900.0)), Some(277));
         assert_eq!(
             historical_density_fetch_window_cap(Some(HISTORICAL_VERY_DENSE_ROWS_PER_BLOCK)),
             Some(HISTORICAL_DENSE_FETCH_WINDOW_MIN_BLOCKS)
