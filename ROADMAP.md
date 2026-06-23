@@ -43,6 +43,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Threshold run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-155604.log`: average ~342k logs/sec, p50 ~309k, p90 ~576k, with no sequence resets or plan failures.
   - The tradeoff is more request timeout churn and higher body/receipt tail latency, but sustained floor progress improved under the current 300/300 Mbps network constraint.
 - Rejected lowering the decoupled dense body/receipt minimum peer count from 8 to 4. The experiment made more plans use the decoupled path and reduced body/receipt plan latency, but it overfilled prepared work, reduced active download depth, and lowered warmed progress versus the committed baseline.
+- Accepted a larger healthy-memory prepare buffer while keeping the low-memory path unchanged:
+  - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-163936.log`: last-60 average ~329k logs/sec, p50 ~295k, p90 ~536k.
+  - Prepare-buffer run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-164912.log`: last-60 average ~334k logs/sec, p50 ~301k, p90 ~517k, with fewer low windows and no sequence resets or plan failures.
+  - The change is modest but useful: it smooths write/download overlap without hiding the remaining active-fetch scheduling bottleneck.
 
 ## Remaining TODOs
 
@@ -72,6 +76,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Dense body/receipt chunk caps now shrink with log density when at least 16 peers are available: sparse ranges keep 128-block chunks, dense ranges cap at 48 blocks, and very dense ranges cap at 32 blocks. Live testing showed this reduced tail timeouts and improved sustained logs/sec.
 - During ordered historical writes, the engine uses a write-specific bounded refill path. It keeps active downloads full without treating a full prepared queue as sufficient by itself, while the normal fetch buffer still enforces memory limits. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
 - Dense lookahead can now activate at 16 serving peers, but wider high-peer fetch windows still require 20 serving peers. This keeps the downloader busy earlier without broadening request windows too aggressively.
+- Healthy-memory historical prepare buffering can hold up to 12 completed fetches, while low-memory refill behavior remains at the smaller prepare lookahead floor. Live testing showed this modestly improves write/download overlap without creating the prepared-work backlog seen in the rejected decoupled request experiment.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -118,6 +123,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: forcing more request plans through the decoupled dense path can outrun ordered prepare/write ingestion.
   - Resolution: rejected the 4-peer decoupled eligibility experiment after live testing showed lower progress despite lower request-plan latency.
   - Remaining: further improvements should keep fetch, prepare, and write stages balanced instead of optimizing request latency alone.
+- Challenge: the accepted prepare-buffer experiment improved overlap but did not keep active downloads full with 20+ serving peers.
+  - Resolution: kept the small buffer increase because it did not regress safety or low-memory behavior.
+  - Remaining: active fetch dips still require chunk-level scheduling/reassignment, not more static buffering.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -128,6 +136,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/mod.rs`; rejected shorter request-pause experiment was reverted.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected lower decoupled dense peer eligibility and restored the committed request-plan baseline on the remote client.
+- Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the healthy-memory prepare-buffer increase and kept the low-memory floor unchanged.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
