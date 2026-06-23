@@ -32,6 +32,8 @@ const PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
+const PIPELINED_BODY_RECEIPT_DENSE_CHUNK_BLOCKS: usize = 48;
+const PIPELINED_BODY_RECEIPT_VERY_DENSE_CHUNK_BLOCKS: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 512;
 const PIPELINED_BODY_RECEIPT_DENSE_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
@@ -41,6 +43,7 @@ const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
 const PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
 const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
+const PIPELINED_BODY_RECEIPT_VERY_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 1_500.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
 const PARALLEL_CHUNK_SALVAGE_PEER_LIMIT: usize = 4;
@@ -4927,7 +4930,20 @@ fn chunk_ranges_with_optional_gas(
     ranges
 }
 
-fn body_receipt_chunk_cap(_peer_pair_count: usize, _rows_per_block: Option<f64>) -> usize {
+fn body_receipt_chunk_cap(peer_pair_count: usize, rows_per_block: Option<f64>) -> usize {
+    if peer_pair_count >= PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS {
+        if rows_per_block
+            .is_some_and(|rows| rows >= PIPELINED_BODY_RECEIPT_VERY_DENSE_RETURN_ROWS_PER_BLOCK)
+        {
+            return PIPELINED_BODY_RECEIPT_VERY_DENSE_CHUNK_BLOCKS;
+        }
+        if rows_per_block
+            .is_some_and(|rows| rows >= PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK)
+        {
+            return PIPELINED_BODY_RECEIPT_DENSE_CHUNK_BLOCKS;
+        }
+    }
+
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT
 }
 
@@ -5335,9 +5351,10 @@ mod tests {
     fn body_receipt_chunk_limit_caps_large_adaptive_limits() {
         assert_eq!(body_receipt_chunk_cap(31, None), 128);
         assert_eq!(body_receipt_chunk_cap(32, Some(50.0)), 128);
-        assert_eq!(body_receipt_chunk_cap(32, Some(100.0)), 128);
-        assert_eq!(body_receipt_chunk_cap(32, Some(250.0)), 128);
-        assert_eq!(body_receipt_chunk_cap(32, Some(1500.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(15, Some(250.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(100.0)), 48);
+        assert_eq!(body_receipt_chunk_cap(32, Some(250.0)), 48);
+        assert_eq!(body_receipt_chunk_cap(32, Some(1500.0)), 32);
         assert_eq!(body_receipt_chunk_limit(128, 128, 128), 128);
         assert_eq!(body_receipt_chunk_limit(16, 128, 128), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 128), 8);
