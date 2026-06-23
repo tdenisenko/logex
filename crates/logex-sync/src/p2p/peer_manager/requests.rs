@@ -33,7 +33,7 @@ const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
-const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 1024;
+const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 512;
 const PIPELINED_BODY_RECEIPT_DENSE_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT / 2;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
@@ -5364,12 +5364,12 @@ mod tests {
         );
         assert_eq!(
             body_receipt_return_blocks(4096, Some(&dense), Some(300.0)),
-            1024
+            512
         );
         let medium_gas = vec![15_000_000; 4096];
         assert_eq!(
             body_receipt_return_blocks(4096, Some(&medium_gas), Some(300.0)),
-            1024
+            512
         );
         assert_eq!(
             body_receipt_return_blocks(4096, Some(&dense), Some(80.0)),
@@ -5383,7 +5383,7 @@ mod tests {
             body_receipt_return_blocks(12_000, Some(&sparse), Some(80.0)),
             10_000
         );
-        assert_eq!(body_receipt_return_blocks(4096, None, None), 1024);
+        assert_eq!(body_receipt_return_blocks(4096, None, None), 512);
     }
 
     #[test]
@@ -5391,7 +5391,7 @@ mod tests {
         assert_eq!(body_receipt_min_accepted_prefix(32), 32);
         assert_eq!(body_receipt_min_accepted_prefix(64), 64);
         assert_eq!(body_receipt_min_accepted_prefix(128), 64);
-        assert_eq!(body_receipt_min_accepted_prefix(1024), 64);
+        assert_eq!(body_receipt_min_accepted_prefix(1024), 128);
         assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
     }
 
@@ -5414,7 +5414,7 @@ mod tests {
 
         assert_eq!(
             planned_body_receipt_prefix_blocks(&ranges, 1_500, 1_500),
-            1_100
+            690
         );
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 512, 1024), 512);
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 1024, 640), 640);
@@ -5503,12 +5503,12 @@ mod tests {
     fn body_receipt_prefix_hedges_get_spare_capacity_for_dense_peer_sets() {
         assert_eq!(
             body_receipt_prefix_hedge_spare_attempts(
-                1024,
+                512,
                 PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
             ),
             4
         );
-        assert_eq!(body_receipt_prefix_hedge_spare_attempts(1025, 32), 0);
+        assert_eq!(body_receipt_prefix_hedge_spare_attempts(513, 32), 0);
         assert_eq!(
             body_receipt_prefix_hedge_spare_attempts(
                 1024,

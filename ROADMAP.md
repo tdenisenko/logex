@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, and allowing two chunk requests per peer once there are 16 candidates.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, and reducing dense body/receipt planned windows to 512 blocks to avoid slow peer tails.
 
 ## Completed Since Last Run
 
@@ -15,7 +15,12 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Comparable run before fanout: last-30 average ~164k logs/sec, p90 ~297k, max ~390k.
   - Fanout run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-094825.log`: last-30 average ~221k logs/sec, p90 ~445k, max ~535k.
 - Rejected 2s request timeout with 16-peer fanout because serving peers collapsed and logs/sec dropped near zero; restored 4s.
-- Deployed the accepted stable variant and confirmed the client resumed historical sync after restart.
+- Rejected partial-prefix early return because it caused residual backfill churn and dropped average throughput.
+- Accepted 512-block dense body/receipt planned windows:
+  - Baseline lower-density run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-103208.log`: average ~81k logs/sec, p50 ~83k, body/receipt avg ~20.1s, decoupled failures avg ~34/plan.
+  - 512-window run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-105803.log`: average ~129k logs/sec, p50 ~110k, body/receipt avg ~15.2s, decoupled failures avg ~6/plan.
+- Rejected 384-block dense windows because smaller batches reduced overall logs/sec and block/sec compared with the 512-window candidate.
+- Deployed the accepted 512-window variant and confirmed the client resumed historical sync after restart.
 
 ## Remaining TODOs
 
@@ -40,6 +45,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Earlier expected-fetch retries are worthwhile because they preserve ordered ingestion while reducing time spent waiting for one stale prefix when later lookahead already completed.
 - Body/receipt plans use a 45s plan timeout with faster fanout; shorter global plan timeouts caused avoidable plan failures in live runs.
 - Candidate pools switch to two chunk requests per peer at 16 peers because dense gas-bounded windows otherwise took multiple request waves even with idle local CPU and disk.
+- Dense body/receipt planned windows are capped at 512 blocks. This keeps the request plan complete, avoids residual backfill, and reduces slow-tail chunk latency better than partial-prefix early return or 384-block windows.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout or payload-size changes.
 
 ## Challenges and Resolutions
@@ -62,18 +68,21 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: dense windows were still taking multiple request waves at 16-24 serving peers.
   - Resolution: lowered the two-request fanout threshold from 32 to 16 peers after live testing showed better sustained throughput and fewer residual gaps.
   - Remaining: rework scheduling so blocking prefix chunks are reassigned while other chunks continue downloading.
+- Challenge: lower-density historical ranges had high body/receipt tail latency and many decoupled request failures.
+  - Resolution: reduced dense planned windows from 1024 to 512 blocks after live testing showed higher sustained throughput, lower fetch latency, and fewer per-plan failures.
+  - Remaining: a live scheduler is still needed because low-throughput windows remain when peer tail latency spikes.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, and batched accounting remains.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout was reverted, and duplicate failure coalescing plus 16-peer fanout remain.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, and the 512-window cap remain.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap after live benchmarking.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync p2p::peer_manager::requests::tests`; multiple remote release builds and live Mac mini benchmark samples.
