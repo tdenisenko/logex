@@ -91,6 +91,8 @@ const HISTORICAL_SPARSE_PIPELINE_MIN_TOTAL_MEMORY_BYTES: u64 =
 const HISTORICAL_DEEP_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 24 * BYTES_PER_GIB;
 const HISTORICAL_WIDE_WINDOW_MIN_TOTAL_MEMORY_BYTES: u64 = 48 * BYTES_PER_GIB;
 const HISTORICAL_ALLOCATOR_TRIM_INTERVAL: Duration = Duration::from_secs(30);
+const HISTORICAL_HIGH_PREPARE_BUFFER_AVAILABLE_MEMORY_BYTES: u64 = 6 * BYTES_PER_GIB;
+const HISTORICAL_HIGH_PREPARE_BUFFER_DEPTH_LIMIT: usize = 16;
 
 #[derive(Debug)]
 struct ConsensusReorg {
@@ -677,6 +679,10 @@ fn has_historical_sequence_after(
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
     if historical_available_memory_is_low(available_memory_bytes) {
         HISTORICAL_PREPARE_LOOKAHEAD_DEPTH
+    } else if available_memory_bytes
+        .is_some_and(|bytes| bytes >= HISTORICAL_HIGH_PREPARE_BUFFER_AVAILABLE_MEMORY_BYTES)
+    {
+        HISTORICAL_HIGH_PREPARE_BUFFER_DEPTH_LIMIT
     } else {
         HISTORICAL_PREPARE_LOOKAHEAD_DEPTH
             .saturating_add(HISTORICAL_PREPARE_COMPLETED_BUFFER_EXTRA)
@@ -4973,6 +4979,24 @@ mod tests {
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
         ));
+    }
+
+    #[test]
+    fn historical_prepare_buffer_expands_only_with_high_available_memory() {
+        assert_eq!(
+            historical_prepare_buffer_depth(Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)),
+            HISTORICAL_PREPARE_LOOKAHEAD_DEPTH
+        );
+        assert_eq!(
+            historical_prepare_buffer_depth(Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES)),
+            HISTORICAL_PREPARE_BUFFER_DEPTH_LIMIT
+        );
+        assert_eq!(
+            historical_prepare_buffer_depth(Some(
+                HISTORICAL_HIGH_PREPARE_BUFFER_AVAILABLE_MEMORY_BYTES
+            )),
+            HISTORICAL_HIGH_PREPARE_BUFFER_DEPTH_LIMIT
+        );
     }
 
     #[test]
