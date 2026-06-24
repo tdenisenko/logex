@@ -27,6 +27,7 @@ const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
 const PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS: usize = 4;
+const PIPELINED_BODY_RECEIPT_IDLE_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
@@ -4811,9 +4812,10 @@ fn retain_idle_body_receipt_candidate_pool_if_enough(
     peer_ids: &mut Vec<PeerId>,
     kind: PeerRequestKind,
 ) {
-    retain_preferred_items_if_enough(
+    retain_preferred_items_with_limited_fallbacks_if_enough(
         peer_ids,
         PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS,
+        PIPELINED_BODY_RECEIPT_IDLE_POOL_PROBE_PEERS,
         |peer_id| {
             peers
                 .get(peer_id)
@@ -4832,17 +4834,6 @@ fn retain_serving_body_receipt_candidate_pool_if_enough(
         PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS,
         |peer_id| peers.get(peer_id).is_some_and(|peer| peer.is_serving),
     );
-}
-
-fn retain_preferred_items_if_enough<T>(
-    items: &mut Vec<T>,
-    min_preferred: usize,
-    is_preferred: impl Fn(&T) -> bool,
-) {
-    let preferred = items.iter().filter(|item| is_preferred(*item)).count();
-    if preferred >= min_preferred {
-        items.retain(is_preferred);
-    }
 }
 
 fn retain_preferred_items_with_limited_fallbacks_if_enough<T>(
@@ -5315,24 +5306,6 @@ mod tests {
         peers.push(PeerId::repeat_byte(0xff));
         limit_body_receipt_candidate_pool(&mut peers);
         assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
-    }
-
-    #[test]
-    fn preferred_item_retention_keeps_fallbacks_until_threshold() {
-        let mut items = vec![1, 2, 3, 4, 5];
-
-        retain_preferred_items_if_enough(&mut items, 4, |item| item % 2 == 1);
-
-        assert_eq!(items, vec![1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn preferred_item_retention_filters_once_threshold_is_met() {
-        let mut items = vec![1, 2, 3, 4, 5];
-
-        retain_preferred_items_if_enough(&mut items, 3, |item| item % 2 == 1);
-
-        assert_eq!(items, vec![1, 3, 5]);
     }
 
     #[test]
