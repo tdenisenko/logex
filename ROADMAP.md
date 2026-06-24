@@ -137,6 +137,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected shifting the EL peer capacity split from one-third outbound to two-thirds outbound:
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-144723.log`: serving peers increased to an average ~14.2 and a max of 22, but useful floor movement averaged only ~136 blocks/sec with ~267k logs/sec.
   - The change was reverted because higher peer count did not beat the accepted baseline for contiguous verified progress and still left many body/receipt peers paused behind slow request waves.
+- Rejected widening paired body/receipt chunk concurrency below 16 peers:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-150144.log`: initial progress improved, but the full sample averaged only ~53 actual floor blocks/sec and ~105k logs/sec while serving peers fell as low as five.
+  - The change was reverted because a wider static paired window increased request pauses/prepared backlog and did not reduce end-to-end peer-tail stalls.
 
 ## Remaining TODOs
 
@@ -176,6 +179,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - The optimization target is stable use of the available 300/300 Mbps link and local resources with low idle time, not maximizing brief logs/sec peaks.
 - Candidate performance is judged by useful verified ingestion per network budget. A scheduler that keeps RX high but lowers contiguous floor progress is a regression even if it increases request concurrency.
 - Peer count alone is not a success metric. A peer-retention change must improve sustained contiguous historical floor movement or resource utilization, not just increase connected/serving peers.
+- Widening low-peer paired body/receipt concurrency without per-peer pacing is rejected. The scheduler needs measured peer/role pacing or chunk reassignment rather than simply launching more paired chunks at once.
 - Benchmark runs should use fresh recent checkpoint quorum sources when the default endpoint is stale; stale checkpoint rejection must not be bypassed for tests.
 - Transient request transport failures (`Disconnected`, `ChannelClosed`, `ConnectionDropped`) pause and demote the peer for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties and are dropped.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
