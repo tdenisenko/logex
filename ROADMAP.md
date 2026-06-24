@@ -76,6 +76,12 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Change: use six dense active fetch windows once at least eight serving peers are available.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-080230.log`: average ~493k logs/sec, p50 ~485k, p90 ~747k, active fetch p50/p90 6/7, paired plan p50/p90 ~5.2s/~10.1s, zero historical pipeline resets.
   - The previous accepted comparison averaged ~465k logs/sec with p50 ~423k and paired plan p50/p90 ~6.1s/~12.5s.
+- Rejected retesting dense lookahead depth 8 on the new baseline:
+  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-082530.log` increased active depth and RX bursts, but average progress fell to ~437k logs/sec, p50 fell to ~398k, and paired plan p90 worsened to ~14.7s.
+  - The change was reverted and the remote client was restored to the accepted depth-7 build.
+- Rejected increasing the dense fetch row target from 250k to 350k rows:
+  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-084124.log` raised RX utilization but over-buffered prepared work, produced one pipeline failure line, and trailed the accepted baseline at ~472k average logs/sec and ~449k p50.
+  - The change was reverted and the remote client was restored to the accepted 250k-row dense window target.
 
 ## Remaining TODOs
 
@@ -181,6 +187,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: after peer retention improved, dense historical sync still underfilled active downloads at 8-15 serving peers.
   - Resolution: accepted a denser low-peer lookahead boost that keeps six fetch windows active once eight serving peers are ready; live testing improved average and median throughput with no pipeline resets.
   - Remaining: low windows still occur under timeout waves, so chunk-level reassignment remains necessary.
+- Challenge: increasing bandwidth pressure can make the link busier without improving useful verified ingestion.
+  - Resolution: rejected both depth-8 lookahead and 350k dense-row windows because they raised RX or bursts while worsening median throughput and request-plan tails.
+  - Remaining: future changes should reduce peer-tail waste, not just increase bytes downloaded.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -199,6 +208,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/state.rs`; added a small tested classification helper for request-error disposition and kept strict protocol-error drops intact.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the unproven 36-peer fast-pool experiment and the regressing three-request fanout experiment.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the dense low-peer lookahead expansion after live testing.
+- Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected depth-8 and 350k dense-row experiments left no code changes in the worktree or remote build.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
