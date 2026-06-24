@@ -125,6 +125,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected raising the high-memory write-refill active-fetch floor from 2 to 4:
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-130946.log`: warm sample averaged ~335k logs/sec with ~286 actual floor blocks/sec, prepared backlog reached 16, and timeout/failure pressure rose while active fetches stayed mostly full.
   - The change was reverted because it kept downloads busy but did not improve contiguous verified floor movement; the remaining bottleneck is ordered-prefix and body/receipt peer-tail coordination, not just refill depth.
+- Rejected requiring 16 peers before the decoupled dense body/receipt path:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-133638.log`: warm sample averaged ~353k logs/sec but only ~209 actual floor blocks/sec with ~31 serving peers; active fetches dropped to 2 and prepared backlog reached 16.
+  - The parser showed fewer decoupled failures, but the paired fallback below 16 peers overfilled prepared work and slowed verified floor movement, so the accepted 8-peer threshold was restored.
 
 ## Remaining TODOs
 
@@ -159,6 +162,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Healthy-memory historical prepare buffering can hold up to 12 completed fetches, while low-memory refill behavior remains at the smaller prepare lookahead floor. Live testing showed this modestly improves write/download overlap without creating the prepared-work backlog seen in the rejected decoupled request experiment.
 - Very healthy available-memory historical prepare buffering can now hold up to 16 completed/preparing batches. This is only enabled above the high-available-memory threshold and keeps the existing low-memory path unchanged.
 - Increasing the write-refill active-fetch floor beyond the accepted baseline is rejected for now. Live testing showed that more active fetches can accumulate prepared work behind the ordered prefix without improving useful verified progress.
+- Raising decoupled dense eligibility to 16 peers is rejected. Reducing decoupled failures alone is not enough if it lowers actual contiguous floor progress or fills the prepared queue.
 - Body/receipt chunk attempts preserve the performance-sorted peer order and use in-plan load balancing inside that order. This favors measured faster peers for prefix-critical chunks while still spreading requests as per-peer in-flight counts rise.
 - The optimization target is sustained use of the available 300/300 Mbps link with low idle time, not maximizing brief logs/sec peaks.
 - Candidate performance is judged by useful verified ingestion per network budget. A scheduler that keeps RX high but lowers contiguous floor progress is a regression even if it increases request concurrency.
@@ -216,6 +220,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: raising the high-memory write-refill floor kept active downloads full but did not move the verified floor faster.
   - Resolution: reverted the change after live testing showed prepared backlog saturation and worse actual floor movement.
   - Remaining: the scheduler needs chunk-level ownership, reassignment, and ordered-prefix awareness rather than another static active-fetch floor.
+- Challenge: avoiding partial decoupled prefixes by raising the decoupled peer threshold reduced one failure class but hurt throughput.
+  - Resolution: reverted the threshold change after live testing showed worse actual floor movement despite fewer decoupled failures.
+  - Remaining: future work should make decoupled plans reassign or suppress known slow peers dynamically instead of disabling the path for medium peer counts.
 - Challenge: allowing more total outstanding fetch work looked like a way to keep downloads active.
   - Resolution: reverted after live testing showed prepared backlog saturation, worse refill latency, and lower throughput.
   - Remaining: the next scheduler should track block-range status and peer speed, similar to Nethermind's pending/sent/inserted fast-block feed, instead of relying on larger buffers.
