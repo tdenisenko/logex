@@ -9,6 +9,13 @@ const PEER_RATE_EWMA_WEIGHT: f64 = 0.25;
 const RECEIPT_QUARANTINE_DURATION: Duration = Duration::from_secs(5 * 60);
 const RECEIPT_REQUEST_FAILURE_QUARANTINE_DURATION: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestErrorDisposition {
+    Pause,
+    Timeout,
+    DropBadProtocol,
+}
+
 impl PeerManager {
     /// Number of currently connected peers.
     pub fn peer_count(&self) -> usize {
@@ -481,32 +488,27 @@ impl PeerManager {
         kind: PeerRequestKind,
         error: &RequestAttempt,
     ) -> bool {
-        match error {
-            RequestAttempt::Disconnected => true,
-            RequestAttempt::Request(request_error) => match request_error {
-                reth_network::p2p::error::RequestError::Timeout => {
-                    self.reduce_peer_request_limit(peer_id, kind);
-                    let consecutive_timeouts = self.record_timeout(peer_id);
-                    self.pause_peer_requests(
-                        peer_id,
-                        kind,
-                        request_timeout_pause_duration(consecutive_timeouts),
-                    );
-                    consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
-                }
-                reth_network::p2p::error::RequestError::BadResponse => {
-                    self.network
-                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
-                    true
-                }
-                reth_network::p2p::error::RequestError::UnsupportedCapability => {
-                    self.network
-                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
-                    true
-                }
-                reth_network::p2p::error::RequestError::ChannelClosed
-                | reth_network::p2p::error::RequestError::ConnectionDropped => true,
-            },
+        match request_error_disposition(error) {
+            RequestErrorDisposition::Pause => {
+                self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
+                self.record_soft_failure(peer_id);
+                false
+            }
+            RequestErrorDisposition::Timeout => {
+                self.reduce_peer_request_limit(peer_id, kind);
+                let consecutive_timeouts = self.record_timeout(peer_id);
+                self.pause_peer_requests(
+                    peer_id,
+                    kind,
+                    request_timeout_pause_duration(consecutive_timeouts),
+                );
+                consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
+            }
+            RequestErrorDisposition::DropBadProtocol => {
+                self.network
+                    .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
+                true
+            }
         }
     }
 
@@ -1113,6 +1115,23 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
     }
 }
 
+fn request_error_disposition(error: &RequestAttempt) -> RequestErrorDisposition {
+    match error {
+        RequestAttempt::Disconnected => RequestErrorDisposition::Pause,
+        RequestAttempt::Request(request_error) => match request_error {
+            reth_network::p2p::error::RequestError::Timeout => RequestErrorDisposition::Timeout,
+            reth_network::p2p::error::RequestError::BadResponse
+            | reth_network::p2p::error::RequestError::UnsupportedCapability => {
+                RequestErrorDisposition::DropBadProtocol
+            }
+            reth_network::p2p::error::RequestError::ChannelClosed
+            | reth_network::p2p::error::RequestError::ConnectionDropped => {
+                RequestErrorDisposition::Pause
+            }
+        },
+    }
+}
+
 fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
     REQUEST_KIND_PAUSE_DURATION
         .saturating_mul(consecutive_timeouts.max(1))
@@ -1474,6 +1493,42 @@ mod tests {
         assert_eq!(
             request_timeout_pause_duration(100),
             REQUEST_TIMEOUT_PAUSE_MAX_DURATION
+        );
+    }
+
+    #[test]
+    fn transient_transport_request_errors_pause_without_dropping_peer() {
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Disconnected),
+            RequestErrorDisposition::Pause
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::ChannelClosed
+            )),
+            RequestErrorDisposition::Pause
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::ConnectionDropped
+            )),
+            RequestErrorDisposition::Pause
+        );
+    }
+
+    #[test]
+    fn protocol_request_errors_still_drop_peer() {
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::BadResponse
+            )),
+            RequestErrorDisposition::DropBadProtocol
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::UnsupportedCapability
+            )),
+            RequestErrorDisposition::DropBadProtocol
         );
     }
 }

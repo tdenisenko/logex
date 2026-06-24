@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, and enabling the dense lookahead boost earlier when enough ready peers exist.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, enabling the dense lookahead boost earlier when enough ready peers exist, and treating transient request transport closures as soft per-kind pauses instead of immediate peer removals.
 
 ## Completed Since Last Run
 
@@ -63,6 +63,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected lowering dense high-depth activation from 16 to 12 serving peers:
   - The experiment increased active depth and block throughput in some windows, but raised timeout churn and produced a body/receipt pipeline failure.
   - The accepted scheduler was restored on the remote and restarted from the same data dir.
+- Accepted soft handling for transient body/receipt request transport failures:
+  - Before the change, correlated `Disconnected` / channel-close request failures could amplify into peer-pool collapse even while the network itself remained usable.
+  - After deployment in `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-070206.log`, serving-peer p50 improved from ~16 to ~31, fetch-capacity p50 from ~17 to ~31, progress p50 from ~351k to ~397k logs/sec, and p90 from ~608k to ~748k logs/sec.
+  - The remaining low windows now correlate with long body/receipt plan tails and ordered prefix refill waits, not loss of the peer pool.
 
 ## Remaining TODOs
 
@@ -96,6 +100,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Body/receipt chunk attempts preserve the performance-sorted peer order and use in-plan load balancing inside that order. This favors measured faster peers for prefix-critical chunks while still spreading requests as per-peer in-flight counts rise.
 - The optimization target is sustained use of the available 300/300 Mbps link with low idle time, not maximizing brief logs/sec peaks.
 - Benchmark runs should use fresh recent checkpoint quorum sources when the default endpoint is stale; stale checkpoint rejection must not be bypassed for tests.
+- Transient request transport failures (`Disconnected`, `ChannelClosed`, `ConnectionDropped`) pause and demote the peer for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties and are dropped.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -160,6 +165,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: lowering dense high-depth activation to use more bandwidth at 12-15 peers increased request pressure too early.
   - Resolution: reverted the experiment after a body/receipt pipeline failed below the accepted prefix.
   - Remaining: activation should become adaptive to timeout/tail-latency signals, not just a lower static peer-count threshold.
+- Challenge: request failure waves could turn a transport hiccup into local peer-pool collapse.
+  - Resolution: transient request transport failures now pause and demote peers instead of disconnecting them from the local peer set; live testing showed the serving pool survived timeout waves and climbed into the 40+ peer range.
+  - Remaining: request-tail latency still causes ordered-prefix waits, so chunk-level reassignment remains the main scheduler task.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -175,6 +183,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted performance-order chunk peer assignment and updated the stale rotation-focused test.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the decoupled dense fast-peer-order experiment after live testing showed severe progress collapse.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected and reverted the 12-peer dense high-depth activation experiment after live testing showed a body/receipt pipeline failure.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/state.rs`; added a small tested classification helper for request-error disposition and kept strict protocol-error drops intact.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
@@ -184,7 +193,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, rejected decoupled dense experiment, and rejected 12-peer dense activation experiment.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted. The transport-error retention fix passed `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`, then was deployed to the Mac mini for a live benchmark.
 - Blockers: no external blocker; the remaining work is architectural scheduler work.
 
 ## Known Issues or Risks
