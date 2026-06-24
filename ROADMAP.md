@@ -82,6 +82,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected increasing the dense fetch row target from 250k to 350k rows:
   - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-084124.log` raised RX utilization but over-buffered prepared work, produced one pipeline failure line, and trailed the accepted baseline at ~472k average logs/sec and ~449k p50.
   - The change was reverted and the remote client was restored to the accepted 250k-row dense window target.
+- Rejected reducing the body/receipt hedge delay from 1.5s to 1.0s:
+  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-085853.log` lowered some plan latency but raised duplicate/wasted request pressure, produced one pipeline failure line, and dropped progress to ~392k average logs/sec and ~375k p50.
+  - The change was reverted and the remote client was restored to the accepted 1.5s hedge delay.
 
 ## Remaining TODOs
 
@@ -188,7 +191,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Resolution: accepted a denser low-peer lookahead boost that keeps six fetch windows active once eight serving peers are ready; live testing improved average and median throughput with no pipeline resets.
   - Remaining: low windows still occur under timeout waves, so chunk-level reassignment remains necessary.
 - Challenge: increasing bandwidth pressure can make the link busier without improving useful verified ingestion.
-  - Resolution: rejected both depth-8 lookahead and 350k dense-row windows because they raised RX or bursts while worsening median throughput and request-plan tails.
+  - Resolution: rejected depth-8 lookahead, 350k dense-row windows, and 1.0s hedging because they raised RX, bursts, or duplicate pressure while worsening median throughput or stability.
   - Remaining: future changes should reduce peer-tail waste, not just increase bytes downloaded.
 
 ## Dead Code and Obsolescence Cleanup
@@ -209,6 +212,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the unproven 36-peer fast-pool experiment and the regressing three-request fanout experiment.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the dense low-peer lookahead expansion after live testing.
 - Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected depth-8 and 350k dense-row experiments left no code changes in the worktree or remote build.
+- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected 1.0s hedge-delay experiment left no code changes in the worktree or remote build.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
