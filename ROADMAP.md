@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, and enabling the dense lookahead boost earlier when enough ready peers exist.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, and enabling the dense lookahead boost earlier when enough ready peers exist.
 
 ## Completed Since Last Run
 
@@ -52,6 +52,14 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-171504.log`: last-60 average ~228k logs/sec, p50 ~180k, 6 low windows under 100k, body/receipt avg ~8.3s.
   - Peer-ordering run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-172437.log`: last-100 average ~321k logs/sec, p50 ~298k, zero low windows under 100k, active fetch avg ~6.9/7, body/receipt avg ~8.1s and paired plan avg ~5.1s.
   - This matches Nethermind's fast-block preference for measured faster peers while still balancing per-plan in-flight requests.
+- Confirmed the latest full sync reached genesis, rotated the completed data dir into `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`, deleted the superseded backup, and restarted fresh from peer metadata only.
+- Replaced the stale default checkpoint source in the remote benchmark script with the agreeing Beacon API quorum `https://ethereum-beacon-api.publicnode.com,https://lodestar-mainnet.chainsafe.io`; stale checkpoint rejection correctly prevented startup with the old SIGP checkpoint.
+- Benchmarked the fresh accepted build under the current 300/300 Mbps network:
+  - `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-054601.log`: last-60 average ~414k logs/sec, p50 ~361k, p90 ~677k, max ~970k, no sequence resets or pipeline failures.
+  - RX bandwidth usually ranged ~115-214 Mbps during dense sync, so the bottleneck is still peer/request tail behavior rather than disk or CPU, with the link becoming relevant during stronger windows.
+- Rejected decoupled dense peer-order preservation after live testing:
+  - The experiment improved bursts but produced near-zero progress windows while active fetches and RX remained high.
+  - Restored the accepted scheduler on the remote and confirmed historical progress resumed from the same data dir.
 
 ## Remaining TODOs
 
@@ -83,6 +91,8 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Dense lookahead can now activate at 16 serving peers, but wider high-peer fetch windows still require 20 serving peers. This keeps the downloader busy earlier without broadening request windows too aggressively.
 - Healthy-memory historical prepare buffering can hold up to 12 completed fetches, while low-memory refill behavior remains at the smaller prepare lookahead floor. Live testing showed this modestly improves write/download overlap without creating the prepared-work backlog seen in the rejected decoupled request experiment.
 - Body/receipt chunk attempts preserve the performance-sorted peer order and use in-plan load balancing inside that order. This favors measured faster peers for prefix-critical chunks while still spreading requests as per-peer in-flight counts rise.
+- The optimization target is sustained use of the available 300/300 Mbps link with low idle time, not maximizing brief logs/sec peaks.
+- Benchmark runs should use fresh recent checkpoint quorum sources when the default endpoint is stale; stale checkpoint rejection must not be bypassed for tests.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -138,6 +148,12 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: equal-load chunk rotation could assign prefix-critical body/receipt chunks to slower peers despite existing peer speed scoring.
   - Resolution: preserved score order inside chunk attempts and relied on in-flight counts for fairness; live testing improved warmed progress and reduced low windows.
   - Remaining: a full scheduler should still track individual block-range status and reassign slow chunks.
+- Challenge: the old checkpoint endpoint returned a stale finalized slot for a fresh data dir.
+  - Resolution: startup correctly rejected the stale checkpoint; the benchmark script now uses two agreeing Beacon API endpoints.
+  - Remaining: implement the project's own recent-checkpoint source later, as already planned outside this PR.
+- Challenge: preserving fast-peer order in the decoupled dense path looked promising but caused severe low-progress windows under live load.
+  - Resolution: reverted the experiment and restored the accepted remote build.
+  - Remaining: decoupled scheduling needs chunk-level reassignment/hedging rather than simply removing peer rotation.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -151,16 +167,17 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the healthy-memory prepare-buffer increase and kept the low-memory floor unchanged.
 - Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected outstanding-work budget experiment left no code changes in the worktree.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted performance-order chunk peer assignment and updated the stale rotation-focused test.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the decoupled dense fast-peer-order experiment after live testing showed severe progress collapse.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, and rejected decoupled dense experiment.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted.
 - Blockers: no external blocker; the remaining work is architectural scheduler work.
 
 ## Known Issues or Risks
