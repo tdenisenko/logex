@@ -97,6 +97,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected stopping decoupled dense role downloads at the accepted prefix:
   - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-101621.log` used ~213 Mbps average RX but only reached ~248k average progress and ~198k p50, with 22 residual batches in a short run.
   - The change was reverted because it spent bandwidth on more partial-prefix/residual churn instead of improving verified ingestion.
+- Rejected single-shot paired body/receipt chunk attempts:
+  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-103452.log` reduced the worst paired-plan tail but did not materially improve batch throughput, worsened paired-plan p50, and increased pipeline failure lines.
+  - The change was reverted because it moved retry work to the scheduler without enough evidence of better end-to-end sync time.
 
 ## Remaining TODOs
 
@@ -217,6 +220,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: letting decoupled dense role downloads stop as soon as the accepted prefix was available reduced waiting in theory but increased residual churn in practice.
   - Resolution: reverted after live testing showed lower useful logs/sec despite high RX utilization.
   - Remaining: partial-prefix progress should only be used when a scheduler can keep the leftover range queued without fragmenting ordered ingestion.
+- Challenge: making paired chunk attempts single-shot exposed failures to the scheduler sooner but also removed useful in-attempt fallback.
+  - Resolution: reverted after live testing showed no sustained batch-throughput gain and more pipeline failure lines.
+  - Remaining: a live scheduler needs per-role task state so it can reuse a successful body or receipt half instead of redownloading the whole chunk on every retry.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -241,16 +247,17 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected paired-plan lookahead hedge experiment left no code changes locally or on the remote build.
 - Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected broad decoupled-prefix experiment left no code changes locally or on the remote build.
 - Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected accepted-prefix early-stop experiment left no code changes locally or on the remote build.
+- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected single-shot paired-attempt experiment left no code changes locally or on the remote build.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, rejected decoupled dense experiment, rejected 12-peer dense activation experiment, transient transport soft-failure handling, dense low-peer lookahead expansion, rejected paired-plan lookahead hedge, rejected broad decoupled-prefix testing, and rejected accepted-prefix early-stop testing.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, rejected decoupled dense experiment, rejected 12-peer dense activation experiment, transient transport soft-failure handling, dense low-peer lookahead expansion, rejected paired-plan lookahead hedge, rejected broad decoupled-prefix testing, rejected accepted-prefix early-stop testing, and rejected single-shot paired-attempt testing.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted. The transport-error retention fix passed `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`, then was deployed to the Mac mini for a live benchmark. The dense low-peer lookahead expansion passed `cargo fmt --check` and `cargo test -p logex-sync`, then was live-tested on the Mac mini. The rejected broad decoupled-prefix experiment passed `cargo fmt --check` and targeted `cargo test -p logex-sync` coverage before live testing, then was reverted. The rejected accepted-prefix early-stop experiment passed `cargo fmt --check`, `cargo test -p logex-sync decoupled_dense`, and `cargo test -p logex-sync body_receipt` before live testing, then was reverted.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted. The transport-error retention fix passed `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`, then was deployed to the Mac mini for a live benchmark. The dense low-peer lookahead expansion passed `cargo fmt --check` and `cargo test -p logex-sync`, then was live-tested on the Mac mini. The rejected broad decoupled-prefix experiment passed `cargo fmt --check` and targeted `cargo test -p logex-sync` coverage before live testing, then was reverted. The rejected accepted-prefix early-stop experiment passed `cargo fmt --check`, `cargo test -p logex-sync decoupled_dense`, and `cargo test -p logex-sync body_receipt` before live testing, then was reverted. The rejected single-shot paired-attempt experiment passed `cargo fmt --check` and `cargo test -p logex-sync body_receipt` before live testing, then was reverted.
 - Blockers: no external blocker; the remaining work is architectural scheduler work.
 
 ## Known Issues or Risks
