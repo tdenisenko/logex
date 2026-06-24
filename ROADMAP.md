@@ -60,6 +60,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected decoupled dense peer-order preservation after live testing:
   - The experiment improved bursts but produced near-zero progress windows while active fetches and RX remained high.
   - Restored the accepted scheduler on the remote and confirmed historical progress resumed from the same data dir.
+- Rejected lowering dense high-depth activation from 16 to 12 serving peers:
+  - The experiment increased active depth and block throughput in some windows, but raised timeout churn and produced a body/receipt pipeline failure.
+  - The accepted scheduler was restored on the remote and restarted from the same data dir.
 
 ## Remaining TODOs
 
@@ -154,6 +157,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: preserving fast-peer order in the decoupled dense path looked promising but caused severe low-progress windows under live load.
   - Resolution: reverted the experiment and restored the accepted remote build.
   - Remaining: decoupled scheduling needs chunk-level reassignment/hedging rather than simply removing peer rotation.
+- Challenge: lowering dense high-depth activation to use more bandwidth at 12-15 peers increased request pressure too early.
+  - Resolution: reverted the experiment after a body/receipt pipeline failed below the accepted prefix.
+  - Remaining: activation should become adaptive to timeout/tail-latency signals, not just a lower static peer-count threshold.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -168,13 +174,14 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected outstanding-work budget experiment left no code changes in the worktree.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted performance-order chunk peer assignment and updated the stale rotation-focused test.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the decoupled dense fast-peer-order experiment after live testing showed severe progress collapse.
+- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected and reverted the 12-peer dense high-depth activation experiment after live testing showed a body/receipt pipeline failure.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, and rejected decoupled dense experiment.
+- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, rejected decoupled dense experiment, and rejected 12-peer dense activation experiment.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; throughput target and scheduler work remain incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; multiple remote release builds and live Mac mini benchmark samples. The rejected decoupled experiment passed local `cargo fmt --check` and `cargo test -p logex-sync` before live testing, then was reverted.
