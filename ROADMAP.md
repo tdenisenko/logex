@@ -47,6 +47,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-163936.log`: last-60 average ~329k logs/sec, p50 ~295k, p90 ~536k.
   - Prepare-buffer run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-164912.log`: last-60 average ~334k logs/sec, p50 ~301k, p90 ~517k, with fewer low windows and no sequence resets or plan failures.
   - The change is modest but useful: it smooths write/download overlap without hiding the remaining active-fetch scheduling bottleneck.
+- Rejected changing the healthy-memory fetch budget from completed-only to total outstanding work. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-170413.log` overfilled prepared work, dropped active fetches, and reduced last-60 progress to ~143k logs/sec versus ~334k on the accepted baseline.
 
 ## Remaining TODOs
 
@@ -126,6 +127,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: the accepted prepare-buffer experiment improved overlap but did not keep active downloads full with 20+ serving peers.
   - Resolution: kept the small buffer increase because it did not regress safety or low-memory behavior.
   - Remaining: active fetch dips still require chunk-level scheduling/reassignment, not more static buffering.
+- Challenge: allowing more total outstanding fetch work looked like a way to keep downloads active.
+  - Resolution: reverted after live testing showed prepared backlog saturation, worse refill latency, and lower throughput.
+  - Remaining: the next scheduler should track block-range status and peer speed, similar to Nethermind's pending/sent/inserted fast-block feed, instead of relying on larger buffers.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -137,6 +141,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected lower decoupled dense peer eligibility and restored the committed request-plan baseline on the remote client.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the healthy-memory prepare-buffer increase and kept the low-memory floor unchanged.
+- Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected outstanding-work budget experiment left no code changes in the worktree.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
