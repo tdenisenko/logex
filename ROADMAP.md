@@ -85,6 +85,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected reducing the body/receipt hedge delay from 1.5s to 1.0s:
   - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-085853.log` lowered some plan latency but raised duplicate/wasted request pressure, produced one pipeline failure line, and dropped progress to ~392k average logs/sec and ~375k p50.
   - The change was reverted and the remote client was restored to the accepted 1.5s hedge delay.
+- Rejected disabling the decoupled dense body/receipt path:
+  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-091648.log` had more serving peers but worse useful throughput at ~442k average logs/sec and ~401k p50, with paired plan p90 worsening to ~17.0s and a larger prepared backlog.
+  - The change was reverted because the decoupled path is still useful for keeping verified ingestion moving under peer-tail latency.
 
 ## Remaining TODOs
 
@@ -193,6 +196,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: increasing bandwidth pressure can make the link busier without improving useful verified ingestion.
   - Resolution: rejected depth-8 lookahead, 350k dense-row windows, and 1.0s hedging because they raised RX, bursts, or duplicate pressure while worsening median throughput or stability.
   - Remaining: future changes should reduce peer-tail waste, not just increase bytes downloaded.
+- Challenge: removing the decoupled dense path simplified request flow but made body/receipt plan tails and prepared backlog worse.
+  - Resolution: restored the accepted decoupled path after live testing showed paired-only scheduling trailed the accepted baseline despite a healthy serving-peer count.
+  - Remaining: replace static whole-window request plans with a live scheduler that can reassign slow chunks without over-buffering prepared work.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -213,6 +219,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the dense low-peer lookahead expansion after live testing.
 - Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected depth-8 and 350k dense-row experiments left no code changes in the worktree or remote build.
 - Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected 1.0s hedge-delay experiment left no code changes in the worktree or remote build.
+- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected paired-only experiment left the accepted decoupled dense body/receipt path enabled locally and on the remote build.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow
