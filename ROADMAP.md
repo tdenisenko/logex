@@ -48,6 +48,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Prepare-buffer run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-164912.log`: last-60 average ~334k logs/sec, p50 ~301k, p90 ~517k, with fewer low windows and no sequence resets or plan failures.
   - The change is modest but useful: it smooths write/download overlap without hiding the remaining active-fetch scheduling bottleneck.
 - Rejected changing the healthy-memory fetch budget from completed-only to total outstanding work. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-170413.log` overfilled prepared work, dropped active fetches, and reduced last-60 progress to ~143k logs/sec versus ~334k on the accepted baseline.
+- Accepted preserving performance-sorted peer order for body/receipt chunk attempts instead of rotating equally loaded peers by chunk index:
+  - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-171504.log`: last-60 average ~228k logs/sec, p50 ~180k, 6 low windows under 100k, body/receipt avg ~8.3s.
+  - Peer-ordering run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-172437.log`: last-100 average ~321k logs/sec, p50 ~298k, zero low windows under 100k, active fetch avg ~6.9/7, body/receipt avg ~8.1s and paired plan avg ~5.1s.
+  - This matches Nethermind's fast-block preference for measured faster peers while still balancing per-plan in-flight requests.
 
 ## Remaining TODOs
 
@@ -78,6 +82,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - During ordered historical writes, the engine uses a write-specific bounded refill path. It keeps active downloads full without treating a full prepared queue as sufficient by itself, while the normal fetch buffer still enforces memory limits. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
 - Dense lookahead can now activate at 16 serving peers, but wider high-peer fetch windows still require 20 serving peers. This keeps the downloader busy earlier without broadening request windows too aggressively.
 - Healthy-memory historical prepare buffering can hold up to 12 completed fetches, while low-memory refill behavior remains at the smaller prepare lookahead floor. Live testing showed this modestly improves write/download overlap without creating the prepared-work backlog seen in the rejected decoupled request experiment.
+- Body/receipt chunk attempts preserve the performance-sorted peer order and use in-plan load balancing inside that order. This favors measured faster peers for prefix-critical chunks while still spreading requests as per-peer in-flight counts rise.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
 
 ## Challenges and Resolutions
@@ -130,6 +135,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: allowing more total outstanding fetch work looked like a way to keep downloads active.
   - Resolution: reverted after live testing showed prepared backlog saturation, worse refill latency, and lower throughput.
   - Remaining: the next scheduler should track block-range status and peer speed, similar to Nethermind's pending/sent/inserted fast-block feed, instead of relying on larger buffers.
+- Challenge: equal-load chunk rotation could assign prefix-critical body/receipt chunks to slower peers despite existing peer speed scoring.
+  - Resolution: preserved score order inside chunk attempts and relied on in-flight counts for fairness; live testing improved warmed progress and reduced low windows.
+  - Remaining: a full scheduler should still track individual block-range status and reassign slow chunks.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -142,6 +150,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected lower decoupled dense peer eligibility and restored the committed request-plan baseline on the remote client.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the healthy-memory prepare-buffer increase and kept the low-memory floor unchanged.
 - Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected outstanding-work budget experiment left no code changes in the worktree.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted performance-order chunk peer assignment and updated the stale rotation-focused test.
 - No obsolete experiment code remains in the local worktree.
 
 ## Git Workflow

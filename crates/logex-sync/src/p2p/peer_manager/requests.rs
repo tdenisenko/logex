@@ -4104,10 +4104,9 @@ fn body_receipt_attempt_peer_ids(
     peer_ids: &[PeerId],
     bad_peers: &HashSet<PeerId>,
     in_flight_peers: &HashMap<PeerId, usize>,
-    chunk_index: usize,
+    _chunk_index: usize,
 ) -> (Vec<PeerId>, Option<PeerId>) {
-    let mut ordered = peer_ids.to_vec();
-    rotate_request_candidates(&mut ordered, chunk_index);
+    let ordered = peer_ids.to_vec();
 
     let mut eligible = ordered
         .iter()
@@ -5208,7 +5207,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_attempt_peers_preserve_rotation_among_equal_loads() {
+    fn body_receipt_attempt_peers_preserve_performance_order_among_equal_loads() {
         let first = PeerId::repeat_byte(0x11);
         let second = PeerId::repeat_byte(0x22);
         let third = PeerId::repeat_byte(0x33);
@@ -5217,8 +5216,8 @@ mod tests {
         let (ordered, primary) =
             body_receipt_attempt_peer_ids(&peers, &HashSet::new(), &HashMap::new(), 1);
 
-        assert_eq!(primary, Some(second));
-        assert_eq!(ordered, vec![second, third, first]);
+        assert_eq!(primary, Some(first));
+        assert_eq!(ordered, vec![first, second, third]);
     }
 
     #[test]
