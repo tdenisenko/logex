@@ -33,6 +33,9 @@ The feature is close enough that more small knob experiments should stop unless 
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-104524.log` averaged about 224.9 actual historical floor blocks/sec with six low windows and one zero-progress window.
   - The widened stale-prefix queue was reverted; the metrics were kept.
   - Restored run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-110035.log` averaged about 231.8 actual blocks/sec with three low windows and zero zero-progress windows in the 20-sample check, and later status showed the historical EWMA briefly above 800k logs/sec.
+- Rejected a write-time refill guard experiment:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-111413.log` dropped to repeated zero-progress windows even with 17 serving peers.
+  - The guard was reverted locally and on the Mac mini; restored baseline is running in `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-112142.log`.
 - Validation passed after the rollback:
   - `cargo fmt --check`
   - `cargo test -p logex-sync`
@@ -91,6 +94,10 @@ The feature is close enough that more small knob experiments should stop unless 
   - Resolution: reverted the behavior and kept only the observability counters.
   - Remaining: build the full queue/reservation scheduler rather than adding more local refill heuristics.
 
+- Challenge: skipping write-time refill when buffers looked healthy made short-run behavior worse and produced repeated zero-progress windows.
+  - Resolution: reverted the guard and restored the committed baseline on the Mac mini.
+  - Remaining: solve refill stalls with explicit asynchronous reservation/planning instead of suppressing refill from the write path.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`, scheduler status plumbing, and dashboard metrics.
@@ -98,13 +105,14 @@ The feature is close enough that more small knob experiments should stop unless 
 - Removed unused fallback metadata from live plan chunk tracking.
 - Removed obsolete fallback-specific tests and kept tests covering live role capacity, chunk accounting, missing-prefix reassignment, and scheduling predicates.
 - Removed the rejected bounded stale-prefix refill experiment before committing.
+- Removed the rejected write-time refill guard before committing.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`.
+- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`; `docs: record rejected refill experiments`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo test -p logex-server`; `cargo clippy -p logex-sync -- -D warnings`; `cargo clippy -p logex-server -- -D warnings`; remote smoke and throughput sampling on the Mac mini.
