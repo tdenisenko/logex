@@ -19,6 +19,7 @@ const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
+const PIPELINED_BODY_RECEIPT_PREFIX_REASSIGN_ROUNDS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
     PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
@@ -1295,6 +1296,29 @@ impl BodyReceiptRequestPlan {
                                         * self.ranges.len()),
                             );
                             hedge_count += 1;
+                        } else if body_receipt_can_schedule_more_prefix_chunks(
+                            in_flight.len(),
+                            attempts.len(),
+                            max_scheduled_chunks,
+                            max_hedged_attempts,
+                        ) && let Some((range, chunk_index)) =
+                            body_receipt_missing_prefix_reassign_candidate(
+                                &self.ranges,
+                                &self.range_indices_by_start,
+                                &mut retry_counts,
+                                &in_flight,
+                                &chunks,
+                                min_return_blocks,
+                            )
+                        {
+                            schedule_body_receipt_chunk_attempt(
+                                &self,
+                                &mut attempts,
+                                &mut in_flight,
+                                &mut peer_state,
+                                range,
+                                chunk_index,
+                            );
                         }
                         continue;
                     }
@@ -1346,21 +1370,22 @@ impl BodyReceiptRequestPlan {
 
                 if chunk_failed
                     && chunk_start <= contiguous_blocks
-                    && !in_flight.contains_key(&chunk_start)
-                    && retry_counts.get(&chunk_start).copied().unwrap_or_default()
-                        < PIPELINED_GAP_RETRY_ROUNDS
-                    && let Some(base_chunk_index) =
-                        self.range_indices_by_start.get(&chunk_start).copied()
-                    && let Some(range) = self
-                        .ranges
-                        .iter()
-                        .find(|range| range.start == chunk_start)
-                        .cloned()
-                        .and_then(|range| body_receipt_prefix_range(range, min_return_blocks))
+                    && body_receipt_can_schedule_more_prefix_chunks(
+                        in_flight.len(),
+                        attempts.len(),
+                        max_scheduled_chunks,
+                        max_hedged_attempts,
+                    )
+                    && let Some((range, chunk_index)) =
+                        body_receipt_missing_prefix_reassign_candidate(
+                            &self.ranges,
+                            &self.range_indices_by_start,
+                            &mut retry_counts,
+                            &in_flight,
+                            &chunks,
+                            min_return_blocks,
+                        )
                 {
-                    let retry_count = retry_counts.entry(chunk_start).or_default();
-                    *retry_count += 1;
-                    let chunk_index = base_chunk_index + (*retry_count * self.ranges.len());
                     schedule_body_receipt_chunk_attempt(
                         &self,
                         &mut attempts,
@@ -4279,6 +4304,40 @@ fn body_receipt_hedge_candidate(
     Some((entry.range.clone(), entry.chunk_index))
 }
 
+fn body_receipt_missing_prefix_reassign_candidate<T>(
+    ranges: &[std::ops::Range<usize>],
+    range_indices_by_start: &HashMap<usize, usize>,
+    retry_counts: &mut HashMap<usize, usize>,
+    in_flight: &HashMap<usize, InFlightBodyReceiptChunk>,
+    chunks: &BTreeMap<usize, Vec<T>>,
+    min_return_blocks: usize,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let contiguous_blocks = contiguous_chunk_blocks(chunks);
+    let range = ranges
+        .iter()
+        .find(|range| {
+            range.start <= contiguous_blocks
+                && range.start < min_return_blocks
+                && !chunks.contains_key(&range.start)
+                && !in_flight.contains_key(&range.start)
+        })
+        .and_then(|range| body_receipt_prefix_range(range.clone(), min_return_blocks))?;
+    let retry_count = retry_counts.entry(range.start).or_default();
+    if *retry_count >= PIPELINED_BODY_RECEIPT_PREFIX_REASSIGN_ROUNDS {
+        return None;
+    }
+
+    *retry_count += 1;
+    let base_chunk_index = range_indices_by_start
+        .get(&range.start)
+        .copied()
+        .unwrap_or_default();
+    Some((
+        range,
+        base_chunk_index + (*retry_count * ranges.len().max(1)),
+    ))
+}
+
 fn body_receipt_chunk_request<'a>(
     plan: &'a BodyReceiptRequestPlan,
     range: std::ops::Range<usize>,
@@ -5583,6 +5642,92 @@ mod tests {
                         * PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK as u32)
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn body_receipt_missing_prefix_reassigns_earliest_unowned_gap() {
+        let ranges = vec![0..32, 32..64, 64..96];
+        let indices = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| (range.start, index))
+            .collect::<HashMap<_, _>>();
+        let mut retry_counts = HashMap::new();
+        let in_flight = HashMap::new();
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![1u8; 32]);
+        chunks.insert(64, vec![1u8; 32]);
+
+        assert_eq!(
+            body_receipt_missing_prefix_reassign_candidate(
+                &ranges,
+                &indices,
+                &mut retry_counts,
+                &in_flight,
+                &chunks,
+                96,
+            ),
+            Some((32..64, 4))
+        );
+    }
+
+    #[test]
+    fn body_receipt_missing_prefix_reassign_skips_inflight_gap() {
+        let start = Instant::now();
+        let ranges = vec![0..32, 32..64, 64..96];
+        let indices = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| (range.start, index))
+            .collect::<HashMap<_, _>>();
+        let mut retry_counts = HashMap::new();
+        let in_flight = HashMap::from([(
+            32,
+            InFlightBodyReceiptChunk {
+                range: 32..64,
+                chunk_index: 1,
+                attempts: 1,
+                last_hedged_at: start,
+                hedges: 0,
+            },
+        )]);
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![1u8; 32]);
+
+        assert_eq!(
+            body_receipt_missing_prefix_reassign_candidate(
+                &ranges,
+                &indices,
+                &mut retry_counts,
+                &in_flight,
+                &chunks,
+                96,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn body_receipt_missing_prefix_reassign_is_bounded() {
+        let ranges = vec![0..32, 32..64];
+        let indices = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| (range.start, index))
+            .collect::<HashMap<_, _>>();
+        let mut retry_counts = HashMap::from([(0, PIPELINED_BODY_RECEIPT_PREFIX_REASSIGN_ROUNDS)]);
+
+        assert_eq!(
+            body_receipt_missing_prefix_reassign_candidate(
+                &ranges,
+                &indices,
+                &mut retry_counts,
+                &HashMap::new(),
+                &BTreeMap::<usize, Vec<u8>>::new(),
+                64,
+            ),
+            None
         );
     }
 
