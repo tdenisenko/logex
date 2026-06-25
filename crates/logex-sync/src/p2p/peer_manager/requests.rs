@@ -65,6 +65,7 @@ type RequestStats = Vec<(PeerId, usize, Duration)>;
 type TypedRequestStats = Vec<(PeerId, PeerRequestKind, usize, Duration)>;
 type ParallelChunkFailures = Vec<ChunkRequestFailure>;
 type ParallelChunkError = (ParallelChunkFailures, RequestStats);
+type RawBlockBodies = Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>;
 type ParallelBodies = (Vec<SourcedBlockBody>, RequestStats, ParallelChunkFailures);
 type ParallelSourcedReceipts = (Vec<SourcedReceiptSet>, RequestStats, ParallelChunkFailures);
 type ParallelReceipts = (PeerId, ReceiptBatch, RequestStats, ParallelChunkFailures);
@@ -122,6 +123,47 @@ struct BodyReceiptChunkAttempt {
     chunk: BodyReceiptChunk,
     body_peer: Option<PeerId>,
     receipt_peer: Option<PeerId>,
+}
+
+enum BodyReceiptChunkRoleAttempt {
+    Bodies {
+        peer_id: PeerId,
+        requested: usize,
+        elapsed: Duration,
+        result: std::result::Result<RawBlockBodies, ChunkFailureKind>,
+    },
+    Receipts {
+        peer_id: PeerId,
+        requested: usize,
+        elapsed: Duration,
+        result: std::result::Result<ReceiptBatch, ChunkFailureKind>,
+    },
+}
+
+struct BodyReceiptChunkLiveCandidates {
+    bodies: Vec<PeerId>,
+    receipts: Vec<PeerId>,
+}
+
+#[derive(Default)]
+struct BodyReceiptChunkLiveRoleState {
+    next_index: usize,
+    used_peers: HashSet<PeerId>,
+    in_flight: usize,
+    last_scheduled_at: Option<Instant>,
+}
+
+#[derive(Default)]
+struct BodyReceiptChunkLiveState {
+    bodies: BodyReceiptChunkLiveRoleState,
+    receipts: BodyReceiptChunkLiveRoleState,
+}
+
+struct BodyReceiptChunkLiveStatus<'a> {
+    expected_receipt_counts: Option<&'a [usize]>,
+    has_bodies: bool,
+    has_cached_receipts: bool,
+    force: bool,
 }
 
 #[derive(Default)]
@@ -1526,252 +1568,215 @@ impl BodyReceiptRequestPlan {
     ) -> BodyReceiptChunk {
         let mut failures = Vec::new();
         let mut stats = Vec::new();
-        let mut cached_receipts: Option<(PeerId, ReceiptBatch)> = None;
         let body_candidates = body_peer_ids
             .into_iter()
             .take(PIPELINED_CHUNK_REQUEST_PEERS)
             .collect::<Vec<_>>();
-
-        for body_peer in body_candidates {
-            let receipt_candidates = receipt_candidates_for_body_peer(
-                receipt_peer_ids.clone(),
+        let receipt_candidates = if let Some(body_peer) = body_candidates.first().copied() {
+            receipt_candidates_for_body_peer(
+                receipt_peer_ids,
                 body_peer,
                 PIPELINED_CHUNK_REQUEST_PEERS,
-            );
-            let Some(first_receipt_peer) = receipt_candidates.first().copied() else {
-                failures.push(ChunkRequestFailure {
-                    role: ChunkRequestRole::Bodies,
-                    peer_id: body_peer,
-                    requested: hashes.len(),
-                    kind: ChunkFailureKind::Request(RequestAttempt::Disconnected),
-                });
-                continue;
-            };
-            let has_cached_receipts = cached_receipts.is_some();
-            let fallback_receipt_candidates = receipt_candidates
+            )
+        } else {
+            receipt_peer_ids
                 .into_iter()
-                .skip(if has_cached_receipts { 0 } else { 1 });
+                .take(PIPELINED_CHUNK_REQUEST_PEERS)
+                .collect()
+        };
 
-            let body_hashes = hashes.clone();
-            let (body_elapsed, body_result, receipt_result) = if has_cached_receipts {
-                let started_at = Instant::now();
-                let _active = BodyReceiptActiveRequestGuard::new(
-                    &self.accounting_tx,
-                    body_peer,
-                    PeerRequestKind::Bodies,
+        let candidates = BodyReceiptChunkLiveCandidates {
+            bodies: body_candidates,
+            receipts: receipt_candidates,
+        };
+        let mut attempts = futures_util::stream::FuturesUnordered::new();
+        let mut live_state = BodyReceiptChunkLiveState::default();
+        let mut bodies: Option<Vec<SourcedBlockBody>> = None;
+        let mut expected_receipt_counts: Option<Vec<usize>> = None;
+        let mut cached_receipts = Vec::<(PeerId, ReceiptBatch)>::new();
+
+        schedule_body_receipt_chunk_body_role(
+            self,
+            &mut attempts,
+            &candidates.bodies,
+            &mut live_state.bodies,
+            &hashes,
+        );
+        schedule_body_receipt_chunk_receipt_role(
+            self,
+            &mut attempts,
+            &candidates.receipts,
+            &mut live_state.receipts,
+            &hashes,
+            expected_receipt_counts.as_deref(),
+        );
+
+        loop {
+            if attempts.is_empty() {
+                schedule_missing_body_receipt_chunk_roles(
+                    self,
+                    &mut attempts,
+                    &candidates,
+                    &mut live_state,
+                    &hashes,
+                    BodyReceiptChunkLiveStatus {
+                        expected_receipt_counts: expected_receipt_counts.as_deref(),
+                        has_bodies: bodies.is_some(),
+                        has_cached_receipts: !cached_receipts.is_empty(),
+                        force: true,
+                    },
                 );
-                let result = self
-                    .request_bodies_until_complete(body_peer, body_hashes)
-                    .await;
-                (started_at.elapsed(), result, None)
-            } else {
-                let receipt_hashes = hashes.clone();
-                let body_request = async {
-                    let started_at = Instant::now();
-                    let _active = BodyReceiptActiveRequestGuard::new(
-                        &self.accounting_tx,
-                        body_peer,
-                        PeerRequestKind::Bodies,
-                    );
-                    let result = self
-                        .request_bodies_until_complete(body_peer, body_hashes)
-                        .await;
-                    (started_at.elapsed(), result)
-                };
-                let receipt_request = async {
-                    let started_at = Instant::now();
-                    let _active = BodyReceiptActiveRequestGuard::new(
-                        &self.accounting_tx,
-                        first_receipt_peer,
-                        PeerRequestKind::Receipts,
-                    );
-                    let result = self
-                        .request_receipts_until_complete(first_receipt_peer, receipt_hashes, None)
-                        .await;
-                    (started_at.elapsed(), result)
-                };
-                let ((body_elapsed, body_result), (receipt_elapsed, receipt_result)) =
-                    tokio::join!(body_request, receipt_request);
-                (
-                    body_elapsed,
-                    body_result,
-                    Some((first_receipt_peer, receipt_elapsed, receipt_result)),
-                )
-            };
-
-            let bodies = match body_result {
-                Ok(bodies) => {
-                    stats.push((
-                        body_peer,
-                        PeerRequestKind::Bodies,
-                        bodies.len(),
-                        body_elapsed,
-                    ));
-                    bodies
-                        .into_iter()
-                        .map(|body| (body_peer, body))
-                        .collect::<Vec<_>>()
+                if attempts.is_empty() {
+                    break;
                 }
-                Err(kind) => {
-                    failures.push(ChunkRequestFailure {
-                        role: ChunkRequestRole::Bodies,
-                        peer_id: body_peer,
-                        requested: hashes.len(),
-                        kind,
-                    });
-                    match receipt_result {
-                        Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
-                            stats.push((
-                                receipt_peer,
-                                PeerRequestKind::Receipts,
-                                receipts.len(),
-                                receipt_elapsed,
-                            ));
-                            cached_receipts.get_or_insert((receipt_peer, receipts));
-                        }
-                        Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
-                            failures.push(ChunkRequestFailure {
-                                role: ChunkRequestRole::Receipts,
-                                peer_id: receipt_peer,
-                                requested: hashes.len(),
-                                kind,
-                            });
-                        }
-                        None => {}
-                    }
+            }
+
+            let attempt = match timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await {
+                Ok(Some(attempt)) => attempt,
+                Ok(None) => break,
+                Err(_) => {
+                    schedule_missing_body_receipt_chunk_roles(
+                        self,
+                        &mut attempts,
+                        &candidates,
+                        &mut live_state,
+                        &hashes,
+                        BodyReceiptChunkLiveStatus {
+                            expected_receipt_counts: expected_receipt_counts.as_deref(),
+                            has_bodies: bodies.is_some(),
+                            has_cached_receipts: !cached_receipts.is_empty(),
+                            force: false,
+                        },
+                    );
                     continue;
                 }
             };
 
-            let expected_receipt_counts = bodies
-                .iter()
-                .map(|(_, body)| body.transaction_count())
-                .collect::<Vec<_>>();
+            match attempt {
+                BodyReceiptChunkRoleAttempt::Bodies {
+                    peer_id,
+                    requested,
+                    elapsed,
+                    result,
+                } => {
+                    live_state.bodies.in_flight = live_state.bodies.in_flight.saturating_sub(1);
+                    match result {
+                        Ok(raw_bodies) => {
+                            stats.push((
+                                peer_id,
+                                PeerRequestKind::Bodies,
+                                raw_bodies.len(),
+                                elapsed,
+                            ));
+                            let sourced_bodies = raw_bodies
+                                .into_iter()
+                                .map(|body| (peer_id, body))
+                                .collect::<Vec<_>>();
+                            expected_receipt_counts = Some(
+                                sourced_bodies
+                                    .iter()
+                                    .map(|(_, body)| body.transaction_count())
+                                    .collect(),
+                            );
 
-            let mut skip_fallback_receipt_peer = None;
-            if let Some((receipt_peer, receipts)) = cached_receipts.take() {
-                match body_receipt_blocks_if_counts_match(
-                    &bodies,
-                    receipt_peer,
-                    receipts,
-                    hashes.len(),
-                ) {
-                    Ok(blocks) => {
-                        return BodyReceiptChunk {
-                            start,
-                            blocks,
-                            failures,
-                            stats,
-                        };
-                    }
-                    Err(kind) => {
-                        skip_fallback_receipt_peer = Some(receipt_peer);
-                        failures.push(ChunkRequestFailure {
-                            role: ChunkRequestRole::Receipts,
-                            peer_id: receipt_peer,
-                            requested: hashes.len(),
-                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                        });
-                    }
-                }
-            }
+                            for (receipt_peer, receipts) in cached_receipts.drain(..) {
+                                match body_receipt_blocks_if_counts_match(
+                                    &sourced_bodies,
+                                    receipt_peer,
+                                    receipts,
+                                    hashes.len(),
+                                ) {
+                                    Ok(blocks) => {
+                                        return BodyReceiptChunk {
+                                            start,
+                                            blocks,
+                                            failures,
+                                            stats,
+                                        };
+                                    }
+                                    Err(kind) => failures.push(ChunkRequestFailure {
+                                        role: ChunkRequestRole::Receipts,
+                                        peer_id: receipt_peer,
+                                        requested: hashes.len(),
+                                        kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                                    }),
+                                }
+                            }
 
-            match receipt_result {
-                Some((receipt_peer, receipt_elapsed, Ok(receipts))) => {
-                    stats.push((
-                        receipt_peer,
-                        PeerRequestKind::Receipts,
-                        receipts.len(),
-                        receipt_elapsed,
-                    ));
-                    match body_receipt_blocks_if_counts_match(
-                        &bodies,
-                        receipt_peer,
-                        receipts,
-                        hashes.len(),
-                    ) {
-                        Ok(blocks) => {
-                            return BodyReceiptChunk {
-                                start,
-                                blocks,
-                                failures,
-                                stats,
-                            };
+                            bodies = Some(sourced_bodies);
                         }
                         Err(kind) => failures.push(ChunkRequestFailure {
-                            role: ChunkRequestRole::Receipts,
-                            peer_id: receipt_peer,
-                            requested: hashes.len(),
-                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                            role: ChunkRequestRole::Bodies,
+                            peer_id,
+                            requested,
+                            kind,
                         }),
                     }
                 }
-                Some((receipt_peer, _receipt_elapsed, Err(kind))) => {
-                    failures.push(ChunkRequestFailure {
-                        role: ChunkRequestRole::Receipts,
-                        peer_id: receipt_peer,
-                        requested: hashes.len(),
-                        kind,
-                    })
+                BodyReceiptChunkRoleAttempt::Receipts {
+                    peer_id,
+                    requested,
+                    elapsed,
+                    result,
+                } => {
+                    live_state.receipts.in_flight = live_state.receipts.in_flight.saturating_sub(1);
+                    match result {
+                        Ok(receipts) => {
+                            stats.push((
+                                peer_id,
+                                PeerRequestKind::Receipts,
+                                receipts.len(),
+                                elapsed,
+                            ));
+                            if let Some(bodies) = bodies.as_ref() {
+                                match body_receipt_blocks_if_counts_match(
+                                    bodies,
+                                    peer_id,
+                                    receipts,
+                                    hashes.len(),
+                                ) {
+                                    Ok(blocks) => {
+                                        return BodyReceiptChunk {
+                                            start,
+                                            blocks,
+                                            failures,
+                                            stats,
+                                        };
+                                    }
+                                    Err(kind) => failures.push(ChunkRequestFailure {
+                                        role: ChunkRequestRole::Receipts,
+                                        peer_id,
+                                        requested,
+                                        kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                                    }),
+                                }
+                            } else {
+                                cached_receipts.push((peer_id, receipts));
+                            }
+                        }
+                        Err(kind) => failures.push(ChunkRequestFailure {
+                            role: ChunkRequestRole::Receipts,
+                            peer_id,
+                            requested,
+                            kind,
+                        }),
+                    }
                 }
-                None => {}
             }
 
-            for receipt_peer in fallback_receipt_candidates {
-                if skip_fallback_receipt_peer == Some(receipt_peer) {
-                    continue;
-                }
-                let started_at = Instant::now();
-                let _active = BodyReceiptActiveRequestGuard::new(
-                    &self.accounting_tx,
-                    receipt_peer,
-                    PeerRequestKind::Receipts,
-                );
-                match self
-                    .request_receipts_until_complete(
-                        receipt_peer,
-                        hashes.clone(),
-                        Some(expected_receipt_counts.clone()),
-                    )
-                    .await
-                {
-                    Ok(receipts) => {
-                        stats.push((
-                            receipt_peer,
-                            PeerRequestKind::Receipts,
-                            receipts.len(),
-                            started_at.elapsed(),
-                        ));
-                        match body_receipt_blocks_if_counts_match(
-                            &bodies,
-                            receipt_peer,
-                            receipts,
-                            hashes.len(),
-                        ) {
-                            Ok(blocks) => {
-                                return BodyReceiptChunk {
-                                    start,
-                                    blocks,
-                                    failures,
-                                    stats,
-                                };
-                            }
-                            Err(kind) => failures.push(ChunkRequestFailure {
-                                role: ChunkRequestRole::Receipts,
-                                peer_id: receipt_peer,
-                                requested: hashes.len(),
-                                kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                            }),
-                        }
-                    }
-                    Err(kind) => failures.push(ChunkRequestFailure {
-                        role: ChunkRequestRole::Receipts,
-                        peer_id: receipt_peer,
-                        requested: hashes.len(),
-                        kind,
-                    }),
-                }
-            }
+            schedule_missing_body_receipt_chunk_roles(
+                self,
+                &mut attempts,
+                &candidates,
+                &mut live_state,
+                &hashes,
+                BodyReceiptChunkLiveStatus {
+                    expected_receipt_counts: expected_receipt_counts.as_deref(),
+                    has_bodies: bodies.is_some(),
+                    has_cached_receipts: !cached_receipts.is_empty(),
+                    force: false,
+                },
+            );
         }
 
         BodyReceiptChunk {
@@ -4362,6 +4367,161 @@ fn body_receipt_chunk_request<'a>(
     .boxed()
 }
 
+fn schedule_missing_body_receipt_chunk_roles<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptChunkRoleAttempt>,
+    >,
+    candidates: &BodyReceiptChunkLiveCandidates,
+    state: &mut BodyReceiptChunkLiveState,
+    hashes: &[B256],
+    status: BodyReceiptChunkLiveStatus<'_>,
+) {
+    if body_receipt_chunk_should_schedule_body(&state.bodies, &status) {
+        schedule_body_receipt_chunk_body_role(
+            plan,
+            attempts,
+            &candidates.bodies,
+            &mut state.bodies,
+            hashes,
+        );
+    }
+
+    if body_receipt_chunk_should_schedule_receipts(&state.receipts, &status) {
+        schedule_body_receipt_chunk_receipt_role(
+            plan,
+            attempts,
+            &candidates.receipts,
+            &mut state.receipts,
+            hashes,
+            status.expected_receipt_counts,
+        );
+    }
+}
+
+fn body_receipt_chunk_should_schedule_body(
+    state: &BodyReceiptChunkLiveRoleState,
+    status: &BodyReceiptChunkLiveStatus<'_>,
+) -> bool {
+    !status.has_bodies
+        && (state.in_flight == 0
+            || body_receipt_chunk_role_hedge_due(state.last_scheduled_at, status.force))
+}
+
+fn body_receipt_chunk_should_schedule_receipts(
+    state: &BodyReceiptChunkLiveRoleState,
+    status: &BodyReceiptChunkLiveStatus<'_>,
+) -> bool {
+    (status.has_bodies || (state.in_flight == 0 && !status.has_cached_receipts))
+        && (state.in_flight == 0
+            || body_receipt_chunk_role_hedge_due(state.last_scheduled_at, status.force))
+}
+
+fn body_receipt_chunk_role_hedge_due(last_scheduled_at: Option<Instant>, force: bool) -> bool {
+    force
+        || last_scheduled_at.is_some_and(|scheduled_at| {
+            scheduled_at.elapsed() >= PIPELINED_BODY_RECEIPT_HEDGE_DELAY
+        })
+}
+
+fn schedule_body_receipt_chunk_body_role<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptChunkRoleAttempt>,
+    >,
+    candidates: &[PeerId],
+    state: &mut BodyReceiptChunkLiveRoleState,
+    hashes: &[B256],
+) -> bool {
+    while state.next_index < candidates.len() {
+        let peer_id = candidates[state.next_index];
+        state.next_index += 1;
+        if !state.used_peers.insert(peer_id) {
+            continue;
+        }
+
+        let request_hashes = hashes.to_vec();
+        state.in_flight += 1;
+        state.last_scheduled_at = Some(Instant::now());
+        attempts.push(
+            async move {
+                let started_at = Instant::now();
+                let requested = request_hashes.len();
+                let _active = BodyReceiptActiveRequestGuard::new(
+                    &plan.accounting_tx,
+                    peer_id,
+                    PeerRequestKind::Bodies,
+                );
+                let result = plan
+                    .request_bodies_until_complete(peer_id, request_hashes)
+                    .await;
+                BodyReceiptChunkRoleAttempt::Bodies {
+                    peer_id,
+                    requested,
+                    elapsed: started_at.elapsed(),
+                    result,
+                }
+            }
+            .boxed(),
+        );
+        return true;
+    }
+
+    false
+}
+
+fn schedule_body_receipt_chunk_receipt_role<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptChunkRoleAttempt>,
+    >,
+    candidates: &[PeerId],
+    state: &mut BodyReceiptChunkLiveRoleState,
+    hashes: &[B256],
+    expected_receipt_counts: Option<&[usize]>,
+) -> bool {
+    while state.next_index < candidates.len() {
+        let peer_id = candidates[state.next_index];
+        state.next_index += 1;
+        if !state.used_peers.insert(peer_id) {
+            continue;
+        }
+
+        let request_hashes = hashes.to_vec();
+        let expected_receipt_counts = expected_receipt_counts.map(|counts| counts.to_vec());
+        state.in_flight += 1;
+        state.last_scheduled_at = Some(Instant::now());
+        attempts.push(
+            async move {
+                let started_at = Instant::now();
+                let requested = request_hashes.len();
+                let _active = BodyReceiptActiveRequestGuard::new(
+                    &plan.accounting_tx,
+                    peer_id,
+                    PeerRequestKind::Receipts,
+                );
+                let result = plan
+                    .request_receipts_until_complete(
+                        peer_id,
+                        request_hashes,
+                        expected_receipt_counts,
+                    )
+                    .await;
+                BodyReceiptChunkRoleAttempt::Receipts {
+                    peer_id,
+                    requested,
+                    elapsed: started_at.elapsed(),
+                    result,
+                }
+            }
+            .boxed(),
+        );
+        return true;
+    }
+
+    false
+}
+
 fn schedule_decoupled_body_chunk<'a>(
     plan: &'a BodyReceiptRequestPlan,
     attempts: &mut futures_util::stream::FuturesUnordered<
@@ -5592,6 +5752,73 @@ mod tests {
         assert!(!body_receipt_can_schedule_more_prefix_chunks(6, 8, 6, 10));
         assert!(!body_receipt_can_schedule_more_prefix_chunks(5, 10, 6, 10));
         assert!(!body_receipt_can_schedule_more_prefix_chunks(0, 0, 0, 10));
+    }
+
+    #[test]
+    fn body_receipt_live_chunk_waits_for_bodies_when_receipts_are_cached() {
+        let idle_receipts = BodyReceiptChunkLiveRoleState::default();
+        let cached_without_bodies = BodyReceiptChunkLiveStatus {
+            expected_receipt_counts: None,
+            has_bodies: false,
+            has_cached_receipts: true,
+            force: true,
+        };
+        assert!(!body_receipt_chunk_should_schedule_receipts(
+            &idle_receipts,
+            &cached_without_bodies
+        ));
+
+        let missing_without_cache = BodyReceiptChunkLiveStatus {
+            has_cached_receipts: false,
+            ..cached_without_bodies
+        };
+        assert!(body_receipt_chunk_should_schedule_receipts(
+            &idle_receipts,
+            &missing_without_cache
+        ));
+    }
+
+    #[test]
+    fn body_receipt_live_chunk_hedges_only_stale_inflight_roles() {
+        let fresh = BodyReceiptChunkLiveRoleState {
+            in_flight: 1,
+            last_scheduled_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        let stale = BodyReceiptChunkLiveRoleState {
+            in_flight: 1,
+            last_scheduled_at: Some(
+                Instant::now() - PIPELINED_BODY_RECEIPT_HEDGE_DELAY - Duration::from_millis(1),
+            ),
+            ..Default::default()
+        };
+        let missing_bodies = BodyReceiptChunkLiveStatus {
+            expected_receipt_counts: None,
+            has_bodies: false,
+            has_cached_receipts: false,
+            force: false,
+        };
+        assert!(!body_receipt_chunk_should_schedule_body(
+            &fresh,
+            &missing_bodies
+        ));
+        assert!(body_receipt_chunk_should_schedule_body(
+            &stale,
+            &missing_bodies
+        ));
+
+        let missing_receipts = BodyReceiptChunkLiveStatus {
+            has_bodies: true,
+            ..missing_bodies
+        };
+        assert!(!body_receipt_chunk_should_schedule_receipts(
+            &fresh,
+            &missing_receipts
+        ));
+        assert!(body_receipt_chunk_should_schedule_receipts(
+            &stale,
+            &missing_receipts
+        ));
     }
 
     #[test]
