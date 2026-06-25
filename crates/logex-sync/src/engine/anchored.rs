@@ -137,6 +137,26 @@ type HistoricalResidualSequentialTail = (
     Duration,
 );
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoricalSequenceGapAction {
+    None,
+    RefillMissingExpectedFetch,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoricalSequenceGapState {
+    prepare_expected: u64,
+    fetch_expected: u64,
+    missing_prepare: bool,
+    later_prepare: bool,
+    missing_fetch: bool,
+    later_fetch: bool,
+    planned_child_exists: bool,
+    expected_child_exists: bool,
+    active_expected_fetch_attempts: usize,
+}
+
 async fn validate_historical_blocks_parallel(
     headers: &[Header],
     hashes: &[B256],
@@ -715,6 +735,25 @@ fn has_historical_sequence_after(
         .chain(completed_sequences)
         .any(|candidate| candidate > sequence)
         || in_progress_sequence.is_some_and(|candidate| candidate > sequence)
+}
+
+fn historical_sequence_gap_action_for_state(
+    state: HistoricalSequenceGapState,
+) -> HistoricalSequenceGapAction {
+    if state.missing_prepare && state.later_prepare && state.prepare_expected < state.fetch_expected
+    {
+        return HistoricalSequenceGapAction::Reset;
+    }
+
+    if state.missing_fetch && state.later_fetch && !state.planned_child_exists {
+        if state.expected_child_exists && state.active_expected_fetch_attempts == 0 {
+            HistoricalSequenceGapAction::RefillMissingExpectedFetch
+        } else {
+            HistoricalSequenceGapAction::Reset
+        }
+    } else {
+        HistoricalSequenceGapAction::None
+    }
 }
 
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
@@ -1706,7 +1745,7 @@ impl SyncEngine {
             }
 
             self.drain_historical_prepare_tasks().await?;
-            if self.recover_historical_sequence_gap(&child_header) {
+            if self.recover_historical_sequence_gap(&child_header).await? {
                 progressed = true;
                 continue;
             }
@@ -1794,7 +1833,7 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.drain_historical_prepare_tasks().await?;
-        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header);
+        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header).await?;
         if max_new_fetches != usize::MAX
             && historical_critical_refill_has_enough_buffer(
                 self.active_historical_fetch_count(),
@@ -1847,7 +1886,7 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.drain_historical_prepare_tasks().await?;
-        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header);
+        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header).await?;
         let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
             return Ok(false);
         };
@@ -2268,7 +2307,7 @@ impl SyncEngine {
         }
 
         self.drain_historical_prepare_tasks().await?;
-        if self.recover_historical_sequence_gap(&child_header) {
+        if self.recover_historical_sequence_gap(&child_header).await? {
             return Ok(true);
         }
         let expected_prepare_sequence = self.historical_prepare_expected_sequence;
@@ -2690,44 +2729,63 @@ impl SyncEngine {
         )
     }
 
-    fn historical_sequence_gap_requires_reset(&self) -> bool {
+    fn historical_sequence_gap_action(&self) -> HistoricalSequenceGapAction {
         let prepare_expected = self.historical_prepare_expected_sequence;
         let missing_prepare = !self.historical_prepare_sequence_available(prepare_expected);
         let later_prepare = self.has_historical_prepare_after(prepare_expected);
-        if missing_prepare
-            && later_prepare
-            && prepare_expected < self.historical_fetch_expected_sequence
-        {
-            return true;
-        }
-
         let fetch_expected = self.historical_fetch_expected_sequence;
         let missing_fetch = !self.historical_fetch_sequence_available(fetch_expected);
         let later_fetch = self.has_historical_fetch_after(fetch_expected);
-        missing_fetch && later_fetch && self.historical_fetch_planned_child.is_none()
+        historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+            prepare_expected,
+            fetch_expected,
+            missing_prepare,
+            later_prepare,
+            missing_fetch,
+            later_fetch,
+            planned_child_exists: self.historical_fetch_planned_child.is_some(),
+            expected_child_exists: self.historical_fetch_expected_child.is_some(),
+            active_expected_fetch_attempts: self.active_expected_historical_fetch_attempt_count(),
+        })
     }
 
-    fn recover_historical_sequence_gap(&mut self, child_header: &Header) -> bool {
+    async fn recover_historical_sequence_gap(&mut self, child_header: &Header) -> Result<bool> {
         self.drain_historical_fetch_outcomes();
-        if !self.historical_sequence_gap_requires_reset() {
-            return false;
+        match self.historical_sequence_gap_action() {
+            HistoricalSequenceGapAction::None => Ok(false),
+            HistoricalSequenceGapAction::RefillMissingExpectedFetch => {
+                let Some(expected_child) = self.historical_fetch_expected_child.clone() else {
+                    return Ok(false);
+                };
+                tracing::debug!(
+                    child_block = child_header.number(),
+                    expected_child = expected_child.number(),
+                    fetch_expected = self.historical_fetch_expected_sequence,
+                    fetch_next = self.historical_fetch_next_sequence,
+                    completed_fetches = self.historical_fetch_completed.len(),
+                    active_fetches = self.active_historical_fetch_count(),
+                    "refilling missing expected historical fetch without resetting buffered lookahead"
+                );
+                self.retry_expected_historical_fetch(&expected_child).await
+            }
+            HistoricalSequenceGapAction::Reset => {
+                tracing::debug!(
+                    child_block = child_header.number(),
+                    fetch_expected = self.historical_fetch_expected_sequence,
+                    fetch_next = self.historical_fetch_next_sequence,
+                    active_fetches = self.active_historical_fetch_count(),
+                    completed_fetches = self.historical_fetch_completed.len(),
+                    prepare_expected = self.historical_prepare_expected_sequence,
+                    active_prepares = self.active_historical_prepare_count(),
+                    completed_prepares = self.historical_prepare_completed.len(),
+                    "resetting historical pipeline after unrecoverable sequence gap"
+                );
+                self.reset_historical_fetch_pipeline();
+                self.historical_fetch_expected_child = Some(child_header.clone());
+                self.historical_fetch_planned_child = Some(child_header.clone());
+                Ok(true)
+            }
         }
-
-        tracing::debug!(
-            child_block = child_header.number(),
-            fetch_expected = self.historical_fetch_expected_sequence,
-            fetch_next = self.historical_fetch_next_sequence,
-            active_fetches = self.active_historical_fetch_count(),
-            completed_fetches = self.historical_fetch_completed.len(),
-            prepare_expected = self.historical_prepare_expected_sequence,
-            active_prepares = self.active_historical_prepare_count(),
-            completed_prepares = self.historical_prepare_completed.len(),
-            "resetting historical pipeline after unrecoverable sequence gap"
-        );
-        self.reset_historical_fetch_pipeline();
-        self.historical_fetch_expected_child = Some(child_header.clone());
-        self.historical_fetch_planned_child = Some(child_header.clone());
-        true
     }
 
     fn historical_fetch_peer_capacity(&self) -> usize {
@@ -5980,6 +6038,78 @@ mod tests {
             completed.keys().copied(),
             Some(7)
         ));
+    }
+
+    #[test]
+    fn historical_sequence_gap_refills_missing_expected_fetch_without_resetting_lookahead() {
+        assert_eq!(
+            historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+                prepare_expected: 0,
+                fetch_expected: 3,
+                missing_prepare: false,
+                later_prepare: false,
+                missing_fetch: true,
+                later_fetch: true,
+                planned_child_exists: false,
+                expected_child_exists: true,
+                active_expected_fetch_attempts: 0,
+            }),
+            HistoricalSequenceGapAction::RefillMissingExpectedFetch
+        );
+    }
+
+    #[test]
+    fn historical_sequence_gap_resets_prepare_materialization_gap() {
+        assert_eq!(
+            historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+                prepare_expected: 2,
+                fetch_expected: 4,
+                missing_prepare: true,
+                later_prepare: true,
+                missing_fetch: false,
+                later_fetch: false,
+                planned_child_exists: false,
+                expected_child_exists: true,
+                active_expected_fetch_attempts: 0,
+            }),
+            HistoricalSequenceGapAction::Reset
+        );
+    }
+
+    #[test]
+    fn historical_sequence_gap_does_not_refill_active_expected_fetch() {
+        assert_eq!(
+            historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+                prepare_expected: 0,
+                fetch_expected: 3,
+                missing_prepare: false,
+                later_prepare: false,
+                missing_fetch: true,
+                later_fetch: true,
+                planned_child_exists: false,
+                expected_child_exists: true,
+                active_expected_fetch_attempts: 1,
+            }),
+            HistoricalSequenceGapAction::Reset
+        );
+    }
+
+    #[test]
+    fn historical_sequence_gap_ignores_contiguous_state() {
+        assert_eq!(
+            historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+                prepare_expected: 2,
+                fetch_expected: 2,
+                missing_prepare: false,
+                later_prepare: true,
+                missing_fetch: false,
+                later_fetch: true,
+                planned_child_exists: false,
+                expected_child_exists: true,
+                active_expected_fetch_attempts: 0,
+            }),
+            HistoricalSequenceGapAction::None
+        );
     }
 
     #[test]
