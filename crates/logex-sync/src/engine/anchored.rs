@@ -77,6 +77,7 @@ const HISTORICAL_DENSITY_EWMA_WEIGHT: f64 = 0.5;
 const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
+const HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT: usize = 4;
 const HISTORICAL_WRITE_COALESCE_MAX_BATCHES: usize = 4;
 const HISTORICAL_WRITE_COALESCE_TARGET_ROWS: u64 = 500_000;
 const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
@@ -155,6 +156,37 @@ struct HistoricalSequenceGapState {
     planned_child_exists: bool,
     expected_child_exists: bool,
     active_expected_fetch_attempts: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoricalFetchRefillScope {
+    Full,
+    CriticalPath,
+    WritePath,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoricalFetchSchedulerSnapshot {
+    peer_capacity: usize,
+    total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
+    rows_per_block_ewma: Option<f64>,
+    active_fetches: usize,
+    pending_fetches: usize,
+    completed_fetches: usize,
+    pending_prepares: usize,
+    body_ready_peers: usize,
+    receipt_ready_peers: usize,
+    active_body_requests: usize,
+    active_receipt_requests: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoricalFetchSchedulerDecision {
+    pipeline_depth: usize,
+    buffer_depth: usize,
+    new_fetch_limit: usize,
+    reset_for_memory_pressure: bool,
 }
 
 async fn validate_historical_blocks_parallel(
@@ -599,6 +631,49 @@ fn historical_dense_low_peer_fetch_pipeline_depth_boost(
         .then_some(HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH)
 }
 
+fn historical_fetch_pipeline_depth(
+    peer_capacity: usize,
+    total_memory_bytes: Option<u64>,
+    available_memory_bytes: Option<u64>,
+    rows_per_block: Option<f64>,
+) -> usize {
+    let base_pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
+        peer_capacity,
+        total_memory_bytes,
+        available_memory_bytes,
+    );
+    let sparse_pipeline_boost = historical_sparse_fetch_pipeline_depth_boost(
+        peer_capacity,
+        total_memory_bytes,
+        available_memory_bytes,
+        rows_per_block,
+    );
+    let dense_pipeline_boost = historical_dense_fetch_pipeline_depth_boost(
+        peer_capacity,
+        total_memory_bytes,
+        available_memory_bytes,
+        rows_per_block,
+    );
+    let dense_low_peer_pipeline_boost = historical_dense_low_peer_fetch_pipeline_depth_boost(
+        peer_capacity,
+        total_memory_bytes,
+        available_memory_bytes,
+        rows_per_block,
+    );
+    let base_pipeline_depth = sparse_pipeline_boost
+        .map(|boost| base_pipeline_depth.max(boost))
+        .unwrap_or(base_pipeline_depth);
+    let base_pipeline_depth = dense_pipeline_boost
+        .map(|boost| base_pipeline_depth.max(boost))
+        .unwrap_or(base_pipeline_depth);
+    let base_pipeline_depth = dense_low_peer_pipeline_boost
+        .map(|boost| base_pipeline_depth.max(boost))
+        .unwrap_or(base_pipeline_depth);
+    historical_density_fetch_pipeline_depth_cap(rows_per_block)
+        .map(|cap| base_pipeline_depth.min(cap))
+        .unwrap_or(base_pipeline_depth)
+}
+
 fn historical_fetch_buffer_depth(
     pipeline_depth: usize,
     available_memory_bytes: Option<u64>,
@@ -646,6 +721,98 @@ fn historical_fetch_budget_has_capacity(
         pending_fetches < buffer_depth
     } else {
         completed_fetches < buffer_depth
+    }
+}
+
+fn historical_write_path_fetch_refill_limit(
+    requested_limit: usize,
+    pipeline_depth: usize,
+    snapshot: HistoricalFetchSchedulerSnapshot,
+) -> usize {
+    let pipeline_gap = pipeline_depth.saturating_sub(snapshot.active_fetches);
+    let base_limit = requested_limit
+        .min(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT)
+        .min(pipeline_gap);
+    if base_limit == 0 || historical_available_memory_is_low(snapshot.available_memory_bytes) {
+        return base_limit;
+    }
+
+    let pending_buffer = snapshot
+        .pending_fetches
+        .saturating_add(snapshot.pending_prepares);
+    let buffer_floor = historical_critical_refill_buffer_floor(snapshot.available_memory_bytes);
+    if pending_buffer < buffer_floor {
+        requested_limit
+            .min(HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT)
+            .min(pipeline_gap)
+    } else {
+        base_limit
+    }
+}
+
+fn historical_fetch_scheduler_decision(
+    snapshot: HistoricalFetchSchedulerSnapshot,
+    scope: HistoricalFetchRefillScope,
+    requested_limit: usize,
+) -> HistoricalFetchSchedulerDecision {
+    let pipeline_depth = historical_fetch_pipeline_depth(
+        snapshot.peer_capacity,
+        snapshot.total_memory_bytes,
+        snapshot.available_memory_bytes,
+        snapshot.rows_per_block_ewma,
+    );
+    let buffer_depth = historical_fetch_buffer_depth(
+        pipeline_depth,
+        snapshot.available_memory_bytes,
+        snapshot.rows_per_block_ewma,
+    );
+    let reset_for_memory_pressure =
+        historical_available_memory_is_critical(snapshot.available_memory_bytes)
+            && snapshot.pending_fetches > buffer_depth;
+    let request_pressure_allows_refill = historical_body_receipt_request_pressure_allows_refill(
+        snapshot.body_ready_peers,
+        snapshot.receipt_ready_peers,
+        snapshot.active_body_requests,
+        snapshot.active_receipt_requests,
+    );
+    let fetch_budget_allows_refill = historical_fetch_budget_has_capacity(
+        snapshot.pending_fetches,
+        snapshot.completed_fetches,
+        buffer_depth,
+        snapshot.available_memory_bytes,
+    );
+
+    let scope_limit = match scope {
+        HistoricalFetchRefillScope::Full => requested_limit,
+        HistoricalFetchRefillScope::CriticalPath => {
+            if historical_critical_refill_has_enough_buffer(
+                snapshot.active_fetches,
+                snapshot.pending_fetches,
+                snapshot.pending_prepares,
+                snapshot.available_memory_bytes,
+            ) {
+                0
+            } else {
+                requested_limit
+            }
+        }
+        HistoricalFetchRefillScope::WritePath => {
+            historical_write_path_fetch_refill_limit(requested_limit, pipeline_depth, snapshot)
+        }
+    };
+
+    let pipeline_gap = pipeline_depth.saturating_sub(snapshot.active_fetches);
+    let new_fetch_limit = if request_pressure_allows_refill && fetch_budget_allows_refill {
+        scope_limit.min(pipeline_gap)
+    } else {
+        0
+    };
+
+    HistoricalFetchSchedulerDecision {
+        pipeline_depth,
+        buffer_depth,
+        new_fetch_limit,
+        reset_for_memory_pressure,
     }
 }
 
@@ -1834,21 +2001,15 @@ impl SyncEngine {
 
         self.drain_historical_prepare_tasks().await?;
         let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header).await?;
-        if max_new_fetches != usize::MAX
-            && historical_critical_refill_has_enough_buffer(
-                self.active_historical_fetch_count(),
-                self.pending_historical_fetch_count(),
-                self.pending_historical_prepare_count(),
-                historical_available_memory_bytes(),
-            )
-        {
-            return Ok(false);
-        }
-
         let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
             return Ok(false);
         };
-        self.ensure_historical_fetch_pipeline_limited(fetch_child_header, max_new_fetches)
+        let scope = if max_new_fetches == usize::MAX {
+            HistoricalFetchRefillScope::Full
+        } else {
+            HistoricalFetchRefillScope::CriticalPath
+        };
+        self.ensure_historical_fetch_pipeline_limited(fetch_child_header, scope, max_new_fetches)
             .await?;
         let prepare_progressed = if max_new_fetches == usize::MAX {
             self.spawn_ready_historical_prepare_tasks().await?
@@ -1892,7 +2053,8 @@ impl SyncEngine {
         };
         self.ensure_historical_fetch_pipeline_limited(
             fetch_child_header,
-            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+            HistoricalFetchRefillScope::WritePath,
+            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT,
         )
         .await?;
         let prepare_progressed = self
@@ -2612,6 +2774,7 @@ impl SyncEngine {
                 };
                 self.ensure_historical_fetch_pipeline_limited(
                     next_child_header,
+                    HistoricalFetchRefillScope::CriticalPath,
                     HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
                 )
                 .await?;
@@ -2794,16 +2957,36 @@ impl SyncEngine {
             .max(self.peers.body_receipt_request_ready_peer_count())
     }
 
-    fn historical_request_pressure_allows_fetch_refill(&self) -> bool {
+    fn historical_fetch_scheduler_snapshot(&self) -> HistoricalFetchSchedulerSnapshot {
         let (body_ready_peers, receipt_ready_peers) =
             self.peers.body_receipt_request_ready_peer_counts();
         let (active_body_requests, active_receipt_requests) =
             self.peers.active_body_receipt_request_counts();
-        historical_body_receipt_request_pressure_allows_refill(
+        HistoricalFetchSchedulerSnapshot {
+            peer_capacity: self.historical_fetch_peer_capacity(),
+            total_memory_bytes: historical_total_memory_bytes(),
+            available_memory_bytes: historical_available_memory_bytes(),
+            rows_per_block_ewma: self.historical_rows_per_block_ewma,
+            active_fetches: self.active_historical_fetch_count(),
+            pending_fetches: self.pending_historical_fetch_count(),
+            completed_fetches: self.historical_fetch_completed.len(),
+            pending_prepares: self.pending_historical_prepare_count(),
             body_ready_peers,
             receipt_ready_peers,
             active_body_requests,
             active_receipt_requests,
+        }
+    }
+
+    fn historical_fetch_scheduler_decision(
+        &self,
+        scope: HistoricalFetchRefillScope,
+        requested_limit: usize,
+    ) -> HistoricalFetchSchedulerDecision {
+        historical_fetch_scheduler_decision(
+            self.historical_fetch_scheduler_snapshot(),
+            scope,
+            requested_limit,
         )
     }
 
@@ -3153,13 +3336,18 @@ impl SyncEngine {
     }
 
     async fn ensure_historical_fetch_pipeline(&mut self, child_header: Header) -> Result<()> {
-        self.ensure_historical_fetch_pipeline_limited(child_header, usize::MAX)
-            .await
+        self.ensure_historical_fetch_pipeline_limited(
+            child_header,
+            HistoricalFetchRefillScope::Full,
+            usize::MAX,
+        )
+        .await
     }
 
     async fn ensure_historical_fetch_pipeline_limited(
         &mut self,
         child_header: Header,
+        scope: HistoricalFetchRefillScope,
         max_new_fetches: usize,
     ) -> Result<()> {
         self.drain_historical_fetch_outcomes();
@@ -3175,58 +3363,15 @@ impl SyncEngine {
         self.retry_stalled_expected_historical_fetch_if_needed()
             .await?;
 
-        let available_memory_bytes = historical_available_memory_bytes();
-        let peer_capacity = self.historical_fetch_peer_capacity();
-        let base_pipeline_depth = historical_fetch_pipeline_depth_for_serving_peers(
-            peer_capacity,
-            historical_total_memory_bytes(),
-            available_memory_bytes,
-        );
-        let sparse_pipeline_boost = historical_sparse_fetch_pipeline_depth_boost(
-            peer_capacity,
-            historical_total_memory_bytes(),
-            available_memory_bytes,
-            self.historical_rows_per_block_ewma,
-        );
-        let dense_pipeline_boost = historical_dense_fetch_pipeline_depth_boost(
-            peer_capacity,
-            historical_total_memory_bytes(),
-            available_memory_bytes,
-            self.historical_rows_per_block_ewma,
-        );
-        let dense_low_peer_pipeline_boost = historical_dense_low_peer_fetch_pipeline_depth_boost(
-            peer_capacity,
-            historical_total_memory_bytes(),
-            available_memory_bytes,
-            self.historical_rows_per_block_ewma,
-        );
-        let base_pipeline_depth = sparse_pipeline_boost
-            .map(|boost| base_pipeline_depth.max(boost))
-            .unwrap_or(base_pipeline_depth);
-        let base_pipeline_depth = dense_pipeline_boost
-            .map(|boost| base_pipeline_depth.max(boost))
-            .unwrap_or(base_pipeline_depth);
-        let base_pipeline_depth = dense_low_peer_pipeline_boost
-            .map(|boost| base_pipeline_depth.max(boost))
-            .unwrap_or(base_pipeline_depth);
-        let density_pipeline_cap =
-            historical_density_fetch_pipeline_depth_cap(self.historical_rows_per_block_ewma);
-        let pipeline_depth = density_pipeline_cap
-            .map(|cap| base_pipeline_depth.min(cap))
-            .unwrap_or(base_pipeline_depth);
-        let buffer_depth = historical_fetch_buffer_depth(
-            pipeline_depth,
-            available_memory_bytes,
-            self.historical_rows_per_block_ewma,
-        );
-        if historical_available_memory_is_critical(available_memory_bytes)
-            && self.pending_historical_fetch_count() > buffer_depth
-        {
+        let decision = self.historical_fetch_scheduler_decision(scope, max_new_fetches);
+        if decision.reset_for_memory_pressure {
             tracing::debug!(
-                available_memory_bytes,
+                available_memory_bytes = self
+                    .historical_fetch_scheduler_snapshot()
+                    .available_memory_bytes,
                 pending_fetches = self.pending_historical_fetch_count(),
-                pipeline_depth,
-                buffer_depth,
+                pipeline_depth = decision.pipeline_depth,
+                buffer_depth = decision.buffer_depth,
                 "resetting historical fetch lookahead under memory pressure"
             );
             self.reset_historical_fetch_pipeline();
@@ -3234,16 +3379,15 @@ impl SyncEngine {
             self.historical_fetch_planned_child = Some(child_header.clone());
         }
         let mut new_fetches = 0usize;
-        while new_fetches < max_new_fetches
-            && self.active_historical_fetch_count() < pipeline_depth
-            && self.historical_request_pressure_allows_fetch_refill()
-            && historical_fetch_budget_has_capacity(
-                self.pending_historical_fetch_count(),
-                self.historical_fetch_completed.len(),
-                buffer_depth,
-                available_memory_bytes,
-            )
-        {
+        loop {
+            let remaining_fetches = max_new_fetches.saturating_sub(new_fetches);
+            if remaining_fetches == 0 {
+                break;
+            }
+            let decision = self.historical_fetch_scheduler_decision(scope, remaining_fetches);
+            if decision.new_fetch_limit == 0 {
+                break;
+            }
             let Some(planned_child) = self.historical_fetch_planned_child.take() else {
                 break;
             };
@@ -5987,6 +6131,84 @@ mod tests {
             floor - 1,
             low_memory
         ));
+    }
+
+    fn scheduler_snapshot_for_refill_tests() -> HistoricalFetchSchedulerSnapshot {
+        HistoricalFetchSchedulerSnapshot {
+            peer_capacity: 20,
+            total_memory_bytes: Some(HISTORICAL_HIGH_PIPELINE_MIN_TOTAL_MEMORY_BYTES),
+            available_memory_bytes: Some(HISTORICAL_HIGH_PREPARE_BUFFER_AVAILABLE_MEMORY_BYTES),
+            rows_per_block_ewma: Some(HISTORICAL_DENSE_ROWS_PER_BLOCK + 50.0),
+            active_fetches: 2,
+            pending_fetches: 2,
+            completed_fetches: 0,
+            pending_prepares: 0,
+            body_ready_peers: 20,
+            receipt_ready_peers: 20,
+            active_body_requests: 0,
+            active_receipt_requests: 0,
+        }
+    }
+
+    #[test]
+    fn historical_scheduler_decision_expands_write_refill_when_buffer_is_low() {
+        let decision = historical_fetch_scheduler_decision(
+            scheduler_snapshot_for_refill_tests(),
+            HistoricalFetchRefillScope::WritePath,
+            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT,
+        );
+
+        assert_eq!(
+            decision.new_fetch_limit,
+            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT
+        );
+        assert!(decision.pipeline_depth > HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT);
+    }
+
+    #[test]
+    fn historical_scheduler_decision_keeps_write_refill_bounded_when_buffer_is_healthy() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.pending_fetches =
+            historical_critical_refill_buffer_floor(snapshot.available_memory_bytes);
+        let decision = historical_fetch_scheduler_decision(
+            snapshot,
+            HistoricalFetchRefillScope::WritePath,
+            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT,
+        );
+
+        assert_eq!(
+            decision.new_fetch_limit,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        );
+    }
+
+    #[test]
+    fn historical_scheduler_decision_blocks_refill_under_request_pressure() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.body_ready_peers = 2;
+        snapshot.receipt_ready_peers = 2;
+        snapshot.active_body_requests = HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT;
+        let decision = historical_fetch_scheduler_decision(
+            snapshot,
+            HistoricalFetchRefillScope::Full,
+            usize::MAX,
+        );
+
+        assert_eq!(decision.new_fetch_limit, 0);
+    }
+
+    #[test]
+    fn historical_scheduler_decision_pauses_critical_refill_with_enough_buffer() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.pending_fetches =
+            historical_critical_refill_buffer_floor(snapshot.available_memory_bytes);
+        let decision = historical_fetch_scheduler_decision(
+            snapshot,
+            HistoricalFetchRefillScope::CriticalPath,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+        );
+
+        assert_eq!(decision.new_fetch_limit, 0);
     }
 
     #[test]

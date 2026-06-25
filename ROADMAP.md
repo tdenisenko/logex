@@ -8,6 +8,8 @@ PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historica
 
 Reverse historical header page downloads now have an owned async reservation path. Header page network I/O can run outside the synchronous refill loop, then materialize into the existing body/receipt fetch plan with the same validation and peer accounting. Body/receipt fetch plans now reserve queued peer load up front so later queued plans do not over-select the same fastest peers before request-start accounting catches up. Completed body/receipt chunks that sit behind a prefix gap are now carried into residual repair and verified/written once they become contiguous instead of being discarded and refetched. Prefix-critical body/receipt role retries are now bounded and candidate-expanded only when later chunks are already buffered behind a prefix gap. Stalled expected fetches can now launch one bounded duplicate attempt without discarding the original attempt or resetting lookahead. The scheduler now counts active fetch attempts instead of only sequence handles and stops refilling when body/receipt subrequest pressure is already above the ready peer pool target. The next meaningful change is finishing the broader bounded queue/backpressure scheduler, not more timeout/fanout/lookahead tuning.
 
+The historical fetch refill policy is now centralized behind an explicit scheduler snapshot and refill scope. Full, critical-path, and write-path refill callers consume the same pressure, memory, pipeline-depth, and buffer-depth decision logic. Write-path refill can temporarily expand queued fetch admission when the buffer is low, but remains bounded by request pressure and memory limits.
+
 ## Completed Since Last Run
 
 - Preserved completed body/receipt chunks after residual prefix gaps:
@@ -85,6 +87,11 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Prepare/materialization gaps still reset because they indicate ordered validated state is missing, not only a download hole.
   - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, scheduler gap tests, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
   - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-151439.log` showed the client running after restart, 37 completed batches after warmup, zero reset/head-of-line reset logs, partial-prefix residual repair still active, and no short-sample regression.
+- Centralized historical fetch refill decisions:
+  - Added an explicit scheduler snapshot and refill scope so full, critical-path, and write-path refill decisions share the same pressure and memory gates.
+  - Write-path refill can expand from the critical-path limit only when the fetch/prepare buffer is low and request pressure allows more work.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, scheduler decision tests, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-152839.log` warmed to about 368k logs/sec and 1,014 blocks/sec with 10 serving peers, six active fetches, zero reset/head-of-line reset logs, and active residual repair.
 
 ## Remaining TODOs
 
@@ -123,6 +130,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Prepared body/receipt plans preserve enough per-role request capacity to fetch their required prefix even when existing active/reserved load is high; active load only trims spare and duplicate-prefix capacity. This avoids starving the queue while still preventing redundant work from bypassing backpressure.
 - Partial-prefix completion may use the smaller residual-repair threshold only when suffix chunks are already buffered. This avoids throwing away validated contiguous prefix work while preserving the stricter normal threshold for isolated short responses.
 - A missing expected fetch sequence is now treated as recoverable download-state loss when later fetches are buffered and the expected child header is known. The engine refills that sequence in place instead of resetting the entire lookahead queue; ordered prepare/write gaps still reset.
+- Historical fetch refill now uses explicit scheduler scopes. The write path may admit a few more fetches than the critical path when buffers are low, but all scopes share request pressure, memory pressure, and pipeline-depth gates.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -196,6 +204,10 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Resolution: added a recovery action that refills the missing expected sequence in place when it is still safe to do so.
   - Remaining: move more of the fetch/prepare/write pressure policy into the bounded scheduler state so these recovery decisions are driven by measured pressure rather than scattered call sites.
 
+- Challenge: fetch refill policy was duplicated across full priming, critical-path refill, and write-time refill.
+  - Resolution: centralized the refill snapshot and decision logic, then made write-time refill a bounded scoped decision instead of a separate heuristic.
+  - Remaining: move from scoped refill calls to a continuously managed outer request scheduler.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -213,16 +225,17 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Removed the rejected latency/failure scoring experiment before committing.
 - Inspected partial-prefix completion and residual repair helpers after accepting buffered partial-prefix preservation; no obsolete residual paths were safe to remove yet.
 - Inspected sequence-gap recovery after adding in-place expected-fetch refill; prepare-gap reset behavior remains required and was kept.
+- Removed the obsolete standalone request-pressure refill check after replacing it with centralized scheduler-snapshot decisions.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, and request-pressure targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, and request-pressure targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
 - Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks
