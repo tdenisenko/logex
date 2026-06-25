@@ -210,6 +210,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Accepted plan-level live body/receipt role scheduling:
   - Change: paired body/receipt plans now schedule body and receipt role futures at the plan level, release per-role peer load as soon as that role completes, cache fast halves, and keep the same contiguous-prefix completion rule.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-090610.log`: corrected sampler moved 94,439 blocks over 290s, about ~325.7 actual blocks/sec, with one low window, zero zero-progress windows, and no pipeline/reset/error matches.
+  - Follow-up sample on the same run moved 92,068 blocks over 288s, about ~319.7 actual blocks/sec, with two low windows and zero zero-progress windows. The result supports keeping the scheduler, but the temporary paired fallback path stays until the remaining prepared-buffer low windows are understood.
   - Local validation passed: `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
 
 ## Remaining TODOs
