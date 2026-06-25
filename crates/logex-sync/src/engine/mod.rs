@@ -72,7 +72,7 @@ pub(super) struct HistoricalFetchedBatch {
     required_block: u64,
     header_elapsed: Duration,
     body_receipt_elapsed: Duration,
-    residual_header_batch: Option<HistoricalHeaderBatch>,
+    residual_batch: Option<HistoricalResidualBatch>,
 }
 
 pub(super) struct HistoricalHeaderBatch {
@@ -82,6 +82,11 @@ pub(super) struct HistoricalHeaderBatch {
     hashes: Vec<B256>,
     required_block: u64,
     header_elapsed: Duration,
+}
+
+pub(super) struct HistoricalResidualBatch {
+    header_batch: HistoricalHeaderBatch,
+    prefetched_chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
 }
 
 pub(super) struct HistoricalFetchPlan {
@@ -145,7 +150,7 @@ pub(super) struct PreparedHistoricalBatch {
     validation_elapsed: Duration,
     validation_queue_elapsed: Duration,
     processing_elapsed: Duration,
-    residual_header_batch: Option<HistoricalHeaderBatch>,
+    residual_batch: Option<HistoricalResidualBatch>,
 }
 
 pub(super) struct WrittenHistoricalBatch {
@@ -163,7 +168,7 @@ pub(super) struct WrittenHistoricalBatch {
     validation_queue_elapsed: Duration,
     prepare_wait_elapsed: Duration,
     processing_elapsed: Duration,
-    residual_header_batch: Option<HistoricalHeaderBatch>,
+    residual_batch: Option<HistoricalResidualBatch>,
 }
 
 pub(super) struct HistoricalValidationFailure {

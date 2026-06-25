@@ -1143,7 +1143,7 @@ async fn process_historical_batch(
         required_block,
         header_elapsed,
         body_receipt_elapsed,
-        residual_header_batch,
+        residual_batch,
     } = batch;
     let requested_headers = headers.len();
 
@@ -1191,7 +1191,7 @@ async fn process_historical_batch(
         validation_elapsed,
         validation_queue_elapsed,
         processing_elapsed,
-        residual_header_batch,
+        residual_batch,
     }))
 }
 
@@ -1213,7 +1213,7 @@ async fn write_prepared_historical_batch(
         validation_elapsed,
         validation_queue_elapsed,
         processing_elapsed,
-        residual_header_batch,
+        residual_batch,
     } = prepared;
     let write_started = std::time::Instant::now();
     let outcome = super::ingest::write_extracted_historical_batch(storage, extracted).await?;
@@ -1234,7 +1234,7 @@ async fn write_prepared_historical_batch(
         validation_queue_elapsed,
         prepare_wait_elapsed: Duration::ZERO,
         processing_elapsed,
-        residual_header_batch,
+        residual_batch,
     })
 }
 
@@ -1248,7 +1248,7 @@ fn prepared_historical_batch_row_count(prepared: &PreparedHistoricalBatch) -> u6
 }
 
 fn prepared_historical_batch_can_coalesce(prepared: &PreparedHistoricalBatch) -> bool {
-    prepared.residual_header_batch.is_none() && prepared.block_count > 0
+    prepared.residual_batch.is_none() && prepared.block_count > 0
 }
 
 fn merge_prepared_historical_batch(
@@ -1278,9 +1278,9 @@ fn merge_prepared_historical_batch(
 
 fn historical_batch_next_child_header(batch: &HistoricalFetchedBatch) -> Option<Header> {
     if let Some(residual_child) = batch
-        .residual_header_batch
+        .residual_batch
         .as_ref()
-        .and_then(|residual| residual.headers.last().cloned())
+        .and_then(|residual| residual.header_batch.headers.last().cloned())
     {
         return Some(residual_child);
     }
@@ -1321,6 +1321,52 @@ fn historical_residual_header_batch(
         required_block,
         header_elapsed: Duration::ZERO,
     })
+}
+
+fn take_prefetched_residual_prefix<T>(
+    prefetched_chunks: &mut BTreeMap<usize, Vec<T>>,
+    limit: usize,
+) -> Vec<T> {
+    let mut blocks = Vec::new();
+    while blocks.len() < limit {
+        let start = blocks.len();
+        let Some(mut chunk) = prefetched_chunks.remove(&start) else {
+            break;
+        };
+        let remaining = limit - blocks.len();
+        if chunk.len() > remaining {
+            let tail = chunk.split_off(remaining);
+            prefetched_chunks.insert(limit, tail);
+        }
+        blocks.extend(chunk);
+    }
+    blocks
+}
+
+fn shift_prefetched_residual_chunks_after_consumption<T>(
+    prefetched_chunks: &mut BTreeMap<usize, Vec<T>>,
+    consumed_blocks: usize,
+) {
+    if consumed_blocks == 0 || prefetched_chunks.is_empty() {
+        return;
+    }
+
+    let shifted = std::mem::take(prefetched_chunks)
+        .into_iter()
+        .filter_map(|(start, chunks)| {
+            (start >= consumed_blocks).then_some((start - consumed_blocks, chunks))
+        })
+        .collect();
+    *prefetched_chunks = shifted;
+}
+
+fn merge_prefetched_residual_chunks<T>(
+    prefetched_chunks: &mut BTreeMap<usize, Vec<T>>,
+    new_chunks: BTreeMap<usize, Vec<T>>,
+) {
+    for (start, chunks) in new_chunks {
+        prefetched_chunks.entry(start).or_insert(chunks);
+    }
 }
 
 fn historical_header_has_empty_body_and_receipts(header: &Header) -> bool {
@@ -3205,6 +3251,11 @@ impl SyncEngine {
                     .as_ref()
                     .map(|batch| batch.headers.len())
                     .unwrap_or_default();
+                let residual_batch =
+                    residual_header_batch.map(|header_batch| HistoricalResidualBatch {
+                        header_batch,
+                        prefetched_chunks: completion.residual_chunks,
+                    });
                 if consumed_blocks < planned_return_blocks {
                     tracing::debug!(
                         consumed_blocks,
@@ -3240,7 +3291,7 @@ impl SyncEngine {
                         required_block,
                         header_elapsed,
                         body_receipt_elapsed,
-                        residual_header_batch,
+                        residual_batch,
                     },
                     next_child_header,
                 )))
@@ -3794,7 +3845,7 @@ impl SyncEngine {
         let partial_prefix = block_count < planned_return_blocks;
         let extraction_elapsed = written.outcome.extraction_elapsed;
         let write_elapsed = written.outcome.write_elapsed;
-        let residual_header_batch = written.residual_header_batch.take();
+        let residual_batch = written.residual_batch.take();
         let log_count = self.record_historical_ingest_outcome(written.outcome);
         self.historical_rows_per_block_ewma = update_historical_density_ewma(
             self.historical_rows_per_block_ewma,
@@ -3803,13 +3854,13 @@ impl SyncEngine {
         );
         self.maybe_trim_historical_allocator();
         self.refresh_historical_status().await;
-        let residual_blocks = residual_header_batch
+        let residual_blocks = residual_batch
             .as_ref()
-            .map(|batch| batch.headers.len())
+            .map(|batch| batch.header_batch.headers.len())
             .unwrap_or_default();
-        if let Some(residual_header_batch) = residual_header_batch
+        if let Some(residual_batch) = residual_batch
             && !self
-                .ingest_historical_residual_header_batch(residual_header_batch)
+                .ingest_historical_residual_batch(residual_batch)
                 .await?
         {
             self.reset_historical_fetch_pipeline();
@@ -3872,10 +3923,14 @@ impl SyncEngine {
         Ok(true)
     }
 
-    async fn ingest_historical_residual_header_batch(
+    async fn ingest_historical_residual_batch(
         &mut self,
-        header_batch: HistoricalHeaderBatch,
+        residual_batch: HistoricalResidualBatch,
     ) -> Result<bool> {
+        let HistoricalResidualBatch {
+            header_batch,
+            mut prefetched_chunks,
+        } = residual_batch;
         let HistoricalHeaderBatch {
             child_header,
             header_peer,
@@ -3938,6 +3993,87 @@ impl SyncEngine {
         let mut remaining_hashes = hashes;
         let mut excluded_residual_peers = Vec::new();
         while !remaining_headers.is_empty() {
+            let prefetched_blocks =
+                take_prefetched_residual_prefix(&mut prefetched_chunks, remaining_headers.len());
+            if !prefetched_blocks.is_empty() {
+                let block_count = prefetched_blocks.len();
+                let chunk_headers = remaining_headers[..block_count].to_vec();
+                let chunk_hashes = remaining_hashes[..block_count].to_vec();
+                match validate_and_extract_historical_blocks_streaming(
+                    &chunk_headers,
+                    &chunk_hashes,
+                    prefetched_blocks,
+                )
+                .await?
+                {
+                    Ok((
+                        extracted,
+                        mut peer_notes,
+                        lowest_block,
+                        highest_block,
+                        block_count,
+                        validation_queue_elapsed,
+                        validation_elapsed,
+                    )) => {
+                        peer_notes.push(header_peer);
+                        for peer_id in peer_notes {
+                            self.note_serving_peer(peer_id, &mut newly_serving_peers);
+                        }
+
+                        let write_started = std::time::Instant::now();
+                        let outcome = super::ingest::write_extracted_historical_batch(
+                            Arc::clone(&self.storage),
+                            extracted,
+                        )
+                        .await?;
+                        let extraction_elapsed = outcome.extraction_elapsed;
+                        let write_elapsed = outcome.write_elapsed;
+                        let log_count = self.record_historical_ingest_outcome(outcome);
+                        self.historical_rows_per_block_ewma = update_historical_density_ewma(
+                            self.historical_rows_per_block_ewma,
+                            log_count,
+                            block_count,
+                        );
+                        self.refresh_historical_status().await;
+
+                        tracing::debug!(
+                            lowest_block,
+                            highest_block,
+                            blocks = block_count,
+                            logs = log_count,
+                            remaining_blocks = remaining_headers.len().saturating_sub(block_count),
+                            validation_queue_ms = validation_queue_elapsed.as_millis(),
+                            validation_ms = validation_elapsed.as_millis(),
+                            extraction_ms = extraction_elapsed.as_millis(),
+                            write_ms = write_elapsed.as_millis(),
+                            write_total_ms = write_started.elapsed().as_millis(),
+                            total_ms = residual_started.elapsed().as_millis(),
+                            "historical residual prefetched body/receipt chunk verified and ingested"
+                        );
+
+                        remaining_headers.drain(..block_count);
+                        remaining_hashes.drain(..block_count);
+                        shift_prefetched_residual_chunks_after_consumption(
+                            &mut prefetched_chunks,
+                            block_count,
+                        );
+                        continue;
+                    }
+                    Err(failure) => {
+                        tracing::warn!(
+                            block_number = failure.block_number,
+                            block_hash = %failure.block_hash,
+                            peer = %failure.peer,
+                            error = %failure.message,
+                            "historical residual prefetched block validation failed"
+                        );
+                        self.peers
+                            .report_invalid_block_data(failure.peer, failure.response_kind);
+                        return Ok(false);
+                    }
+                }
+            }
+
             if remaining_headers
                 .iter()
                 .all(historical_header_has_empty_body_and_receipts)
@@ -4026,13 +4162,14 @@ impl SyncEngine {
                 body_receipt_elapsed,
                 validation_queue_elapsed,
                 validation_elapsed,
+                residual_prefetched_chunks,
             ) = loop {
                 let body_receipt_started = std::time::Instant::now();
                 let body_receipt_gas_used = remaining_headers
                     .iter()
                     .map(|header| header.gas_used())
                     .collect();
-                let blocks = match self
+                let completion = match self
                     .peers
                     .prepare_bodies_and_receipts_request_for_hashes_and_gas_excluding(
                         remaining_hashes.clone(),
@@ -4054,7 +4191,7 @@ impl SyncEngine {
                                 if !completion.blocks.is_empty()
                                     && completion.blocks.len() <= remaining_headers.len() =>
                             {
-                                completion.blocks
+                                completion
                             }
                             Ok(Some(completion)) => {
                                 tracing::debug!(
@@ -4080,10 +4217,11 @@ impl SyncEngine {
                     None => return Ok(false),
                 };
                 let body_receipt_elapsed = body_receipt_started.elapsed();
-                let block_count = blocks.len();
+                let block_count = completion.blocks.len();
                 if block_count == 0 || block_count > remaining_headers.len() {
                     return Ok(false);
                 }
+                let residual_prefetched_chunks = completion.residual_chunks;
                 let chunk_headers = remaining_headers[..block_count].to_vec();
                 let chunk_hashes = remaining_hashes[..block_count].to_vec();
                 let remaining_after_chunk = remaining_headers.len().saturating_sub(block_count);
@@ -4099,7 +4237,7 @@ impl SyncEngine {
                 match validate_and_extract_historical_blocks_streaming(
                     &chunk_headers,
                     &chunk_hashes,
-                    blocks,
+                    completion.blocks,
                 )
                 .await?
                 {
@@ -4122,6 +4260,7 @@ impl SyncEngine {
                             body_receipt_elapsed,
                             validation_queue_elapsed,
                             validation_elapsed,
+                            residual_prefetched_chunks,
                         );
                     }
                     Err(failure) => {
@@ -4190,6 +4329,8 @@ impl SyncEngine {
 
             remaining_headers.drain(..block_count);
             remaining_hashes.drain(..block_count);
+            shift_prefetched_residual_chunks_after_consumption(&mut prefetched_chunks, block_count);
+            merge_prefetched_residual_chunks(&mut prefetched_chunks, residual_prefetched_chunks);
         }
 
         Ok(true)
@@ -4823,7 +4964,7 @@ mod tests {
             validation_elapsed: Duration::from_millis(50),
             validation_queue_elapsed: Duration::from_millis(60),
             processing_elapsed: Duration::from_millis(70),
-            residual_header_batch: None,
+            residual_batch: None,
         }
     }
 
@@ -5098,6 +5239,39 @@ mod tests {
     }
 
     #[test]
+    fn prefetched_residual_chunks_shift_after_gap_consumption() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(4, vec![4, 5, 6, 7]);
+        chunks.insert(8, vec![8, 9, 10, 11]);
+
+        assert!(take_prefetched_residual_prefix(&mut chunks, 12).is_empty());
+
+        shift_prefetched_residual_chunks_after_consumption(&mut chunks, 4);
+        assert_eq!(
+            take_prefetched_residual_prefix(&mut chunks, 12),
+            vec![4, 5, 6, 7, 8, 9, 10, 11]
+        );
+    }
+
+    #[test]
+    fn prefetched_residual_chunks_preserve_existing_chunks_on_merge() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![0, 1, 2, 3]);
+        chunks.insert(8, vec![8, 9, 10, 11]);
+
+        let mut new_chunks = BTreeMap::new();
+        new_chunks.insert(0, vec![100, 101, 102, 103]);
+        new_chunks.insert(4, vec![4, 5, 6, 7]);
+
+        merge_prefetched_residual_chunks(&mut chunks, new_chunks);
+
+        assert_eq!(
+            take_prefetched_residual_prefix(&mut chunks, 12),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+    }
+
+    #[test]
     fn historical_batch_next_child_header_continues_below_residual_gap() {
         let h100 = header(100, B256::ZERO, 0x01);
         let h101 = header(101, h100.hash_slow(), 0x02);
@@ -5124,7 +5298,10 @@ mod tests {
             required_block: 100,
             header_elapsed: Duration::ZERO,
             body_receipt_elapsed: Duration::ZERO,
-            residual_header_batch,
+            residual_batch: residual_header_batch.map(|header_batch| HistoricalResidualBatch {
+                header_batch,
+                prefetched_chunks: BTreeMap::new(),
+            }),
         };
 
         assert_eq!(
@@ -5664,7 +5841,10 @@ mod tests {
     #[test]
     fn prepared_historical_batch_coalescing_rejects_residual_gaps() {
         let mut prepared = prepared_batch(1_000, 16, 42);
-        prepared.residual_header_batch = Some(residual_header_batch(header(999, B256::ZERO, 1)));
+        prepared.residual_batch = Some(HistoricalResidualBatch {
+            header_batch: residual_header_batch(header(999, B256::ZERO, 1)),
+            prefetched_chunks: BTreeMap::new(),
+        });
 
         assert!(!prepared_historical_batch_can_coalesce(&prepared));
     }

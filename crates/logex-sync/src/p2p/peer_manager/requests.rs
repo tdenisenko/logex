@@ -244,6 +244,7 @@ struct BodyReceiptActiveRequestGuard {
 pub(crate) struct BodyReceiptRequestCompletion {
     pub(crate) blocks: Vec<SourcedBodyReceipts>,
     pub(crate) planned_return_blocks: usize,
+    pub(crate) residual_chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
 }
 
 #[derive(Clone)]
@@ -895,7 +896,8 @@ impl PeerManager {
             planned_return_blocks,
             total_hashes,
         );
-        let blocks = take_contiguous_body_receipt_prefix(completion_return_blocks, chunks);
+        let (blocks, residual_chunks) =
+            split_contiguous_body_receipt_prefix(completion_return_blocks, chunks);
 
         let min_accepted_prefix = min_accepted_prefix_override
             .map(|prefix| {
@@ -907,6 +909,7 @@ impl PeerManager {
             Ok(Some(BodyReceiptRequestCompletion {
                 blocks,
                 planned_return_blocks,
+                residual_chunks,
             }))
         } else {
             bail!(
@@ -5003,17 +5006,24 @@ fn contiguous_chunk_blocks<T>(chunks: &BTreeMap<usize, Vec<T>>) -> usize {
     expected_start
 }
 
-fn take_contiguous_body_receipt_prefix(
+fn split_contiguous_body_receipt_prefix(
     return_blocks: usize,
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-) -> Vec<SourcedBodyReceipts> {
-    take_contiguous_prefix(return_blocks, chunks)
+) -> (
+    Vec<SourcedBodyReceipts>,
+    BTreeMap<usize, Vec<SourcedBodyReceipts>>,
+) {
+    split_contiguous_prefix(return_blocks, chunks)
 }
 
-fn take_contiguous_prefix<T>(return_blocks: usize, chunks: BTreeMap<usize, Vec<T>>) -> Vec<T> {
+fn split_contiguous_prefix<T>(
+    return_blocks: usize,
+    chunks: BTreeMap<usize, Vec<T>>,
+) -> (Vec<T>, BTreeMap<usize, Vec<T>>) {
     let contiguous_blocks = contiguous_chunk_blocks(&chunks);
     let target_blocks = contiguous_blocks.min(return_blocks);
     let mut blocks = Vec::with_capacity(target_blocks);
+    let mut residual_chunks = BTreeMap::new();
     let mut expected_start = 0usize;
 
     for (start, mut chunk_blocks) in chunks {
@@ -5028,10 +5038,17 @@ fn take_contiguous_prefix<T>(return_blocks: usize, chunks: BTreeMap<usize, Vec<T
             chunk_blocks.truncate(remaining_prefix);
             expected_start += chunk_blocks.len();
             blocks.extend(chunk_blocks);
+        } else if start >= target_blocks && start < return_blocks {
+            let mut chunk_blocks = chunk_blocks;
+            let max_len = return_blocks - start;
+            if chunk_blocks.len() > max_len {
+                chunk_blocks.truncate(max_len);
+            }
+            residual_chunks.insert(start - target_blocks, chunk_blocks);
         }
     }
 
-    blocks
+    (blocks, residual_chunks)
 }
 
 #[derive(Debug, Clone)]
@@ -6371,15 +6388,29 @@ mod tests {
     }
 
     #[test]
-    fn take_contiguous_body_receipt_prefix_returns_deterministic_prefix() {
+    fn split_contiguous_prefix_returns_deterministic_prefix() {
         let mut chunks = BTreeMap::new();
         chunks.insert(0, vec![0, 1, 2, 3]);
         chunks.insert(4, vec![4, 5, 6, 7]);
         chunks.insert(8, vec![8, 9, 10, 11]);
 
-        let blocks = take_contiguous_prefix(6, chunks);
+        let (blocks, _) = split_contiguous_prefix(6, chunks);
 
         assert_eq!(blocks, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn split_contiguous_prefix_preserves_residual_chunks_after_gap() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![0, 1, 2, 3]);
+        chunks.insert(8, vec![8, 9, 10, 11]);
+        chunks.insert(12, vec![12, 13, 14, 15]);
+
+        let (blocks, residual_chunks) = split_contiguous_prefix(16, chunks);
+
+        assert_eq!(blocks, vec![0, 1, 2, 3]);
+        assert_eq!(residual_chunks.get(&4), Some(&vec![8, 9, 10, 11]));
+        assert_eq!(residual_chunks.get(&8), Some(&vec![12, 13, 14, 15]));
     }
 
     #[test]
