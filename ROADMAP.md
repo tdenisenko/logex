@@ -186,12 +186,15 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-053809.log`: local validation passed, but no duplicate attempts fired and the live sample averaged ~187.0 actual blocks/sec with one low window, below the accepted ~220.8 actual blocks/sec baseline.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-055321.log`: duplicate attempts fired five times, but the live sample averaged ~187.3 actual blocks/sec with one low window. The duplicate attempts reduced useful active fetch depth instead of improving contiguous floor movement.
   - Both candidates were reverted locally and on the Mac mini; the remote client was restored to the accepted scheduler at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-060349.log`.
+- Rejected the first chunk-level role-split live scheduler:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-062114.log`: local validation passed, but the corrected live sample averaged ~176.7 actual blocks/sec with 10 low windows and 2 zero-progress windows.
+  - The candidate was reverted locally and on the Mac mini; the remote client was restored to the accepted scheduler at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-063608.log`.
 
 ## Remaining TODOs
 
 1. Build a chunk-level live body/receipt request scheduler.
    - Reason: historical sync is still peer-tail bound; static fetch plans can stall on a slow prefix while other peers and later work are available.
-   - Completion criteria: body/receipt chunks inside a plan have live ownership, reservation expiry, and peer-speed-aware reassignment; timed-out work is reassigned without discarding useful lookahead; ordered verified ingestion is preserved; sustained full-run throughput improves without extra peer churn; and the scheduler avoids the rejected live-first, role-level, and outer-sequence duplicate-attempt failure modes.
+   - Completion criteria: body/receipt chunks inside a plan have live ownership, reservation expiry, and peer-speed-aware reassignment; timed-out work is reassigned without discarding useful lookahead; ordered verified ingestion is preserved; sustained full-run throughput improves without extra peer churn; and the scheduler avoids the rejected live-first, role-level, broad role-split, and outer-sequence duplicate-attempt failure modes.
 
 2. Improve full-run historical sync stability and throughput.
    - Reason: peaks can reach the 800k+ logs/sec range, but low-throughput windows still keep the end-to-end sync time above the target.
@@ -238,6 +241,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes. A scheduler that downloads body/receipt halves independently must still be driven by contiguous-prefix ownership and expected receipt counts; otherwise it wastes bandwidth on partial chunks.
 - Live-first role-level body/receipt scheduling is rejected for now. It must not sit in front of the accepted paired scheduler unless it can prove accepted-prefix completion without introducing low/zero-progress windows.
 - Outer-sequence duplicate expected-fetch reservations are rejected. Live tests showed they either did not fire before useful stalls cleared or fired by consuming capacity from the main lookahead pipeline; the next scheduler must operate at chunk/request ownership level inside the body/receipt planner.
+- Broad role-split chunk scheduling is rejected. Splitting every prefix chunk into independent body and receipt tasks produced high bandwidth use but poor contiguous floor movement; the next attempt should preserve the accepted paired chunk path and only reassign stale prefix-critical chunk roles.
 
 ## Challenges and Resolutions
 
@@ -376,10 +380,14 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: duplicating the outer expected fetch looked like a bounded way to reduce head-of-line stalls without replacing the accepted paired scheduler.
   - Resolution: tested two candidates, one late-triggered and one 4s-triggered. The late-triggered candidate did not fire; the 4s-triggered candidate fired but reduced useful active fetch depth and still trailed the accepted scheduler.
   - Remaining: implement live ownership and reassignment inside the body/receipt chunk planner rather than duplicating whole expected sequences.
+- Challenge: the first chunk-level role-split scheduler reused fast body/receipt halves but split too much work ahead of the accepted prefix.
+  - Resolution: reverted after live testing showed lower actual floor movement and more low/zero-progress windows than the accepted scheduler.
+  - Remaining: implement a prefix-first scheduler that keeps paired chunk attempts as the normal path and reassigns only stale prefix-critical roles.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected local benchmark/sampler scripts and found no committed script using the bad `netstat` fields. Created a corrected ignored local sampler instead of leaving the measurement as an ad hoc command.
+- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected broad role-split live scheduler left no code changes locally or on the remote build.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, while the accepted separate dense activation threshold remains.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense lookahead depth 8 was replaced by accepted depth 7.
 - Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected 20s retry, larger fetch buffer, timed duplicate prefix hedge, and unguarded critical-refill experiments were reverted or replaced by the bounded write-refill implementation.
