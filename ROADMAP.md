@@ -44,7 +44,7 @@ The feature is close enough that more small knob experiments should stop unless 
   - `cargo clippy -p logex-server -- -D warnings`
 - Extracted reverse historical header page downloads into an owned request plan plus completion/accounting step.
   - Reason: bounded queued scheduling needs header network I/O to become a schedulable unit instead of being coupled to engine refill.
-  - Validation: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`.
+  - Validation: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; Mac mini release build and smoke in `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-113317.log`.
 
 ## Remaining TODOs
 
@@ -117,7 +117,7 @@ The feature is close enough that more small knob experiments should stop unless 
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`; `docs: record rejected refill experiments`; `refactor: split reverse header page planning`.
+- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`; `docs: record rejected refill experiments`; `refactor: split reverse header page planning`; `docs: record header plan remote smoke`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo test -p logex-server`; `cargo clippy -p logex-sync -- -D warnings`; `cargo clippy -p logex-server -- -D warnings`; remote smoke and throughput sampling on the Mac mini.
