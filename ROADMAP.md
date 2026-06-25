@@ -193,12 +193,16 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - The chunk request path now starts the first body/receipt pair, caches whichever half returns first, and after the hedge delay retries only the missing stale role inside the same chunk attempt.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-064959.log`: corrected samples averaged ~242.3 and ~244.0 actual blocks/sec with zero zero-progress windows. The only pipeline failure was the cold-start one-peer warmup before serving peers were available.
   - Local validation passed: `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
+- Rejected plan-level reservation expiry for body/receipt chunk ownership:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-072620.log`: corrected sample averaged ~237.1 actual blocks/sec with one low window and zero zero-progress windows, trailing the accepted per-chunk retry baseline.
+  - The reservation expiry path never fired during the run (`0` reservation-expiry log lines), so it added complexity without proving that it could recover a real stuck prefix.
+  - The candidate was reverted locally and on the Mac mini; the remote client was restored to the accepted per-chunk role retry build at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-073823.log`.
 
 ## Remaining TODOs
 
-1. Extend the live body/receipt scheduler beyond per-chunk role retries.
+1. Implement a bounded queued live request scheduler for historical body/receipt downloads.
    - Reason: historical sync is still peer-tail bound; static fetch plans can stall on a slow prefix while other peers and later work are available.
-   - Completion criteria: chunk ownership and reassignment spans the body/receipt plan rather than only one chunk attempt; timed-out prefix work is reassigned without discarding useful lookahead; ordered verified ingestion is preserved; sustained full-run throughput improves without extra peer churn; and the scheduler avoids the rejected live-first, role-level, broad role-split, and outer-sequence duplicate-attempt failure modes.
+   - Completion criteria: download reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the scheduler avoids the rejected live-first, role-level, broad role-split, reservation-expiry, and outer-sequence duplicate-attempt failure modes.
 
 2. Improve full-run historical sync stability and throughput.
    - Reason: peaks can reach the 800k+ logs/sec range, but low-throughput windows still keep the end-to-end sync time above the target.
