@@ -1178,6 +1178,9 @@ impl BodyReceiptRequestPlan {
         let mut chunks = BTreeMap::new();
         let mut failures = Vec::new();
         let mut stats = Vec::new();
+        let mut hedge_count = 0usize;
+        let max_scheduled_chunks: usize;
+        let max_hedged_attempts: usize;
         {
             let mut attempts = futures_util::stream::FuturesUnordered::new();
             let mut pending_ranges =
@@ -1192,12 +1195,11 @@ impl BodyReceiptRequestPlan {
             let mut retry_counts = HashMap::<usize, usize>::new();
             let mut in_flight = HashMap::<usize, InFlightBodyReceiptChunk>::new();
             let mut peer_state = BodyReceiptPlanPeerState::default();
-            let mut hedge_count = 0usize;
             let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
-            let max_scheduled_chunks =
+            max_scheduled_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
-            let max_hedged_attempts = self.max_in_flight.max(max_scheduled_chunks).saturating_add(
+            max_hedged_attempts = self.max_in_flight.max(max_scheduled_chunks).saturating_add(
                 body_receipt_prefix_hedge_spare_attempts(
                     min_return_blocks,
                     self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
@@ -1369,7 +1371,12 @@ impl BodyReceiptRequestPlan {
                     );
                 }
 
-                while attempts.len() < max_scheduled_chunks {
+                while body_receipt_can_schedule_more_prefix_chunks(
+                    in_flight.len(),
+                    attempts.len(),
+                    max_scheduled_chunks,
+                    max_hedged_attempts,
+                ) {
                     if contiguous_chunk_blocks(&chunks) >= min_return_blocks {
                         break;
                     }
@@ -1467,6 +1474,9 @@ impl BodyReceiptRequestPlan {
             receipt_avg_ms,
             body_max_ms,
             receipt_max_ms,
+            hedges = hedge_count,
+            max_unique_chunks = max_scheduled_chunks,
+            max_attempts = max_hedged_attempts,
             plan_ms = plan_started_at.elapsed().as_millis(),
             "body/receipt chunk pipeline plan completed"
         );
@@ -5085,6 +5095,15 @@ fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count
     PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS
 }
 
+fn body_receipt_can_schedule_more_prefix_chunks(
+    unique_in_flight_chunks: usize,
+    active_attempts: usize,
+    max_unique_chunks: usize,
+    max_attempts: usize,
+) -> bool {
+    unique_in_flight_chunks < max_unique_chunks && active_attempts < max_attempts
+}
+
 fn decoupled_initial_prefix_redundancy_count(
     ranges: &[std::ops::Range<usize>],
     min_return_blocks: usize,
@@ -5506,6 +5525,14 @@ mod tests {
             0
         );
         assert_eq!(body_receipt_prefix_hedge_spare_attempts(0, 32), 0);
+    }
+
+    #[test]
+    fn body_receipt_scheduler_keeps_unique_prefix_coverage_after_hedges() {
+        assert!(body_receipt_can_schedule_more_prefix_chunks(5, 8, 6, 10));
+        assert!(!body_receipt_can_schedule_more_prefix_chunks(6, 8, 6, 10));
+        assert!(!body_receipt_can_schedule_more_prefix_chunks(5, 10, 6, 10));
+        assert!(!body_receipt_can_schedule_more_prefix_chunks(0, 0, 0, 10));
     }
 
     #[test]
