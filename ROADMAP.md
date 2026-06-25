@@ -160,7 +160,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Accepted dense prefix progress salvage:
   - Logs showed the main body/receipt pipeline could complete 47 useful contiguous blocks but reject them because the dense accepted-prefix threshold was 64, causing full lookahead resets.
   - The dense accepted-prefix threshold now matches the dense chunk size more closely, and tiny residual tails below the parallel planner minimum are fetched through the sequential validated path.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-171944.log` moved 49,664 blocks over 243s, about ~204 actual blocks/sec, with zero no-progress windows and no `below accepted prefix` resets in the sampled log.
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-171944.log` moved 89,088 blocks over 366s, about ~243 actual blocks/sec, with zero no-progress windows, zero `below accepted prefix` resets, and zero body/receipt pipeline failures in the sampled log.
 
 ## Remaining TODOs
 
