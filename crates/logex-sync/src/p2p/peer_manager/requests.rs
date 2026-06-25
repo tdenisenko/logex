@@ -938,11 +938,11 @@ impl PeerManager {
         let (blocks, residual_chunks) =
             split_contiguous_body_receipt_prefix(completion_return_blocks, chunks);
 
-        let min_accepted_prefix = min_accepted_prefix_override
-            .map(|prefix| {
-                body_receipt_min_accepted_prefix_override(completion_return_blocks, prefix)
-            })
-            .unwrap_or_else(|| body_receipt_min_accepted_prefix(completion_return_blocks));
+        let min_accepted_prefix = body_receipt_completion_min_accepted_prefix(
+            completion_return_blocks,
+            min_accepted_prefix_override,
+            !residual_chunks.is_empty(),
+        );
         if blocks.len() >= min_accepted_prefix {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
@@ -5743,6 +5743,26 @@ fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize
     return_blocks.min(prefix)
 }
 
+fn body_receipt_completion_min_accepted_prefix(
+    return_blocks: usize,
+    min_accepted_prefix_override: Option<usize>,
+    has_residual_chunks: bool,
+) -> usize {
+    if let Some(prefix) = min_accepted_prefix_override {
+        return body_receipt_min_accepted_prefix_override(return_blocks, prefix);
+    }
+
+    let default_prefix = body_receipt_min_accepted_prefix(return_blocks);
+    if has_residual_chunks {
+        default_prefix.min(body_receipt_min_accepted_prefix_override(
+            return_blocks,
+            PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS,
+        ))
+    } else {
+        default_prefix
+    }
+}
+
 fn body_receipt_scheduled_chunk_limit(
     ranges: &[std::ops::Range<usize>],
     min_return_blocks: usize,
@@ -6191,6 +6211,26 @@ mod tests {
                 PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
             ),
             8
+        );
+    }
+
+    #[test]
+    fn body_receipt_completion_prefix_uses_residual_floor_only_with_buffered_suffix() {
+        assert_eq!(
+            body_receipt_completion_min_accepted_prefix(512, None, false),
+            body_receipt_min_accepted_prefix(512)
+        );
+        assert_eq!(
+            body_receipt_completion_min_accepted_prefix(512, None, true),
+            PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
+        );
+        assert_eq!(
+            body_receipt_completion_min_accepted_prefix(8, None, true),
+            8
+        );
+        assert_eq!(
+            body_receipt_completion_min_accepted_prefix(512, Some(24), true),
+            24
         );
     }
 

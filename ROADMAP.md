@@ -72,6 +72,14 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Active log: `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-143416.log`.
   - Remote release build passed.
   - Five-minute smoke showed the starvation regression fixed, historical sync around 273k logs/sec and 726 blocks/sec with 21 serving peers, 50 completed batches, no pipeline resets, and no duplicate churn.
+- Tested latency/failure scoring as a candidate peer selector improvement and rejected it:
+  - Local validation passed, but live Mac mini sampling regressed to about 88k logs/sec and 273 blocks/sec with fewer serving peers and a lookahead reset.
+  - The candidate was reverted locally and the Mac mini was restored to the accepted branch state without resetting the data dir.
+- Preserved useful partial-prefix completions when buffered suffix chunks already exist:
+  - Body/receipt completion now lowers the accepted prefix floor to the residual-repair floor only when later completed chunks are buffered behind the prefix.
+  - This keeps already verified contiguous prefix progress and lets residual repair fill the remaining gap, while the normal completion threshold still applies when no suffix work exists.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, and targeted residual prefix tests.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-145746.log` showed partial-prefix completions turning into residual verified ingestion, 58 completed batches, and one early reset followed by sustained historical floor movement.
 
 ## Remaining TODOs
 
@@ -108,6 +116,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Expected-fetch retries now use a bounded duplicate attempt instead of aborting the original in-flight request. This preserves lookahead and avoids converting a slow expected peer into a full pipeline reset; the tradeoff is bounded extra network pressure when the duplicate path is triggered.
 - Scheduler refill now treats active/reserved body and receipt subrequests as a first-class backpressure signal. This avoids keeping the sequence pipeline full by overloading a small ready peer pool and turning useful overlap into timeout bursts.
 - Prepared body/receipt plans preserve enough per-role request capacity to fetch their required prefix even when existing active/reserved load is high; active load only trims spare and duplicate-prefix capacity. This avoids starving the queue while still preventing redundant work from bypassing backpressure.
+- Partial-prefix completion may use the smaller residual-repair threshold only when suffix chunks are already buffered. This avoids throwing away validated contiguous prefix work while preserving the stricter normal threshold for isolated short responses.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -169,6 +178,14 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Resolution: rejected that smoke result, then changed per-plan windows to preserve the required prefix capacity and trim only spare duplicate work.
   - Remaining: use measured peer latency and bandwidth to drive the next larger queued scheduler instead of static windows alone.
 
+- Challenge: naive peer latency/failure scoring looked like an obvious selector improvement but reduced serving-peer coverage and throughput in live sampling.
+  - Resolution: reverted the selector scoring candidate and kept the simpler accepted peer scoring path.
+  - Remaining: measured peer behavior should feed the central bounded scheduler, not be bolted onto peer selection as an isolated score tweak.
+
+- Challenge: completed prefix blocks were still being discarded when the completion was below the normal minimum but had buffered suffix chunks that could be repaired.
+  - Resolution: accept the smaller residual prefix threshold only when suffix chunks are already buffered and will be verified by residual repair.
+  - Remaining: integrate this with stale-prefix queue ownership so partial progress is a scheduler-controlled path, not only a completion-time rescue.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -183,13 +200,15 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Replaced the single-attempt historical fetch handle with a per-sequence attempt map so duplicate expected attempts can be tracked, aborted, and released safely.
 - Inspected scheduler accounting and peer-manager request state after adding pressure backpressure; no obsolete low-peer/small-window fallback code could be safely removed yet.
 - Inspected body/receipt plan scheduling after adding per-role request windows; no additional obsolete scheduler paths were safe to remove in this slice.
+- Removed the rejected latency/failure scoring experiment before committing.
+- Inspected partial-prefix completion and residual repair helpers after accepting buffered partial-prefix preservation; no obsolete residual paths were safe to remove yet.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, and request-pressure targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
