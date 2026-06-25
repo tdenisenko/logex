@@ -2,484 +2,98 @@
 
 ## Current Status
 
-LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
+LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260625-102716`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, enabling the dense lookahead boost earlier when enough ready peers exist, treating transient request transport closures as soft per-kind pauses instead of immediate peer removals, keeping six dense active fetch windows once at least eight serving peers are available, allowing a deeper prepared-batch buffer only when available memory is clearly healthy, accepting useful dense prefix progress instead of resetting when a slow peer leaves a small prefix gap, using bounded per-chunk live body/receipt role retries, and releasing plan-level body/receipt peer ownership as soon as each role completes. Broader role-level, queued, and fallback-width scheduler candidates were tested and rejected because they increased request pressure while reducing or failing to materially improve contiguous verified floor progress.
+PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model but now schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, retries stale missing roles without redownloading fast halves, and keeps ordered verified ingestion intact.
+
+The feature is close enough that more small knob experiments should stop unless they directly validate the remaining live queue design. The next meaningful change is a bounded queued scheduler/backpressure pass, not more timeout/fanout/lookahead tuning.
 
 ## Completed Since Last Run
 
-- Accepted paired-plan missing-prefix reassignment:
-  - The scheduler now requeues the earliest required prefix chunk when it is incomplete and no longer owned by an in-flight attempt, instead of waiting for the whole body/receipt plan to fail.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-041728.log`: corrected 20-sample window moved 63,585 blocks over 288s, about ~220.8 actual blocks/sec, with zero low windows, zero zero-progress windows, no plan timeouts, no pipeline failures, no sequence resets, and no below-prefix resets.
-  - This is a clear improvement over the prior checkpoint sample at ~178.7 actual blocks/sec, but it is still below the target and remains a per-plan scheduler rather than a full cross-window reservation queue.
-- Rejected two follow-up scheduler candidates after live benchmarks:
-  - Adaptive low-peer paired window run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-043843.log`: ~144.4 actual blocks/sec with seven low windows, worse than the accepted ~220.8 baseline, so it was reverted.
-  - Live-first decoupled body/receipt scheduler runs `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-050127.log` and `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-051406.log`: local tests passed, but remote samples regressed to ~89.2 and ~100.8 actual blocks/sec with repeated low/zero-progress windows. The accepted scheduler was restored on the remote at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-052414.log`.
-- Accepted a paired-plan scheduler invariant that separates unique prefix chunk coverage from duplicate hedge attempt capacity:
-  - Before the change, duplicate hedge attempts could consume the same counter used to decide whether to start the next prefix chunk, reducing prefix range coverage while hedges were still in flight.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-040058.log`: corrected 20-sample window moved 51,652 blocks over 289s, about ~178.7 actual blocks/sec, with one low window, zero zero-progress windows, no plan timeouts, no pipeline failures, no sequence resets, and no below-prefix resets. The previous accepted corrected sample was ~160.8 actual blocks/sec with two low windows over the sampled window.
-  - The improvement is useful but modest; the larger live reservation scheduler remains required.
-- Confirmed the latest historical sync reached genesis, verified live head tracking still advanced, rotated the completed data dir into `/Volumes/SSD 4TB/LogEx-full-sync-20260625-102716`, deleted the superseded backup, and restarted from peer metadata only.
-- Implemented a role-level live body/receipt scheduler candidate with independent body/receipt task ownership, half reuse, stale-role hedging, accepted-prefix fallback to the legacy paired scheduler, and focused unit tests. Local validation passed (`cargo fmt --check`, `cargo test -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`), but live benchmarking failed:
-  - Candidate sample on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-033745.log`: heavy physical RX around 145-204 Mbps, many low windows, and useful floor progress around ~80-95 actual blocks/sec during the comparable warm interval.
-  - Restored accepted baseline on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-034527.log`: ~160.8 actual blocks/sec average over the corrected sampler window, two low windows, zero zero-progress windows, and dashboard logs/sec bursts up to ~751k.
-  - The candidate was reverted locally and on the remote because it repeated the earlier role-level scheduler failure mode: too much bandwidth converted into partial buffered work instead of contiguous verified ingestion.
-- Created and validated an ignored local-only sampler at `local-ops/sample-logex-throughput.sh` to sample the remote Mac mini using corrected macOS byte counters (`Ibytes`/`Obytes`) and report actual historical floor movement alongside physical and tunnel Mbps.
-- Corrected the live benchmark interpretation: the previous ad hoc sampler read packet/error columns as bytes. Because the approval arrived hours later, the validation sample was in sparse near-genesis ranges; it confirmed the sampler works and showed why sparse ranges naturally have low logs/sec despite high block/sec.
-- Confirmed full VPS routing and public NAT behavior; the remote client advertises `157.245.195.72` for EL/CL P2P and the dashboard remains on port `18683`.
-- Benchmarked the referenced high-throughput run at `/Users/gremlinmaster/logex-src/run/logex-pr96-spec-prepare-fresh-20260622-154837.log`: recent dense range p50 ~488k logs/sec, p90 ~702k, max ~1.01m.
-- Accepted duplicate request-failure coalescing after live logs showed the same slow peer could receive many body/receipt penalties in one request wave.
-- Accepted 16-peer chunk fanout:
-  - Comparable run before fanout: last-30 average ~164k logs/sec, p90 ~297k, max ~390k.
-  - Fanout run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-094825.log`: last-30 average ~221k logs/sec, p90 ~445k, max ~535k.
-- Rejected 2s request timeout with 16-peer fanout because serving peers collapsed and logs/sec dropped near zero; restored 4s.
-- Rejected partial-prefix early return because it caused residual backfill churn and dropped average throughput.
-- Accepted 512-block dense body/receipt planned windows:
-  - Baseline lower-density run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-103208.log`: average ~81k logs/sec, p50 ~83k, body/receipt avg ~20.1s, decoupled failures avg ~34/plan.
-  - 512-window run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-105803.log`: average ~129k logs/sec, p50 ~110k, body/receipt avg ~15.2s, decoupled failures avg ~6/plan.
-- Rejected 384-block dense windows because smaller batches reduced overall logs/sec and block/sec compared with the 512-window candidate.
-- Accepted dense lookahead depth 7:
-  - Depth 6 with 512-window cap: steady average ~135k logs/sec, ~379 blocks/sec.
-  - Depth 7 run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-114125.log`: steady average ~216k logs/sec, ~576 blocks/sec, no plan timeouts or pipeline failures.
-  - Depth 8 was rejected because it raised timeout churn and produced plan timeouts/pipeline failure despite higher bursts.
-- Rejected additional static tuning that did not beat the depth-7 baseline: 20s expected-fetch retry delay, 4s/30s request pause durations, a larger completed-fetch buffer, and a larger critical refill limit.
-- Accepted adaptive dense body/receipt chunk caps:
-  - Baseline depth-7 run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-114125.log`: average ~221k logs/sec, p50 ~185k, ~603 blocks/sec, 1813 timeout mentions.
-  - Adaptive chunk-cap run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-131037.log`: average ~251k logs/sec, p50 ~240k, ~739 blocks/sec, 742 timeout mentions.
-- Deployed the accepted adaptive chunk-cap variant and confirmed the client resumed historical sync after restart.
-- Rejected timed duplicate prefix hedging because it reduced body/receipt latency but lowered sustained progress by reducing useful active fetch depth.
-- Rejected naive write-time refill after it caused sequence-gap resets; kept the root-cause fix that treats the sequence currently being written as owned by the pipeline.
-- Accepted conservative write-time critical refill after the sequence fix:
-  - Baseline run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-135947.log`: average ~197k logs/sec, p50 ~161k, 29 low windows under 100k, refill p90 ~7.7s.
-  - Write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-142945.log`: average ~229k logs/sec, p50 ~188k, 5 low windows under 100k, refill p90 ~6.9s, zero sequence resets.
-- Replaced the generic write-time refill guard with a write-specific refill path that keeps active downloads full even when prepared work is buffered:
-  - Direct write-refill run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-145347.log`: average ~311k logs/sec, p50 ~266k, p90 ~582k, refill p90 ~3.1s, zero sequence resets.
-- Rejected 32-block dense chunk caps for medium-density ranges. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-151531.log` reduced refill time but also shrank batches, lowered average throughput, and did not improve the end-to-end rate.
-- Rejected re-testing dense lookahead depth 8 after write-time refill. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-153321.log` filled the network more aggressively but had worse body/receipt latency and lower average progress than the accepted depth-7 build.
-- Accepted a separate 16-peer dense pipeline activation threshold while keeping the wider high-peer fetch-window threshold at 20:
-  - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-154649.log`: average ~266k logs/sec, p50 ~225k, p90 ~483k.
-  - Threshold run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-155604.log`: average ~342k logs/sec, p50 ~309k, p90 ~576k, with no sequence resets or plan failures.
-  - The tradeoff is more request timeout churn and higher body/receipt tail latency, but sustained floor progress improved under the current 300/300 Mbps network constraint.
-- Rejected lowering the decoupled dense body/receipt minimum peer count from 8 to 4. The experiment made more plans use the decoupled path and reduced body/receipt plan latency, but it overfilled prepared work, reduced active download depth, and lowered warmed progress versus the committed baseline.
-- Accepted a larger healthy-memory prepare buffer while keeping the low-memory path unchanged:
-  - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-163936.log`: last-60 average ~329k logs/sec, p50 ~295k, p90 ~536k.
-  - Prepare-buffer run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-164912.log`: last-60 average ~334k logs/sec, p50 ~301k, p90 ~517k, with fewer low windows and no sequence resets or plan failures.
-  - The change is modest but useful: it smooths write/download overlap without hiding the remaining active-fetch scheduling bottleneck.
-- Rejected changing the healthy-memory fetch budget from completed-only to total outstanding work. The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-170413.log` overfilled prepared work, dropped active fetches, and reduced last-60 progress to ~143k logs/sec versus ~334k on the accepted baseline.
-- Accepted preserving performance-sorted peer order for body/receipt chunk attempts instead of rotating equally loaded peers by chunk index:
-  - Restored baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-171504.log`: last-60 average ~228k logs/sec, p50 ~180k, 6 low windows under 100k, body/receipt avg ~8.3s.
-  - Peer-ordering run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260623-172437.log`: last-100 average ~321k logs/sec, p50 ~298k, zero low windows under 100k, active fetch avg ~6.9/7, body/receipt avg ~8.1s and paired plan avg ~5.1s.
-  - This matches Nethermind's fast-block preference for measured faster peers while still balancing per-plan in-flight requests.
-- Confirmed the latest full sync reached genesis, rotated the completed data dir into `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`, deleted the superseded backup, and restarted fresh from peer metadata only.
-- Replaced the stale default checkpoint source in the remote benchmark script with the agreeing Beacon API quorum `https://ethereum-beacon-api.publicnode.com,https://lodestar-mainnet.chainsafe.io`; stale checkpoint rejection correctly prevented startup with the old SIGP checkpoint.
-- Benchmarked the fresh accepted build under the current 300/300 Mbps network:
-  - `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-054601.log`: last-60 average ~414k logs/sec, p50 ~361k, p90 ~677k, max ~970k, no sequence resets or pipeline failures.
-  - RX bandwidth usually ranged ~115-214 Mbps during dense sync, so the bottleneck is still peer/request tail behavior rather than disk or CPU, with the link becoming relevant during stronger windows.
-- Rejected decoupled dense peer-order preservation after live testing:
-  - The experiment improved bursts but produced near-zero progress windows while active fetches and RX remained high.
-  - Restored the accepted scheduler on the remote and confirmed historical progress resumed from the same data dir.
-- Rejected lowering dense high-depth activation from 16 to 12 serving peers:
-  - The experiment increased active depth and block throughput in some windows, but raised timeout churn and produced a body/receipt pipeline failure.
-  - The accepted scheduler was restored on the remote and restarted from the same data dir.
-- Accepted soft handling for transient body/receipt request transport failures:
-  - Before the change, correlated `Disconnected` / channel-close request failures could amplify into peer-pool collapse even while the network itself remained usable.
-  - After deployment in `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-070206.log`, serving-peer p50 improved from ~16 to ~31, fetch-capacity p50 from ~17 to ~31, progress p50 from ~351k to ~397k logs/sec, and p90 from ~608k to ~748k logs/sec.
-  - The remaining low windows now correlate with long body/receipt plan tails and ordered prefix refill waits, not loss of the peer pool.
-- Rejected widening the fast body/receipt candidate pool from 24 to 36 peers because the candidate did not activate in the observed window and had no proven benefit.
-- Rejected raising high-peer per-peer request fanout from 2 to 3:
-  - Accepted baseline `/private/tmp/logex-perf-logs/logex-accepted-after-revert-20260624-072956.log`: average ~465k logs/sec, p50 ~423k, p90 ~787k, paired plan p50 ~6.1s.
-  - Fanout-3 run `/private/tmp/logex-perf-logs/logex-fanout3-20260624-074158.log`: average ~418k logs/sec, p50 ~343k, p90 ~794k, with higher request failure count.
-  - The change was reverted because it increased pressure without improving sustained throughput.
-- Accepted denser low-peer lookahead after live testing:
-  - Change: use six dense active fetch windows once at least eight serving peers are available.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-080230.log`: average ~493k logs/sec, p50 ~485k, p90 ~747k, active fetch p50/p90 6/7, paired plan p50/p90 ~5.2s/~10.1s, zero historical pipeline resets.
-  - The previous accepted comparison averaged ~465k logs/sec with p50 ~423k and paired plan p50/p90 ~6.1s/~12.5s.
-- Rejected retesting dense lookahead depth 8 on the new baseline:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-082530.log` increased active depth and RX bursts, but average progress fell to ~437k logs/sec, p50 fell to ~398k, and paired plan p90 worsened to ~14.7s.
-  - The change was reverted and the remote client was restored to the accepted depth-7 build.
-- Rejected increasing the dense fetch row target from 250k to 350k rows:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-084124.log` raised RX utilization but over-buffered prepared work, produced one pipeline failure line, and trailed the accepted baseline at ~472k average logs/sec and ~449k p50.
-  - The change was reverted and the remote client was restored to the accepted 250k-row dense window target.
-- Rejected reducing the body/receipt hedge delay from 1.5s to 1.0s:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-085853.log` lowered some plan latency but raised duplicate/wasted request pressure, produced one pipeline failure line, and dropped progress to ~392k average logs/sec and ~375k p50.
-  - The change was reverted and the remote client was restored to the accepted 1.5s hedge delay.
-- Rejected disabling the decoupled dense body/receipt path:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-091648.log` had more serving peers but worse useful throughput at ~442k average logs/sec and ~401k p50, with paired plan p90 worsening to ~17.0s and a larger prepared backlog.
-  - The change was reverted because the decoupled path is still useful for keeping verified ingestion moving under peer-tail latency.
-- Rejected paired-plan lookahead hedging:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-094038.log` kept RX bandwidth high but increased disconnect/timeout churn, produced three body/receipt pipeline failure lines, and hit a 45s plan timeout.
-  - The change was reverted and the remote client was restored to the accepted scheduler in `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-094842.log`.
-- Rejected broadening the decoupled dense prefix request path:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-095322.log` increased buffered prepared work but reduced useful progress to ~258k average logs/sec and ~221k p50, with 285 parallel request failures.
-  - The change was reverted because it filled the prepared queue ahead of ordered writes while active fetch utilization fell; the accepted scheduler was restored on the remote client.
-- Rejected stopping decoupled dense role downloads at the accepted prefix:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-101621.log` used ~213 Mbps average RX but only reached ~248k average progress and ~198k p50, with 22 residual batches in a short run.
-  - The change was reverted because it spent bandwidth on more partial-prefix/residual churn instead of improving verified ingestion.
-- Rejected single-shot paired body/receipt chunk attempts:
-  - The run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-103452.log` reduced the worst paired-plan tail but did not materially improve batch throughput, worsened paired-plan p50, and increased pipeline failure lines.
-  - The change was reverted because it moved retry work to the scheduler without enough evidence of better end-to-end sync time.
-- Rejected the role-level paired body/receipt scheduler:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-105311.log`: average ~60k logs/sec, p50 ~55k, p90 ~108k while still using ~198 Mbps average RX.
-  - Restored accepted build `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-110035.log`: recovery sample averaged ~424k logs/sec, p50 ~436k, p90 ~623k at ~205 Mbps average RX.
-  - The change was reverted because it reused partial body/receipt halves but produced small contiguous prefixes, high timeout pressure, and poor useful ingestion per downloaded byte.
-- Rejected near-full decoupled dense prefix acceptance:
-  - Accepted-control run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-110035.log`: average ~465k logs/sec, p50 ~473k, p90 ~741k at ~235 Mbps average RX.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-111704.log`: average ~285k logs/sec, p50 ~286k, p90 ~488k at ~188 Mbps average RX.
-  - The change was reverted because accepting a 64-block tail gap reduced active useful work and worsened paired-plan latency instead of avoiding expensive fallback.
-- Rejected increasing body/receipt request timeout from 4s to 5s:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-112942.log`: average ~398k logs/sec, p50 ~405k, p90 ~696k at ~235 Mbps average RX.
-  - The paired-plan median improved, but end-to-end progress and low-window behavior trailed the accepted 4s baseline.
-  - The change was reverted because waiting longer reduced retry pressure locally without improving contiguous verified ingestion.
-- Rejected reducing paired body/receipt chunk fallback from 3 peers to 2:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-114351.log`: warmed samples used ~238-252 Mbps RX but did not move the historical floor faster than the restored three-peer baseline.
-  - The change was reverted because it spent comparable or higher network bandwidth without improving useful verified progress.
-- Rejected refreshing the hedge delay when duplicate paired chunk attempts are scheduled:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-120905.log`: average ~303k logs/sec and ~310 actual floor blocks/sec with active fetches still dipping to zero.
-  - The change was reverted because it improved some paired-plan latency metrics but did not improve end-to-end historical floor movement.
-- Accepted a high-available-memory prepared-batch buffer:
-  - Baseline accepted sample before the change: ~327 actual floor blocks/sec, ~369k average logs/sec, ~192 Mbps average RX, prepared backlog average ~6.9.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-125212.log`: ~387 actual floor blocks/sec, ~421k average logs/sec, ~234 Mbps average RX, prepared backlog average ~4.2, prepared backlog max 16 in logs, RSS p90 ~3.8 GiB, and zero pipeline resets/failure lines.
-  - The change is gated by high available memory, so low-memory machines keep the previous smaller buffer.
-- Rejected raising the high-memory write-refill active-fetch floor from 2 to 4:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-130946.log`: warm sample averaged ~335k logs/sec with ~286 actual floor blocks/sec, prepared backlog reached 16, and timeout/failure pressure rose while active fetches stayed mostly full.
-  - The change was reverted because it kept downloads busy but did not improve contiguous verified floor movement; the remaining bottleneck is ordered-prefix and body/receipt peer-tail coordination, not just refill depth.
-- Rejected requiring 16 peers before the decoupled dense body/receipt path:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-133638.log`: warm sample averaged ~353k logs/sec but only ~209 actual floor blocks/sec with ~31 serving peers; active fetches dropped to 2 and prepared backlog reached 16.
-  - The parser showed fewer decoupled failures, but the paired fallback below 16 peers overfilled prepared work and slowed verified floor movement, so the accepted 8-peer threshold was restored.
-- Rejected per-request-kind timeout counters for body/receipt peer scoring:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-135513.log`: sample averaged ~287k logs/sec and only ~158 actual floor blocks/sec, with many peers simultaneously timeout-penalized.
-  - The change was reverted because it reduced useful peer capacity without improving contiguous verified floor movement; the accepted high-memory prepare-buffer baseline was restored on the remote client.
-- Rejected immediate retry eligibility for disconnected serving peers:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-142725.log`: initial peer recovery improved, but a warmer sample regressed to ~169k average logs/sec, ~104 actual floor blocks/sec, and a peer collapse to three serving peers.
-  - The change was reverted because it did not prevent timeout-wave collapse or improve useful verified ingestion; the accepted baseline was restored on the remote client.
-- Rejected shifting the EL peer capacity split from one-third outbound to two-thirds outbound:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-144723.log`: serving peers increased to an average ~14.2 and a max of 22, but useful floor movement averaged only ~136 blocks/sec with ~267k logs/sec.
-  - The change was reverted because higher peer count did not beat the accepted baseline for contiguous verified progress and still left many body/receipt peers paused behind slow request waves.
-- Rejected widening paired body/receipt chunk concurrency below 16 peers:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-150144.log`: initial progress improved, but the full sample averaged only ~53 actual floor blocks/sec and ~105k logs/sec while serving peers fell as low as five.
-  - The change was reverted because a wider static paired window increased request pauses/prepared backlog and did not reduce end-to-end peer-tail stalls.
-- Accepted bounded active-peer fallbacks for body/receipt candidate selection:
-  - Change: when enough idle body/receipt peers exist, prefer those idle peers but keep up to eight active fallbacks instead of discarding every active candidate before performance scoring.
-  - Immediate accepted baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-151034.log`: ~121 actual floor blocks/sec over ~274s, ~208k average logged logs/sec, body/receipt batch latency ~15.5s.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-151846.log`: ~146 actual floor blocks/sec over ~419s, ~288k average logged logs/sec, last-80 body/receipt batch latency ~13.2s, paired-plan failures averaged ~0.1 per plan.
-  - A follow-up 18-sample status window averaged ~205 actual floor blocks/sec with only ~6.3 serving peers, showing better weak-peer utilization without the peer collapse seen in the rejected fanout change.
-- Rejected stopping the decoupled dense collector at the accepted prefix:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-154029.log` created many partial-prefix batches and spent several seconds per batch filling residual gaps inline.
-  - The change was reverted because it moved the wait into residual backfill and reduced useful verified floor movement.
-- Rejected lowering dense chunk-size activation from 16 peers to 8 peers:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-155014.log` averaged ~165 actual floor blocks/sec over the warmed sample versus ~205 for the accepted bounded-fallback baseline.
-  - The change was reverted because smaller chunks increased request churn and paused-peer pressure without reducing body/receipt tail latency enough.
-- Rejected stronger active-request score penalties:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-160935.log` lowered some plan-latency metrics but reduced active fetch depth and warmed floor movement to ~128 actual blocks/sec.
-  - The change was reverted because it left useful peers underused and trailed the accepted load-adjusted scoring baseline.
-- Rejected medium-peer prefix redundancy:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-163715.log` passed focused local request tests but averaged only ~133 actual floor blocks/sec over a live sample.
-  - Restored accepted baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-164404.log`; a five-minute sample moved 65,528 blocks in 304s, about ~216 actual blocks/sec, with zero no-progress windows and high tunnel RX during movement.
-- Accepted dense prefix progress salvage:
-  - Logs showed the main body/receipt pipeline could complete 47 useful contiguous blocks but reject them because the dense accepted-prefix threshold was 64, causing full lookahead resets.
-  - The dense accepted-prefix threshold now matches the dense chunk size more closely, and tiny residual tails below the parallel planner minimum are fetched through the sequential validated path.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-171944.log` moved 89,088 blocks over 366s, about ~243 actual blocks/sec, with zero no-progress windows, zero `below accepted prefix` resets, and zero body/receipt pipeline failures in the sampled log.
-- Rejected shortening submitted-dial suppression from 15s to 5s:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-173915.log` did not materially improve connected/serving peers, averaged below the accepted dense-prefix run during the sampled window, and produced a zero-progress interval.
-  - The change was reverted and the remote client was restored to the accepted branch state.
-- Rejected outer-sequence duplicate expected-fetch reservations:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-053809.log`: local validation passed, but no duplicate attempts fired and the live sample averaged ~187.0 actual blocks/sec with one low window, below the accepted ~220.8 actual blocks/sec baseline.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-055321.log`: duplicate attempts fired five times, but the live sample averaged ~187.3 actual blocks/sec with one low window. The duplicate attempts reduced useful active fetch depth instead of improving contiguous floor movement.
-  - Both candidates were reverted locally and on the Mac mini; the remote client was restored to the accepted scheduler at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-060349.log`.
-- Rejected the first chunk-level role-split live scheduler:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-062114.log`: local validation passed, but the corrected live sample averaged ~176.7 actual blocks/sec with 10 low windows and 2 zero-progress windows.
-  - The candidate was reverted locally and on the Mac mini; the remote client was restored to the accepted scheduler at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-063608.log`.
-- Accepted bounded per-chunk live body/receipt role retries:
-  - The chunk request path now starts the first body/receipt pair, caches whichever half returns first, and after the hedge delay retries only the missing stale role inside the same chunk attempt.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-064959.log`: corrected samples averaged ~242.3 and ~244.0 actual blocks/sec with zero zero-progress windows. The only pipeline failure was the cold-start one-peer warmup before serving peers were available.
-  - Local validation passed: `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
-- Rejected plan-level reservation expiry for body/receipt chunk ownership:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-072620.log`: corrected sample averaged ~237.1 actual blocks/sec with one low window and zero zero-progress windows, trailing the accepted per-chunk retry baseline.
-  - The reservation expiry path never fired during the run (`0` reservation-expiry log lines), so it added complexity without proving that it could recover a real stuck prefix.
-  - The candidate was reverted locally and on the Mac mini; the remote client was restored to the accepted per-chunk role retry build at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-073823.log`.
-- Rejected the first bounded queued body/receipt scheduler candidate:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-075847.log`: corrected sample averaged ~257.4 actual blocks/sec with one low window and zero zero-progress windows, trailing the accepted control at ~266.8 actual blocks/sec.
-  - The queue kept progress moving but amplified role requests inside each plan, so useful verified floor movement per request fell. The candidate was reverted locally and on the Mac mini; the remote client was restored to the accepted scheduler at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-080652.log`.
-- Rejected useful-prefix-only paired scheduling:
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-081420.log`: corrected sample averaged ~267.9 actual blocks/sec with two low windows and zero zero-progress windows, essentially tied with the accepted control at ~266.8 actual blocks/sec.
-  - The candidate confirmed that non-prefix range churn is not the current dominant tail. It was reverted because the benefit was too small to justify keeping another scheduler branch.
-- Rejected wider active fallback pools for body/receipt candidates:
-  - Accepted baseline sample after restoring the scheduler averaged ~235.6 actual blocks/sec with three low windows and zero zero-progress windows in the current range.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-083347.log` produced a zero-progress window early in the sample after widening idle/serving fallback probes from 8 to 12 peers, so the candidate was stopped and reverted.
-  - The result reinforces that broader candidate breadth and request pressure are not sufficient; the next scheduler needs precise stale-role or stale-chunk reassignment.
-- Accepted plan-level live body/receipt role scheduling:
-  - Change: paired body/receipt plans now schedule body and receipt role futures at the plan level, release per-role peer load as soon as that role completes, cache fast halves, and keep the same contiguous-prefix completion rule.
-  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-090610.log`: corrected sampler moved 94,439 blocks over 290s, about ~325.7 actual blocks/sec, with one low window, zero zero-progress windows, and no pipeline/reset/error matches.
-  - Follow-up sample on the same run moved 92,068 blocks over 288s, about ~319.7 actual blocks/sec, with two low windows and zero zero-progress windows. The result supports keeping the scheduler, but the temporary paired fallback path stays until the remaining prepared-buffer low windows are understood.
-  - Local validation passed: `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
+- Removed the obsolete paired body/receipt chunk-attempt fallback path from `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
+- Removed the now-unused live-scheduler feature flag, fallback structs, fallback scheduling helpers, obsolete hedge helpers, and fallback-only tests.
+- Simplified plan-live missing-prefix ownership to track only active chunk starts, since the accepted live scheduler no longer needs the old fallback attempt metadata.
+- Rejected adaptive ordered-write coalescing after live testing:
+  - Control run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-090610.log`: corrected sampler averaged about 397.6 actual historical floor blocks/sec with zero low or zero-progress windows.
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-093344.log`: interrupted sample averaged about 262.7 actual blocks/sec with two low windows and one zero-progress window.
+  - The candidate was reverted locally and on the Mac mini.
+- Deployed the cleaned scheduler to the Mac mini:
+  - Active log: `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-100450.log`.
+  - Post-deploy status showed the client syncing, historical floor moving, 18 EL peers, and 17 serving peers.
+  - Log grep found no body/receipt pipeline failures, plan timeouts, sequence gaps, below-prefix resets, or errors in the new run.
+- Validation passed locally:
+  - `cargo fmt --check`
+  - `cargo check -p logex-sync`
+  - `cargo test -p logex-sync`
+  - `cargo clippy -p logex-sync -- -D warnings`
 
 ## Remaining TODOs
 
-1. Implement a bounded queued live request scheduler for historical body/receipt downloads.
-   - Reason: historical sync is still peer-tail bound; static fetch plans can stall on a slow prefix while other peers and later work are available.
-   - Completion criteria: download reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the scheduler avoids the rejected live-first, role-level, broad role-split, reservation-expiry, and outer-sequence duplicate-attempt failure modes.
+1. Implement the bounded queued live request scheduler for historical body/receipt downloads.
+   - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
+   - Completion criteria: body/receipt chunk reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
 
-2. Improve full-run historical sync stability and throughput.
-   - Reason: peaks can reach the 800k+ logs/sec range, but low-throughput windows still keep the end-to-end sync time above the target.
-   - Completion criteria: benchmark windows show materially lower max gaps and sustained throughput near the target while tracking active fetches, body/receipt latency, failures, serving peers, CPU, memory, disk, and network.
+2. Add scheduler-level backpressure and observability.
+   - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
+   - Completion criteria: status/log metrics expose live reservation depth, prefix-critical waits, stale role reassignments, active fetches, prepared backlog, ordered write time, bandwidth, peer request latency, and dropped/retried work without flooding the dashboard.
 
-3. Complete EL production hardening.
-   - Reason: performance work must not weaken restart safety, checkpoint freshness, forward sync, reorg handling, or query correctness.
+3. Validate full-run historical sync performance.
+   - Reason: short samples can be misleading across log-dense and sparse ranges.
+   - Completion criteria: a fresh full-run benchmark records start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, zero-progress windows, bandwidth, CPU, memory, disk, peer counts, and any resets/failures. The target remains a materially lower full-sync time, with the long-term goal of four hours on the current class of machine/network if the network and peers allow it.
+
+4. Complete EL production hardening.
+   - Reason: scheduler work must not weaken restart safety, checkpoint freshness, forward sync, reorg handling, low-disk behavior, query correctness, or dashboard access.
    - Completion criteria: tests or smokes cover recent-checkpoint enforcement, stale restart rejection, CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
 
 ## Design Decisions
 
-- Keep performance changes only when live Mac mini benchmarks show sustained improvement, not just higher peaks.
+- Keep performance changes only when live Mac mini benchmarks show sustained improvement in useful verified floor progress, not just higher logs/sec peaks or higher bandwidth.
 - Historical reverse sync remains independent of CL live-head tracking after a valid recent checkpoint-backed pivot exists.
-- Logs/sec is useful for dense ranges, but block/sec and rows/block must be considered in lower-density historical ranges.
-- Static global timeout reductions are rejected for now; the 2s timeout was too aggressive with higher fanout and caused peer churn. Future timeout work should be adaptive per peer/request kind.
-- Static global timeout increases are also rejected for now; 5s reduced paired-plan median latency but lowered end-to-end useful throughput versus the accepted 4s baseline.
-- Earlier expected-fetch retries are worthwhile in the accepted reset/retry form because they preserve ordered ingestion while reducing time spent waiting for one stale prefix when later lookahead already completed.
-- Body/receipt plans use a 45s plan timeout with faster fanout; shorter global plan timeouts caused avoidable plan failures in live runs.
-- Candidate pools switch to two chunk requests per peer at 16 peers because dense gas-bounded windows otherwise took multiple request waves even with idle local CPU and disk.
-- Dense body/receipt planned windows are capped at 512 blocks. This keeps the request plan complete, avoids residual backfill, and reduces slow-tail chunk latency better than partial-prefix early return or 384-block windows.
-- Dense lookahead caps at 7 active fetches. Depth 8 improves bursts but increases pending backlog and timeout churn; depth 7 provided the better sustained/stability balance in live tests.
-- Dense body/receipt chunk caps now shrink with log density when at least 16 peers are available: sparse ranges keep 128-block chunks, dense ranges cap at 48 blocks, and very dense ranges cap at 32 blocks. Live testing showed this reduced tail timeouts and improved sustained logs/sec.
-- During ordered historical writes, the engine uses a write-specific bounded refill path. It keeps active downloads full without treating a full prepared queue as sufficient by itself, while the normal fetch buffer still enforces memory limits. The in-progress ingest sequence is counted as pipeline-owned so refill checks do not mistake a currently written batch for a sequence gap.
-- Dense lookahead can now activate at 16 serving peers, but wider high-peer fetch windows still require 20 serving peers. This keeps the downloader busy earlier without broadening request windows too aggressively.
-- Dense low-peer lookahead now expands to six active fetch windows after eight serving peers are available. This uses idle bandwidth earlier in warm peer pools without the failure rate increase seen from raising per-peer request fanout.
-- Healthy-memory historical prepare buffering can hold up to 12 completed fetches, while low-memory refill behavior remains at the smaller prepare lookahead floor. Live testing showed this modestly improves write/download overlap without creating the prepared-work backlog seen in the rejected decoupled request experiment.
-- Very healthy available-memory historical prepare buffering can now hold up to 16 completed/preparing batches. This is only enabled above the high-available-memory threshold and keeps the existing low-memory path unchanged.
-- Increasing the write-refill active-fetch floor beyond the accepted baseline is rejected for now. Live testing showed that more active fetches can accumulate prepared work behind the ordered prefix without improving useful verified progress.
-- Raising decoupled dense eligibility to 16 peers is rejected. Reducing decoupled failures alone is not enough if it lowers actual contiguous floor progress or fills the prepared queue.
-- Body/receipt chunk attempts preserve the performance-sorted peer order and use in-plan load balancing inside that order. This favors measured faster peers for prefix-critical chunks while still spreading requests as per-peer in-flight counts rise.
-- The optimization target is stable use of the available 300/300 Mbps link and local resources with low idle time, not maximizing brief logs/sec peaks.
-- Performance sampling must use physical-interface byte counters when judging bandwidth saturation. On macOS `netstat -ibn`, `Ibytes` is field 7 and `Obytes` is field 10; tunnel/interface packet counters are not a reliable Mbps proxy.
-- Candidate performance is judged by useful verified ingestion per network budget. A scheduler that keeps RX high but lowers contiguous floor progress is a regression even if it increases request concurrency.
-- Live queueing must be bounded by useful prefix coverage, not just number of in-flight role attempts. The rejected queued candidate proved that filling a queue can smooth zero windows while still losing throughput if it schedules too many partial body/receipt roles per verified prefix.
-- Useful-prefix-only range scheduling is not enough by itself. Live testing showed it does not materially improve throughput while long body/receipt plan tails remain.
-- Widening body/receipt fallback candidate pools is rejected for now. It reintroduced a zero-progress window under live load, so future scheduler work should reassign stale prefix-critical roles/chunks instead of raising broad candidate pressure.
-- Peer count alone is not a success metric. A peer-retention change must improve sustained contiguous historical floor movement or resource utilization, not just increase connected/serving peers.
-- Widening low-peer paired body/receipt concurrency without per-peer pacing is rejected. The scheduler needs measured peer/role pacing or chunk reassignment rather than simply launching more paired chunks at once.
-- Body/receipt candidate selection should prefer idle peers without excluding all active fast peers. Bounded active fallbacks let load-adjusted scoring use proven peers while still avoiding the overload caused by wider static fanout.
-- Smaller dense chunks are not automatically better at medium peer counts. Live testing showed that reducing the chunk-size threshold to eight peers increased request churn and did not improve verified floor progress.
-- Medium-peer prefix redundancy is rejected for now. It reduced some local plan tails but lowered useful floor movement; future duplicate work should be driven by live chunk ownership and reservation expiry.
-- Dense prefix salvage is preferred over full lookahead reset when at least 32 contiguous dense blocks are available. The blocks are still validated and any remaining prefix gap is filled before queued lookahead is ingested, preserving ordered verification while avoiding idle retry windows.
-- Benchmark runs should use fresh recent checkpoint quorum sources when the default endpoint is stale; stale checkpoint rejection must not be bypassed for tests.
-- Transient request transport failures (`Disconnected`, `ChannelClosed`, `ConnectionDropped`) pause and demote the peer for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties and are dropped.
-- Paired body/receipt plans now distinguish unique prefix chunk coverage from duplicate hedge attempt capacity. Hedges may consume the duplicate-attempt budget, but they should not prevent the scheduler from keeping the configured number of unique prefix chunks in flight.
-- Paired body/receipt plans now reassign missing prefix chunks from the live request loop when the chunk is no longer in flight. This preserves ordered verification while avoiding whole-plan failure for an unowned prefix gap.
-- The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes. A scheduler that downloads body/receipt halves independently must still be driven by contiguous-prefix ownership and expected receipt counts; otherwise it wastes bandwidth on partial chunks.
-- Live-first role-level body/receipt scheduling is rejected for now. It must not sit in front of the accepted paired scheduler unless it can prove accepted-prefix completion without introducing low/zero-progress windows.
-- Outer-sequence duplicate expected-fetch reservations are rejected. Live tests showed they either did not fire before useful stalls cleared or fired by consuming capacity from the main lookahead pipeline; the next scheduler must operate at chunk/request ownership level inside the body/receipt planner.
-- Broad role-split chunk scheduling is rejected. Splitting every prefix chunk into independent body and receipt tasks produced high bandwidth use but poor contiguous floor movement; the next attempt should preserve the accepted paired chunk path and only reassign stale prefix-critical chunk roles.
-- Bounded per-chunk live role retries are accepted. They preserve the paired chunk path, reuse the first successful body or receipt half, and retry only stale missing roles inside that chunk before escalating to broader scheduler work.
-- Plan-level live role scheduling is accepted for the paired body/receipt path. It keeps the paired prefix window but moves role ownership to the plan, so fast body/receipt peers are not considered busy until the opposite role finishes.
+- Logs/sec is useful for dense ranges, but block/sec, rows/block, peer count, body/receipt latency, and bandwidth must be evaluated together.
+- Static timeout, fanout, lookahead, and buffer tuning has mostly reached diminishing returns. Future work should focus on scheduler architecture: chunk ownership, reservation expiry, measured peer speed, prefix-critical reassignment, and bounded queues.
+- The accepted live role scheduler preserves the paired prefix model while releasing body and receipt peer ownership independently. This avoids the rejected broad role-split failure mode where bandwidth was spent on partial chunks that did not advance the contiguous verified floor.
+- Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
+- Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
 ## Challenges and Resolutions
 
-- Challenge: previous ad hoc bandwidth samples used the wrong macOS `netstat` fields and overstated tunnel Mbps.
-  - Resolution: created an ignored local ops sampler with corrected physical-interface byte counters and validated it against the live run.
-  - Remaining: future A/B tests should compare actual floor blocks/sec, rows/log density, physical RX/TX, active fetches, and zero-progress windows together.
-- Challenge: the referenced 1m logs/sec run occurred in a much denser block range than the current resumed run.
-  - Resolution: compared rows/block, body/receipt latency, active fetch depth, failures, and serving peer counts instead of judging by logs/sec alone.
-  - Remaining: future benchmark reports should normalize by density or include both logs/sec and block/sec.
-- Challenge: larger dense fetch payloads looked like a way to amortize slow peer round trips.
-  - Resolution: reverted after live testing showed long active-fetch stalls and readiness drops.
-  - Remaining: larger payloads should only be reconsidered inside a live scheduler that can reassign slow chunks.
-- Challenge: shorter request timeouts can clear slow chunks faster but over-penalize peers when combined with higher fanout.
-  - Resolution: rejected the `2s` fanout experiment and restored the stable `4s` request timeout.
-  - Remaining: implement adaptive per-peer timeout/backoff if further evidence supports it.
-- Challenge: high-peer depth `8` could not be proven because the run did not reach the activation threshold.
-  - Resolution: reverted the unproven change rather than leaving speculative code in the branch.
-  - Remaining: retest higher depth only with a controlled run that actually reaches high serving-peer counts.
-- Challenge: dense body/receipt plans could discard useful contiguous progress when a slow peer left the first dense chunk just under the accepted prefix.
-  - Resolution: lowered the dense accepted-prefix threshold and added a sequential residual-tail fallback for gaps smaller than the parallel planner minimum.
-  - Remaining: continue longer-run monitoring to confirm this reduces full-run idle windows without increasing residual churn.
-- Challenge: the live-first decoupled body/receipt scheduler compiled and passed unit tests but produced partial-prefix completions and zero-progress windows on the Mac mini.
-  - Resolution: added an accepted-prefix gate, retested, and still rejected/reverted the candidate because the live-first path remained slower than the accepted scheduler.
-  - Remaining: redesign the live scheduler as an ownership/reservation layer around the accepted paired path rather than as a speculative replacement in front of it.
-- Challenge: two follow-up scheduler candidates did not solve the live request tail.
-  - Resolution: reverted useful-prefix-only scheduling because it only tied the accepted baseline, and reverted wider fallback probes because they produced a zero-progress window.
-  - Remaining: implement a stricter stale-role/stale-chunk reassignment scheduler that releases completed body/receipt roles without increasing broad request fanout.
-- Challenge: the expected historical fetch can block the contiguous floor while later lookahead is complete.
-  - Resolution: accepted an earlier selective retry of only the expected fetch after live benchmarking showed better sustained progress and fewer fallback/residual repairs.
-  - Remaining: a live scheduler should reduce this further by reassigning stale chunks instead of retrying whole fetch windows.
-- Challenge: dense windows were still taking multiple request waves at 16-24 serving peers.
-  - Resolution: lowered the two-request fanout threshold from 32 to 16 peers after live testing showed better sustained throughput and fewer residual gaps.
-  - Remaining: rework scheduling so blocking prefix chunks are reassigned while other chunks continue downloading.
-- Challenge: lower-density historical ranges had high body/receipt tail latency and many decoupled request failures.
-  - Resolution: reduced dense planned windows from 1024 to 512 blocks after live testing showed higher sustained throughput, lower fetch latency, and fewer per-plan failures.
-  - Remaining: a live scheduler is still needed because low-throughput windows remain when peer tail latency spikes.
-- Challenge: increasing dense lookahead to 8 produced high bursts but worsened timeout churn and plan stability.
-  - Resolution: tested depth 7 as an intermediate setting and accepted it after live benchmarking showed higher sustained throughput than depth 6 without the depth-8 plan failures.
-  - Remaining: replace static depth tuning with a live scheduler that reacts to peer tail latency and resource pressure.
-- Challenge: several simple scheduler knobs improved one metric but worsened sustained logs/sec.
-  - Resolution: rejected 20s expected-fetch retry, shorter request pauses, larger fetch buffering, and broader critical refills after live benchmarks trailed the accepted baseline.
-  - Remaining: fix active-fetch dips with chunk-level reassignment rather than whole-window retry/buffering.
-- Challenge: dense body/receipt chunks still had peer-tail latency, especially around 48-64 block requests.
-  - Resolution: accepted adaptive dense chunk caps after live testing showed higher average/median logs/sec and fewer timeout mentions.
-  - Remaining: make chunk sizing more fully adaptive once the live scheduler exists.
-- Challenge: refilling during writes previously caused false historical sequence-gap resets.
-  - Resolution: counted the active ingest sequence as owned by the pipeline and added regression coverage before accepting bounded write-time refill. A follow-up write-specific refill path reduced refill tail latency further by not letting a full prepared queue starve active downloads.
-  - Remaining: refill tails still exist at high peer counts; chunk-level reassignment remains the larger scheduler task.
-- Challenge: after the write-refill fix, remaining low-throughput windows can be network-bound rather than scheduler-idle.
-  - Resolution: sampled interface counters during live sync. The WireGuard tunnel reached the effective 300 Mbps class ceiling during some lower logs/sec windows, so logs/sec must be interpreted alongside bandwidth, blocks/sec, and rows/block.
-  - Remaining: add better durable bandwidth/resource telemetry before making broad scheduler changes that depend on saturation signals.
-- Challenge: lowering the existing high-pipeline peer threshold globally would also widen fetch windows too early.
-  - Resolution: introduced a separate dense pipeline activation threshold and kept the existing high-window threshold unchanged.
-  - Remaining: live scheduling should eventually replace these static thresholds.
-- Challenge: forcing more request plans through the decoupled dense path can outrun ordered prepare/write ingestion.
-  - Resolution: rejected the 4-peer decoupled eligibility experiment after live testing showed lower progress despite lower request-plan latency.
-  - Remaining: further improvements should keep fetch, prepare, and write stages balanced instead of optimizing request latency alone.
-- Challenge: the accepted prepare-buffer experiment improved overlap but did not keep active downloads full with 20+ serving peers.
-  - Resolution: kept the small buffer increase because it did not regress safety or low-memory behavior.
-  - Remaining: active fetch dips still require chunk-level scheduling/reassignment, not more static buffering.
-- Challenge: raising the high-memory write-refill floor kept active downloads full but did not move the verified floor faster.
-  - Resolution: reverted the change after live testing showed prepared backlog saturation and worse actual floor movement.
-  - Remaining: the scheduler needs chunk-level ownership, reassignment, and ordered-prefix awareness rather than another static active-fetch floor.
-- Challenge: avoiding partial decoupled prefixes by raising the decoupled peer threshold reduced one failure class but hurt throughput.
-  - Resolution: reverted the threshold change after live testing showed worse actual floor movement despite fewer decoupled failures.
-  - Remaining: future work should make decoupled plans reassign or suppress known slow peers dynamically instead of disabling the path for medium peer counts.
-- Challenge: allowing more total outstanding fetch work looked like a way to keep downloads active.
-  - Resolution: reverted after live testing showed prepared backlog saturation, worse refill latency, and lower throughput.
-  - Remaining: the next scheduler should track block-range status and peer speed, similar to Nethermind's pending/sent/inserted fast-block feed, instead of relying on larger buffers.
-- Challenge: equal-load chunk rotation could assign prefix-critical body/receipt chunks to slower peers despite existing peer speed scoring.
-  - Resolution: preserved score order inside chunk attempts and relied on in-flight counts for fairness; live testing improved warmed progress and reduced low windows.
-  - Remaining: a full scheduler should still track individual block-range status and reassign slow chunks.
-- Challenge: the old checkpoint endpoint returned a stale finalized slot for a fresh data dir.
-  - Resolution: startup correctly rejected the stale checkpoint; the benchmark script now uses two agreeing Beacon API endpoints.
-  - Remaining: implement the project's own recent-checkpoint source later, as already planned outside this PR.
-- Challenge: preserving fast-peer order in the decoupled dense path looked promising but caused severe low-progress windows under live load.
-  - Resolution: reverted the experiment and restored the accepted remote build.
-  - Remaining: decoupled scheduling needs chunk-level reassignment/hedging rather than simply removing peer rotation.
-- Challenge: lowering dense high-depth activation to use more bandwidth at 12-15 peers increased request pressure too early.
-  - Resolution: reverted the experiment after a body/receipt pipeline failed below the accepted prefix.
-  - Remaining: activation should become adaptive to timeout/tail-latency signals, not just a lower static peer-count threshold.
-- Challenge: request failure waves could turn a transport hiccup into local peer-pool collapse.
-  - Resolution: transient request transport failures now pause and demote peers instead of disconnecting them from the local peer set; live testing showed the serving pool survived timeout waves and climbed into the 40+ peer range.
-  - Remaining: request-tail latency still causes ordered-prefix waits, so chunk-level reassignment remains the main scheduler task.
-- Challenge: after peer retention improved, dense historical sync still underfilled active downloads at 8-15 serving peers.
-  - Resolution: accepted a denser low-peer lookahead boost that keeps six fetch windows active once eight serving peers are ready; live testing improved average and median throughput with no pipeline resets.
-  - Remaining: low windows still occur under timeout waves, so chunk-level reassignment remains necessary.
-- Challenge: increasing bandwidth pressure can make the link busier without improving useful verified ingestion.
-  - Resolution: rejected depth-8 lookahead, 350k dense-row windows, and 1.0s hedging because they raised RX, bursts, or duplicate pressure while worsening median throughput or stability.
-  - Remaining: future changes should reduce peer-tail waste, not just increase bytes downloaded.
-- Challenge: removing the decoupled dense path simplified request flow but made body/receipt plan tails and prepared backlog worse.
-  - Resolution: restored the accepted decoupled path after live testing showed paired-only scheduling trailed the accepted baseline despite a healthy serving-peer count.
-  - Remaining: replace static whole-window request plans with a live scheduler that can reassign slow chunks without over-buffering prepared work.
-- Challenge: pre-hedging later paired-plan prefix chunks looked like a narrow way to smooth stalls.
-  - Resolution: reverted after live testing showed extra duplicate pressure, more disconnect churn, and body/receipt plan failures instead of better sustained progress.
-  - Remaining: implement true queue/reservation reassignment rather than adding more duplicate in-flight requests to the current batch planner.
-- Challenge: broadening the decoupled prefix request path downloaded more ahead-of-prefix work but did not improve verified ingestion.
-  - Resolution: reverted after live testing showed prepared backlog growth, lower active fetch utilization, and worse sustained logs/sec.
-  - Remaining: the scheduler needs explicit chunk reservations, expiry, and reassignment so peer-tail work can move independently without over-buffering prepared windows.
-- Challenge: letting decoupled dense role downloads stop as soon as the accepted prefix was available reduced waiting in theory but increased residual churn in practice.
-  - Resolution: reverted after live testing showed lower useful logs/sec despite high RX utilization.
-  - Remaining: partial-prefix progress should only be used when a scheduler can keep the leftover range queued without fragmenting ordered ingestion.
-- Challenge: making paired chunk attempts single-shot exposed failures to the scheduler sooner but also removed useful in-attempt fallback.
-  - Resolution: reverted after live testing showed no sustained batch-throughput gain and more pipeline failure lines.
-  - Remaining: a live scheduler needs per-role task state so it can reuse a successful body or receipt half instead of redownloading the whole chunk on every retry.
-- Challenge: role-level body/receipt retry state looked like the next step after single-shot attempts, but the first implementation converted bandwidth into many partial chunks rather than contiguous verified progress.
-  - Resolution: reverted after live testing showed similar RX usage to the accepted build with much lower logs/sec and more timeout pressure.
-  - Remaining: future scheduler work should reserve prefix-critical chunks, reassign stale work, and keep a contiguous-progress budget before increasing role-level concurrency.
-- Challenge: paired-plan hedges shared the total in-flight attempt window with unique prefix range coverage.
-  - Resolution: separated the scheduler invariant so duplicate hedges remain capped by the total attempt budget while new prefix chunks are still scheduled until the unique chunk window is full. Live testing showed a modest improvement without resets or plan failures.
-  - Remaining: this does not replace live chunk reservations; stale body/receipt roles still need explicit ownership, expiry, and reassignment across the prefix queue.
-- Challenge: an earliest missing prefix chunk could become unowned after failures while later chunks continued to run.
-  - Resolution: added bounded missing-prefix reassignment inside the paired scheduler loop, with tests covering earliest-gap selection, in-flight exclusion, and retry bounds. Live testing improved actual floor movement and removed low windows in the sampled interval.
-  - Remaining: reassignment is still scoped to one body/receipt plan; a full scheduler should carry chunk ownership across windows and use peer speed to choose reassignment targets.
-- Challenge: accepting near-full decoupled prefixes looked like a bounded way to avoid refetching one missing dense tail chunk.
-  - Resolution: reverted after live testing showed lower useful throughput, lower RX, and worse paired-plan latency than the accepted control.
-  - Remaining: residual-tail reuse should be part of a real reservation queue, not a relaxed acceptance threshold that fragments the ordered pipeline.
-- Challenge: increasing the body/receipt request timeout from 4s to 5s could reduce false timeouts on a saturated 300 Mbps route.
-  - Resolution: reverted after live testing showed lower sustained progress despite a better paired-plan median.
-  - Remaining: timeout changes should be adaptive per peer/request kind and tied to reservation expiry, not a global constant.
-- Challenge: reducing paired chunk fallback attempts from 3 peers to 2 looked like a way to cut serial tail waits.
-  - Resolution: reverted after same-region A/B sampling showed similar historical floor movement despite higher RX utilization.
-  - Remaining: fallback reduction should wait for a live chunk reservation scheduler that can reassign partial work without wasting bandwidth.
-- Challenge: refreshing the hedge clock on duplicate chunk attempts reduced local duplicate pressure in theory.
-  - Resolution: reverted after live testing showed lower useful progress and no improvement to active-fetch dips.
-  - Remaining: duplicate control needs queue-level ownership signals, not only per-plan hedge timing.
-- Challenge: accepted runs still showed low windows when the prepared buffer hit its healthy-memory cap even though CPU and RSS were not saturated.
-  - Resolution: allowed a larger prepared-batch buffer only when available memory is above the high threshold; live testing improved floor movement and bandwidth utilization without high RSS.
-  - Remaining: this reduces one backpressure source but does not replace the planned live chunk reservation scheduler.
-- Challenge: per-request-kind timeout counters looked like a narrow way to avoid letting body successes hide receipt-timeout peers.
-  - Resolution: reverted after live testing showed worse actual floor movement and broad timeout-penalization that removed too much usable peer capacity.
-  - Remaining: peer scoring should move into a live scheduler with per-chunk reservation expiry and measured peer speed rather than only adding more static timeout counters.
-- Challenge: disconnected serving peers were not immediately eligible for redial because requeueing marked them as submitted before a dial was actually issued.
-  - Resolution: tested a fix that only returned them to the pending queue, but reverted it after live benchmarking showed no stability gain and a worse warm sample.
-  - Remaining: peer recovery needs to be coordinated with request-tail pressure; simply retrying useful peers sooner does not stop global timeout waves.
-- Challenge: medium-peer prefix redundancy looked like a targeted way to reduce gaps when the run had 5-10 serving peers.
-  - Resolution: reverted after live testing showed lower actual floor movement than the accepted baseline despite focused unit tests passing.
-  - Remaining: duplicate prefix work should be part of a live scheduler that can reassign only the stale role/chunk instead of adding static redundant requests.
-- Challenge: duplicating the outer expected fetch looked like a bounded way to reduce head-of-line stalls without replacing the accepted paired scheduler.
-  - Resolution: tested two candidates, one late-triggered and one 4s-triggered. The late-triggered candidate did not fire; the 4s-triggered candidate fired but reduced useful active fetch depth and still trailed the accepted scheduler.
-  - Remaining: implement live ownership and reassignment inside the body/receipt chunk planner rather than duplicating whole expected sequences.
-- Challenge: the first chunk-level role-split scheduler reused fast body/receipt halves but split too much work ahead of the accepted prefix.
-  - Resolution: reverted after live testing showed lower actual floor movement and more low/zero-progress windows than the accepted scheduler.
-  - Remaining: implement a prefix-first scheduler that keeps paired chunk attempts as the normal path and reassigns only stale prefix-critical roles.
-- Challenge: the paired chunk path waited for the first body and receipt futures to both finish before retrying the slow side.
-  - Resolution: replaced the inner join with a bounded per-chunk live loop that caches a fast half and hedges only the stale missing role.
-  - Remaining: extend live ownership across plan windows if further benchmarking shows prefix stalls remain.
-- Challenge: plan-local peer accounting still treated a completed body or receipt peer as busy until the opposite role completed.
-  - Resolution: moved paired role scheduling to the plan level so each role releases peer load independently while preserving ordered prefix completion.
-  - Remaining: run a longer dense-range sample; if stable, remove the obsolete chunk-attempt fallback path before merging this PR.
+- Challenge: many small scheduler experiments improved one metric while reducing actual contiguous floor progress.
+  - Resolution: reverted every candidate that did not beat the accepted baseline in live Mac mini sampling.
+  - Remaining: stop broad tuning and build the bounded queued scheduler directly.
+
+- Challenge: the old fallback path made the body/receipt scheduler harder to reason about after the live role scheduler was accepted.
+  - Resolution: removed the fallback path, fallback-only helpers, and fallback-only tests.
+  - Remaining: the live scheduler still needs cross-window reservations and backpressure.
+
+- Challenge: adaptive ordered-write coalescing looked like it could reduce write overhead but introduced a zero-progress window.
+  - Resolution: reverted the change and kept the accepted write/refill behavior.
+  - Remaining: write-side changes should be tied to real backpressure signals, not static coalescing.
+
+- Challenge: logs/sec alone can mislead in sparse ranges or when network saturation changes.
+  - Resolution: benchmarks now compare actual historical floor movement and low/zero-progress windows alongside logs/sec.
+  - Remaining: add durable scheduler metrics so future decisions do not require ad hoc log parsing.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected local benchmark/sampler scripts and found no committed script using the bad `netstat` fields. Created a corrected ignored local sampler instead of leaving the measurement as an ad hoc command.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected broad role-split live scheduler left no code changes locally or on the remote build.
-- Replaced the obsolete join-based body/receipt chunk wait path in `crates/logex-sync/src/p2p/peer_manager/requests.rs`; no rejected scheduler code remains in the working tree or remote build.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected deeper dense low-peer lookahead was reverted to 4 active fetches, while the accepted separate dense activation threshold remains.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected dense lookahead depth 8 was replaced by accepted depth 7.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected 20s retry, larger fetch buffer, timed duplicate prefix hedge, and unguarded critical-refill experiments were reverted or replaced by the bounded write-refill implementation.
-- Inspected `crates/logex-sync/src/engine/anchored.rs` and `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected depth-8 and 32-block dense chunk retests were reverted and the remote client was restored to the accepted depth-7 / 48-block dense chunk build.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/mod.rs`; rejected shorter request-pause experiment was reverted.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected 2s fanout timeout, partial-prefix early return, and 384-window experiments were reverted. Duplicate failure coalescing, 16-peer fanout, the 512-window cap, and adaptive dense chunk caps remain.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected lower decoupled dense peer eligibility and restored the committed request-plan baseline on the remote client.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the healthy-memory prepare-buffer increase and kept the low-memory floor unchanged.
-- Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected outstanding-work budget experiment left no code changes in the worktree.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted performance-order chunk peer assignment and updated the stale rotation-focused test.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the decoupled dense fast-peer-order experiment after live testing showed severe progress collapse.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected and reverted the 12-peer dense high-depth activation experiment after live testing showed a body/receipt pipeline failure.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/state.rs`; added a small tested classification helper for request-error disposition and kept strict protocol-error drops intact.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected and reverted the unproven 36-peer fast-pool experiment and the regressing three-request fanout experiment.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the dense low-peer lookahead expansion after live testing.
-- Inspected and reverted `crates/logex-sync/src/engine/anchored.rs`; the rejected depth-8 and 350k dense-row experiments left no code changes in the worktree or remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected 1.0s hedge-delay experiment left no code changes in the worktree or remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected paired-only experiment left the accepted decoupled dense body/receipt path enabled locally and on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected paired-plan lookahead hedge experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected broad decoupled-prefix experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected accepted-prefix early-stop experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected single-shot paired-attempt experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected role-level paired scheduler experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected near-full decoupled prefix experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected 5s request-timeout experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected two-peer paired fallback experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected duplicate-attempt hedge-clock experiment left no code changes locally or on the remote build.
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; accepted the high-available-memory prepare-buffer expansion with unit coverage and no obsolete code left behind.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/mod.rs`, `crates/logex-sync/src/p2p/peer_manager/lifecycle.rs`, and `crates/logex-sync/src/p2p/peer_manager/state.rs`; the rejected per-request-kind timeout counter experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/lifecycle.rs`; the rejected immediate retry-queue experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected accepted-prefix dense collector and 8-peer dense chunk-size experiments left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/state.rs`; the rejected stronger active-request score penalty left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected medium-peer prefix redundancy experiment left no code changes locally or on the remote build.
-- Inspected and reverted `crates/logex-sync/src/p2p/peer_manager/requests.rs`; the rejected role-level live scheduler candidate left no code changes locally or on the remote build.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted the unique-prefix-coverage scheduler invariant and added focused unit coverage. No rejected experiment code was left behind.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted bounded missing-prefix reassignment and added focused unit coverage. No obsolete retry-only code path was left behind.
-- Inspected and reverted `crates/logex-sync/src/engine/mod.rs` and `crates/logex-sync/src/engine/anchored.rs`; the rejected outer-sequence duplicate expected-fetch candidates left no code changes locally or on the remote build.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted bounded per-chunk live body/receipt role retries and added focused scheduling predicate tests. The obsolete join-before-fallback path was removed.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; accepted plan-level live body/receipt role scheduling and added focused unit coverage for bounded role-attempt capacity and completed-chunk accounting. The previous paired chunk-attempt path remains temporarily as a rollback fallback until the longer benchmark confirms the new scheduler should replace it outright.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
+- Removed obsolete paired body/receipt fallback code after the live role scheduler was validated and accepted.
+- Removed unused fallback metadata from live plan chunk tracking.
+- Removed obsolete fallback-specific tests and kept tests covering live role capacity, chunk accounting, missing-prefix reassignment, and scheduling predicates.
+- Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: checkpoint commit for duplicate failure coalescing and 16-peer fanout; accepted 512-block dense window cap; accepted dense lookahead depth 7 after live benchmarking; accepted adaptive dense chunk caps; accepted bounded write-time refill and sequence ownership hardening; accepted direct write-time refill; accepted separate 16-peer dense pipeline activation; accepted healthy-memory prepare-buffer expansion; accepted performance-ordered body/receipt chunk peer assignment; roadmap update for full-sync backup rotation, checkpoint source replacement, rejected decoupled dense experiment, rejected 12-peer dense activation experiment, transient transport soft-failure handling, dense low-peer lookahead expansion, rejected paired-plan lookahead hedge, rejected broad decoupled-prefix testing, rejected accepted-prefix early-stop testing, rejected single-shot paired-attempt testing, rejected role-level paired scheduler testing, rejected near-full decoupled prefix testing, rejected 5s timeout testing, rejected two-peer paired fallback testing, rejected duplicate-attempt hedge-clock testing, accepted high-available-memory prepare buffering, rejected high-memory write-refill floor testing, rejected 16-peer decoupled threshold testing, rejected per-request-kind timeout counter testing, rejected immediate retry-queue testing, accepted bounded active-peer fallbacks, rejected accepted-prefix dense collector / 8-peer dense chunk-size testing, rejected stronger active-request score penalties, rejected medium-peer prefix redundancy, accepted unique prefix chunk coverage after hedging, accepted missing-prefix reassignment, documented corrected local throughput sampling, documented rejected broad role-split scheduling, and accepted bounded per-chunk live role retries.
+- Commits made during this run: `cleanup: remove body receipt scheduler fallback`
 - Pull request status: draft PR #96 remains open for scheduler work.
-- Merge status: not merged; throughput target and scheduler work remain incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; focused request-scheduler tests; corrected sampler validation against the Mac mini. The accepted plan-level live role scheduler was live-tested on the Mac mini at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-090610.log`.
-- Blockers: no external blocker; the remaining work is architectural scheduler work.
+- Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; remote smoke on the Mac mini.
+- Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks
 
 - Historical sync is still peer-tail bound and can show low-throughput windows even when active fetches are full.
-- Current performance is sensitive to block log density, peer mix, warm-up state, and the 300/300 Mbps network link; short samples and logs/sec alone can be misleading.
-- Full VPS routing is currently required for useful P2P benchmarking, but it has VPS bandwidth cost.
-- A larger scheduler refactor is likely required to reach the target full-sync time.
-- The accepted live role scheduler still needs a longer run before the temporary paired chunk-attempt fallback path should be removed.
+- Current performance is sensitive to block log density, peer mix, warm-up state, and the 300/300 Mbps network link.
+- Full VPS routing improves P2P coverage but has VPS bandwidth cost.
+- The next improvement is not another small tuning pass; it is the bounded queued scheduler with explicit reservation and backpressure semantics.
