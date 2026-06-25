@@ -42,12 +42,15 @@ The feature is close enough that more small knob experiments should stop unless 
   - `cargo test -p logex-server`
   - `cargo clippy -p logex-sync -- -D warnings`
   - `cargo clippy -p logex-server -- -D warnings`
+- Extracted reverse historical header page downloads into an owned request plan plus completion/accounting step.
+  - Reason: bounded queued scheduling needs header network I/O to become a schedulable unit instead of being coupled to engine refill.
+  - Validation: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`.
 
 ## Remaining TODOs
 
 1. Implement the bounded queued live request scheduler for historical body/receipt downloads.
    - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
-   - Completion criteria: body/receipt chunk reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
+   - Completion criteria: header/body/receipt reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
 
 2. Complete scheduler-level backpressure.
    - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
@@ -69,6 +72,7 @@ The feature is close enough that more small knob experiments should stop unless 
 - Static timeout, fanout, lookahead, and buffer tuning has mostly reached diminishing returns. Future work should focus on scheduler architecture: chunk ownership, reservation expiry, measured peer speed, prefix-critical reassignment, and bounded queues.
 - The accepted live role scheduler preserves the paired prefix model while releasing body and receipt peer ownership independently. This avoids the rejected broad role-split failure mode where bandwidth was spent on partial chunks that did not advance the contiguous verified floor.
 - Small scheduler experiments are no longer the right path. The bounded stale-prefix refill trial also regressed, so the next implementation should be the larger queued live scheduler with explicit reservation/backpressure semantics.
+- Reverse header page downloads are now represented as owned plans with a separate completion/accounting step. This is the boundary needed before the engine can run header planning as part of a bounded async reservation queue.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -106,13 +110,14 @@ The feature is close enough that more small knob experiments should stop unless 
 - Removed obsolete fallback-specific tests and kept tests covering live role capacity, chunk accounting, missing-prefix reassignment, and scheduling predicates.
 - Removed the rejected bounded stale-prefix refill experiment before committing.
 - Removed the rejected write-time refill guard before committing.
+- Removed the obsolete direct reverse-header-pages wrapper after the engine moved to the owned plan API.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`; `docs: record rejected refill experiments`.
+- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`; `docs: record rejected refill experiments`; `refactor: split reverse header page planning`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo test -p logex-server`; `cargo clippy -p logex-sync -- -D warnings`; `cargo clippy -p logex-server -- -D warnings`; remote smoke and throughput sampling on the Mac mini.

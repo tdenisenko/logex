@@ -3141,55 +3141,84 @@ impl SyncEngine {
             && self.peers.peer_count() >= HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS
         {
             let required_block = child_header.number().saturating_sub(target_count);
-            match cancelable(
-                &mut self.shutdown,
-                self.peers.get_headers_reverse_pages(
+            match self
+                .peers
+                .prepare_reverse_header_pages_request(
                     child_header.number(),
                     target_count,
                     page_limit,
                     required_block,
-                ),
-            )
-            .await
+                )
+                .await
             {
-                Some(Ok(pages)) if !pages.is_empty() => {
-                    match validate_reverse_header_pages_with_hashes(&child_header, pages) {
-                        Ok((header_peer, mut headers, mut hashes)) => {
-                            let keep =
-                                historical_header_prefix_len_for_gas_target(&headers, target_count);
-                            headers.truncate(keep);
-                            hashes.truncate(keep);
-                            let required_block = headers
-                                .last()
-                                .map(|header| header.number())
-                                .unwrap_or_else(|| child_header.number().saturating_sub(1));
-                            return Ok(Some(HistoricalHeaderBatch {
-                                child_header,
-                                header_peer,
-                                headers,
-                                hashes,
-                                required_block,
-                                header_elapsed: header_started.elapsed(),
-                            }));
-                        }
-                        Err((header_peer, error)) => {
-                            tracing::warn!(
-                                child_block = child_header.number(),
-                                header_peer = %header_peer,
-                                %error,
-                                "parallel historical reverse header validation failed"
-                            );
-                            if header_peer != PeerId::ZERO {
-                                self.peers.report_invalid_block_data(header_peer, "headers");
+                Ok(Some(plan)) => match cancelable(&mut self.shutdown, plan.execute()).await {
+                    Some(outcome) => {
+                        match self.peers.complete_reverse_header_pages_request(outcome) {
+                            Ok(pages) if !pages.is_empty() => {
+                                match validate_reverse_header_pages_with_hashes(
+                                    &child_header,
+                                    pages,
+                                ) {
+                                    Ok((header_peer, mut headers, mut hashes)) => {
+                                        let keep = historical_header_prefix_len_for_gas_target(
+                                            &headers,
+                                            target_count,
+                                        );
+                                        headers.truncate(keep);
+                                        hashes.truncate(keep);
+                                        let required_block = headers
+                                            .last()
+                                            .map(|header| header.number())
+                                            .unwrap_or_else(|| {
+                                                child_header.number().saturating_sub(1)
+                                            });
+                                        return Ok(Some(HistoricalHeaderBatch {
+                                            child_header,
+                                            header_peer,
+                                            headers,
+                                            hashes,
+                                            required_block,
+                                            header_elapsed: header_started.elapsed(),
+                                        }));
+                                    }
+                                    Err((header_peer, error)) => {
+                                        tracing::warn!(
+                                            child_block = child_header.number(),
+                                            header_peer = %header_peer,
+                                            %error,
+                                            "parallel historical reverse header validation failed"
+                                        );
+                                        if header_peer != PeerId::ZERO {
+                                            self.peers
+                                                .report_invalid_block_data(header_peer, "headers");
+                                        }
+                                        self.refresh_connectivity_state();
+                                    }
+                                }
                             }
-                            self.refresh_connectivity_state();
+                            Ok(_) => {
+                                self.refresh_connectivity_state();
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    error = %error,
+                                    child_block = child_header.number(),
+                                    requested_headers = target_count,
+                                    "parallel historical reverse header request failed"
+                                );
+                                self.refresh_connectivity_state();
+                            }
                         }
                     }
-                }
-                Some(Ok(_)) => {
+                    None => {
+                        self.finish_shutdown()?;
+                        return Ok(None);
+                    }
+                },
+                Ok(None) => {
                     self.refresh_connectivity_state();
                 }
-                Some(Err(error)) => {
+                Err(error) => {
                     tracing::debug!(
                         error = %error,
                         child_block = child_header.number(),
@@ -3197,10 +3226,6 @@ impl SyncEngine {
                         "parallel historical reverse header request failed"
                     );
                     self.refresh_connectivity_state();
-                }
-                None => {
-                    self.finish_shutdown()?;
-                    return Ok(None);
                 }
             }
         }

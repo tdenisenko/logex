@@ -251,6 +251,23 @@ struct HeaderPageResult {
     failures: Vec<(PeerId, RequestAttempt)>,
 }
 
+pub(crate) struct ReverseHeaderPagesRequestPlan {
+    pages: Vec<HeaderPageRequestPlan>,
+}
+
+struct HeaderPageRequestPlan {
+    page_index: usize,
+    request: HeadersRequest,
+    candidates: Vec<(
+        PeerId,
+        PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    )>,
+}
+
+pub(crate) struct ReverseHeaderPagesRequestOutcome {
+    page_results: Vec<HeaderPageResult>,
+}
+
 #[derive(Debug, Clone)]
 enum ChunkFailureKind {
     Request(RequestAttempt),
@@ -311,21 +328,16 @@ impl PeerManager {
             .await
     }
 
-    pub(crate) async fn get_headers_reverse_pages(
+    pub(crate) async fn prepare_reverse_header_pages_request(
         &mut self,
         child_block: u64,
         total_count: u64,
         page_limit: u64,
         required_block: u64,
-    ) -> Result<
-        Vec<(
-            PeerId,
-            Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
-        )>,
-    > {
+    ) -> Result<Option<ReverseHeaderPagesRequestPlan>> {
         self.drain_events_now();
         if child_block == 0 || total_count == 0 || page_limit == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let mut peer_ids = self
@@ -348,40 +360,39 @@ impl PeerManager {
             bail!("no connected peers available to handle reverse header page request")
         }
 
-        let mut attempts = futures_util::stream::FuturesUnordered::new();
-        let mut offset = 0u64;
-        let mut page_index = 0usize;
-        while offset < total_count {
-            let Some(start_block) = child_block
-                .checked_sub(1)
-                .and_then(|block| block.checked_sub(offset))
-            else {
-                break;
-            };
-            let request_count = page_limit.min(total_count - offset);
-            let request =
-                HeadersRequest::falling(BlockHashOrNumber::Number(start_block), request_count);
+        let mut pages = Vec::new();
+        for (page_index, request) in
+            reverse_header_page_requests(child_block, total_count, page_limit)
+        {
             let mut candidates = peers.clone();
             if !candidates.is_empty() {
                 let shift = page_index % candidates.len();
                 candidates.rotate_left(shift);
             }
-            attempts
-                .push(request_header_page_from_candidates(page_index, request, candidates).boxed());
-            offset = offset.saturating_add(request_count);
-            page_index = page_index.saturating_add(1);
+            pages.push(HeaderPageRequestPlan {
+                page_index,
+                request,
+                candidates,
+            });
         }
 
-        let mut page_results = Vec::new();
-        while let Some(result) = attempts.next().await {
-            page_results.push(result);
-        }
-        page_results.sort_by_key(|result| result.page_index);
+        Ok(Some(ReverseHeaderPagesRequestPlan { pages }))
+    }
 
+    pub(crate) fn complete_reverse_header_pages_request(
+        &mut self,
+        mut outcome: ReverseHeaderPagesRequestOutcome,
+    ) -> Result<
+        Vec<(
+            PeerId,
+            Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+        )>,
+    > {
+        outcome.page_results.sort_by_key(|result| result.page_index);
         let mut dead_peers = HashSet::new();
         let mut saw_empty_response = false;
         let mut pages = Vec::new();
-        for result in page_results {
+        for result in outcome.page_results {
             for (peer_id, error) in result.failures {
                 let should_drop = self.on_request_error(peer_id, PeerRequestKind::Headers, &error);
                 debug!(peer = %peer_id, ?error, "reverse header page request failed");
@@ -4383,6 +4394,55 @@ fn release_body_receipt_attempt_peer(
     }
 }
 
+impl ReverseHeaderPagesRequestPlan {
+    pub(crate) async fn execute(self) -> ReverseHeaderPagesRequestOutcome {
+        let mut attempts = futures_util::stream::FuturesUnordered::new();
+        for page in self.pages {
+            attempts.push(
+                request_header_page_from_candidates(page.page_index, page.request, page.candidates)
+                    .boxed(),
+            );
+        }
+
+        let mut page_results = Vec::new();
+        while let Some(result) = attempts.next().await {
+            page_results.push(result);
+        }
+
+        ReverseHeaderPagesRequestOutcome { page_results }
+    }
+}
+
+fn reverse_header_page_requests(
+    child_block: u64,
+    total_count: u64,
+    page_limit: u64,
+) -> Vec<(usize, HeadersRequest)> {
+    let mut requests = Vec::new();
+    if child_block == 0 || total_count == 0 || page_limit == 0 {
+        return requests;
+    }
+
+    let mut offset = 0u64;
+    let mut page_index = 0usize;
+    while offset < total_count {
+        let Some(start_block) = child_block
+            .checked_sub(1)
+            .and_then(|block| block.checked_sub(offset))
+        else {
+            break;
+        };
+        let request_count = page_limit.min(total_count - offset);
+        requests.push((
+            page_index,
+            HeadersRequest::falling(BlockHashOrNumber::Number(start_block), request_count),
+        ));
+        offset = offset.saturating_add(request_count);
+        page_index = page_index.saturating_add(1);
+    }
+    requests
+}
+
 async fn request_header_page_from_candidates(
     page_index: usize,
     request: HeadersRequest,
@@ -5544,6 +5604,25 @@ mod tests {
         assert_eq!(body_receipt_chunk_limit(128, 128, 128), 128);
         assert_eq!(body_receipt_chunk_limit(16, 128, 128), 16);
         assert_eq!(body_receipt_chunk_limit(128, 8, 128), 8);
+    }
+
+    #[test]
+    fn reverse_header_page_requests_split_descending_pages() {
+        let requests = reverse_header_page_requests(1_001, 250, 100);
+        let pages = requests
+            .iter()
+            .map(|(index, request)| {
+                let BlockHashOrNumber::Number(start) = request.start else {
+                    panic!("reverse page request should use numeric starts");
+                };
+                (*index, start, request.limit)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(pages, vec![(0, 1_000, 100), (1, 900, 100), (2, 800, 50)]);
+        assert!(reverse_header_page_requests(0, 250, 100).is_empty());
+        assert!(reverse_header_page_requests(1_001, 0, 100).is_empty());
+        assert!(reverse_header_page_requests(1_001, 250, 0).is_empty());
     }
 
     #[test]
