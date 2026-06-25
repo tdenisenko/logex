@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs.
 
-PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model but now schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, retries stale missing roles without redownloading fast halves, and keeps ordered verified ingestion intact.
+PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model but now schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, retries stale missing roles without redownloading fast halves, reports scheduler/backpressure metrics, and keeps ordered verified ingestion intact.
 
 The feature is close enough that more small knob experiments should stop unless they directly validate the remaining live queue design. The next meaningful change is a bounded queued scheduler/backpressure pass, not more timeout/fanout/lookahead tuning.
 
@@ -26,6 +26,19 @@ The feature is close enough that more small knob experiments should stop unless 
   - `cargo check -p logex-sync`
   - `cargo test -p logex-sync`
   - `cargo clippy -p logex-sync -- -D warnings`
+- Added scheduler/backpressure observability without changing accepted request behavior:
+  - `/status.execution_network` now reports historical fetch activity, head-of-line blocking, stale role retries, and prefix reassignments.
+  - The advanced dashboard shows historical fetch queue, prepare queue, prefix wait, and scheduler retry counters.
+- Rejected the bounded stale-prefix refill experiment:
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-104524.log` averaged about 224.9 actual historical floor blocks/sec with six low windows and one zero-progress window.
+  - The widened stale-prefix queue was reverted; the metrics were kept.
+  - Restored run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-110035.log` averaged about 231.8 actual blocks/sec with three low windows and zero zero-progress windows in the 20-sample check, and later status showed the historical EWMA briefly above 800k logs/sec.
+- Validation passed after the rollback:
+  - `cargo fmt --check`
+  - `cargo test -p logex-sync`
+  - `cargo test -p logex-server`
+  - `cargo clippy -p logex-sync -- -D warnings`
+  - `cargo clippy -p logex-server -- -D warnings`
 
 ## Remaining TODOs
 
@@ -33,9 +46,9 @@ The feature is close enough that more small knob experiments should stop unless 
    - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
    - Completion criteria: body/receipt chunk reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
 
-2. Add scheduler-level backpressure and observability.
+2. Complete scheduler-level backpressure.
    - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
-   - Completion criteria: status/log metrics expose live reservation depth, prefix-critical waits, stale role reassignments, active fetches, prepared backlog, ordered write time, bandwidth, peer request latency, and dropped/retried work without flooding the dashboard.
+   - Completion criteria: scheduler decisions consume live reservation depth, prefix-critical waits, stale role reassignments, active fetches, prepared backlog, ordered write pressure, bandwidth, peer request latency, and dropped/retried work; the dashboard remains concise and non-spammy.
 
 3. Validate full-run historical sync performance.
    - Reason: short samples can be misleading across log-dense and sparse ranges.
@@ -52,6 +65,7 @@ The feature is close enough that more small knob experiments should stop unless 
 - Logs/sec is useful for dense ranges, but block/sec, rows/block, peer count, body/receipt latency, and bandwidth must be evaluated together.
 - Static timeout, fanout, lookahead, and buffer tuning has mostly reached diminishing returns. Future work should focus on scheduler architecture: chunk ownership, reservation expiry, measured peer speed, prefix-critical reassignment, and bounded queues.
 - The accepted live role scheduler preserves the paired prefix model while releasing body and receipt peer ownership independently. This avoids the rejected broad role-split failure mode where bandwidth was spent on partial chunks that did not advance the contiguous verified floor.
+- Small scheduler experiments are no longer the right path. The bounded stale-prefix refill trial also regressed, so the next implementation should be the larger queued live scheduler with explicit reservation/backpressure semantics.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -71,24 +85,29 @@ The feature is close enough that more small knob experiments should stop unless 
 
 - Challenge: logs/sec alone can mislead in sparse ranges or when network saturation changes.
   - Resolution: benchmarks now compare actual historical floor movement and low/zero-progress windows alongside logs/sec.
-  - Remaining: add durable scheduler metrics so future decisions do not require ad hoc log parsing.
+  - Remaining: use the new scheduler metrics to drive the queued scheduler instead of relying on ad hoc log parsing.
+
+- Challenge: broadening stale-prefix refill to later prefix chunks looked like a small way to reduce idle time, but live testing introduced a zero-progress window.
+  - Resolution: reverted the behavior and kept only the observability counters.
+  - Remaining: build the full queue/reservation scheduler rather than adding more local refill heuristics.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
+- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`, scheduler status plumbing, and dashboard metrics.
 - Removed obsolete paired body/receipt fallback code after the live role scheduler was validated and accepted.
 - Removed unused fallback metadata from live plan chunk tracking.
 - Removed obsolete fallback-specific tests and kept tests covering live role capacity, chunk accounting, missing-prefix reassignment, and scheduling predicates.
+- Removed the rejected bounded stale-prefix refill experiment before committing.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `cleanup: remove body receipt scheduler fallback`
+- Commits made during this run: `cleanup: remove body receipt scheduler fallback`; `chore: add historical scheduler observability`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo clippy -p logex-sync -- -D warnings`; remote smoke on the Mac mini.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync`; `cargo test -p logex-server`; `cargo clippy -p logex-sync -- -D warnings`; `cargo clippy -p logex-server -- -D warnings`; remote smoke and throughput sampling on the Mac mini.
 - Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks

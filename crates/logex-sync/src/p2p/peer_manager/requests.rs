@@ -200,6 +200,13 @@ pub(crate) struct BodyReceiptRequestAccounting {
     stats: TypedRequestStats,
     failures: ParallelChunkFailures,
     active_requests: Vec<BodyReceiptActiveRequest>,
+    scheduler: BodyReceiptSchedulerAccounting,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BodyReceiptSchedulerAccounting {
+    stale_role_retries: u64,
+    prefix_reassignments: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -910,8 +917,17 @@ impl PeerManager {
                 stats: event_stats,
                 failures: event_failures,
                 active_requests,
+                scheduler,
             } = accounting;
             self.apply_body_receipt_active_request_deltas(active_requests);
+            self.body_receipt_scheduler_metrics.stale_role_retries = self
+                .body_receipt_scheduler_metrics
+                .stale_role_retries
+                .saturating_add(scheduler.stale_role_retries);
+            self.body_receipt_scheduler_metrics.prefix_reassignments = self
+                .body_receipt_scheduler_metrics
+                .prefix_reassignments
+                .saturating_add(scheduler.prefix_reassignments);
             stats.extend(event_stats);
             failures.extend(event_failures);
         }
@@ -998,6 +1014,7 @@ fn emit_body_receipt_active_request_delta(
             kind,
             delta,
         }],
+        scheduler: BodyReceiptSchedulerAccounting::default(),
     });
 }
 
@@ -1018,6 +1035,27 @@ fn emit_body_receipt_request_accounting(
         stats,
         failures,
         active_requests: Vec::new(),
+        scheduler: BodyReceiptSchedulerAccounting::default(),
+    });
+}
+
+fn emit_body_receipt_scheduler_accounting(
+    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    scheduler: BodyReceiptSchedulerAccounting,
+) {
+    if scheduler.stale_role_retries == 0 && scheduler.prefix_reassignments == 0 {
+        return;
+    }
+
+    let Some(accounting_tx) = accounting_tx else {
+        return;
+    };
+
+    let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        stats: Vec::new(),
+        failures: Vec::new(),
+        active_requests: Vec::new(),
+        scheduler,
     });
 }
 
@@ -1319,7 +1357,7 @@ impl BodyReceiptRequestPlan {
                         if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
                             && attempts.len() < max_role_attempts
                         {
-                            hedge_count += schedule_stale_body_receipt_plan_roles(
+                            let scheduled = schedule_stale_body_receipt_plan_roles(
                                 &self,
                                 &mut attempts,
                                 &mut active_chunks,
@@ -1327,6 +1365,14 @@ impl BodyReceiptRequestPlan {
                                 &chunks,
                                 min_return_blocks,
                                 max_role_attempts,
+                            );
+                            hedge_count += scheduled;
+                            emit_body_receipt_scheduler_accounting(
+                                &self.accounting_tx,
+                                BodyReceiptSchedulerAccounting {
+                                    stale_role_retries: scheduled as u64,
+                                    prefix_reassignments: 0,
+                                },
                             );
                         }
                         continue;
@@ -1360,7 +1406,7 @@ impl BodyReceiptRequestPlan {
                 }
 
                 if attempts.len() < max_role_attempts {
-                    schedule_stale_body_receipt_plan_roles(
+                    let scheduled = schedule_stale_body_receipt_plan_roles(
                         &self,
                         &mut attempts,
                         &mut active_chunks,
@@ -1368,6 +1414,13 @@ impl BodyReceiptRequestPlan {
                         &chunks,
                         min_return_blocks,
                         max_role_attempts,
+                    );
+                    emit_body_receipt_scheduler_accounting(
+                        &self.accounting_tx,
+                        BodyReceiptSchedulerAccounting {
+                            stale_role_retries: scheduled as u64,
+                            prefix_reassignments: 0,
+                        },
                     );
                 }
 
@@ -1390,6 +1443,13 @@ impl BodyReceiptRequestPlan {
                         &mut peer_state,
                         range,
                         chunk_index,
+                    );
+                    emit_body_receipt_scheduler_accounting(
+                        &self.accounting_tx,
+                        BodyReceiptSchedulerAccounting {
+                            stale_role_retries: 0,
+                            prefix_reassignments: 1,
+                        },
                     );
                 }
 

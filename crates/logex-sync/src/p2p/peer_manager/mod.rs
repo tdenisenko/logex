@@ -129,6 +129,7 @@ pub struct PeerManager {
     network_activated: bool,
     max_peers: usize,
     session_metrics: ExecutionPeerSessionMetrics,
+    body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics,
 }
 
 #[derive(Default)]
@@ -140,6 +141,12 @@ struct ExecutionPeerSessionMetrics {
     nonserving_disconnects: u64,
     missing_fork_id_candidates: u64,
     fork_id_rejected_candidates: u64,
+}
+
+#[derive(Default)]
+struct BodyReceiptSchedulerMetrics {
+    stale_role_retries: u64,
+    prefix_reassignments: u64,
 }
 
 #[derive(Clone)]
@@ -297,6 +304,7 @@ impl PeerManager {
             network_activated,
             max_peers,
             session_metrics: ExecutionPeerSessionMetrics::default(),
+            body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
         };
 
         manager.seed_known_peers();

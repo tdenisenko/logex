@@ -160,6 +160,10 @@ impl PeerManager {
             historical_fetch_pending: 0,
             historical_fetch_expected_sequence: 0,
             historical_fetch_next_sequence: 0,
+            historical_fetch_head_of_line_blocked: false,
+            historical_fetch_head_of_line_completed: 0,
+            historical_fetch_expected_active: false,
+            historical_fetch_head_of_line_elapsed_ms: None,
             historical_prepare_active: 0,
             historical_prepare_ready: 0,
             historical_prepare_completed: 0,
@@ -168,6 +172,12 @@ impl PeerManager {
             historical_ingest_active: false,
             historical_ingest_sequence: None,
             historical_ingest_elapsed_ms: None,
+            historical_scheduler_stale_role_retries: self
+                .body_receipt_scheduler_metrics
+                .stale_role_retries,
+            historical_scheduler_prefix_reassignments: self
+                .body_receipt_scheduler_metrics
+                .prefix_reassignments,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,

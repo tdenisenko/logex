@@ -229,6 +229,15 @@ pub struct ExecutionNetworkStatus {
     pub historical_fetch_expected_sequence: u64,
     /// Next historical fetch sequence that will be assigned to a new plan.
     pub historical_fetch_next_sequence: u64,
+    /// Whether the required historical fetch sequence is blocking behind later work.
+    pub historical_fetch_head_of_line_blocked: bool,
+    /// Later historical fetch outcomes buffered while the required sequence is missing.
+    pub historical_fetch_head_of_line_completed: usize,
+    /// Whether the required historical fetch sequence still has an active request task.
+    pub historical_fetch_expected_active: bool,
+    /// Milliseconds elapsed since the required historical fetch sequence started blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_fetch_head_of_line_elapsed_ms: Option<u64>,
     /// Historical prepare tasks currently in flight.
     pub historical_prepare_active: usize,
     /// Historical prepare tasks whose join handles are already ready.
@@ -247,6 +256,10 @@ pub struct ExecutionNetworkStatus {
     /// Milliseconds elapsed since the active historical ingest started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_ingest_elapsed_ms: Option<u64>,
+    /// Cumulative stale body/receipt role retries scheduled by the historical scheduler.
+    pub historical_scheduler_stale_role_retries: u64,
+    /// Cumulative prefix-critical chunk reassignments scheduled by the historical scheduler.
+    pub historical_scheduler_prefix_reassignments: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

@@ -2258,6 +2258,7 @@ impl SyncEngine {
         self.historical_prepare_expected_sequence = self.historical_fetch_expected_sequence;
         self.historical_fetch_expected_child = None;
         self.historical_fetch_planned_child = None;
+        self.historical_fetch_head_of_line_started_at = None;
         self.historical_fetch_completed.clear();
         self.peers.clear_body_receipt_active_requests();
         while self.historical_fetch_rx.try_recv().is_ok() {}
@@ -2303,12 +2304,30 @@ impl SyncEngine {
             .apply_body_receipt_request_accounting(&mut outcome.outcome);
         self.historical_fetch_completed
             .insert(outcome.sequence, outcome);
+        self.refresh_historical_fetch_head_of_line_timer();
     }
 
     fn drain_historical_fetch_outcomes(&mut self) {
         self.drain_historical_request_accounting();
         while let Ok(outcome) = self.historical_fetch_rx.try_recv() {
             self.store_historical_fetch_outcome(outcome);
+        }
+        self.refresh_historical_fetch_head_of_line_timer();
+    }
+
+    fn refresh_historical_fetch_head_of_line_timer(&mut self) {
+        let blocked = !self
+            .historical_fetch_completed
+            .contains_key(&self.historical_fetch_expected_sequence)
+            && self
+                .historical_fetch_completed
+                .keys()
+                .any(|sequence| *sequence > self.historical_fetch_expected_sequence);
+        if blocked {
+            self.historical_fetch_head_of_line_started_at
+                .get_or_insert_with(Instant::now);
+        } else {
+            self.historical_fetch_head_of_line_started_at = None;
         }
     }
 
@@ -3013,6 +3032,7 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence =
             self.historical_fetch_expected_sequence.saturating_add(1);
         self.historical_fetch_expected_child = next_child_header;
+        self.refresh_historical_fetch_head_of_line_timer();
     }
 
     fn materialized_historical_next_child(&self, sequence: u64) -> Option<Option<Header>> {
@@ -3035,6 +3055,7 @@ impl SyncEngine {
         );
         self.historical_fetch_expected_sequence = advanced_sequence;
         self.historical_fetch_expected_child = advanced_child;
+        self.refresh_historical_fetch_head_of_line_timer();
         advanced_sequence != expected_sequence
     }
 

@@ -14,6 +14,25 @@ impl SyncEngine {
             status.historical_fetch_active + status.historical_fetch_completed;
         status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;
         status.historical_fetch_next_sequence = self.historical_fetch_next_sequence;
+        status.historical_fetch_expected_active = self
+            .historical_fetch_handles
+            .contains_key(&self.historical_fetch_expected_sequence);
+        status.historical_fetch_head_of_line_completed = self
+            .historical_fetch_completed
+            .keys()
+            .filter(|sequence| **sequence > self.historical_fetch_expected_sequence)
+            .count();
+        status.historical_fetch_head_of_line_blocked = !self
+            .historical_fetch_completed
+            .contains_key(&self.historical_fetch_expected_sequence)
+            && status.historical_fetch_head_of_line_completed > 0;
+        status.historical_fetch_head_of_line_elapsed_ms = status
+            .historical_fetch_head_of_line_blocked
+            .then(|| {
+                self.historical_fetch_head_of_line_started_at
+                    .map(|started_at| started_at.elapsed().as_millis() as u64)
+            })
+            .flatten();
         status.historical_prepare_active = self.historical_prepare_handles.len();
         status.historical_prepare_ready = self
             .historical_prepare_handles

@@ -1187,6 +1187,10 @@
           <div class="debug-item"><span class="k">Receipt request peers</span><span class="v" id="debugReceiptRequestPeers">--</span></div>
           <div class="debug-item"><span class="k">Peer request pressure</span><span class="v" id="debugPeerRequestPressure">--</span></div>
           <div class="debug-item"><span class="k">Adaptive request limit</span><span class="v" id="debugRequestLimitAvg">--</span></div>
+          <div class="debug-item"><span class="k">Historical fetch queue</span><span class="v" id="debugHistoricalFetchQueue">--</span></div>
+          <div class="debug-item"><span class="k">Historical prepare queue</span><span class="v" id="debugHistoricalPrepareQueue">--</span></div>
+          <div class="debug-item"><span class="k">Historical prefix wait</span><span class="v" id="debugHistoricalPrefixWait">--</span></div>
+          <div class="debug-item"><span class="k">Historical scheduler retries</span><span class="v" id="debugHistoricalSchedulerRetries">--</span></div>
           <div class="debug-item"><span class="k">Log rate</span><span class="v" id="debugLogRate">--</span></div>
           <div class="debug-item"><span class="k">Block rate</span><span class="v" id="debugBlockRate">--</span></div>
           <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
@@ -1659,6 +1663,13 @@ function fmtBytes(value) {
     index += 1;
   }
   return fmtDecimal(number, number >= 10 || index === 0 ? 0 : 1) + ' ' + units[index];
+}
+
+function fmtMillis(value) {
+  var number = numberOrNull(value);
+  if (number === null) return '--';
+  if (number < 1000) return fmt(number) + ' ms';
+  return fmtDecimal(number / 1000, number >= 10000 ? 0 : 1) + ' s';
 }
 
 function fmtEta(seconds) {
@@ -3220,6 +3231,26 @@ function updateStatus(data) {
   setText('debugRequestLimitAvg',
     fmt(numberOrNull(executionNetwork.body_request_limit_avg)) + ' body / ' +
     fmt(numberOrNull(executionNetwork.receipt_request_limit_avg)) + ' receipt');
+  var fetchActive = numberOrNull(executionNetwork.historical_fetch_active);
+  var fetchCompleted = numberOrNull(executionNetwork.historical_fetch_completed);
+  var fetchPending = numberOrNull(executionNetwork.historical_fetch_pending);
+  setText('debugHistoricalFetchQueue',
+    fmt(fetchActive) + ' active / ' + fmt(fetchCompleted) + ' ready / ' + fmt(fetchPending) + ' pending');
+  var prepareActive = numberOrNull(executionNetwork.historical_prepare_active);
+  var prepareReady = numberOrNull(executionNetwork.historical_prepare_ready);
+  var preparePending = numberOrNull(executionNetwork.historical_prepare_pending);
+  setText('debugHistoricalPrepareQueue',
+    fmt(prepareActive) + ' active / ' + fmt(prepareReady) + ' ready / ' + fmt(preparePending) + ' pending');
+  var prefixBlocked = !!executionNetwork.historical_fetch_head_of_line_blocked;
+  var prefixElapsed = numberOrNull(executionNetwork.historical_fetch_head_of_line_elapsed_ms);
+  var prefixCompleted = numberOrNull(executionNetwork.historical_fetch_head_of_line_completed);
+  var expectedActive = !!executionNetwork.historical_fetch_expected_active;
+  setText('debugHistoricalPrefixWait', prefixBlocked
+    ? fmtMillis(prefixElapsed) + ' / ' + fmt(prefixCompleted) + ' ready ahead / expected ' + (expectedActive ? 'active' : 'missing')
+    : 'Clear');
+  setText('debugHistoricalSchedulerRetries',
+    fmt(numberOrNull(executionNetwork.historical_scheduler_stale_role_retries)) + ' stale roles / ' +
+    fmt(numberOrNull(executionNetwork.historical_scheduler_prefix_reassignments)) + ' prefix reassignments');
   setText('debugLogRate', fmtLogRate(logRate));
   setText('debugBlockRate', fmtRate(blockRate));
   setParentHidden('debugRemainingLogs', historicalSyncDisabled);
