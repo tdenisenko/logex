@@ -20,7 +20,7 @@ use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
-    SourcedBodyReceipts,
+    ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan, SourcedBodyReceipts,
 };
 use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
@@ -92,6 +92,23 @@ pub(super) struct HistoricalFetchPlan {
 pub(super) struct HistoricalFetchHandle {
     attempt: u64,
     handle: JoinHandle<()>,
+}
+
+pub(super) struct HistoricalHeaderFetchHandle {
+    sequence: u64,
+    attempt: u64,
+    child_header: Header,
+    handle: JoinHandle<()>,
+}
+
+pub(super) struct HistoricalHeaderFetchOutcome {
+    generation: u64,
+    sequence: u64,
+    attempt: u64,
+    child_header: Header,
+    target_count: u64,
+    header_elapsed: Duration,
+    outcome: ReverseHeaderPagesRequestOutcome,
 }
 
 pub(super) struct HistoricalFetchOutcome {
@@ -181,6 +198,8 @@ pub struct SyncEngine {
     consensus: Option<Arc<ConsensusStore>>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
+    historical_header_fetch_tx: mpsc::UnboundedSender<HistoricalHeaderFetchOutcome>,
+    historical_header_fetch_rx: mpsc::UnboundedReceiver<HistoricalHeaderFetchOutcome>,
     historical_fetch_tx: mpsc::UnboundedSender<HistoricalFetchOutcome>,
     historical_fetch_rx: mpsc::UnboundedReceiver<HistoricalFetchOutcome>,
     historical_request_accounting_tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
@@ -192,6 +211,7 @@ pub struct SyncEngine {
     historical_fetch_expected_child: Option<Header>,
     historical_fetch_planned_child: Option<Header>,
     historical_fetch_head_of_line_started_at: Option<Instant>,
+    historical_header_fetch_handle: Option<HistoricalHeaderFetchHandle>,
     historical_fetch_handles: HashMap<u64, HistoricalFetchHandle>,
     historical_fetch_completed: BTreeMap<u64, HistoricalFetchOutcome>,
     historical_prepare_expected_sequence: u64,
@@ -217,6 +237,7 @@ impl SyncEngine {
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));
+        let (historical_header_fetch_tx, historical_header_fetch_rx) = mpsc::unbounded_channel();
         let (historical_fetch_tx, historical_fetch_rx) = mpsc::unbounded_channel();
         let (historical_request_accounting_tx, historical_request_accounting_rx) =
             mpsc::unbounded_channel();
@@ -229,6 +250,8 @@ impl SyncEngine {
             consensus,
             head_tracker: HeadTracker::new(RECENT_HEADER_WINDOW),
             progress,
+            historical_header_fetch_tx,
+            historical_header_fetch_rx,
             historical_fetch_tx,
             historical_fetch_rx,
             historical_request_accounting_tx,
@@ -240,6 +263,7 @@ impl SyncEngine {
             historical_fetch_expected_child: None,
             historical_fetch_planned_child: None,
             historical_fetch_head_of_line_started_at: None,
+            historical_header_fetch_handle: None,
             historical_fetch_handles: HashMap::new(),
             historical_fetch_completed: BTreeMap::new(),
             historical_prepare_expected_sequence: 0,

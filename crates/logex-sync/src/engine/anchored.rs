@@ -2247,6 +2247,9 @@ impl SyncEngine {
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
+        if let Some(fetch) = self.historical_header_fetch_handle.take() {
+            fetch.handle.abort();
+        }
         for (_, fetch) in self.historical_fetch_handles.drain() {
             fetch.handle.abort();
         }
@@ -2261,6 +2264,7 @@ impl SyncEngine {
         self.historical_fetch_head_of_line_started_at = None;
         self.historical_fetch_completed.clear();
         self.peers.clear_body_receipt_active_requests();
+        while self.historical_header_fetch_rx.try_recv().is_ok() {}
         while self.historical_fetch_rx.try_recv().is_ok() {}
         while self.historical_request_accounting_rx.try_recv().is_ok() {}
     }
@@ -2452,6 +2456,7 @@ impl SyncEngine {
         refill_fetch_pipeline: bool,
     ) -> Result<bool> {
         self.drain_historical_fetch_outcomes();
+        self.drain_historical_header_fetch_outcomes().await?;
         self.drain_historical_prepare_tasks().await?;
 
         let mut progressed = false;
@@ -2489,6 +2494,7 @@ impl SyncEngine {
                 .await?;
             }
             self.drain_historical_fetch_outcomes();
+            self.drain_historical_header_fetch_outcomes().await?;
         }
 
         Ok(progressed)
@@ -2528,11 +2534,14 @@ impl SyncEngine {
     }
 
     fn pending_historical_fetch_count(&self) -> usize {
-        self.historical_fetch_handles.len() + self.historical_fetch_completed.len()
+        self.historical_fetch_handles.len()
+            + self.historical_fetch_completed.len()
+            + usize::from(self.historical_header_fetch_handle.is_some())
     }
 
     fn active_historical_fetch_count(&self) -> usize {
         self.historical_fetch_handles.len()
+            + usize::from(self.historical_header_fetch_handle.is_some())
     }
 
     fn historical_prepare_sequence_available(&self, sequence: u64) -> bool {
@@ -2554,18 +2563,32 @@ impl SyncEngine {
     }
 
     fn historical_fetch_sequence_available(&self, sequence: u64) -> bool {
+        let header_sequence = self
+            .historical_header_fetch_handle
+            .as_ref()
+            .map(|fetch| fetch.sequence);
         historical_sequence_available(
             sequence,
-            self.historical_fetch_handles.keys().copied(),
+            self.historical_fetch_handles
+                .keys()
+                .copied()
+                .chain(header_sequence),
             self.historical_fetch_completed.keys().copied(),
             None,
         )
     }
 
     fn has_historical_fetch_after(&self, sequence: u64) -> bool {
+        let header_sequence = self
+            .historical_header_fetch_handle
+            .as_ref()
+            .map(|fetch| fetch.sequence);
         has_historical_sequence_after(
             sequence,
-            self.historical_fetch_handles.keys().copied(),
+            self.historical_fetch_handles
+                .keys()
+                .copied()
+                .chain(header_sequence),
             self.historical_fetch_completed.keys().copied(),
             None,
         )
@@ -2680,6 +2703,179 @@ impl SyncEngine {
         }
     }
 
+    async fn try_spawn_historical_header_fetch_plan(
+        &mut self,
+        child_header: Header,
+    ) -> Result<bool> {
+        if self.historical_header_fetch_handle.is_some()
+            || child_header.number() == EXECUTION_HISTORY_TARGET_BLOCK
+        {
+            return Ok(false);
+        }
+
+        let page_limit = self
+            .config
+            .header_batch_size
+            .clamp(1, HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT);
+        let target_count = self
+            .historical_fetch_window_blocks()
+            .min(child_header.number() - EXECUTION_HISTORY_TARGET_BLOCK);
+        if target_count <= page_limit
+            || self.peers.peer_count() < HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS
+        {
+            return Ok(false);
+        }
+
+        let required_block = child_header.number().saturating_sub(target_count);
+        match self
+            .peers
+            .prepare_reverse_header_pages_request(
+                child_header.number(),
+                target_count,
+                page_limit,
+                required_block,
+            )
+            .await
+        {
+            Ok(Some(plan)) => {
+                self.spawn_historical_header_fetch_plan(child_header, target_count, plan);
+                Ok(true)
+            }
+            Ok(None) => {
+                self.refresh_connectivity_state();
+                Ok(false)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    child_block = child_header.number(),
+                    requested_headers = target_count,
+                    "unable to reserve async historical reverse header request"
+                );
+                self.refresh_connectivity_state();
+                Ok(false)
+            }
+        }
+    }
+
+    fn spawn_historical_header_fetch_plan(
+        &mut self,
+        child_header: Header,
+        target_count: u64,
+        plan: ReverseHeaderPagesRequestPlan,
+    ) {
+        let generation = self.historical_fetch_generation;
+        let sequence = self.historical_fetch_next_sequence;
+        let attempt = self.next_historical_fetch_attempt();
+        let tx = self.historical_header_fetch_tx.clone();
+        let task_child_header = child_header.clone();
+        let handle = tokio::spawn(async move {
+            let header_started = std::time::Instant::now();
+            let outcome = plan.execute().await;
+            let _ = tx.send(HistoricalHeaderFetchOutcome {
+                generation,
+                sequence,
+                attempt,
+                child_header: task_child_header,
+                target_count,
+                header_elapsed: header_started.elapsed(),
+                outcome,
+            });
+        });
+        if let Some(previous) =
+            self.historical_header_fetch_handle
+                .replace(HistoricalHeaderFetchHandle {
+                    sequence,
+                    attempt,
+                    child_header,
+                    handle,
+                })
+        {
+            previous.handle.abort();
+        }
+    }
+
+    async fn store_historical_header_fetch_outcome(
+        &mut self,
+        outcome: HistoricalHeaderFetchOutcome,
+    ) -> Result<bool> {
+        if outcome.generation != self.historical_fetch_generation {
+            return Ok(false);
+        }
+
+        let Some(fetch) = self.historical_header_fetch_handle.as_ref() else {
+            return Ok(false);
+        };
+        if fetch.sequence != outcome.sequence || fetch.attempt != outcome.attempt {
+            tracing::trace!(
+                sequence = outcome.sequence,
+                outcome_attempt = outcome.attempt,
+                active_sequence = fetch.sequence,
+                active_attempt = fetch.attempt,
+                "discarding stale historical header fetch outcome"
+            );
+            return Ok(false);
+        }
+        if fetch.child_header.number() != outcome.child_header.number()
+            || fetch.child_header.hash_slow() != outcome.child_header.hash_slow()
+        {
+            let expected_child = fetch.child_header.clone();
+            tracing::debug!(
+                sequence = outcome.sequence,
+                expected_child = expected_child.number(),
+                fetched_child = outcome.child_header.number(),
+                "discarding mismatched historical header fetch outcome"
+            );
+            self.historical_header_fetch_handle.take();
+            self.historical_fetch_planned_child = Some(expected_child);
+            return Ok(false);
+        }
+
+        self.historical_header_fetch_handle.take();
+        if outcome.sequence < self.historical_fetch_expected_sequence {
+            return Ok(false);
+        }
+
+        let child_header = outcome.child_header.clone();
+        let Some(header_batch) = self.materialize_parallel_historical_header_batch(
+            outcome.child_header,
+            outcome.target_count,
+            outcome.header_elapsed,
+            outcome.outcome,
+        )?
+        else {
+            self.historical_fetch_planned_child = Some(child_header);
+            return Ok(false);
+        };
+
+        let Some(plan) = self
+            .prepare_historical_fetch_plan_from_header_batch(header_batch)
+            .await?
+        else {
+            if self.pending_historical_fetch_count() == 0 {
+                self.reset_historical_fetch_pipeline();
+            } else {
+                self.historical_fetch_planned_child = None;
+            }
+            return Ok(false);
+        };
+
+        self.historical_fetch_next_sequence = self
+            .historical_fetch_next_sequence
+            .max(outcome.sequence.saturating_add(1));
+        self.historical_fetch_planned_child = plan.planned_next_child_header.clone();
+        self.spawn_historical_fetch_plan_at_sequence(outcome.sequence, plan);
+        Ok(true)
+    }
+
+    async fn drain_historical_header_fetch_outcomes(&mut self) -> Result<bool> {
+        let mut progressed = false;
+        while let Ok(outcome) = self.historical_header_fetch_rx.try_recv() {
+            progressed |= self.store_historical_header_fetch_outcome(outcome).await?;
+        }
+        Ok(progressed)
+    }
+
     async fn retry_expected_historical_fetch(&mut self, child_header: &Header) -> Result<bool> {
         let sequence = self.historical_fetch_expected_sequence;
         let Some(fetch) = self.historical_fetch_handles.remove(&sequence) else {
@@ -2723,6 +2919,7 @@ impl SyncEngine {
         max_new_fetches: usize,
     ) -> Result<()> {
         self.drain_historical_fetch_outcomes();
+        self.drain_historical_header_fetch_outcomes().await?;
 
         let pipeline_empty = self.pending_historical_fetch_count() == 0
             && self.historical_fetch_planned_child.is_none();
@@ -2807,6 +3004,17 @@ impl SyncEngine {
                 break;
             }
 
+            if self
+                .try_spawn_historical_header_fetch_plan(planned_child.clone())
+                .await?
+            {
+                new_fetches = new_fetches.saturating_add(1);
+                tokio::task::yield_now().await;
+                self.drain_historical_request_accounting();
+                self.drain_historical_header_fetch_outcomes().await?;
+                continue;
+            }
+
             let Some(plan) = self.prepare_historical_fetch_plan(planned_child).await? else {
                 if self.pending_historical_fetch_count() == 0 {
                     self.reset_historical_fetch_pipeline();
@@ -2832,6 +3040,7 @@ impl SyncEngine {
         let mut wait_started = Instant::now();
         loop {
             self.drain_historical_fetch_outcomes();
+            self.drain_historical_header_fetch_outcomes().await?;
             self.drain_historical_prepare_tasks().await?;
 
             if let Some(outcome) = self
@@ -2851,7 +3060,9 @@ impl SyncEngine {
                 return Ok(None);
             }
 
-            if self.historical_fetch_handles.is_empty() {
+            if self.historical_fetch_handles.is_empty()
+                && self.historical_header_fetch_handle.is_none()
+            {
                 return Ok(None);
             }
 
@@ -2899,6 +3110,14 @@ impl SyncEngine {
                         return Ok(None);
                     };
                     self.store_historical_fetch_outcome(outcome);
+                    self.ensure_historical_fetch_pipeline(child_header.clone())
+                        .await?;
+                }
+                outcome = self.historical_header_fetch_rx.recv(), if self.historical_header_fetch_handle.is_some() => {
+                    let Some(outcome) = outcome else {
+                        return Ok(None);
+                    };
+                    self.store_historical_header_fetch_outcome(outcome).await?;
                     self.ensure_historical_fetch_pipeline(child_header.clone())
                         .await?;
                 }
@@ -3067,6 +3286,14 @@ impl SyncEngine {
             return Ok(None);
         };
 
+        self.prepare_historical_fetch_plan_from_header_batch(header_batch)
+            .await
+    }
+
+    async fn prepare_historical_fetch_plan_from_header_batch(
+        &mut self,
+        header_batch: HistoricalHeaderBatch,
+    ) -> Result<Option<HistoricalFetchPlan>> {
         if !HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE {
             return Ok(None);
         }
@@ -3120,6 +3347,66 @@ impl SyncEngine {
         }))
     }
 
+    fn materialize_parallel_historical_header_batch(
+        &mut self,
+        child_header: Header,
+        target_count: u64,
+        header_elapsed: Duration,
+        outcome: ReverseHeaderPagesRequestOutcome,
+    ) -> Result<Option<HistoricalHeaderBatch>> {
+        match self.peers.complete_reverse_header_pages_request(outcome) {
+            Ok(pages) if !pages.is_empty() => {
+                match validate_reverse_header_pages_with_hashes(&child_header, pages) {
+                    Ok((header_peer, mut headers, mut hashes)) => {
+                        let keep =
+                            historical_header_prefix_len_for_gas_target(&headers, target_count);
+                        headers.truncate(keep);
+                        hashes.truncate(keep);
+                        let required_block = headers
+                            .last()
+                            .map(|header| header.number())
+                            .unwrap_or_else(|| child_header.number().saturating_sub(1));
+                        Ok(Some(HistoricalHeaderBatch {
+                            child_header,
+                            header_peer,
+                            headers,
+                            hashes,
+                            required_block,
+                            header_elapsed,
+                        }))
+                    }
+                    Err((header_peer, error)) => {
+                        tracing::warn!(
+                            child_block = child_header.number(),
+                            header_peer = %header_peer,
+                            %error,
+                            "parallel historical reverse header validation failed"
+                        );
+                        if header_peer != PeerId::ZERO {
+                            self.peers.report_invalid_block_data(header_peer, "headers");
+                        }
+                        self.refresh_connectivity_state();
+                        Ok(None)
+                    }
+                }
+            }
+            Ok(_) => {
+                self.refresh_connectivity_state();
+                Ok(None)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    child_block = child_header.number(),
+                    requested_headers = target_count,
+                    "parallel historical reverse header request failed"
+                );
+                self.refresh_connectivity_state();
+                Ok(None)
+            }
+        }
+    }
+
     async fn fetch_historical_header_batch(
         &mut self,
         child_header: Header,
@@ -3153,61 +3440,13 @@ impl SyncEngine {
             {
                 Ok(Some(plan)) => match cancelable(&mut self.shutdown, plan.execute()).await {
                     Some(outcome) => {
-                        match self.peers.complete_reverse_header_pages_request(outcome) {
-                            Ok(pages) if !pages.is_empty() => {
-                                match validate_reverse_header_pages_with_hashes(
-                                    &child_header,
-                                    pages,
-                                ) {
-                                    Ok((header_peer, mut headers, mut hashes)) => {
-                                        let keep = historical_header_prefix_len_for_gas_target(
-                                            &headers,
-                                            target_count,
-                                        );
-                                        headers.truncate(keep);
-                                        hashes.truncate(keep);
-                                        let required_block = headers
-                                            .last()
-                                            .map(|header| header.number())
-                                            .unwrap_or_else(|| {
-                                                child_header.number().saturating_sub(1)
-                                            });
-                                        return Ok(Some(HistoricalHeaderBatch {
-                                            child_header,
-                                            header_peer,
-                                            headers,
-                                            hashes,
-                                            required_block,
-                                            header_elapsed: header_started.elapsed(),
-                                        }));
-                                    }
-                                    Err((header_peer, error)) => {
-                                        tracing::warn!(
-                                            child_block = child_header.number(),
-                                            header_peer = %header_peer,
-                                            %error,
-                                            "parallel historical reverse header validation failed"
-                                        );
-                                        if header_peer != PeerId::ZERO {
-                                            self.peers
-                                                .report_invalid_block_data(header_peer, "headers");
-                                        }
-                                        self.refresh_connectivity_state();
-                                    }
-                                }
-                            }
-                            Ok(_) => {
-                                self.refresh_connectivity_state();
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    error = %error,
-                                    child_block = child_header.number(),
-                                    requested_headers = target_count,
-                                    "parallel historical reverse header request failed"
-                                );
-                                self.refresh_connectivity_state();
-                            }
+                        if let Some(batch) = self.materialize_parallel_historical_header_batch(
+                            child_header.clone(),
+                            target_count,
+                            header_started.elapsed(),
+                            outcome,
+                        )? {
+                            return Ok(Some(batch));
                         }
                     }
                     None => {
@@ -3391,6 +3630,15 @@ impl SyncEngine {
                         None => break Err(eyre::eyre!("historical fetch channel closed")),
                     }
                 }
+                outcome = self.historical_header_fetch_rx.recv(), if self.historical_header_fetch_handle.is_some() => {
+                    match outcome {
+                        Some(outcome) => {
+                            self.store_historical_header_fetch_outcome(outcome).await?;
+                            self.spawn_ready_historical_prepare_tasks_without_refill().await?;
+                        }
+                        None => break Err(eyre::eyre!("historical header fetch channel closed")),
+                    }
+                }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                 }
@@ -3474,6 +3722,15 @@ impl SyncEngine {
                             self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                         }
                         None => break Err(eyre::eyre!("historical fetch channel closed")),
+                    }
+                }
+                outcome = self.historical_header_fetch_rx.recv(), if self.historical_header_fetch_handle.is_some() => {
+                    match outcome {
+                        Some(outcome) => {
+                            self.store_historical_header_fetch_outcome(outcome).await?;
+                            self.spawn_ready_historical_prepare_tasks_without_refill().await?;
+                        }
+                        None => break Err(eyre::eyre!("historical header fetch channel closed")),
                     }
                 }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {

@@ -43,6 +43,7 @@ mod state;
 use self::requests::{BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, RequestAttempt};
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
+    ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan,
 };
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
