@@ -76,6 +76,7 @@ const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
 const HISTORICAL_WRITE_COALESCE_MAX_BATCHES: usize = 4;
 const HISTORICAL_WRITE_COALESCE_TARGET_ROWS: u64 = 500_000;
 const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
+const HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS: usize = 64;
 const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
@@ -120,6 +121,17 @@ struct HistoricalValidationExtractedChunk {
     blocking_queue_elapsed: Duration,
     validation_elapsed: Duration,
 }
+
+type HistoricalResidualSequentialTail = (
+    super::ingest::HistoricalExtractedBatch,
+    Vec<PeerId>,
+    u64,
+    u64,
+    usize,
+    Duration,
+    Duration,
+    Duration,
+);
 
 async fn validate_historical_blocks_parallel(
     headers: &[Header],
@@ -634,6 +646,10 @@ fn historical_fetch_refill_should_use_pipeline_child(
     prepare_expected_sequence: u64,
 ) -> bool {
     pending_prepares > 0 || fetch_expected_sequence > prepare_expected_sequence
+}
+
+fn historical_residual_should_use_sequential_tail(block_count: usize) -> bool {
+    (1..HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS).contains(&block_count)
 }
 
 fn historical_advanced_fetch_position(
@@ -3615,6 +3631,70 @@ impl SyncEngine {
                 break;
             }
 
+            if historical_residual_should_use_sequential_tail(remaining_headers.len()) {
+                let Some((
+                    extracted,
+                    mut peer_notes,
+                    lowest_block,
+                    highest_block,
+                    block_count,
+                    body_receipt_elapsed,
+                    validation_queue_elapsed,
+                    validation_elapsed,
+                )) = self
+                    .fetch_and_extract_historical_residual_tail_sequential(
+                        header_peer,
+                        &remaining_headers,
+                        &remaining_hashes,
+                        required_block,
+                    )
+                    .await?
+                else {
+                    return Ok(false);
+                };
+
+                peer_notes.push(header_peer);
+                for peer_id in peer_notes {
+                    self.note_serving_peer(peer_id, &mut newly_serving_peers);
+                }
+
+                let write_started = std::time::Instant::now();
+                let outcome = super::ingest::write_extracted_historical_batch(
+                    Arc::clone(&self.storage),
+                    extracted,
+                )
+                .await?;
+                let extraction_elapsed = outcome.extraction_elapsed;
+                let write_elapsed = outcome.write_elapsed;
+                let log_count = self.record_historical_ingest_outcome(outcome);
+                self.historical_rows_per_block_ewma = update_historical_density_ewma(
+                    self.historical_rows_per_block_ewma,
+                    log_count,
+                    block_count,
+                );
+                self.refresh_historical_status().await;
+
+                tracing::debug!(
+                    lowest_block,
+                    highest_block,
+                    blocks = block_count,
+                    logs = log_count,
+                    remaining_blocks = 0usize,
+                    body_receipt_ms = body_receipt_elapsed.as_millis(),
+                    validation_queue_ms = validation_queue_elapsed.as_millis(),
+                    validation_ms = validation_elapsed.as_millis(),
+                    extraction_ms = extraction_elapsed.as_millis(),
+                    write_ms = write_elapsed.as_millis(),
+                    write_total_ms = write_started.elapsed().as_millis(),
+                    total_ms = residual_started.elapsed().as_millis(),
+                    "historical residual sequential tail verified and ingested"
+                );
+
+                remaining_headers.clear();
+                remaining_hashes.clear();
+                break;
+            }
+
             let (
                 extracted,
                 mut peer_notes,
@@ -3792,6 +3872,127 @@ impl SyncEngine {
         }
 
         Ok(true)
+    }
+
+    async fn fetch_and_extract_historical_residual_tail_sequential(
+        &mut self,
+        header_peer: PeerId,
+        headers: &[Header],
+        hashes: &[B256],
+        required_block: u64,
+    ) -> Result<Option<HistoricalResidualSequentialTail>> {
+        let body_receipt_started = std::time::Instant::now();
+        let bodies = match cancelable(
+            &mut self.shutdown,
+            self.peers
+                .get_bodies_prefer_peers(hashes.to_vec(), required_block, &[header_peer]),
+        )
+        .await
+        {
+            Some(Ok(bodies)) if bodies.len() == headers.len() => bodies,
+            Some(Ok(bodies)) => {
+                tracing::debug!(
+                    headers = headers.len(),
+                    bodies = bodies.len(),
+                    "historical residual sequential tail body response count mismatch"
+                );
+                return Ok(None);
+            }
+            Some(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    blocks = headers.len(),
+                    "historical residual sequential tail body request failed"
+                );
+                self.refresh_connectivity_state();
+                return Ok(None);
+            }
+            None => {
+                self.finish_shutdown()?;
+                return Ok(None);
+            }
+        };
+
+        let expected_receipt_counts: Vec<usize> = bodies
+            .iter()
+            .map(|(_peer_id, body)| body.transaction_count())
+            .collect();
+        let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
+        let (receipt_peer, receipts) = match cancelable(
+            &mut self.shutdown,
+            self.peers.get_receipts_matching_counts_prefer_peers(
+                hashes.to_vec(),
+                required_block,
+                &expected_receipt_counts,
+                &receipt_peer_preference,
+            ),
+        )
+        .await
+        {
+            Some(Ok((peer_id, receipts))) if receipts.len() == headers.len() => (peer_id, receipts),
+            Some(Ok((peer_id, receipts))) => {
+                tracing::debug!(
+                    headers = headers.len(),
+                    receipt_peer = %peer_id,
+                    receipts = receipts.len(),
+                    "historical residual sequential tail receipt response count mismatch"
+                );
+                return Ok(None);
+            }
+            Some(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    blocks = headers.len(),
+                    "historical residual sequential tail receipt request failed"
+                );
+                self.refresh_connectivity_state();
+                return Ok(None);
+            }
+            None => {
+                self.finish_shutdown()?;
+                return Ok(None);
+            }
+        };
+        let body_receipt_elapsed = body_receipt_started.elapsed();
+
+        let blocks: Vec<SourcedBodyReceipts> = bodies
+            .into_iter()
+            .zip(receipts)
+            .map(|((body_peer, body), receipts)| ((body_peer, body), (receipt_peer, receipts)))
+            .collect();
+
+        match validate_and_extract_historical_blocks_streaming(headers, hashes, blocks).await? {
+            Ok((
+                extracted,
+                peer_notes,
+                lowest_block,
+                highest_block,
+                block_count,
+                validation_queue_elapsed,
+                validation_elapsed,
+            )) => Ok(Some((
+                extracted,
+                peer_notes,
+                lowest_block,
+                highest_block,
+                block_count,
+                body_receipt_elapsed,
+                validation_queue_elapsed,
+                validation_elapsed,
+            ))),
+            Err(failure) => {
+                tracing::warn!(
+                    block_number = failure.block_number,
+                    block_hash = %failure.block_hash,
+                    peer = %failure.peer,
+                    error = %failure.message,
+                    "historical residual sequential tail validation failed"
+                );
+                self.peers
+                    .report_invalid_block_data(failure.peer, failure.response_kind);
+                Ok(None)
+            }
+        }
     }
 
     fn maybe_trim_historical_allocator(&mut self) {
@@ -4303,6 +4504,18 @@ mod tests {
             processing_elapsed: Duration::from_millis(70),
             residual_header_batch: None,
         }
+    }
+
+    #[test]
+    fn residual_small_tail_uses_sequential_fetch() {
+        assert!(!historical_residual_should_use_sequential_tail(0));
+        assert!(historical_residual_should_use_sequential_tail(1));
+        assert!(historical_residual_should_use_sequential_tail(
+            HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS - 1
+        ));
+        assert!(!historical_residual_should_use_sequential_tail(
+            HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS
+        ));
     }
 
     fn residual_header_batch(child_header: Header) -> HistoricalHeaderBatch {

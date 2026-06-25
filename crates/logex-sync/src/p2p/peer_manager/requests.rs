@@ -38,7 +38,7 @@ const PIPELINED_BODY_RECEIPT_VERY_DENSE_CHUNK_BLOCKS: usize = 32;
 const PIPELINED_BODY_RECEIPT_CHUNK_GAS_TARGET: u64 = 960_000_000;
 const PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS: usize = 512;
 const PIPELINED_BODY_RECEIPT_DENSE_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
-    PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT / 2;
+    PIPELINED_BODY_RECEIPT_DENSE_CHUNK_BLOCKS * 2 / 3;
 const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
 const PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 16;
@@ -5376,10 +5376,10 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_min_accepted_prefix_accepts_dense_half_chunk_progress() {
+    fn body_receipt_min_accepted_prefix_accepts_dense_chunk_progress() {
         assert_eq!(body_receipt_min_accepted_prefix(32), 32);
-        assert_eq!(body_receipt_min_accepted_prefix(64), 64);
-        assert_eq!(body_receipt_min_accepted_prefix(128), 64);
+        assert_eq!(body_receipt_min_accepted_prefix(64), 32);
+        assert_eq!(body_receipt_min_accepted_prefix(128), 32);
         assert_eq!(body_receipt_min_accepted_prefix(1024), 128);
         assert_eq!(body_receipt_min_accepted_prefix(10_000), 128);
     }

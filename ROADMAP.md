@@ -4,7 +4,7 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard/query APIs. PR #95 is merged as the current `master` baseline. This branch, `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, enabling the dense lookahead boost earlier when enough ready peers exist, treating transient request transport closures as soft per-kind pauses instead of immediate peer removals, keeping six dense active fetch windows once at least eight serving peers are available, and allowing a deeper prepared-batch buffer only when available memory is clearly healthy.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VPS route for useful P2P coverage. A completed full-sync snapshot is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260624-123315`; the active `LogEx` data dir was reset with only peer metadata copied forward for continued dense-range testing. The current accepted branch state improves dense historical sync by retrying stalled expected fetches sooner, avoiding over-deep dense low-peer fetch lookahead, batching body/receipt request accounting, coalescing duplicate request penalties per peer/role, restoring the safer 45s plan timeout, allowing two chunk requests per peer once there are 16 candidates, reducing dense body/receipt planned windows to 512 blocks, using 7 dense lookahead fetches when memory and peer count allow, capping dense body/receipt chunks to reduce peer-tail latency, refilling the critical fetch path while ordered writes are in progress, enabling the dense lookahead boost earlier when enough ready peers exist, treating transient request transport closures as soft per-kind pauses instead of immediate peer removals, keeping six dense active fetch windows once at least eight serving peers are available, allowing a deeper prepared-batch buffer only when available memory is clearly healthy, and accepting useful dense prefix progress instead of resetting when a slow peer leaves a small prefix gap.
 
 ## Completed Since Last Run
 
@@ -157,6 +157,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Rejected medium-peer prefix redundancy:
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-163715.log` passed focused local request tests but averaged only ~133 actual floor blocks/sec over a live sample.
   - Restored accepted baseline `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-164404.log`; a five-minute sample moved 65,528 blocks in 304s, about ~216 actual blocks/sec, with zero no-progress windows and high tunnel RX during movement.
+- Accepted dense prefix progress salvage:
+  - Logs showed the main body/receipt pipeline could complete 47 useful contiguous blocks but reject them because the dense accepted-prefix threshold was 64, causing full lookahead resets.
+  - The dense accepted-prefix threshold now matches the dense chunk size more closely, and tiny residual tails below the parallel planner minimum are fetched through the sequential validated path.
+  - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260624-171944.log` moved 49,664 blocks over 243s, about ~204 actual blocks/sec, with zero no-progress windows and no `below accepted prefix` resets in the sampled log.
 
 ## Remaining TODOs
 
@@ -200,6 +204,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Body/receipt candidate selection should prefer idle peers without excluding all active fast peers. Bounded active fallbacks let load-adjusted scoring use proven peers while still avoiding the overload caused by wider static fanout.
 - Smaller dense chunks are not automatically better at medium peer counts. Live testing showed that reducing the chunk-size threshold to eight peers increased request churn and did not improve verified floor progress.
 - Medium-peer prefix redundancy is rejected for now. It reduced some local plan tails but lowered useful floor movement; future duplicate work should be driven by live chunk ownership and reservation expiry.
+- Dense prefix salvage is preferred over full lookahead reset when at least 32 contiguous dense blocks are available. The blocks are still validated and any remaining prefix gap is filled before queued lookahead is ingested, preserving ordered verification while avoiding idle retry windows.
 - Benchmark runs should use fresh recent checkpoint quorum sources when the default endpoint is stale; stale checkpoint rejection must not be bypassed for tests.
 - Transient request transport failures (`Disconnected`, `ChannelClosed`, `ConnectionDropped`) pause and demote the peer for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties and are dropped.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes.
@@ -218,6 +223,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: high-peer depth `8` could not be proven because the run did not reach the activation threshold.
   - Resolution: reverted the unproven change rather than leaving speculative code in the branch.
   - Remaining: retest higher depth only with a controlled run that actually reaches high serving-peer counts.
+- Challenge: dense body/receipt plans could discard useful contiguous progress when a slow peer left the first dense chunk just under the accepted prefix.
+  - Resolution: lowered the dense accepted-prefix threshold and added a sequential residual-tail fallback for gaps smaller than the parallel planner minimum.
+  - Remaining: continue longer-run monitoring to confirm this reduces full-run idle windows without increasing residual churn.
 - Challenge: the expected historical fetch can block the contiguous floor while later lookahead is complete.
   - Resolution: accepted an earlier selective retry of only the expected fetch after live benchmarking showed better sustained progress and fewer fallback/residual repairs.
   - Remaining: a live scheduler should reduce this further by reassigning stale chunks instead of retrying whole fetch windows.
