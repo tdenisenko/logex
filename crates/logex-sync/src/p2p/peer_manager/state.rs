@@ -45,6 +45,41 @@ impl PeerManager {
         body_ready.min(receipt_ready)
     }
 
+    /// Connected peers currently eligible for body and receipt requests,
+    /// returned separately so scheduler backpressure can respect asymmetric
+    /// receipt pauses/quarantines.
+    pub fn body_receipt_request_ready_peer_counts(&self) -> (usize, usize) {
+        let mut body_ready = 0usize;
+        let mut receipt_ready = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_ready = body_ready.saturating_add(1);
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_ready = receipt_ready.saturating_add(1);
+            }
+        }
+        (body_ready, receipt_ready)
+    }
+
+    /// Active plus reserved body/receipt request slots currently charged to
+    /// peers by historical background fetch plans.
+    pub fn active_body_receipt_request_counts(&self) -> (usize, usize) {
+        let mut active_body_requests = 0usize;
+        let mut active_receipt_requests = 0usize;
+        for peer in self.peers.values() {
+            active_body_requests = active_body_requests
+                .saturating_add(peer.body_active_requests)
+                .saturating_add(peer.body_reserved_requests);
+            active_receipt_requests = active_receipt_requests
+                .saturating_add(peer.receipt_active_requests)
+                .saturating_add(peer.receipt_reserved_requests);
+        }
+        (active_body_requests, active_receipt_requests)
+    }
+
     /// Highest advertised canonical block across connected peers.
     pub fn highest_peer_block(&self) -> Option<u64> {
         self.peers

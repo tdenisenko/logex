@@ -219,11 +219,11 @@ pub struct ExecutionNetworkStatus {
     pub body_request_limit_avg: usize,
     /// Average adaptive receipt request block limit across connected peers.
     pub receipt_request_limit_avg: usize,
-    /// Historical fetch tasks currently in flight.
+    /// Historical fetch request attempts currently in flight.
     pub historical_fetch_active: usize,
     /// Historical fetch outcomes buffered and waiting for ordered ingest.
     pub historical_fetch_completed: usize,
-    /// Historical fetch tasks plus buffered outcomes.
+    /// Historical fetch request attempts plus buffered outcomes.
     pub historical_fetch_pending: usize,
     /// Historical fetch sequence currently required by ordered ingest.
     pub historical_fetch_expected_sequence: u64,

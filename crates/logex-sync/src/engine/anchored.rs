@@ -58,9 +58,12 @@ const HISTORICAL_FETCH_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250)
 const HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY: Duration = Duration::from_secs(4);
 const HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY: Duration = Duration::from_secs(30);
 const HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE: usize = 2;
+const HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED: usize = 1;
 const HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
+const HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET: usize = 6;
+const HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT: usize = 16;
 const HISTORICAL_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 16;
 const HISTORICAL_HIGH_PIPELINE_MIN_SERVING_PEERS: usize = 20;
 const HISTORICAL_DENSE_PIPELINE_MIN_SERVING_PEERS: usize = 16;
@@ -624,6 +627,23 @@ fn historical_fetch_budget_has_capacity(
     } else {
         completed_fetches < buffer_depth
     }
+}
+
+fn historical_body_receipt_request_pressure_allows_refill(
+    body_ready_peers: usize,
+    receipt_ready_peers: usize,
+    active_body_requests: usize,
+    active_receipt_requests: usize,
+) -> bool {
+    let ready_peers = body_ready_peers.min(receipt_ready_peers);
+    if ready_peers == 0 {
+        return false;
+    }
+
+    let request_limit = ready_peers
+        .saturating_mul(HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET)
+        .max(HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT);
+    active_body_requests < request_limit && active_receipt_requests < request_limit
 }
 
 fn historical_critical_refill_buffer_floor(available_memory_bytes: Option<u64>) -> usize {
@@ -2597,15 +2617,27 @@ impl SyncEngine {
         Some(storage_child_header.clone())
     }
 
-    fn pending_historical_fetch_count(&self) -> usize {
-        self.historical_fetch_handles.len()
-            + self.historical_fetch_completed.len()
+    pub(super) fn pending_historical_fetch_count(&self) -> usize {
+        self.active_historical_fetch_count() + self.historical_fetch_completed.len()
+    }
+
+    pub(super) fn active_historical_fetch_count(&self) -> usize {
+        self.active_historical_body_receipt_attempt_count()
             + usize::from(self.historical_header_fetch_handle.is_some())
     }
 
-    fn active_historical_fetch_count(&self) -> usize {
-        self.historical_fetch_handles.len()
-            + usize::from(self.historical_header_fetch_handle.is_some())
+    fn active_historical_body_receipt_attempt_count(&self) -> usize {
+        self.historical_fetch_handles
+            .values()
+            .map(|fetch| fetch.attempts.len())
+            .sum()
+    }
+
+    fn active_expected_historical_fetch_attempt_count(&self) -> usize {
+        self.historical_fetch_handles
+            .get(&self.historical_fetch_expected_sequence)
+            .map(|fetch| fetch.attempts.len())
+            .unwrap_or_default()
     }
 
     fn historical_prepare_sequence_available(&self, sequence: u64) -> bool {
@@ -2702,6 +2734,19 @@ impl SyncEngine {
         self.peers
             .serving_peer_count()
             .max(self.peers.body_receipt_request_ready_peer_count())
+    }
+
+    fn historical_request_pressure_allows_fetch_refill(&self) -> bool {
+        let (body_ready_peers, receipt_ready_peers) =
+            self.peers.body_receipt_request_ready_peer_counts();
+        let (active_body_requests, active_receipt_requests) =
+            self.peers.active_body_receipt_request_counts();
+        historical_body_receipt_request_pressure_allows_refill(
+            body_ready_peers,
+            receipt_ready_peers,
+            active_body_requests,
+            active_receipt_requests,
+        )
     }
 
     fn historical_fetch_window_blocks(&self) -> u64 {
@@ -2992,11 +3037,7 @@ impl SyncEngine {
 
     async fn retry_expected_historical_fetch(&mut self, child_header: &Header) -> Result<bool> {
         let sequence = self.historical_fetch_expected_sequence;
-        let active_attempts = self
-            .historical_fetch_handles
-            .get(&sequence)
-            .map(|fetch| fetch.attempts.len())
-            .unwrap_or_default();
+        let active_attempts = self.active_expected_historical_fetch_attempt_count();
         if !historical_fetch_duplicate_retry_permitted(active_attempts) {
             return Ok(false);
         }
@@ -3026,6 +3067,33 @@ impl SyncEngine {
         Ok(self.spawn_historical_fetch_retry_plan_at_sequence(sequence, plan))
     }
 
+    async fn retry_stalled_expected_historical_fetch_if_needed(&mut self) -> Result<bool> {
+        self.refresh_historical_fetch_head_of_line_timer();
+        let Some(started_at) = self.historical_fetch_head_of_line_started_at else {
+            return Ok(false);
+        };
+        if self.historical_fetch_completed.len()
+            < HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED
+        {
+            return Ok(false);
+        }
+        let waited = started_at.elapsed();
+        let active_attempts = self.active_expected_historical_fetch_attempt_count();
+        if !historical_expected_fetch_retry_permitted(active_attempts > 0, waited)
+            || !historical_fetch_duplicate_retry_permitted(active_attempts)
+        {
+            return Ok(false);
+        }
+        let Some(child_header) = self.historical_fetch_expected_child.clone() else {
+            return Ok(false);
+        };
+        let retried = self.retry_expected_historical_fetch(&child_header).await?;
+        if retried {
+            self.historical_fetch_head_of_line_started_at = Some(Instant::now());
+        }
+        Ok(retried)
+    }
+
     async fn ensure_historical_fetch_pipeline(&mut self, child_header: Header) -> Result<()> {
         self.ensure_historical_fetch_pipeline_limited(child_header, usize::MAX)
             .await
@@ -3046,6 +3114,8 @@ impl SyncEngine {
             self.historical_fetch_expected_child = Some(child_header.clone());
             self.historical_fetch_planned_child = Some(child_header.clone());
         }
+        self.retry_stalled_expected_historical_fetch_if_needed()
+            .await?;
 
         let available_memory_bytes = historical_available_memory_bytes();
         let peer_capacity = self.historical_fetch_peer_capacity();
@@ -3108,6 +3178,7 @@ impl SyncEngine {
         let mut new_fetches = 0usize;
         while new_fetches < max_new_fetches
             && self.active_historical_fetch_count() < pipeline_depth
+            && self.historical_request_pressure_allows_fetch_refill()
             && historical_fetch_budget_has_capacity(
                 self.pending_historical_fetch_count(),
                 self.historical_fetch_completed.len(),
@@ -3189,7 +3260,7 @@ impl SyncEngine {
                 .contains_key(&self.historical_fetch_expected_sequence);
             if wait_started.elapsed() >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
                 && self.historical_fetch_completed.len()
-                    >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
+                    >= HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED
             {
                 let waited = wait_started.elapsed();
                 let retry_permitted =
@@ -3201,7 +3272,10 @@ impl SyncEngine {
                     wait_started = Instant::now();
                     continue;
                 }
-                if retry_permitted {
+                if retry_permitted
+                    && self.historical_fetch_completed.len()
+                        >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
+                {
                     tracing::debug!(
                         expected_sequence = self.historical_fetch_expected_sequence,
                         completed_fetches = self.historical_fetch_completed.len(),
@@ -5726,6 +5800,10 @@ mod tests {
 
     #[test]
     fn historical_fetch_duplicate_retry_is_bounded() {
+        assert_eq!(
+            HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED - 1
+        );
         assert!(!historical_fetch_duplicate_retry_permitted(0));
         assert!(historical_fetch_duplicate_retry_permitted(1));
         assert!(!historical_fetch_duplicate_retry_permitted(
@@ -5752,6 +5830,37 @@ mod tests {
             0,
             HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT,
             Some(HISTORICAL_LOW_AVAILABLE_MEMORY_BYTES - 1)
+        ));
+    }
+
+    #[test]
+    fn historical_request_pressure_gates_refill_by_ready_peer_pool() {
+        assert!(!historical_body_receipt_request_pressure_allows_refill(
+            0, 12, 0, 0
+        ));
+        assert!(historical_body_receipt_request_pressure_allows_refill(
+            2,
+            2,
+            HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT - 1,
+            HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT - 1,
+        ));
+        assert!(!historical_body_receipt_request_pressure_allows_refill(
+            2,
+            2,
+            HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT,
+            0,
+        ));
+        assert!(!historical_body_receipt_request_pressure_allows_refill(
+            10,
+            10,
+            0,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
+        ));
+        assert!(historical_body_receipt_request_pressure_allows_refill(
+            10,
+            10,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET - 1,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET - 1,
         ));
     }
 

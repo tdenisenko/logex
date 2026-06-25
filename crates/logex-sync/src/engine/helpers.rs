@@ -8,10 +8,9 @@ use std::future::Future;
 impl SyncEngine {
     fn execution_network_status(&self) -> logex_types::ExecutionNetworkStatus {
         let mut status = self.peers.execution_network_status();
-        status.historical_fetch_active = self.historical_fetch_handles.len();
+        status.historical_fetch_active = self.active_historical_fetch_count();
         status.historical_fetch_completed = self.historical_fetch_completed.len();
-        status.historical_fetch_pending =
-            status.historical_fetch_active + status.historical_fetch_completed;
+        status.historical_fetch_pending = self.pending_historical_fetch_count();
         status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;
         status.historical_fetch_next_sequence = self.historical_fetch_next_sequence;
         status.historical_fetch_expected_active = self
