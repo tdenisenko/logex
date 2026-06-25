@@ -39,6 +39,10 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Active log: `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-124218.log`.
   - Remote release build passed.
   - Smoke status showed prefix reassignments increasing, no head-of-line block, active fetches present, and the historical floor moving.
+- Tested refill-during-prepare as a candidate overlap improvement and rejected it:
+  - Local format, check, and targeted scheduler tests passed.
+  - Live A/B sampling showed the candidate introduced pipeline reset pressure and many more request timeouts than the committed branch baseline.
+  - The Mac mini was restored to the committed branch baseline without resetting the data dir.
 
 ## Remaining TODOs
 
@@ -71,6 +75,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Queued body/receipt plans reserve only their first-wave role requests. This gives the peer scorer immediate backpressure for queued work without treating every fallback candidate as already loaded.
 - Completed body/receipt chunks behind a prefix gap are retained as residual-prefetched chunks. They are not trusted or written early; residual repair validates them against the already-verified header chain when they become contiguous.
 - Prefix-critical extra body/receipt retries are enabled only when later chunks are already buffered behind a prefix gap. The retry lane expands only that prefix chunk's candidates and remains bounded so it cannot become an unbounded duplicate-request strategy.
+- Refill-during-prepare is not accepted as a standalone optimization. It can improve apparent overlap, but live testing showed that adding critical-path refill from the prepare wait loop without a true central scheduler/backpressure model increases request pressure and pipeline resets.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -116,6 +121,10 @@ Reverse historical header page downloads now have an owned async reservation pat
   - Resolution: added a bounded prefix-critical retry lane that expands candidate pools only for the earliest stalled prefix chunk when buffered suffix chunks prove useful downloaded work is waiting.
   - Remaining: move this primitive into the broader bounded queue/backpressure scheduler.
 
+- Challenge: refilling historical fetches while prepare tasks were still running looked like a small overlap improvement.
+  - Resolution: tested it live against the committed branch baseline and rejected it after the candidate produced more timeouts and pipeline resets.
+  - Remaining: implement overlap through the bounded queued scheduler instead of adding another critical-path refill hook.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -124,6 +133,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Removed obsolete fallback-specific tests and kept tests covering live role capacity, chunk accounting, missing-prefix reassignment, and scheduling predicates.
 - Removed the rejected bounded stale-prefix refill experiment before committing.
 - Removed the rejected write-time refill guard before committing.
+- Removed the rejected refill-during-prepare experiment before committing.
 - Removed the obsolete direct reverse-header-pages wrapper after the engine moved to the owned plan API.
 - Removed obsolete contiguous-prefix wrapper helpers after residual chunk splitting replaced them.
 - No additional obsolete scheduler code was found that could be safely removed in the prefix-critical retry pass; the synchronous path remains the required low-peer/small-window fallback.
@@ -136,7 +146,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual and prefix-critical targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release build and smoke on the Mac mini.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, and refill/backpressure targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
 - Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks
