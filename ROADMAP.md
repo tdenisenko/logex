@@ -12,6 +12,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
   - The scheduler now requeues the earliest required prefix chunk when it is incomplete and no longer owned by an in-flight attempt, instead of waiting for the whole body/receipt plan to fail.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-041728.log`: corrected 20-sample window moved 63,585 blocks over 288s, about ~220.8 actual blocks/sec, with zero low windows, zero zero-progress windows, no plan timeouts, no pipeline failures, no sequence resets, and no below-prefix resets.
   - This is a clear improvement over the prior checkpoint sample at ~178.7 actual blocks/sec, but it is still below the target and remains a per-plan scheduler rather than a full cross-window reservation queue.
+- Rejected two follow-up scheduler candidates after live benchmarks:
+  - Adaptive low-peer paired window run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-043843.log`: ~144.4 actual blocks/sec with seven low windows, worse than the accepted ~220.8 baseline, so it was reverted.
+  - Live-first decoupled body/receipt scheduler runs `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-050127.log` and `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-051406.log`: local tests passed, but remote samples regressed to ~89.2 and ~100.8 actual blocks/sec with repeated low/zero-progress windows. The accepted scheduler was restored on the remote at `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-052414.log`.
 - Accepted a paired-plan scheduler invariant that separates unique prefix chunk coverage from duplicate hedge attempt capacity:
   - Before the change, duplicate hedge attempts could consume the same counter used to decide whether to start the next prefix chunk, reducing prefix range coverage while hedges were still in flight.
   - Candidate run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-040058.log`: corrected 20-sample window moved 51,652 blocks over 289s, about ~178.7 actual blocks/sec, with one low window, zero zero-progress windows, no plan timeouts, no pipeline failures, no sequence resets, and no below-prefix resets. The previous accepted corrected sample was ~160.8 actual blocks/sec with two low windows over the sampled window.
@@ -184,7 +187,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 
 1. Build a live body/receipt request scheduler.
    - Reason: historical sync is still peer-tail bound; static fetch plans can stall on a slow prefix while other peers and later work are available.
-   - Completion criteria: chunks are assigned to idle peers, timed-out work is reassigned without discarding useful lookahead, ordered verified ingestion is preserved, sustained full-run throughput improves without extra peer churn, and the scheduler avoids the rejected role-level failure mode where receipt/body halves are downloaded speculatively but do not produce a larger contiguous verified prefix.
+   - Completion criteria: chunks are assigned to idle peers, timed-out work is reassigned without discarding useful lookahead, ordered verified ingestion is preserved, sustained full-run throughput improves without extra peer churn, and the scheduler avoids the rejected live-first/role-level failure modes where speculative body/receipt work produces partial prefixes or blocks the proven paired path.
 
 2. Improve full-run historical sync stability and throughput.
    - Reason: peaks can reach the 800k+ logs/sec range, but low-throughput windows still keep the end-to-end sync time above the target.
@@ -229,6 +232,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Paired body/receipt plans now distinguish unique prefix chunk coverage from duplicate hedge attempt capacity. Hedges may consume the duplicate-attempt budget, but they should not prevent the scheduler from keeping the configured number of unique prefix chunks in flight.
 - Paired body/receipt plans now reassign missing prefix chunks from the live request loop when the chunk is no longer in flight. This preserves ordered verification while avoiding whole-plan failure for an unowned prefix gap.
 - The next meaningful path remains a geth/Nethermind-style live scheduler with peer allocation, reassignment, and measured peer speed, not broad static timeout changes. A scheduler that downloads body/receipt halves independently must still be driven by contiguous-prefix ownership and expected receipt counts; otherwise it wastes bandwidth on partial chunks.
+- Live-first role-level body/receipt scheduling is rejected for now. It must not sit in front of the accepted paired scheduler unless it can prove accepted-prefix completion without introducing low/zero-progress windows.
 
 ## Challenges and Resolutions
 
@@ -250,6 +254,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through the full VP
 - Challenge: dense body/receipt plans could discard useful contiguous progress when a slow peer left the first dense chunk just under the accepted prefix.
   - Resolution: lowered the dense accepted-prefix threshold and added a sequential residual-tail fallback for gaps smaller than the parallel planner minimum.
   - Remaining: continue longer-run monitoring to confirm this reduces full-run idle windows without increasing residual churn.
+- Challenge: the live-first decoupled body/receipt scheduler compiled and passed unit tests but produced partial-prefix completions and zero-progress windows on the Mac mini.
+  - Resolution: added an accepted-prefix gate, retested, and still rejected/reverted the candidate because the live-first path remained slower than the accepted scheduler.
+  - Remaining: redesign the live scheduler as an ownership/reservation layer around the accepted paired path rather than as a speculative replacement in front of it.
 - Challenge: the expected historical fetch can block the contiguous floor while later lookahead is complete.
   - Resolution: accepted an earlier selective retry of only the expected fetch after live benchmarking showed better sustained progress and fewer fallback/residual repairs.
   - Remaining: a live scheduler should reduce this further by reassigning stale chunks instead of retrying whole fetch windows.
