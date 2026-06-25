@@ -190,6 +190,8 @@ pub(crate) struct BodyReceiptRequestPlan {
     body_peer_ids: Vec<PeerId>,
     receipt_peer_ids: Vec<PeerId>,
     max_in_flight: usize,
+    body_max_in_flight: usize,
+    receipt_max_in_flight: usize,
     peer_rotation: usize,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
     accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
@@ -824,15 +826,41 @@ impl PeerManager {
         }
         let return_blocks =
             body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref(), rows_per_block);
+        let minimum_role_window = body_receipt_scheduled_chunk_limit(
+            &ranges,
+            body_receipt_plan_progress_target(return_blocks),
+        );
         let range_indices_by_start: HashMap<usize, usize> = ranges
             .iter()
             .enumerate()
             .map(|(index, range)| (range.start, index))
             .collect();
+        let body_max_in_flight = body_receipt_role_request_window_remaining(
+            &self.peers,
+            &body_peer_ids,
+            PeerRequestKind::Bodies,
+            MAX_PARALLEL_BODY_REQUESTS,
+            minimum_role_window,
+        );
+        if body_max_in_flight == 0 {
+            return Ok(None);
+        }
+        let receipt_max_in_flight = body_receipt_role_request_window_remaining(
+            &self.peers,
+            &receipt_peer_ids,
+            PeerRequestKind::Receipts,
+            MAX_PARALLEL_RECEIPT_REQUESTS,
+            minimum_role_window,
+        );
+        if receipt_max_in_flight == 0 {
+            return Ok(None);
+        }
         let max_in_flight = paired_body_receipt_chunk_window_limit(
             body_peer_ids.len().min(receipt_peer_ids.len()),
             MAX_PARALLEL_BODY_RECEIPT_REQUESTS,
-        );
+        )
+        .min(body_max_in_flight)
+        .min(receipt_max_in_flight);
         if max_in_flight == 0 {
             return Ok(None);
         }
@@ -861,6 +889,8 @@ impl PeerManager {
             body_peer_ids,
             receipt_peer_ids,
             max_in_flight,
+            body_max_in_flight,
+            receipt_max_in_flight,
             peer_rotation: self.request_cursor,
             peers,
             accounting_tx: None,
@@ -1188,7 +1218,7 @@ impl BodyReceiptRequestPlan {
             return_blocks,
             self.peer_rotation,
             PeerRequestKind::Bodies,
-            MAX_PARALLEL_BODY_REQUESTS,
+            self.body_max_in_flight,
         );
         add_decoupled_initial_reservations(
             &mut reservations,
@@ -1197,7 +1227,7 @@ impl BodyReceiptRequestPlan {
             return_blocks,
             self.peer_rotation,
             PeerRequestKind::Receipts,
-            MAX_PARALLEL_RECEIPT_REQUESTS,
+            self.receipt_max_in_flight,
         );
         reservations
     }
@@ -1272,12 +1302,14 @@ impl BodyReceiptRequestPlan {
             hashes.clone(),
             ranges.clone(),
             self.peer_rotation,
+            self.body_max_in_flight,
         );
         let receipts_request = self.request_decoupled_sourced_receipt_chunks(
             &self.receipt_peer_ids,
             hashes,
             ranges,
             self.peer_rotation,
+            self.receipt_max_in_flight,
         );
         let (bodies_result, receipts_result) = tokio::join!(bodies_request, receipts_request);
 
@@ -1715,6 +1747,7 @@ impl BodyReceiptRequestPlan {
         hashes: Vec<B256>,
         ranges: Vec<std::ops::Range<usize>>,
         peer_rotation: usize,
+        max_in_flight: usize,
     ) -> std::result::Result<Option<ParallelBodies>, ParallelChunkError> {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
@@ -1725,9 +1758,8 @@ impl BodyReceiptRequestPlan {
             .enumerate()
             .map(|(index, range)| (range.start, index))
             .collect();
-        let max_in_flight =
-            request_window_limit(peer_ids.len(), MAX_PARALLEL_BODY_REQUESTS).min(ranges.len());
-        if max_in_flight == 0 {
+        let request_window = max_in_flight;
+        if request_window == 0 {
             return Ok(None);
         }
         let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
@@ -1736,9 +1768,11 @@ impl BodyReceiptRequestPlan {
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
+        let initial_ranges = request_window.min(ranges.len());
         let redundant_prefix_chunks =
-            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len());
-        for _ in 0..max_in_flight {
+            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len())
+                .min(request_window.saturating_sub(initial_ranges));
+        for _ in 0..initial_ranges {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
@@ -1958,6 +1992,7 @@ impl BodyReceiptRequestPlan {
         hashes: Vec<B256>,
         ranges: Vec<std::ops::Range<usize>>,
         peer_rotation: usize,
+        max_in_flight: usize,
     ) -> std::result::Result<Option<ParallelSourcedReceipts>, ParallelChunkError> {
         if ranges.len() < 2 || peer_ids.is_empty() {
             return Ok(None);
@@ -1968,9 +2003,8 @@ impl BodyReceiptRequestPlan {
             .enumerate()
             .map(|(index, range)| (range.start, index))
             .collect();
-        let max_in_flight =
-            request_window_limit(peer_ids.len(), MAX_PARALLEL_RECEIPT_REQUESTS).min(ranges.len());
-        if max_in_flight == 0 {
+        let request_window = max_in_flight;
+        if request_window == 0 {
             return Ok(None);
         }
         let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
@@ -1979,9 +2013,11 @@ impl BodyReceiptRequestPlan {
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
+        let initial_ranges = request_window.min(ranges.len());
         let redundant_prefix_chunks =
-            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len());
-        for _ in 0..max_in_flight {
+            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len())
+                .min(request_window.saturating_sub(initial_ranges));
+        for _ in 0..initial_ranges {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
@@ -4082,18 +4118,19 @@ fn add_decoupled_initial_reservations(
     return_blocks: usize,
     peer_rotation: usize,
     kind: PeerRequestKind,
-    max_requests: usize,
+    max_in_flight: usize,
 ) {
     if peer_ids.is_empty() || ranges.is_empty() {
         return;
     }
-    let max_in_flight = request_window_limit(peer_ids.len(), max_requests).min(ranges.len());
-    for (chunk_index, _) in ranges.iter().enumerate().take(max_in_flight) {
+    let initial_ranges = max_in_flight.min(ranges.len());
+    for (chunk_index, _) in ranges.iter().enumerate().take(initial_ranges) {
         let peer_id = peer_ids[rotated_chunk_index(chunk_index, peer_rotation) % peer_ids.len()];
         reservations.add(peer_id, kind);
     }
     let redundant_prefix_chunks =
-        decoupled_initial_prefix_redundancy_count(ranges, return_blocks, peer_ids.len());
+        decoupled_initial_prefix_redundancy_count(ranges, return_blocks, peer_ids.len())
+            .min(max_in_flight.saturating_sub(initial_ranges));
     for (duplicate_index, range) in ranges.iter().take(redundant_prefix_chunks).enumerate() {
         let base_chunk_index = ranges
             .iter()
@@ -5426,6 +5463,43 @@ fn request_window_limit(peer_count: usize, max_in_flight: usize) -> usize {
         .clamp(1, max_in_flight)
 }
 
+fn body_receipt_role_request_window_remaining(
+    peers: &HashMap<PeerId, ActivePeer>,
+    peer_ids: &[PeerId],
+    kind: PeerRequestKind,
+    max_in_flight: usize,
+    minimum_in_flight: usize,
+) -> usize {
+    let active_requests = peer_ids
+        .iter()
+        .filter_map(|peer_id| peers.get(peer_id))
+        .map(|peer| body_receipt_active_requests(peer, kind))
+        .sum::<usize>();
+
+    body_receipt_role_request_window_remaining_for_load(
+        peer_ids.len(),
+        active_requests,
+        max_in_flight,
+        minimum_in_flight,
+    )
+}
+
+fn body_receipt_role_request_window_remaining_for_load(
+    peer_count: usize,
+    active_requests: usize,
+    max_in_flight: usize,
+    minimum_in_flight: usize,
+) -> usize {
+    let window = request_window_limit(peer_count, max_in_flight);
+    if window == 0 {
+        return 0;
+    }
+
+    window
+        .saturating_sub(active_requests)
+        .max(minimum_in_flight.min(window))
+}
+
 fn parallel_requests_per_peer(peer_count: usize) -> usize {
     if peer_count >= PARALLEL_HIGH_FANOUT_MIN_PEERS {
         PARALLEL_REQUESTS_PER_PEER_HIGH
@@ -5924,6 +5998,30 @@ mod tests {
     }
 
     #[test]
+    fn body_receipt_role_request_window_subtracts_active_load() {
+        assert_eq!(
+            body_receipt_role_request_window_remaining_for_load(8, 0, 64, 2),
+            8
+        );
+        assert_eq!(
+            body_receipt_role_request_window_remaining_for_load(8, 3, 64, 2),
+            5
+        );
+        assert_eq!(
+            body_receipt_role_request_window_remaining_for_load(8, 7, 64, 2),
+            2
+        );
+        assert_eq!(
+            body_receipt_role_request_window_remaining_for_load(8, 99, 64, 2),
+            2
+        );
+        assert_eq!(
+            body_receipt_role_request_window_remaining_for_load(8, 99, 64, 0),
+            0
+        );
+    }
+
+    #[test]
     fn paired_body_receipt_window_counts_both_request_types() {
         assert_eq!(paired_body_receipt_chunk_window_limit(0, 16), 0);
         assert_eq!(paired_body_receipt_chunk_window_limit(1, 16), 1);
@@ -6234,6 +6332,8 @@ mod tests {
             body_peer_ids: body_peers,
             receipt_peer_ids: receipt_peers,
             max_in_flight: 2,
+            body_max_in_flight: 2,
+            receipt_max_in_flight: 2,
             peer_rotation: 0,
             peers: HashMap::new(),
             accounting_tx: None,
@@ -6279,6 +6379,8 @@ mod tests {
             body_peer_ids: body_peers,
             receipt_peer_ids: receipt_peers,
             max_in_flight: 4,
+            body_max_in_flight: 4,
+            receipt_max_in_flight: 4,
             peer_rotation: 0,
             peers: HashMap::new(),
             accounting_tx: None,
@@ -6301,6 +6403,53 @@ mod tests {
 
         assert_eq!(body_reservations, 4);
         assert_eq!(receipt_reservations, 4);
+    }
+
+    #[test]
+    fn body_receipt_decoupled_plan_reservations_use_spare_window_for_prefix_redundancy() {
+        let body_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
+            .map(|index| PeerId::repeat_byte((index + 1) as u8))
+            .collect::<Vec<_>>();
+        let receipt_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
+            .map(|index| PeerId::repeat_byte((index + 41) as u8))
+            .collect::<Vec<_>>();
+        let ranges = vec![0..64, 64..128, 128..192, 192..256];
+        let plan = BodyReceiptRequestPlan {
+            hashes: vec![B256::ZERO; 256],
+            range_indices_by_start: ranges
+                .iter()
+                .enumerate()
+                .map(|(index, range)| (range.start, index))
+                .collect(),
+            ranges,
+            return_blocks: PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
+            body_peer_ids: body_peers,
+            receipt_peer_ids: receipt_peers,
+            max_in_flight: 4,
+            body_max_in_flight: 8,
+            receipt_max_in_flight: 8,
+            peer_rotation: 0,
+            peers: HashMap::new(),
+            accounting_tx: None,
+        };
+
+        assert!(plan.should_use_decoupled_dense_pipeline());
+        let reservations = plan.reservations();
+        let body_reservations = reservations
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, PeerRequestKind::Bodies))
+            .map(|entry| entry.count)
+            .sum::<usize>();
+        let receipt_reservations = reservations
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, PeerRequestKind::Receipts))
+            .map(|entry| entry.count)
+            .sum::<usize>();
+
+        assert_eq!(body_reservations, 8);
+        assert_eq!(receipt_reservations, 8);
     }
 
     #[test]
@@ -6410,6 +6559,8 @@ mod tests {
             body_peer_ids: body_peers.clone(),
             receipt_peer_ids: receipt_peers.clone(),
             max_in_flight: 1,
+            body_max_in_flight: 1,
+            receipt_max_in_flight: 1,
             peer_rotation: 0,
             peers: HashMap::new(),
             accounting_tx: None,
