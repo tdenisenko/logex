@@ -10,6 +10,8 @@ Reverse historical header page downloads now have an owned async reservation pat
 
 The historical fetch refill policy is now centralized behind an explicit scheduler snapshot and refill scope. Full, critical-path, and write-path refill callers consume the same pressure, memory, pipeline-depth, and buffer-depth decision logic. Write-path refill can temporarily expand queued fetch admission when the buffer is low, but remains bounded by request pressure and memory limits.
 
+Latest live scheduler work fixed a zero-prefix reset path in the body/receipt plan. Completed suffix chunks now count as prefix-critical pressure even when they begin at or beyond the accepted prefix boundary, exhausted prefix chunks can be removed from active ownership and reassigned, and a bounded final prefix salvage lane can recover missing prefix chunks before the plan returns. A broader full-window body/receipt expansion was tested and rejected because it increased short-sample throughput but still produced zero-prefix resets.
+
 ## Completed Since Last Run
 
 - Preserved completed body/receipt chunks after residual prefix gaps:
@@ -92,6 +94,12 @@ The historical fetch refill policy is now centralized behind an explicit schedul
   - Write-path refill can expand from the critical-path limit only when the fetch/prepare buffer is low and request pressure allows more work.
   - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, scheduler decision tests, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
   - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-152839.log` warmed to about 368k logs/sec and 1,014 blocks/sec with 10 serving peers, six active fetches, zero reset/head-of-line reset logs, and active residual repair.
+- Stabilized live prefix repair in the paired body/receipt scheduler:
+  - Rejected an aggressive full paired-window expansion after remote smoke showed it could still complete suffix chunks with zero contiguous prefix and reset lookahead.
+  - Fixed buffered-suffix detection so completed chunks beyond the accepted prefix boundary still make the missing prefix critical.
+  - Added exhausted-prefix cleanup and a bounded final prefix salvage lane before live plans return suffix-only results.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, body/receipt scheduler tests, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-163335.log` ran for the extended sample with 88 completed batches, zero resets, zero zero-prefix resets, and continued historical floor movement.
 
 ## Remaining TODOs
 
@@ -131,6 +139,8 @@ The historical fetch refill policy is now centralized behind an explicit schedul
 - Partial-prefix completion may use the smaller residual-repair threshold only when suffix chunks are already buffered. This avoids throwing away validated contiguous prefix work while preserving the stricter normal threshold for isolated short responses.
 - A missing expected fetch sequence is now treated as recoverable download-state loss when later fetches are buffered and the expected child header is known. The engine refills that sequence in place instead of resetting the entire lookahead queue; ordered prepare/write gaps still reset.
 - Historical fetch refill now uses explicit scheduler scopes. The write path may admit a few more fetches than the critical path when buffers are low, but all scopes share request pressure, memory pressure, and pipeline-depth gates.
+- Prefix-critical body/receipt repair is triggered by any completed suffix chunk while contiguous progress is below the accepted floor, not only suffix chunks below that floor. A completed chunk past the accepted floor is still useful evidence that the missing prefix should be recovered rather than resetting the whole plan.
+- The live body/receipt plan now has a bounded final prefix salvage lane. It reuses the normal body/receipt request and count-validation path, but caps chunks, peers, and elapsed time so it remains a recovery lane rather than an unbounded serial fallback.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -208,6 +218,10 @@ The historical fetch refill policy is now centralized behind an explicit schedul
   - Resolution: centralized the refill snapshot and decision logic, then made write-time refill a bounded scoped decision instead of a separate heuristic.
   - Remaining: move from scoped refill calls to a continuously managed outer request scheduler.
 
+- Challenge: live body/receipt plans could complete many suffix chunks while returning zero contiguous prefix blocks, causing lookahead resets even with active peer capacity.
+  - Resolution: corrected the buffered-suffix predicate, removed exhausted prefix ownership so missing prefixes can be reassigned, and added bounded final prefix salvage before returning a suffix-only plan.
+  - Remaining: the broader queued live scheduler should make this proactive instead of relying on end-of-plan salvage.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -226,16 +240,18 @@ The historical fetch refill policy is now centralized behind an explicit schedul
 - Inspected partial-prefix completion and residual repair helpers after accepting buffered partial-prefix preservation; no obsolete residual paths were safe to remove yet.
 - Inspected sequence-gap recovery after adding in-place expected-fetch refill; prepare-gap reset behavior remains required and was kept.
 - Removed the obsolete standalone request-pressure refill check after replacing it with centralized scheduler-snapshot decisions.
+- Rejected and removed the aggressive full paired-window expansion after remote smoke showed it still produced a zero-prefix reset.
+- Inspected live body/receipt prefix repair helpers after the accepted fix; the bounded salvage lane remains required until the broader queued scheduler owns prefix-critical work proactively.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, and request-pressure targeted tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, and body/receipt prefix salvage tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
 - Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks
