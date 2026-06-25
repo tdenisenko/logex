@@ -4,36 +4,32 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs.
 
-PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model, schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, retries stale missing roles without redownloading fast halves, reports scheduler/backpressure metrics, and keeps ordered verified ingestion intact.
+PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model, schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, reserves first-wave queued body/receipt peer work before network tasks start, reports scheduler/backpressure metrics, and keeps ordered verified ingestion intact.
 
-Reverse historical header page downloads now have an owned async reservation path. Header page network I/O can run outside the synchronous refill loop, then materialize into the existing body/receipt fetch plan with the same validation and peer accounting. The next meaningful change is extending the bounded queue/backpressure model across body/receipt reservations, not more timeout/fanout/lookahead tuning.
+Reverse historical header page downloads now have an owned async reservation path. Header page network I/O can run outside the synchronous refill loop, then materialize into the existing body/receipt fetch plan with the same validation and peer accounting. Body/receipt fetch plans now reserve queued peer load up front so later queued plans do not over-select the same fastest peers before request-start accounting catches up. The next meaningful change is finishing the broader bounded queue/backpressure scheduler, not more timeout/fanout/lookahead tuning.
 
 ## Completed Since Last Run
 
-- Implemented async historical header reservations:
-  - Added a header reservation channel/handle in the sync engine.
-  - Reverse header page request plans now execute outside the synchronous refill loop.
-  - Header outcomes are completed through the existing peer accounting, validated with the existing reverse-page verifier, and then materialized into the existing body/receipt fetch plan.
-  - Failed header reservations do not consume fetch sequence numbers, so they cannot create permanent ordered-ingest gaps.
-- Wired the new header reservation channel into refill, prepare, wait, and write loops so completed header reservations are materialized while other work is in flight.
-- Preserved the synchronous header/body/receipt path as the fallback for low-peer or small-window cases.
+- Added plan-level body/receipt peer reservations:
+  - Body/receipt plans now reserve first-wave body and receipt peer load when queued, before async request tasks begin.
+  - Peer scoring, active request status, and scheduler backpressure now see active plus reserved body/receipt work.
+  - Reservations are released on fetch completion, retry, replacement, and pipeline reset.
+  - Reservation generation is covered for paired and decoupled dense plans.
 - Validation passed:
   - `cargo fmt --check`
   - `cargo check -p logex-sync`
-  - `cargo test -p logex-sync reverse_header_page_requests_split_descending_pages`
-  - `cargo test -p logex-sync historical_fetch`
   - `cargo clippy -p logex-sync -- -D warnings`
   - `cargo test -p logex-sync`
 - Deployed to the Mac mini and restarted the tmux-managed client:
-  - Active log: `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-114539.log`.
+  - Active log: `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-120517.log`.
   - Remote release build passed.
-  - Smoke status showed the client running, historical floor moving, and no panics or header validation failures in the new log.
+  - Smoke status showed the client running, historical floor moving, queued fetches active, full VPS egress active, and no head-of-line block after warmup.
 
 ## Remaining TODOs
 
-1. Extend the bounded queued live request scheduler across body/receipt reservations.
+1. Finish the bounded queued live request scheduler.
    - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
-   - Completion criteria: body/receipt reservations are decoupled from verification/ingest behind a bounded memory-aware queue; prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
+   - Completion criteria: prefix-critical chunks can be reassigned while later completed chunks remain buffered; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes.
 
 2. Complete scheduler-level backpressure.
    - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
@@ -57,6 +53,7 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Small scheduler experiments are no longer the right path. The bounded stale-prefix refill trial also regressed, so the next implementation should be the larger queued live scheduler with explicit reservation/backpressure semantics.
 - Reverse header page downloads are now represented as owned plans with a separate completion/accounting step. This is the boundary needed before the engine can run header planning as part of a bounded async reservation queue.
 - Header page network I/O now runs as an async engine reservation before body/receipt planning. Sequence numbers are only consumed after a header outcome successfully becomes a body/receipt fetch plan, which keeps ordered verification recoverable after header-peer failures.
+- Queued body/receipt plans reserve only their first-wave role requests. This gives the peer scorer immediate backpressure for queued work without treating every fallback candidate as already loaded.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -88,7 +85,11 @@ Reverse historical header page downloads now have an owned async reservation pat
 
 - Challenge: reverse header page downloads were still awaited in the synchronous refill loop even after being split into owned plans.
   - Resolution: added an async header reservation channel that materializes completed header pages into body/receipt fetch plans without consuming a sequence on reservation failure.
-  - Remaining: apply the same bounded reservation/backpressure model to body/receipt work and measure full-run impact.
+  - Remaining: measure full-run impact with the body/receipt reservation layer now in place.
+
+- Challenge: queued body/receipt fetch plans could be prepared faster than request-start accounting reached the peer scorer.
+  - Resolution: added conservative first-wave body/receipt reservations that are visible to scoring/status immediately and are released on all fetch lifecycle exits.
+  - Remaining: use the reservation/backpressure signals to drive the final prefix-critical queued scheduler.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -99,17 +100,17 @@ Reverse historical header page downloads now have an owned async reservation pat
 - Removed the rejected bounded stale-prefix refill experiment before committing.
 - Removed the rejected write-time refill guard before committing.
 - Removed the obsolete direct reverse-header-pages wrapper after the engine moved to the owned plan API.
-- No additional obsolete scheduler code was found that could be safely removed in the async header reservation pass; the synchronous path remains the required low-peer/small-window fallback.
+- No additional obsolete scheduler code was found that could be safely removed in the body/receipt reservation pass; the synchronous path remains the required low-peer/small-window fallback.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: schedule historical header reservations`.
+- Commits made during this run: `perf: schedule historical header reservations`; `perf: reserve body receipt plan peers`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
-- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync reverse_header_page_requests_split_descending_pages`; `cargo test -p logex-sync historical_fetch`; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release build and smoke on the Mac mini.
+- Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; `cargo test -p logex-sync body_receipt_paired_plan_reservations_cover_initial_role_wave`; `cargo test -p logex-sync body_receipt_decoupled_plan_reservations_cover_initial_role_windows`; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release build and smoke on the Mac mini.
 - Blockers: no external blocker. The remaining work is a larger scheduler architecture change.
 
 ## Known Issues or Risks

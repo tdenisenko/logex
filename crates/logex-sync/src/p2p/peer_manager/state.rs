@@ -111,9 +111,12 @@ impl PeerManager {
             } else if !peer_receipts_are_quarantined(peer) {
                 receipt_request_ready_peers = receipt_request_ready_peers.saturating_add(1);
             }
-            active_body_requests = active_body_requests.saturating_add(peer.body_active_requests);
-            active_receipt_requests =
-                active_receipt_requests.saturating_add(peer.receipt_active_requests);
+            active_body_requests = active_body_requests
+                .saturating_add(peer.body_active_requests)
+                .saturating_add(peer.body_reserved_requests);
+            active_receipt_requests = active_receipt_requests
+                .saturating_add(peer.receipt_active_requests)
+                .saturating_add(peer.receipt_reserved_requests);
             if peer.consecutive_timeouts > 0 {
                 timeout_penalized_peers = timeout_penalized_peers.saturating_add(1);
             }
@@ -442,10 +445,48 @@ impl PeerManager {
         }
     }
 
+    pub(crate) fn reserve_body_receipt_requests(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+    ) {
+        self.apply_body_receipt_request_reservations(reservations, true);
+    }
+
+    pub(crate) fn release_body_receipt_request_reservations(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+    ) {
+        self.apply_body_receipt_request_reservations(reservations, false);
+    }
+
+    fn apply_body_receipt_request_reservations(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+        reserve: bool,
+    ) {
+        for reservation in reservations.entries() {
+            let Some(peer) = self.peers.get_mut(&reservation.peer_id) else {
+                continue;
+            };
+            let reserved_requests = match reservation.kind {
+                PeerRequestKind::Headers => continue,
+                PeerRequestKind::Bodies => &mut peer.body_reserved_requests,
+                PeerRequestKind::Receipts => &mut peer.receipt_reserved_requests,
+            };
+            if reserve {
+                *reserved_requests = reserved_requests.saturating_add(reservation.count);
+            } else {
+                *reserved_requests = reserved_requests.saturating_sub(reservation.count);
+            }
+        }
+    }
+
     pub(crate) fn clear_body_receipt_active_requests(&mut self) {
         for peer in self.peers.values_mut() {
             peer.body_active_requests = 0;
             peer.receipt_active_requests = 0;
+            peer.body_reserved_requests = 0;
+            peer.receipt_reserved_requests = 0;
         }
     }
 
@@ -1151,8 +1192,12 @@ fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
 fn peer_active_request_count(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
     match kind {
         PeerRequestKind::Headers => 0,
-        PeerRequestKind::Bodies => peer.body_active_requests,
-        PeerRequestKind::Receipts => peer.receipt_active_requests,
+        PeerRequestKind::Bodies => peer
+            .body_active_requests
+            .saturating_add(peer.body_reserved_requests),
+        PeerRequestKind::Receipts => peer
+            .receipt_active_requests
+            .saturating_add(peer.receipt_reserved_requests),
     }
 }
 

@@ -2251,6 +2251,8 @@ impl SyncEngine {
             fetch.handle.abort();
         }
         for (_, fetch) in self.historical_fetch_handles.drain() {
+            self.peers
+                .release_body_receipt_request_reservations(&fetch.reservations);
             fetch.handle.abort();
         }
         self.reset_historical_prepare_pipeline();
@@ -2294,7 +2296,11 @@ impl SyncEngine {
             );
             return;
         }
-        self.historical_fetch_handles.remove(&outcome.sequence);
+        let Some(fetch) = self.historical_fetch_handles.remove(&outcome.sequence) else {
+            return;
+        };
+        self.peers
+            .release_body_receipt_request_reservations(&fetch.reservations);
         if outcome.sequence < self.historical_fetch_expected_sequence {
             return;
         }
@@ -2682,6 +2688,10 @@ impl SyncEngine {
     ) {
         let generation = self.historical_fetch_generation;
         let attempt = self.next_historical_fetch_attempt();
+        let reservations = plan.body_receipt_plan.reservations();
+        if !reservations.is_empty() {
+            self.peers.reserve_body_receipt_requests(&reservations);
+        }
         let tx = self.historical_fetch_tx.clone();
         let handle = tokio::spawn(async move {
             let body_receipt_started = std::time::Instant::now();
@@ -2695,10 +2705,16 @@ impl SyncEngine {
                 outcome,
             });
         });
-        if let Some(previous) = self
-            .historical_fetch_handles
-            .insert(sequence, HistoricalFetchHandle { attempt, handle })
-        {
+        if let Some(previous) = self.historical_fetch_handles.insert(
+            sequence,
+            HistoricalFetchHandle {
+                attempt,
+                reservations,
+                handle,
+            },
+        ) {
+            self.peers
+                .release_body_receipt_request_reservations(&previous.reservations);
             previous.handle.abort();
         }
     }
@@ -2881,6 +2897,8 @@ impl SyncEngine {
         let Some(fetch) = self.historical_fetch_handles.remove(&sequence) else {
             return Ok(false);
         };
+        self.peers
+            .release_body_receipt_request_reservations(&fetch.reservations);
         fetch.handle.abort();
         self.drain_historical_request_accounting();
         tokio::task::yield_now().await;

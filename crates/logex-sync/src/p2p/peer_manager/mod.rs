@@ -40,9 +40,13 @@ mod lifecycle;
 mod requests;
 mod state;
 
-use self::requests::{BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, RequestAttempt};
+use self::requests::{
+    BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, BodyReceiptRequestReservations,
+    RequestAttempt,
+};
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
+    BodyReceiptRequestReservations as BodyReceiptPeerReservations,
     ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan,
 };
 use self::state::{
@@ -165,6 +169,8 @@ struct ActivePeer {
     receipt_blocks_per_sec: f64,
     body_active_requests: usize,
     receipt_active_requests: usize,
+    body_reserved_requests: usize,
+    receipt_reserved_requests: usize,
     body_request_limit: usize,
     receipt_request_limit: usize,
     body_paused_until: Option<Instant>,

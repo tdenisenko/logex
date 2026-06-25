@@ -19,8 +19,9 @@ use logex_types::{NodeState, SyncStatus};
 use crate::SyncConfig;
 use crate::head_tracker::{HeadTracker, ReorgInfo};
 use crate::p2p::peer_manager::{
-    BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
-    ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan, SourcedBodyReceipts,
+    BodyReceiptPeerReservations, BodyReceiptRequestAccounting, BodyReceiptRequestOutcome,
+    BodyReceiptRequestPlan, PeerManager, ReverseHeaderPagesRequestOutcome,
+    ReverseHeaderPagesRequestPlan, SourcedBodyReceipts,
 };
 use crate::primitives::LogexNetworkPrimitives;
 use crate::progress::ProgressTracker;
@@ -91,6 +92,7 @@ pub(super) struct HistoricalFetchPlan {
 
 pub(super) struct HistoricalFetchHandle {
     attempt: u64,
+    reservations: BodyReceiptPeerReservations,
     handle: JoinHandle<()>,
 }
 
