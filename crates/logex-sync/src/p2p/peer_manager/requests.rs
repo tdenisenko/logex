@@ -20,6 +20,8 @@ const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_REASSIGN_ROUNDS: usize = 4;
+const PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_EXTRA_ROLE_ATTEMPTS: usize = 8;
+const PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
     PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
@@ -160,6 +162,13 @@ struct BodyReceiptPlanPeerState {
     receipt_in_flight_peers: HashMap<PeerId, usize>,
     body_bad_peers: HashSet<PeerId>,
     receipt_bad_peers: HashSet<PeerId>,
+}
+
+#[derive(Clone, Copy)]
+struct BodyReceiptStaleRoleSchedule {
+    min_return_blocks: usize,
+    max_role_attempts: usize,
+    prefix_critical: bool,
 }
 
 struct PlanLiveBodyReceiptChunk {
@@ -1473,8 +1482,16 @@ impl BodyReceiptRequestPlan {
                             );
                             break;
                         }
+                        let prefix_critical = body_receipt_has_buffered_suffix_after_prefix(
+                            &chunks,
+                            min_return_blocks,
+                        );
+                        let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
+                            max_role_attempts,
+                            prefix_critical,
+                        );
                         if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
-                            && attempts.len() < max_role_attempts
+                            && attempts.len() < role_attempt_limit
                         {
                             let scheduled = schedule_stale_body_receipt_plan_roles(
                                 &self,
@@ -1482,15 +1499,26 @@ impl BodyReceiptRequestPlan {
                                 &mut active_chunks,
                                 &mut peer_state,
                                 &chunks,
-                                min_return_blocks,
-                                max_role_attempts,
+                                BodyReceiptStaleRoleSchedule {
+                                    min_return_blocks,
+                                    max_role_attempts: role_attempt_limit,
+                                    prefix_critical,
+                                },
                             );
                             hedge_count += scheduled;
                             emit_body_receipt_scheduler_accounting(
                                 &self.accounting_tx,
                                 BodyReceiptSchedulerAccounting {
-                                    stale_role_retries: scheduled as u64,
-                                    prefix_reassignments: 0,
+                                    stale_role_retries: if prefix_critical {
+                                        0
+                                    } else {
+                                        scheduled as u64
+                                    },
+                                    prefix_reassignments: if prefix_critical {
+                                        scheduled as u64
+                                    } else {
+                                        0
+                                    },
                                 },
                             );
                         }
@@ -1524,21 +1552,34 @@ impl BodyReceiptRequestPlan {
                     break;
                 }
 
-                if attempts.len() < max_role_attempts {
+                let prefix_critical =
+                    body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks);
+                let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
+                    max_role_attempts,
+                    prefix_critical,
+                );
+                if attempts.len() < role_attempt_limit {
                     let scheduled = schedule_stale_body_receipt_plan_roles(
                         &self,
                         &mut attempts,
                         &mut active_chunks,
                         &mut peer_state,
                         &chunks,
-                        min_return_blocks,
-                        max_role_attempts,
+                        BodyReceiptStaleRoleSchedule {
+                            min_return_blocks,
+                            max_role_attempts: role_attempt_limit,
+                            prefix_critical,
+                        },
                     );
                     emit_body_receipt_scheduler_accounting(
                         &self.accounting_tx,
                         BodyReceiptSchedulerAccounting {
-                            stale_role_retries: scheduled as u64,
-                            prefix_reassignments: 0,
+                            stale_role_retries: if prefix_critical { 0 } else { scheduled as u64 },
+                            prefix_reassignments: if prefix_critical {
+                                scheduled as u64
+                            } else {
+                                0
+                            },
                         },
                     );
                 }
@@ -4516,8 +4557,7 @@ fn schedule_stale_body_receipt_plan_roles<'a>(
     active_chunks: &mut HashMap<usize, PlanLiveBodyReceiptChunk>,
     peer_state: &mut BodyReceiptPlanPeerState,
     completed_chunks: &BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-    min_return_blocks: usize,
-    max_role_attempts: usize,
+    schedule: BodyReceiptStaleRoleSchedule,
 ) -> usize {
     let contiguous_blocks = contiguous_chunk_blocks(completed_chunks);
     let Some(start) = active_chunks
@@ -4525,7 +4565,7 @@ fn schedule_stale_body_receipt_plan_roles<'a>(
         .copied()
         .filter(|start| {
             *start <= contiguous_blocks
-                && *start < min_return_blocks
+                && *start < schedule.min_return_blocks
                 && !completed_chunks.contains_key(start)
         })
         .min()
@@ -4539,15 +4579,101 @@ fn schedule_stale_body_receipt_plan_roles<'a>(
         return 0;
     }
 
+    if schedule.prefix_critical {
+        let chunk_index = plan
+            .range_indices_by_start
+            .get(&start)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add((chunk.hedges + 1).saturating_mul(plan.ranges.len().max(1)));
+        extend_body_receipt_plan_chunk_candidates(plan, peer_state, chunk_index, chunk);
+    }
+
     schedule_missing_body_receipt_plan_roles(
         plan,
         attempts,
         peer_state,
         start,
         chunk,
-        max_role_attempts,
-        false,
+        schedule.max_role_attempts,
+        schedule.prefix_critical,
     )
+}
+
+fn body_receipt_prefix_critical_role_attempt_limit(
+    max_role_attempts: usize,
+    prefix_critical: bool,
+) -> usize {
+    if prefix_critical {
+        max_role_attempts.saturating_add(PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_EXTRA_ROLE_ATTEMPTS)
+    } else {
+        max_role_attempts
+    }
+}
+
+fn body_receipt_has_buffered_suffix_after_prefix<T>(
+    completed_chunks: &BTreeMap<usize, Vec<T>>,
+    min_return_blocks: usize,
+) -> bool {
+    let contiguous_blocks = contiguous_chunk_blocks(completed_chunks);
+    completed_chunks
+        .keys()
+        .any(|start| *start > contiguous_blocks && *start < min_return_blocks)
+}
+
+fn extend_body_receipt_plan_chunk_candidates(
+    plan: &BodyReceiptRequestPlan,
+    peer_state: &BodyReceiptPlanPeerState,
+    chunk_index: usize,
+    chunk: &mut PlanLiveBodyReceiptChunk,
+) {
+    let (body_ordered, _) = body_receipt_attempt_peer_ids(
+        &plan.body_peer_ids,
+        &peer_state.body_bad_peers,
+        &peer_state.body_in_flight_peers,
+        chunk_index,
+    );
+    append_body_receipt_plan_candidates(
+        &mut chunk.candidates.bodies,
+        &chunk.state.bodies.used_peers,
+        body_ordered,
+        PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS,
+    );
+
+    let (receipt_ordered, _) = body_receipt_attempt_peer_ids(
+        &plan.receipt_peer_ids,
+        &peer_state.receipt_bad_peers,
+        &peer_state.receipt_in_flight_peers,
+        chunk_index,
+    );
+    append_body_receipt_plan_candidates(
+        &mut chunk.candidates.receipts,
+        &chunk.state.receipts.used_peers,
+        receipt_ordered,
+        PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS,
+    );
+}
+
+fn append_body_receipt_plan_candidates(
+    candidates: &mut Vec<PeerId>,
+    used_peers: &HashSet<PeerId>,
+    ordered: Vec<PeerId>,
+    target_len: usize,
+) {
+    if candidates.len() >= target_len {
+        return;
+    }
+
+    let mut seen = candidates.iter().copied().collect::<HashSet<_>>();
+    for peer_id in ordered {
+        if candidates.len() >= target_len {
+            break;
+        }
+        if used_peers.contains(&peer_id) || !seen.insert(peer_id) {
+            continue;
+        }
+        candidates.push(peer_id);
+    }
 }
 
 fn body_receipt_attempt_peer_ids(
@@ -6240,6 +6366,108 @@ mod tests {
             &stale,
             &missing_receipts
         ));
+    }
+
+    #[test]
+    fn body_receipt_prefix_critical_limit_adds_bounded_retry_lane() {
+        assert_eq!(
+            body_receipt_prefix_critical_role_attempt_limit(12, false),
+            12
+        );
+        assert_eq!(
+            body_receipt_prefix_critical_role_attempt_limit(12, true),
+            12 + PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_EXTRA_ROLE_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn body_receipt_detects_buffered_suffix_behind_prefix_gap() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![1u8; 32]);
+        assert!(!body_receipt_has_buffered_suffix_after_prefix(&chunks, 96));
+
+        chunks.insert(64, vec![1u8; 32]);
+        assert!(body_receipt_has_buffered_suffix_after_prefix(&chunks, 96));
+
+        chunks.insert(32, vec![1u8; 32]);
+        assert!(!body_receipt_has_buffered_suffix_after_prefix(&chunks, 96));
+    }
+
+    #[test]
+    fn body_receipt_prefix_critical_candidate_expansion_uses_fresh_peers() {
+        let body_peers = (0..10)
+            .map(|index| PeerId::repeat_byte((index + 1) as u8))
+            .collect::<Vec<_>>();
+        let receipt_peers = (0..10)
+            .map(|index| PeerId::repeat_byte((index + 41) as u8))
+            .collect::<Vec<_>>();
+        let ranges = vec![0..32];
+        let plan = BodyReceiptRequestPlan {
+            hashes: vec![B256::ZERO; 32],
+            range_indices_by_start: HashMap::from([(0usize, 0usize)]),
+            ranges,
+            return_blocks: 32,
+            body_peer_ids: body_peers.clone(),
+            receipt_peer_ids: receipt_peers.clone(),
+            max_in_flight: 1,
+            peer_rotation: 0,
+            peers: HashMap::new(),
+            accounting_tx: None,
+        };
+        let mut chunk = PlanLiveBodyReceiptChunk {
+            range: 0..32,
+            candidates: BodyReceiptChunkLiveCandidates {
+                bodies: body_peers[..PIPELINED_CHUNK_REQUEST_PEERS].to_vec(),
+                receipts: receipt_peers[..PIPELINED_CHUNK_REQUEST_PEERS].to_vec(),
+            },
+            state: BodyReceiptChunkLiveState {
+                bodies: BodyReceiptChunkLiveRoleState {
+                    used_peers: body_peers[..PIPELINED_CHUNK_REQUEST_PEERS]
+                        .iter()
+                        .copied()
+                        .collect(),
+                    ..Default::default()
+                },
+                receipts: BodyReceiptChunkLiveRoleState {
+                    used_peers: receipt_peers[..PIPELINED_CHUNK_REQUEST_PEERS]
+                        .iter()
+                        .copied()
+                        .collect(),
+                    ..Default::default()
+                },
+            },
+            bodies: None,
+            expected_receipt_counts: None,
+            cached_receipts: Vec::new(),
+            completed: false,
+            hedges: 0,
+        };
+
+        extend_body_receipt_plan_chunk_candidates(
+            &plan,
+            &BodyReceiptPlanPeerState::default(),
+            plan.ranges.len(),
+            &mut chunk,
+        );
+
+        assert_eq!(
+            chunk.candidates.bodies.len(),
+            PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS
+        );
+        assert_eq!(
+            chunk.candidates.receipts.len(),
+            PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS
+        );
+        assert!(
+            chunk.candidates.bodies[PIPELINED_CHUNK_REQUEST_PEERS..]
+                .iter()
+                .all(|peer| !chunk.state.bodies.used_peers.contains(peer))
+        );
+        assert!(
+            chunk.candidates.receipts[PIPELINED_CHUNK_REQUEST_PEERS..]
+                .iter()
+                .all(|peer| !chunk.state.receipts.used_peers.contains(peer))
+        );
     }
 
     #[test]
