@@ -57,6 +57,7 @@ const HISTORICAL_WRITE_REFILL_INTERVAL: Duration = Duration::from_millis(500);
 const HISTORICAL_FETCH_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY: Duration = Duration::from_secs(4);
 const HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY: Duration = Duration::from_secs(30);
+const HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE: usize = 2;
 const HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED: usize = 2;
 const HISTORICAL_SEQUENTIAL_FETCH_BATCH_LIMIT: usize = 1024;
 const HISTORICAL_USE_COMBINED_BODY_RECEIPT_PIPELINE: bool = true;
@@ -606,6 +607,10 @@ fn historical_expected_fetch_retry_permitted(
     waited: Duration,
 ) -> bool {
     !expected_fetch_is_active || waited >= HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
+}
+
+fn historical_fetch_duplicate_retry_permitted(active_attempts: usize) -> bool {
+    active_attempts > 0 && active_attempts < HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE
 }
 
 fn historical_fetch_budget_has_capacity(
@@ -2297,9 +2302,11 @@ impl SyncEngine {
             fetch.handle.abort();
         }
         for (_, fetch) in self.historical_fetch_handles.drain() {
-            self.peers
-                .release_body_receipt_request_reservations(&fetch.reservations);
-            fetch.handle.abort();
+            for (_, attempt) in fetch.attempts {
+                self.peers
+                    .release_body_receipt_request_reservations(&attempt.reservations);
+                attempt.handle.abort();
+            }
         }
         self.reset_historical_prepare_pipeline();
         self.historical_fetch_generation = self.historical_fetch_generation.wrapping_add(1);
@@ -2333,11 +2340,11 @@ impl SyncEngine {
         let Some(fetch) = self.historical_fetch_handles.get(&outcome.sequence) else {
             return;
         };
-        if fetch.attempt != outcome.attempt {
+        if !fetch.attempts.contains_key(&outcome.attempt) {
             tracing::trace!(
                 sequence = outcome.sequence,
                 outcome_attempt = outcome.attempt,
-                active_attempt = fetch.attempt,
+                active_attempts = fetch.attempts.len(),
                 "discarding stale historical fetch outcome"
             );
             return;
@@ -2345,8 +2352,13 @@ impl SyncEngine {
         let Some(fetch) = self.historical_fetch_handles.remove(&outcome.sequence) else {
             return;
         };
-        self.peers
-            .release_body_receipt_request_reservations(&fetch.reservations);
+        for (attempt_id, attempt) in fetch.attempts {
+            self.peers
+                .release_body_receipt_request_reservations(&attempt.reservations);
+            if attempt_id != outcome.attempt {
+                attempt.handle.abort();
+            }
+        }
         if outcome.sequence < self.historical_fetch_expected_sequence {
             return;
         }
@@ -2732,6 +2744,31 @@ impl SyncEngine {
         sequence: u64,
         plan: HistoricalFetchPlan,
     ) {
+        self.spawn_historical_fetch_plan_at_sequence_inner(sequence, plan, true);
+    }
+
+    fn spawn_historical_fetch_retry_plan_at_sequence(
+        &mut self,
+        sequence: u64,
+        plan: HistoricalFetchPlan,
+    ) -> bool {
+        if self
+            .historical_fetch_handles
+            .get(&sequence)
+            .is_some_and(|fetch| !historical_fetch_duplicate_retry_permitted(fetch.attempts.len()))
+        {
+            return false;
+        }
+        self.spawn_historical_fetch_plan_at_sequence_inner(sequence, plan, false);
+        true
+    }
+
+    fn spawn_historical_fetch_plan_at_sequence_inner(
+        &mut self,
+        sequence: u64,
+        plan: HistoricalFetchPlan,
+        replace_existing: bool,
+    ) {
         let generation = self.historical_fetch_generation;
         let attempt = self.next_historical_fetch_attempt();
         let reservations = plan.body_receipt_plan.reservations();
@@ -2751,10 +2788,25 @@ impl SyncEngine {
                 outcome,
             });
         });
-        if let Some(previous) = self.historical_fetch_handles.insert(
-            sequence,
-            HistoricalFetchHandle {
-                attempt,
+
+        if replace_existing && let Some(previous) = self.historical_fetch_handles.remove(&sequence)
+        {
+            for (_, previous_attempt) in previous.attempts {
+                self.peers
+                    .release_body_receipt_request_reservations(&previous_attempt.reservations);
+                previous_attempt.handle.abort();
+            }
+        }
+
+        let fetch = self
+            .historical_fetch_handles
+            .entry(sequence)
+            .or_insert_with(|| HistoricalFetchHandle {
+                attempts: HashMap::new(),
+            });
+        if let Some(previous) = fetch.attempts.insert(
+            attempt,
+            HistoricalFetchAttemptHandle {
                 reservations,
                 handle,
             },
@@ -2940,12 +2992,14 @@ impl SyncEngine {
 
     async fn retry_expected_historical_fetch(&mut self, child_header: &Header) -> Result<bool> {
         let sequence = self.historical_fetch_expected_sequence;
-        let Some(fetch) = self.historical_fetch_handles.remove(&sequence) else {
+        let active_attempts = self
+            .historical_fetch_handles
+            .get(&sequence)
+            .map(|fetch| fetch.attempts.len())
+            .unwrap_or_default();
+        if !historical_fetch_duplicate_retry_permitted(active_attempts) {
             return Ok(false);
-        };
-        self.peers
-            .release_body_receipt_request_reservations(&fetch.reservations);
-        fetch.handle.abort();
+        }
         self.drain_historical_request_accounting();
         tokio::task::yield_now().await;
         self.drain_historical_request_accounting();
@@ -2966,10 +3020,10 @@ impl SyncEngine {
             child_block = child_header.number(),
             completed_fetches = self.historical_fetch_completed.len(),
             active_fetches = self.active_historical_fetch_count(),
-            "retrying stalled expected historical fetch without resetting lookahead"
+            active_attempts,
+            "duplicating stalled expected historical fetch without resetting lookahead"
         );
-        self.spawn_historical_fetch_plan_at_sequence(sequence, plan);
-        Ok(true)
+        Ok(self.spawn_historical_fetch_retry_plan_at_sequence(sequence, plan))
     }
 
     async fn ensure_historical_fetch_pipeline(&mut self, child_header: Header) -> Result<()> {
@@ -5667,6 +5721,15 @@ mod tests {
         assert!(historical_expected_fetch_retry_permitted(
             false,
             HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
+        ));
+    }
+
+    #[test]
+    fn historical_fetch_duplicate_retry_is_bounded() {
+        assert!(!historical_fetch_duplicate_retry_permitted(0));
+        assert!(historical_fetch_duplicate_retry_permitted(1));
+        assert!(!historical_fetch_duplicate_retry_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE
         ));
     }
 

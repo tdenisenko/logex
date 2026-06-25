@@ -95,10 +95,13 @@ pub(super) struct HistoricalFetchPlan {
     body_receipt_plan: BodyReceiptRequestPlan,
 }
 
-pub(super) struct HistoricalFetchHandle {
-    attempt: u64,
+pub(super) struct HistoricalFetchAttemptHandle {
     reservations: BodyReceiptPeerReservations,
     handle: JoinHandle<()>,
+}
+
+pub(super) struct HistoricalFetchHandle {
+    attempts: HashMap<u64, HistoricalFetchAttemptHandle>,
 }
 
 pub(super) struct HistoricalHeaderFetchHandle {
