@@ -10,7 +10,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. Dense startup validation then exposed stale queued-plan peer load and decoupled prefix tail latency as the next scheduler bottlenecks. The current build refreshes queued body/receipt plan peer snapshots before ready-plan admission, load-adjusts the serving-peer score, and adds bounded prefix hedging inside the decoupled dense body/receipt executor. The latest warm dense sample on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-113342.log` measured `148.3` actual blocks/sec with `5` low windows and `0` zero-progress windows, improving over the prior accepted dense baseline of `136.6` actual blocks/sec with `6` low windows and `0` zero-progress windows.
 
-Four follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window, queued expected-prefix admission produced `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows, and routing dense plans through the existing chunk-owned paired scheduler produced `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
+Five follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window, queued expected-prefix admission produced `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows, routing dense plans through the existing chunk-owned paired scheduler produced `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows, and completion-driven prefix hedging produced `73.1` actual blocks/sec with `15` low windows and `2` zero-progress windows while raising prefix reassignments to `2165`. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
 
 The current diagnostics build adds cumulative body/receipt success, failure, and returned-block counters under `execution_network`. A warm Mac mini snapshot on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-131721.log` confirmed the counters increment during historical work and showed receipt-side failures slightly ahead of body-side failures (`94` receipt failures vs `73` body failures) while prefix reassignments continued to accumulate (`392`).
 
@@ -73,13 +73,18 @@ The current diagnostics build adds cumulative body/receipt success, failure, and
   - Execution-network status now exposes cumulative historical body/receipt successes, failures, and returned blocks.
   - Added a focused unit test for the role-specific accounting helper.
   - Remote smoke confirmed the counters increment during live historical sync.
+- Rejected completion-driven prefix hedging:
+  - The candidate retried stale prefix chunks after each body/receipt completion instead of only on the existing timeout path.
+  - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-132613.log` regressed to `73.1` actual blocks/sec with `15` low windows and `2` zero-progress windows.
+  - Runtime diagnostics showed prefix reassignments spiking to `2165`, so the candidate was reverted locally and on the Mac mini.
+  - The Mac mini checkout had drifted onto an older testing branch; its dirty diff was preserved under `run/remote-dirty-before-live-scheduler-align-20260626-203612.patch`, and the remote source was realigned from the local PR branch before rebuilding and restarting `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-133800.log`.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. Scored decoupled peer selection, prepare-wait refill, queued expected-prefix admission, and reusing the existing chunk-owned paired scheduler for dense plans were measured regressions. The next scheduler step should preserve the faster decoupled dense body/receipt role execution while adding shared subrequest diagnostics and completion accounting, rather than swapping back to paired chunk ownership.
+   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. Scored decoupled peer selection, prepare-wait refill, queued expected-prefix admission, reusing the existing chunk-owned paired scheduler for dense plans, and completion-driven prefix hedging were measured regressions. The next scheduler step should preserve the faster decoupled dense body/receipt role execution while adding shared subrequest diagnostics and per-prefix wait accounting, rather than adding more blind hedges.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -137,6 +142,12 @@ The current diagnostics build adds cumulative body/receipt success, failure, and
 - Challenge: existing scheduler counters did not show which body/receipt role was failing or succeeding during idle windows.
   - Resolution: added cumulative role-specific success, failure, and returned-block counters to execution-network status.
   - Remaining: add prefix wait-age and role-specific hedge/backlog counters so low-window samples can identify the exact stalled prefix chunk.
+- Challenge: completion-triggered prefix hedging increased duplicate pressure instead of smoothing floor progress.
+  - Resolution: rejected and reverted the candidate after diagnostics showed `2165` prefix reassignments and a `73.1` blocks/sec sample.
+  - Remaining: add per-prefix wait-age and in-flight owner metrics before attempting another critical-lane rewrite.
+- Challenge: the Mac mini test checkout drifted from the local PR branch after file-by-file deploys.
+  - Resolution: saved the remote dirty diff and rsynced the local PR source into the remote checkout before rebuilding.
+  - Remaining: keep remote source alignment explicit in future tests, because Git fetch from the Mac mini currently fails on host-key verification.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -150,7 +161,7 @@ The current diagnostics build adds cumulative body/receipt success, failure, and
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; `perf: hedge dense prefix chunk requests`; `docs: record rejected scheduler candidates`; `docs: record bounded prefix scheduler rejection`; `docs: record chunk scheduler regression`; `perf: expose historical role request counters`.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; `perf: hedge dense prefix chunk requests`; `docs: record rejected scheduler candidates`; `docs: record bounded prefix scheduler rejection`; `docs: record chunk scheduler regression`; `perf: expose historical role request counters`; `docs: record completion hedge regression`.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.
