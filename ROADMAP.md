@@ -26,8 +26,16 @@ Expected-fetch duplicate recovery now uses the duplicate threshold consistently.
 
 Historical fetch refill now uses adaptive body/receipt request-slot capacity derived from the peer manager's warmed request limits. This makes queue admission respond to proven peer behavior instead of treating every ready peer as identical, while preserving an absolute pressure floor for small peer pools.
 
+Dense decoupled body/receipt requests now return as soon as the accepted contiguous prefix is complete instead of waiting for tail chunks outside that accepted prefix. This reduces slow-peer tail latency while preserving ordered verification: only contiguous body/receipt pairs are returned, and residual gaps still flow through the existing repair path before storage advances.
+
 ## Completed Since Last Run
 
+- Replaced the rejected poll-refill candidate with an accepted dense scheduler completion change:
+  - Removed the uncommitted wait-loop refill experiment because live sampling showed it did not solve active-fetch drain and lowered short-sample throughput.
+  - Dense decoupled body/receipt chunk schedulers now stop once their accepted contiguous prefix is complete, even when the full planned dense window has slower tail chunks.
+  - Focused local validation passed with `cargo fmt --check`, `cargo test -p logex-sync decoupled_dense -- --nocapture`, and `cargo test -p logex-sync historical_scheduler_decision -- --nocapture`.
+  - Remote release build passed and the Mac mini was restarted on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-194439.log`.
+  - Live sample showed no reset/error lines and recovered to about 492k logs/sec and 1,637 blocks/sec with 26 serving peers after warmup.
 - Added adaptive scheduler-level request pressure:
   - The peer manager now exposes body/receipt request-slot capacity scaled from per-peer block request limits that increase on fast complete responses and shrink on slow, partial, or unproven peers.
   - Historical fetch scheduler snapshots now use that adaptive capacity when deciding whether more queued body/receipt plans can be admitted.
@@ -157,7 +165,7 @@ Historical fetch refill now uses adaptive body/receipt request-slot capacity der
 
 1. Finish the bounded queued live request scheduler.
    - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
-   - Completion criteria: stale prefix-critical chunks can be reassigned from bounded queued work; downloads, verification, and ordered writes are overlapped with explicit memory/backpressure limits; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes. Out-of-order lookahead preparation and plan-local peer-tail admission are complete; cross-plan body/receipt dispatch and queue-wide admission/backpressure remain.
+   - Completion criteria: stale prefix-critical chunks can be reassigned from bounded queued work; downloads, verification, and ordered writes are overlapped with explicit memory/backpressure limits; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes. Out-of-order lookahead preparation, plan-local peer-tail admission, adaptive request pressure, and dense accepted-prefix early return are complete; cross-plan body/receipt dispatch and queue-wide admission/backpressure remain.
 
 2. Complete scheduler-level backpressure.
    - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
@@ -194,6 +202,7 @@ Historical fetch refill now uses adaptive body/receipt request-slot capacity der
 - Prefix-critical body/receipt repair is triggered by any completed suffix chunk while contiguous progress is below the accepted floor, not only suffix chunks below that floor. A completed chunk past the accepted floor is still useful evidence that the missing prefix should be recovered rather than resetting the whole plan.
 - The live body/receipt plan now has a bounded final prefix salvage lane. It reuses the normal body/receipt request and count-validation path, but caps chunks, peers, and elapsed time so it remains a recovery lane rather than an unbounded serial fallback.
 - The live body/receipt plan now separates protected prefix work from background returned-range work. Background work is allowed only when the per-role request window has spare capacity after the prefix lane is reserved, preventing a repeat of the rejected broad full-window expansion.
+- Dense decoupled body/receipt plans may now return when the accepted contiguous prefix is complete, even if tail chunks outside that accepted prefix are still missing. This keeps the verifier moving without weakening correctness because only contiguous matching body/receipt chunks are materialized.
 - Expected-fetch recovery now prefers bounded refill/duplicate recovery over destructive reset. Reset is reserved for cases where no expected-sequence attempt is active and enough buffered later work proves the ordered pipeline is blocked.
 - Background lane work is opportunistic only. The plan may briefly drain already-started background chunks after prefix completion, but it must not delay ordered progress beyond the bounded grace window or extend residual repair to data that was not actually fetched.
 - Completed lookahead fetches may be prepared out of order when the expected fetch is still in flight. This overlaps validation/extraction with peer-tail waits and frees fetch-buffer capacity, but writes remain sequence-ordered so verified storage coverage stays contiguous.
@@ -251,6 +260,10 @@ Historical fetch refill now uses adaptive body/receipt request-slot capacity der
 - Challenge: an active expected historical fetch can still become the ordered progress gate even when later fetches are available.
   - Resolution: added a bounded duplicate attempt lane for the expected sequence; first valid completion wins and stale duplicate outcomes are ignored.
   - Remaining: integrate this primitive into the larger live queue/backpressure scheduler so duplicate attempts are driven by measured peer latency and memory pressure.
+
+- Challenge: the dense decoupled scheduler could keep waiting for slow tail chunks after the accepted prefix was already available.
+  - Resolution: changed the dense early-stop rule to return each side once the accepted contiguous prefix is complete; residual repair still handles any missing suffix before ordered storage advances.
+  - Remaining: extend this same explicit admission model to cross-plan queued body/receipt dispatch.
 
 - Challenge: the engine could schedule more historical fetch windows while body/receipt subrequests were already far above the ready peer pool.
   - Resolution: added active/reserved body/receipt request pressure checks to the central refill loop.

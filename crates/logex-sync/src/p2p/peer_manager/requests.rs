@@ -6573,9 +6573,9 @@ fn decoupled_dense_accepted_prefix(return_blocks: usize, peer_count: usize) -> u
 fn decoupled_dense_can_stop_early(
     completed_prefix: usize,
     accepted_prefix: usize,
-    return_blocks: usize,
+    _return_blocks: usize,
 ) -> bool {
-    accepted_prefix >= return_blocks && completed_prefix >= accepted_prefix
+    completed_prefix >= accepted_prefix
 }
 
 fn contiguous_sourced_chunk_items<T>(chunks: &BTreeMap<usize, (PeerId, Vec<T>)>) -> usize {
@@ -7882,9 +7882,9 @@ mod tests {
     }
 
     #[test]
-    fn decoupled_dense_only_stops_early_for_full_prefix_targets() {
+    fn decoupled_dense_stops_when_accepted_prefix_is_complete() {
         assert!(decoupled_dense_can_stop_early(1024, 1024, 1024));
-        assert!(!decoupled_dense_can_stop_early(512, 512, 1024));
+        assert!(decoupled_dense_can_stop_early(512, 512, 1024));
         assert!(!decoupled_dense_can_stop_early(511, 512, 1024));
     }
 
