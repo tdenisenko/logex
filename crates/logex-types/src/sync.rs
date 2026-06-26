@@ -221,6 +221,8 @@ pub struct ExecutionNetworkStatus {
     pub receipt_request_limit_avg: usize,
     /// Historical fetch request attempts currently in flight.
     pub historical_fetch_active: usize,
+    /// Historical body/receipt fetch plans waiting for scheduler admission.
+    pub historical_fetch_ready: usize,
     /// Historical fetch outcomes buffered and waiting for ordered ingest.
     pub historical_fetch_completed: usize,
     /// Historical fetch request attempts plus buffered outcomes.
@@ -256,6 +258,12 @@ pub struct ExecutionNetworkStatus {
     /// Milliseconds elapsed since the active historical ingest started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_ingest_elapsed_ms: Option<u64>,
+    /// Body request slots available after active and reserved historical work.
+    pub historical_scheduler_body_slot_margin: usize,
+    /// Receipt request slots available after active and reserved historical work.
+    pub historical_scheduler_receipt_slot_margin: usize,
+    /// Whether ordered write or prepare backlog is currently blocking scheduler refill.
+    pub historical_scheduler_write_backpressure: bool,
     /// Cumulative stale body/receipt role retries scheduled by the historical scheduler.
     pub historical_scheduler_stale_role_retries: u64,
     /// Cumulative prefix-critical chunk reassignments scheduled by the historical scheduler.

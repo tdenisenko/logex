@@ -4567,6 +4567,23 @@ impl BodyReceiptRequestReservations {
         &self.entries
     }
 
+    pub(crate) fn body_receipt_counts(&self) -> (usize, usize) {
+        let mut body_requests = 0usize;
+        let mut receipt_requests = 0usize;
+        for entry in &self.entries {
+            match entry.kind {
+                PeerRequestKind::Headers => {}
+                PeerRequestKind::Bodies => {
+                    body_requests = body_requests.saturating_add(entry.count);
+                }
+                PeerRequestKind::Receipts => {
+                    receipt_requests = receipt_requests.saturating_add(entry.count);
+                }
+            }
+        }
+        (body_requests, receipt_requests)
+    }
+
     fn add(&mut self, peer_id: PeerId, kind: PeerRequestKind) {
         if matches!(kind, PeerRequestKind::Headers) {
             return;

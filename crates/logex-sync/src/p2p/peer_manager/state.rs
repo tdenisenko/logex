@@ -229,6 +229,7 @@ impl PeerManager {
             body_request_limit_avg,
             receipt_request_limit_avg,
             historical_fetch_active: 0,
+            historical_fetch_ready: 0,
             historical_fetch_completed: 0,
             historical_fetch_pending: 0,
             historical_fetch_expected_sequence: 0,
@@ -245,6 +246,9 @@ impl PeerManager {
             historical_ingest_active: false,
             historical_ingest_sequence: None,
             historical_ingest_elapsed_ms: None,
+            historical_scheduler_body_slot_margin: 0,
+            historical_scheduler_receipt_slot_margin: 0,
+            historical_scheduler_write_backpressure: false,
             historical_scheduler_stale_role_retries: self
                 .body_receipt_scheduler_metrics
                 .stale_role_retries,

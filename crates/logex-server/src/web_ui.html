@@ -1190,6 +1190,7 @@
           <div class="debug-item"><span class="k">Historical fetch queue</span><span class="v" id="debugHistoricalFetchQueue">--</span></div>
           <div class="debug-item"><span class="k">Historical prepare queue</span><span class="v" id="debugHistoricalPrepareQueue">--</span></div>
           <div class="debug-item"><span class="k">Historical prefix wait</span><span class="v" id="debugHistoricalPrefixWait">--</span></div>
+          <div class="debug-item"><span class="k">Historical scheduler slots</span><span class="v" id="debugHistoricalSchedulerSlots">--</span></div>
           <div class="debug-item"><span class="k">Historical scheduler retries</span><span class="v" id="debugHistoricalSchedulerRetries">--</span></div>
           <div class="debug-item"><span class="k">Log rate</span><span class="v" id="debugLogRate">--</span></div>
           <div class="debug-item"><span class="k">Block rate</span><span class="v" id="debugBlockRate">--</span></div>
@@ -3232,10 +3233,11 @@ function updateStatus(data) {
     fmt(numberOrNull(executionNetwork.body_request_limit_avg)) + ' body / ' +
     fmt(numberOrNull(executionNetwork.receipt_request_limit_avg)) + ' receipt');
   var fetchActive = numberOrNull(executionNetwork.historical_fetch_active);
+  var fetchReady = numberOrNull(executionNetwork.historical_fetch_ready);
   var fetchCompleted = numberOrNull(executionNetwork.historical_fetch_completed);
   var fetchPending = numberOrNull(executionNetwork.historical_fetch_pending);
   setText('debugHistoricalFetchQueue',
-    fmt(fetchActive) + ' active / ' + fmt(fetchCompleted) + ' ready / ' + fmt(fetchPending) + ' pending');
+    fmt(fetchActive) + ' active / ' + fmt(fetchReady) + ' queued / ' + fmt(fetchCompleted) + ' ready / ' + fmt(fetchPending) + ' pending');
   var prepareActive = numberOrNull(executionNetwork.historical_prepare_active);
   var prepareReady = numberOrNull(executionNetwork.historical_prepare_ready);
   var preparePending = numberOrNull(executionNetwork.historical_prepare_pending);
@@ -3248,6 +3250,10 @@ function updateStatus(data) {
   setText('debugHistoricalPrefixWait', prefixBlocked
     ? fmtMillis(prefixElapsed) + ' / ' + fmt(prefixCompleted) + ' ready ahead / expected ' + (expectedActive ? 'active' : 'missing')
     : 'Clear');
+  setText('debugHistoricalSchedulerSlots',
+    fmt(numberOrNull(executionNetwork.historical_scheduler_body_slot_margin)) + ' body / ' +
+    fmt(numberOrNull(executionNetwork.historical_scheduler_receipt_slot_margin)) + ' receipt / write ' +
+    (executionNetwork.historical_scheduler_write_backpressure ? 'blocked' : 'clear'));
   setText('debugHistoricalSchedulerRetries',
     fmt(numberOrNull(executionNetwork.historical_scheduler_stale_role_retries)) + ' stale roles / ' +
     fmt(numberOrNull(executionNetwork.historical_scheduler_prefix_reassignments)) + ' prefix reassignments');

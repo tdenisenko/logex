@@ -8,7 +8,10 @@ use std::future::Future;
 impl SyncEngine {
     fn execution_network_status(&self) -> logex_types::ExecutionNetworkStatus {
         let mut status = self.peers.execution_network_status();
+        let (body_slot_margin, receipt_slot_margin, write_backpressure) =
+            self.historical_scheduler_status_fields();
         status.historical_fetch_active = self.active_historical_fetch_count();
+        status.historical_fetch_ready = usize::from(self.historical_fetch_ready_plan.is_some());
         status.historical_fetch_completed = self.historical_fetch_completed.len();
         status.historical_fetch_pending = self.pending_historical_fetch_count();
         status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;
@@ -48,6 +51,9 @@ impl SyncEngine {
         status.historical_ingest_elapsed_ms = self
             .historical_ingest_started_at
             .map(|started_at| started_at.elapsed().as_millis() as u64);
+        status.historical_scheduler_body_slot_margin = body_slot_margin;
+        status.historical_scheduler_receipt_slot_margin = receipt_slot_margin;
+        status.historical_scheduler_write_backpressure = write_backpressure;
         status
     }
 
