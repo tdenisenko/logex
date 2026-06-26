@@ -174,6 +174,15 @@ struct BodyReceiptStaleRoleSchedule {
     prefix_critical: bool,
 }
 
+#[derive(Clone, Copy)]
+struct BodyReceiptLiveLaneSchedule {
+    min_return_blocks: usize,
+    max_prefix_chunks: usize,
+    max_background_chunks: usize,
+    max_live_chunks: usize,
+    max_role_attempts: usize,
+}
+
 struct PlanLiveBodyReceiptChunk {
     range: std::ops::Range<usize>,
     candidates: BodyReceiptChunkLiveCandidates,
@@ -1418,37 +1427,62 @@ impl BodyReceiptRequestPlan {
         let mut failures = Vec::new();
         let mut stats = Vec::new();
         let mut hedge_count = 0usize;
-        let max_scheduled_chunks: usize;
-        let max_role_attempts: usize;
+        let lane_schedule: BodyReceiptLiveLaneSchedule;
         let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
         {
             let mut attempts = futures_util::stream::FuturesUnordered::new();
-            let mut pending_ranges =
-                self.ranges
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .filter_map(|(chunk_index, range)| {
-                        body_receipt_prefix_range(range, self.return_blocks)
-                            .map(|range| (chunk_index, range))
-                    });
+            let mut pending_prefix_ranges = self
+                .ranges
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(chunk_index, range)| {
+                    body_receipt_prefix_range(range, min_return_blocks)
+                        .map(|range| (chunk_index, range))
+                })
+                .collect::<std::collections::VecDeque<_>>();
+            let mut pending_background_ranges = self
+                .ranges
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(chunk_index, range)| {
+                    body_receipt_background_range(range, min_return_blocks, self.return_blocks)
+                        .map(|range| (chunk_index, range))
+                })
+                .collect::<std::collections::VecDeque<_>>();
             let mut retry_counts = HashMap::<usize, usize>::new();
             let mut active_chunks = HashMap::<usize, PlanLiveBodyReceiptChunk>::new();
             let mut peer_state = BodyReceiptPlanPeerState::default();
-            max_scheduled_chunks =
+            let max_prefix_chunks =
                 body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
                     .min(self.max_in_flight);
-            let max_chunk_attempts = self.max_in_flight.max(max_scheduled_chunks).saturating_add(
+            let max_background_chunks = body_receipt_background_chunk_limit(
+                &self.ranges,
+                min_return_blocks,
+                self.return_blocks,
+                max_prefix_chunks,
+                self.body_max_in_flight.min(self.receipt_max_in_flight),
+            );
+            let max_live_chunks = max_prefix_chunks.saturating_add(max_background_chunks);
+            let max_chunk_attempts = self.max_in_flight.max(max_live_chunks).saturating_add(
                 body_receipt_prefix_hedge_spare_attempts(
                     min_return_blocks,
                     self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
                 ),
             );
-            max_role_attempts =
-                body_receipt_plan_live_role_attempt_limit(max_scheduled_chunks, max_chunk_attempts);
-            let mut scheduled_prefix_ranges = Vec::with_capacity(max_scheduled_chunks);
-            for _ in 0..max_scheduled_chunks {
-                let Some((chunk_index, range)) = pending_ranges.next() else {
+            let max_role_attempts =
+                body_receipt_plan_live_role_attempt_limit(max_live_chunks, max_chunk_attempts);
+            lane_schedule = BodyReceiptLiveLaneSchedule {
+                min_return_blocks,
+                max_prefix_chunks,
+                max_background_chunks,
+                max_live_chunks,
+                max_role_attempts,
+            };
+            let mut scheduled_prefix_ranges = Vec::with_capacity(lane_schedule.max_prefix_chunks);
+            for _ in 0..lane_schedule.max_prefix_chunks {
+                let Some((chunk_index, range)) = pending_prefix_ranges.pop_front() else {
                     break;
                 };
                 schedule_body_receipt_plan_chunk(
@@ -1465,7 +1499,7 @@ impl BodyReceiptRequestPlan {
             let redundant_prefix_chunks = body_receipt_initial_prefix_redundancy_count(
                 &self.ranges,
                 min_return_blocks,
-                max_scheduled_chunks,
+                lane_schedule.max_prefix_chunks,
                 self.max_in_flight,
                 self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
             );
@@ -1485,6 +1519,14 @@ impl BodyReceiptRequestPlan {
                         + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
                 );
             }
+            schedule_body_receipt_background_chunks(
+                &self,
+                &mut attempts,
+                &mut active_chunks,
+                &mut peer_state,
+                &mut pending_background_ranges,
+                lane_schedule,
+            );
 
             while !attempts.is_empty() {
                 let Some(wait_timeout) =
@@ -1494,6 +1536,14 @@ impl BodyReceiptRequestPlan {
                         elapsed_ms = plan_started_at.elapsed().as_millis(),
                         chunks = chunks.len(),
                         in_flight = body_receipt_plan_live_active_chunk_count(&active_chunks),
+                        prefix_in_flight = body_receipt_plan_live_active_prefix_chunk_count(
+                            &active_chunks,
+                            min_return_blocks
+                        ),
+                        background_in_flight = body_receipt_plan_live_active_background_chunk_count(
+                            &active_chunks,
+                            min_return_blocks
+                        ),
                         "body/receipt chunk pipeline hit plan timeout"
                     );
                     break;
@@ -1513,6 +1563,15 @@ impl BodyReceiptRequestPlan {
                                 chunks = chunks.len(),
                                 in_flight =
                                     body_receipt_plan_live_active_chunk_count(&active_chunks),
+                                prefix_in_flight = body_receipt_plan_live_active_prefix_chunk_count(
+                                    &active_chunks,
+                                    min_return_blocks
+                                ),
+                                background_in_flight =
+                                    body_receipt_plan_live_active_background_chunk_count(
+                                        &active_chunks,
+                                        min_return_blocks
+                                    ),
                                 "body/receipt chunk pipeline hit plan timeout"
                             );
                             break;
@@ -1522,7 +1581,7 @@ impl BodyReceiptRequestPlan {
                             min_return_blocks,
                         );
                         let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
-                            max_role_attempts,
+                            lane_schedule.max_role_attempts,
                             prefix_critical,
                         );
                         if hedge_count < PIPELINED_BODY_RECEIPT_MAX_HEDGES
@@ -1590,7 +1649,7 @@ impl BodyReceiptRequestPlan {
                 let prefix_critical =
                     body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks);
                 let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
-                    max_role_attempts,
+                    lane_schedule.max_role_attempts,
                     prefix_critical,
                 );
                 if attempts.len() < role_attempt_limit {
@@ -1626,7 +1685,7 @@ impl BodyReceiptRequestPlan {
                 );
 
                 let missing_prefix_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
-                    max_role_attempts,
+                    lane_schedule.max_role_attempts,
                     body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks),
                 );
                 if attempts.len() < missing_prefix_attempt_limit
@@ -1657,25 +1716,22 @@ impl BodyReceiptRequestPlan {
                     );
                 }
 
-                while body_receipt_plan_live_active_chunk_count(&active_chunks)
-                    < max_scheduled_chunks
-                    && attempts.len() < max_role_attempts
-                {
-                    if contiguous_chunk_blocks(&chunks) >= min_return_blocks {
-                        break;
-                    }
-                    let Some((chunk_index, range)) = pending_ranges.next() else {
-                        break;
-                    };
-                    schedule_body_receipt_plan_chunk(
-                        &self,
-                        &mut attempts,
-                        &mut active_chunks,
-                        &mut peer_state,
-                        range,
-                        chunk_index,
-                    );
-                }
+                schedule_body_receipt_prefix_chunks(
+                    &self,
+                    &mut attempts,
+                    &mut active_chunks,
+                    &mut peer_state,
+                    &mut pending_prefix_ranges,
+                    lane_schedule,
+                );
+                schedule_body_receipt_background_chunks(
+                    &self,
+                    &mut attempts,
+                    &mut active_chunks,
+                    &mut peer_state,
+                    &mut pending_background_ranges,
+                    lane_schedule,
+                );
             }
         }
 
@@ -1746,8 +1802,9 @@ impl BodyReceiptRequestPlan {
             receipt_max_ms,
             hedges = hedge_count,
             prefix_salvaged_chunks,
-            max_unique_chunks = max_scheduled_chunks,
-            max_attempts = max_role_attempts,
+            max_prefix_chunks = lane_schedule.max_prefix_chunks,
+            max_background_chunks = lane_schedule.max_background_chunks,
+            max_attempts = lane_schedule.max_role_attempts,
             plan_ms = plan_started_at.elapsed().as_millis(),
             "body/receipt live role pipeline plan completed"
         );
@@ -4299,6 +4356,26 @@ fn body_receipt_plan_live_active_chunk_count(
     chunks.values().filter(|chunk| !chunk.completed).count()
 }
 
+fn body_receipt_plan_live_active_prefix_chunk_count(
+    chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    min_return_blocks: usize,
+) -> usize {
+    chunks
+        .values()
+        .filter(|chunk| !chunk.completed && chunk.range.start < min_return_blocks)
+        .count()
+}
+
+fn body_receipt_plan_live_active_background_chunk_count(
+    chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    min_return_blocks: usize,
+) -> usize {
+    chunks
+        .values()
+        .filter(|chunk| !chunk.completed && chunk.range.start >= min_return_blocks)
+        .count()
+}
+
 fn body_receipt_plan_live_in_flight_chunks(
     chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
 ) -> HashSet<usize> {
@@ -4542,6 +4619,76 @@ fn schedule_body_receipt_plan_chunk<'a>(
         None,
     );
     active_chunks.insert(range.start, chunk);
+}
+
+fn schedule_body_receipt_prefix_chunks<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptPlanRoleAttempt>,
+    >,
+    active_chunks: &mut HashMap<usize, PlanLiveBodyReceiptChunk>,
+    peer_state: &mut BodyReceiptPlanPeerState,
+    pending_ranges: &mut std::collections::VecDeque<(usize, std::ops::Range<usize>)>,
+    schedule: BodyReceiptLiveLaneSchedule,
+) -> usize {
+    let mut scheduled = 0usize;
+    while body_receipt_plan_live_active_prefix_chunk_count(
+        active_chunks,
+        schedule.min_return_blocks,
+    ) < schedule.max_prefix_chunks
+        && attempts.len() < schedule.max_role_attempts
+    {
+        let Some((chunk_index, range)) = pending_ranges.pop_front() else {
+            break;
+        };
+        schedule_body_receipt_plan_chunk(
+            plan,
+            attempts,
+            active_chunks,
+            peer_state,
+            range,
+            chunk_index,
+        );
+        scheduled += 1;
+    }
+
+    scheduled
+}
+
+fn schedule_body_receipt_background_chunks<'a>(
+    plan: &'a BodyReceiptRequestPlan,
+    attempts: &mut futures_util::stream::FuturesUnordered<
+        futures_util::future::BoxFuture<'a, BodyReceiptPlanRoleAttempt>,
+    >,
+    active_chunks: &mut HashMap<usize, PlanLiveBodyReceiptChunk>,
+    peer_state: &mut BodyReceiptPlanPeerState,
+    pending_ranges: &mut std::collections::VecDeque<(usize, std::ops::Range<usize>)>,
+    schedule: BodyReceiptLiveLaneSchedule,
+) -> usize {
+    let mut scheduled = 0usize;
+    while schedule.max_background_chunks > 0
+        && body_receipt_plan_live_active_background_chunk_count(
+            active_chunks,
+            schedule.min_return_blocks,
+        ) < schedule.max_background_chunks
+        && body_receipt_plan_live_active_chunk_count(active_chunks) < schedule.max_live_chunks
+        && attempts.len() < schedule.max_role_attempts
+    {
+        let Some((chunk_index, range)) = pending_ranges.pop_front() else {
+            break;
+        };
+        schedule_body_receipt_plan_chunk(
+            plan,
+            attempts,
+            active_chunks,
+            peer_state,
+            range,
+            chunk_index,
+        );
+        scheduled += 1;
+    }
+
+    scheduled
 }
 
 fn schedule_body_receipt_plan_body_role<'a>(
@@ -5973,6 +6120,23 @@ fn body_receipt_prefix_range(
     }
 }
 
+fn body_receipt_background_range(
+    mut range: std::ops::Range<usize>,
+    min_return_blocks: usize,
+    return_blocks: usize,
+) -> Option<std::ops::Range<usize>> {
+    if range.end <= min_return_blocks || range.start >= return_blocks {
+        return None;
+    }
+    range.start = range.start.max(min_return_blocks);
+    range.end = range.end.min(return_blocks);
+    if range.start < range.end {
+        Some(range)
+    } else {
+        None
+    }
+}
+
 fn body_receipt_return_blocks(
     total_blocks: usize,
     gas_used: Option<&[u64]>,
@@ -6083,6 +6247,35 @@ fn body_receipt_scheduled_chunk_limit(
         .count()
         .max(1);
     prefix_chunks.clamp(1, ranges.len())
+}
+
+fn body_receipt_background_chunk_limit(
+    ranges: &[std::ops::Range<usize>],
+    min_return_blocks: usize,
+    return_blocks: usize,
+    prefix_chunk_limit: usize,
+    role_window: usize,
+) -> usize {
+    if ranges.is_empty()
+        || min_return_blocks == 0
+        || return_blocks <= min_return_blocks
+        || prefix_chunk_limit == 0
+        || role_window <= prefix_chunk_limit
+    {
+        return 0;
+    }
+
+    let background_chunks = ranges
+        .iter()
+        .filter(|range| {
+            body_receipt_background_range((*range).clone(), min_return_blocks, return_blocks)
+                .is_some()
+        })
+        .count();
+    role_window
+        .saturating_sub(prefix_chunk_limit)
+        .min(prefix_chunk_limit)
+        .min(background_chunks)
 }
 
 fn body_receipt_initial_prefix_redundancy_count(
@@ -6551,6 +6744,36 @@ mod tests {
     }
 
     #[test]
+    fn body_receipt_background_range_slices_after_prefix() {
+        assert_eq!(body_receipt_background_range(0..64, 32, 96), Some(32..64));
+        assert_eq!(body_receipt_background_range(0..32, 32, 96), None);
+        assert_eq!(body_receipt_background_range(64..128, 32, 96), Some(64..96));
+        assert_eq!(body_receipt_background_range(128..160, 32, 96), None);
+    }
+
+    #[test]
+    fn body_receipt_background_chunk_limit_uses_spare_role_capacity() {
+        let ranges = vec![0..32, 32..64, 64..96, 96..128];
+
+        assert_eq!(
+            body_receipt_background_chunk_limit(&ranges, 64, 128, 2, 2),
+            0
+        );
+        assert_eq!(
+            body_receipt_background_chunk_limit(&ranges, 64, 128, 2, 3),
+            1
+        );
+        assert_eq!(
+            body_receipt_background_chunk_limit(&ranges, 64, 128, 2, 8),
+            2
+        );
+        assert_eq!(
+            body_receipt_background_chunk_limit(&ranges, 64, 64, 2, 8),
+            0
+        );
+    }
+
+    #[test]
     fn body_receipt_initial_prefix_redundancy_uses_only_spare_dense_capacity() {
         let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
 
@@ -6661,6 +6884,69 @@ mod tests {
         let in_flight = body_receipt_plan_live_in_flight_chunks(&chunks);
         assert!(!in_flight.contains(&0));
         assert!(in_flight.contains(&32));
+    }
+
+    #[test]
+    fn body_receipt_live_plan_counts_prefix_and_background_lanes() {
+        let mut chunks = HashMap::new();
+        chunks.insert(
+            0,
+            PlanLiveBodyReceiptChunk {
+                range: 0..32,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: Vec::new(),
+                    receipts: Vec::new(),
+                },
+                state: BodyReceiptChunkLiveState::default(),
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: false,
+                hedges: 0,
+            },
+        );
+        chunks.insert(
+            64,
+            PlanLiveBodyReceiptChunk {
+                range: 64..96,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: Vec::new(),
+                    receipts: Vec::new(),
+                },
+                state: BodyReceiptChunkLiveState::default(),
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: false,
+                hedges: 0,
+            },
+        );
+        chunks.insert(
+            96,
+            PlanLiveBodyReceiptChunk {
+                range: 96..128,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: Vec::new(),
+                    receipts: Vec::new(),
+                },
+                state: BodyReceiptChunkLiveState::default(),
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: true,
+                hedges: 0,
+            },
+        );
+
+        assert_eq!(
+            body_receipt_plan_live_active_prefix_chunk_count(&chunks, 64),
+            1
+        );
+        assert_eq!(
+            body_receipt_plan_live_active_background_chunk_count(&chunks, 64),
+            1
+        );
+        assert_eq!(body_receipt_plan_live_active_chunk_count(&chunks), 2);
     }
 
     #[test]
