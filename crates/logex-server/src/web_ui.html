@@ -1191,6 +1191,7 @@
           <div class="debug-item"><span class="k">Historical prepare queue</span><span class="v" id="debugHistoricalPrepareQueue">--</span></div>
           <div class="debug-item"><span class="k">Historical prefix wait</span><span class="v" id="debugHistoricalPrefixWait">--</span></div>
           <div class="debug-item"><span class="k">Historical scheduler slots</span><span class="v" id="debugHistoricalSchedulerSlots">--</span></div>
+          <div class="debug-item"><span class="k">Historical refill limits</span><span class="v" id="debugHistoricalRefillLimits">--</span></div>
           <div class="debug-item"><span class="k">Historical scheduler retries</span><span class="v" id="debugHistoricalSchedulerRetries">--</span></div>
           <div class="debug-item"><span class="k">Log rate</span><span class="v" id="debugLogRate">--</span></div>
           <div class="debug-item"><span class="k">Block rate</span><span class="v" id="debugBlockRate">--</span></div>
@@ -3254,6 +3255,11 @@ function updateStatus(data) {
     fmt(numberOrNull(executionNetwork.historical_scheduler_body_slot_margin)) + ' body / ' +
     fmt(numberOrNull(executionNetwork.historical_scheduler_receipt_slot_margin)) + ' receipt / write ' +
     (executionNetwork.historical_scheduler_write_backpressure ? 'blocked' : 'clear'));
+  setText('debugHistoricalRefillLimits',
+    fmt(numberOrNull(executionNetwork.historical_scheduler_pipeline_depth)) + ' pipeline / ' +
+    fmt(numberOrNull(executionNetwork.historical_scheduler_buffer_depth)) + ' buffer / ' +
+    fmt(numberOrNull(executionNetwork.historical_scheduler_critical_refill_limit)) + ' critical / ' +
+    fmt(numberOrNull(executionNetwork.historical_scheduler_write_refill_limit)) + ' write');
   setText('debugHistoricalSchedulerRetries',
     fmt(numberOrNull(executionNetwork.historical_scheduler_stale_role_retries)) + ' stale roles / ' +
     fmt(numberOrNull(executionNetwork.historical_scheduler_prefix_reassignments)) + ' prefix reassignments');

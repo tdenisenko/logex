@@ -34,6 +34,9 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 - Rejected slot-margin concurrency capping for queued ready plans.
   - Reason: reducing a blocked ready plan's live chunk concurrency to current body/receipt slot margins avoided overdraft, but did not materially improve end-to-end floor advancement.
   - Result: the five-minute sample measured `193.1` blocks/sec with `5` low windows and `0` zero windows, only slightly above the kept `187.5` blocks/sec baseline and with worse low-window behavior; the code was reverted and the Mac mini was restored to the kept candidate.
+- Added focused live scheduler refill diagnostics to `/status` and the dashboard advanced section.
+  - Reason: the remaining low-progress windows need to be classified before another architectural change; raw logs/sec alone cannot distinguish request-slot pressure, refill policy denial, write backpressure, or prepare pressure.
+  - Result: status now exposes scheduler pipeline depth, buffer depth, critical/write refill limits, body/receipt slot margins, and write backpressure. The current remote run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-163104.log`.
 
 ## Remaining TODOs
 
@@ -49,6 +52,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 3. Complete the live request scheduler admission design.
    - Reason: the current live scheduler is better than the decoupled path, but still relies on conservative slot admission and can leave useful bandwidth idle when peer-tail latency rises. The rejected overdraft experiment showed that simply borrowing more slots increases duplicate pressure and hurts end-to-end progress.
    - Completion criteria: implement admission that keeps enough independent prefix work active without overfilling per-peer request slots; expose focused debug metrics for live backlog, prefix wait age, retry/hedge counts, peer timeout share, bandwidth use, and write/prepare pressure; validate against the kept baseline with longer samples and no recurring zero-progress windows.
+   - Current progress: refill decision diagnostics are now exposed. The next change should be a deliberate scheduler architecture pass, not another small threshold experiment.
 
 4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
@@ -75,6 +79,9 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 - Challenge: several small scheduler experiments improved isolated metrics but regressed end-to-end samples.
   - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows, including bounded slot overdraft and slot-margin concurrency capping.
   - Remaining: future work should stop one-line tuning and move to a deliberate admission/scheduler change compared against the kept live-scheduler baseline.
+- Challenge: low-progress windows still need a precise cause after the live scheduler milestone.
+  - Resolution: added status/UI diagnostics for pipeline depth, buffer depth, refill limits, slot margins, and write backpressure so the next architectural change can be based on the scheduler's actual decisions.
+  - Remaining: use those diagnostics to implement the next admission/refill redesign and validate it over longer samples.
 - Challenge: the roadmap had accumulated too much experiment-by-experiment detail.
   - Resolution: condensed it to current state, decisions, and remaining work.
 
@@ -82,6 +89,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Inspected the decoupled dense body/receipt path after selecting the live scheduler for production dense plans.
 - Removed diagnostic-only status fields from the final patch because they were tied to the rejected decoupled path.
+- Rechecked the stale remote warning about obsolete body/receipt metric fields; local code no longer contains those fields and the Mac mini source was synchronized to match.
 - Retained the disabled decoupled dense executor for now because deleting it is a larger cleanup best done after the live scheduler has a long-run validation baseline.
 - `.DS_Store` remains untracked and unrelated.
 
@@ -89,7 +97,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; pending roadmap update for the rejected slot-cap experiment.
+- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; `docs: record rejected scheduler admission cap`; pending commit for refill diagnostics.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready as a production-complete scheduler; can be accepted only as a measured live-scheduler milestone before the larger admission redesign.
 - Blockers: none.

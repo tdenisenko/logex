@@ -8,8 +8,7 @@ use std::future::Future;
 impl SyncEngine {
     fn execution_network_status(&self) -> logex_types::ExecutionNetworkStatus {
         let mut status = self.peers.execution_network_status();
-        let (body_slot_margin, receipt_slot_margin, write_backpressure) =
-            self.historical_scheduler_status_fields();
+        let scheduler = self.historical_scheduler_status_fields();
         status.historical_fetch_active = self.active_historical_fetch_count();
         status.historical_fetch_ready = self.historical_fetch_ready_plans.len();
         status.historical_fetch_completed = self.historical_fetch_completed.len();
@@ -51,9 +50,13 @@ impl SyncEngine {
         status.historical_ingest_elapsed_ms = self
             .historical_ingest_started_at
             .map(|started_at| started_at.elapsed().as_millis() as u64);
-        status.historical_scheduler_body_slot_margin = body_slot_margin;
-        status.historical_scheduler_receipt_slot_margin = receipt_slot_margin;
-        status.historical_scheduler_write_backpressure = write_backpressure;
+        status.historical_scheduler_body_slot_margin = scheduler.body_slot_margin;
+        status.historical_scheduler_receipt_slot_margin = scheduler.receipt_slot_margin;
+        status.historical_scheduler_write_backpressure = scheduler.write_backpressure;
+        status.historical_scheduler_pipeline_depth = scheduler.pipeline_depth;
+        status.historical_scheduler_buffer_depth = scheduler.buffer_depth;
+        status.historical_scheduler_critical_refill_limit = scheduler.critical_refill_limit;
+        status.historical_scheduler_write_refill_limit = scheduler.write_refill_limit;
         status
     }
 

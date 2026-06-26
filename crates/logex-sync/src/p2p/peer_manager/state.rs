@@ -249,6 +249,10 @@ impl PeerManager {
             historical_scheduler_body_slot_margin: 0,
             historical_scheduler_receipt_slot_margin: 0,
             historical_scheduler_write_backpressure: false,
+            historical_scheduler_pipeline_depth: 0,
+            historical_scheduler_buffer_depth: 0,
+            historical_scheduler_critical_refill_limit: 0,
+            historical_scheduler_write_refill_limit: 0,
             historical_scheduler_stale_role_retries: self
                 .body_receipt_scheduler_metrics
                 .stale_role_retries,

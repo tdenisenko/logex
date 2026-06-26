@@ -264,6 +264,14 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_receipt_slot_margin: usize,
     /// Whether ordered write or prepare backlog is currently blocking scheduler refill.
     pub historical_scheduler_write_backpressure: bool,
+    /// Current target depth for the historical fetch pipeline.
+    pub historical_scheduler_pipeline_depth: usize,
+    /// Current target depth for buffered historical fetch outcomes.
+    pub historical_scheduler_buffer_depth: usize,
+    /// Number of new fetches currently admitted by critical-path refill.
+    pub historical_scheduler_critical_refill_limit: usize,
+    /// Number of new fetches currently admitted by write-period refill.
+    pub historical_scheduler_write_refill_limit: usize,
     /// Cumulative stale body/receipt role retries scheduled by the historical scheduler.
     pub historical_scheduler_stale_role_retries: u64,
     /// Cumulative prefix-critical chunk reassignments scheduled by the historical scheduler.

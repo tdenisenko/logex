@@ -207,6 +207,17 @@ struct HistoricalExpectedFetchRetryState {
     request_pressure_allows_refill: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct HistoricalSchedulerStatusFields {
+    pub(super) body_slot_margin: usize,
+    pub(super) receipt_slot_margin: usize,
+    pub(super) write_backpressure: bool,
+    pub(super) pipeline_depth: usize,
+    pub(super) buffer_depth: usize,
+    pub(super) critical_refill_limit: usize,
+    pub(super) write_refill_limit: usize,
+}
+
 async fn validate_historical_blocks_parallel(
     headers: &[Header],
     hashes: &[B256],
@@ -3252,16 +3263,24 @@ impl SyncEngine {
         )
     }
 
-    pub(super) fn historical_scheduler_status_fields(&self) -> (usize, usize, bool) {
-        let decision = self.historical_fetch_scheduler_decision(
+    pub(super) fn historical_scheduler_status_fields(&self) -> HistoricalSchedulerStatusFields {
+        let critical_decision = self.historical_fetch_scheduler_decision(
             HistoricalFetchRefillScope::CriticalPath,
             HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
         );
-        (
-            decision.body_request_slot_margin,
-            decision.receipt_request_slot_margin,
-            decision.write_backpressure,
-        )
+        let write_decision = self.historical_fetch_scheduler_decision(
+            HistoricalFetchRefillScope::WritePath,
+            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT,
+        );
+        HistoricalSchedulerStatusFields {
+            body_slot_margin: critical_decision.body_request_slot_margin,
+            receipt_slot_margin: critical_decision.receipt_request_slot_margin,
+            write_backpressure: critical_decision.write_backpressure,
+            pipeline_depth: critical_decision.pipeline_depth,
+            buffer_depth: critical_decision.buffer_depth,
+            critical_refill_limit: critical_decision.new_fetch_limit,
+            write_refill_limit: write_decision.new_fetch_limit,
+        }
     }
 
     fn historical_body_receipt_request_pressure_allows_refill(&self) -> bool {
