@@ -29,6 +29,7 @@ const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_CHUNKS: usize = 2;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT: Duration = Duration::from_secs(12);
 const PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
+const PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
     PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
@@ -65,6 +66,7 @@ const MAX_PARALLEL_BODY_REQUESTS: usize = 64;
 const MIN_PARALLEL_BODY_REQUEST_BLOCKS: usize = 64;
 const MAX_PARALLEL_RECEIPT_REQUESTS: usize = 64;
 const MIN_PARALLEL_RECEIPT_REQUEST_BLOCKS: usize = 64;
+const REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES: usize = 3;
 
 type ReceiptBatch = Vec<
     Vec<alloy_consensus::ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
@@ -5512,18 +5514,48 @@ async fn request_header_page_from_candidates(
 ) -> HeaderPageResult {
     let requested = request.limit;
     let mut failures = Vec::new();
-    for (peer_id, sender) in candidates {
-        let started_at = Instant::now();
-        match request_headers_with_sender(sender, request.clone()).await {
-            Ok(headers) => {
-                return HeaderPageResult {
-                    page_index,
-                    requested,
-                    success: Some((peer_id, headers, started_at.elapsed())),
-                    failures,
-                };
+    let mut candidates = candidates.into_iter();
+
+    loop {
+        let mut attempts = futures_util::stream::FuturesUnordered::new();
+        for (peer_id, sender) in candidates
+            .by_ref()
+            .take(REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES)
+        {
+            attempts.push({
+                let request = request.clone();
+                async move {
+                    let started_at = Instant::now();
+                    let result = request_headers_with_sender(sender, request).await;
+                    (peer_id, started_at.elapsed(), result)
+                }
+                .boxed()
+            });
+        }
+
+        if attempts.is_empty() {
+            break;
+        }
+
+        while let Some((peer_id, elapsed, result)) = attempts.next().await {
+            match result {
+                Ok(headers)
+                    if headers.len() <= requested as usize
+                        && (requested == 0 || !headers.is_empty()) =>
+                {
+                    return HeaderPageResult {
+                        page_index,
+                        requested,
+                        success: Some((peer_id, headers, elapsed)),
+                        failures,
+                    };
+                }
+                Ok(_) => failures.push((
+                    peer_id,
+                    RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse),
+                )),
+                Err(error) => failures.push((peer_id, error)),
             }
-            Err(error) => failures.push((peer_id, error)),
         }
     }
 
@@ -6567,7 +6599,7 @@ fn body_receipt_initial_prefix_redundancy_count(
     if ranges.is_empty()
         || min_return_blocks == 0
         || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
-        || peer_count < PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+        || peer_count < PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS
     {
         return 0;
     }
@@ -6586,7 +6618,7 @@ fn body_receipt_initial_prefix_redundancy_count(
 fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count: usize) -> usize {
     if min_return_blocks == 0
         || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
-        || peer_count < PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+        || peer_count < PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS
     {
         return 0;
     }
@@ -7245,7 +7277,7 @@ mod tests {
                 512,
                 4,
                 8,
-                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS - 1
+                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS - 1
             ),
             0
         );
@@ -7256,7 +7288,7 @@ mod tests {
         assert_eq!(
             body_receipt_prefix_hedge_spare_attempts(
                 512,
-                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS
+                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS
             ),
             4
         );
@@ -7902,14 +7934,14 @@ mod tests {
     }
 
     #[test]
-    fn decoupled_prefix_redundancy_requires_large_peer_pool() {
+    fn decoupled_prefix_redundancy_uses_low_peer_floor() {
         let ranges = vec![0..128, 128..256, 256..384, 384..512, 512..640];
 
         assert_eq!(
             decoupled_initial_prefix_redundancy_count(
                 &ranges,
                 PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
-                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS - 1,
+                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS - 1,
             ),
             0
         );
@@ -7917,7 +7949,7 @@ mod tests {
             decoupled_initial_prefix_redundancy_count(
                 &ranges,
                 PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
-                PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS,
+                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS,
             ),
             PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS
         );
