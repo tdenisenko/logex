@@ -32,8 +32,14 @@ The engine now has an explicit ready body/receipt plan queue between header mate
 
 Primary body/receipt completions now emit only the contiguous prefix that was actually returned. Residual chunk preservation remains limited to the explicit residual-repair path. Live Mac mini smoke on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-212122.log` showed zero artificial residual repairs across the sampled batches, no zero-progress windows, and the remaining bottleneck shifted back to queue depth, peer-tail timeouts, and refill gaps with active fetches around seven despite much larger ready peer capacity.
 
+Two standalone scheduler candidates were tested after that baseline and rejected. Reusing validated header suffixes without a queue-wide owner model measured below the accepted baseline, and adding an active-fetch floor reduced zero windows but still measured below baseline. The feature is not complete until the scheduler owns cross-plan body/receipt dispatch, stale-prefix reassignment, and queue-wide request pressure directly.
+
 ## Completed Since Last Run
 
+- Evaluated and rejected two standalone live-scheduler candidates:
+  - Validated header-suffix reuse plus request-prefix truncation passed local `logex-sync` tests/clippy but measured about 215 blocks/sec with low windows on the Mac mini.
+  - Active-fetch floor refill passed local `logex-sync` tests/clippy but measured about 219 blocks/sec with low windows on the Mac mini.
+  - The Mac mini was restored to the accepted scheduler build and restarted on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-225443.log`.
 - Eliminated artificial primary residual repairs:
   - Normal body/receipt completions now report exactly the contiguous returned prefix as their planned range.
   - Only explicit residual-repair completions preserve suffix chunks for later ordered repair.
@@ -344,6 +350,10 @@ Primary body/receipt completions now emit only the contiguous prefix that was ac
   - Resolution: changed primary completion to emit only the actual contiguous prefix; residual suffix preservation is now restricted to explicit residual repair.
   - Remaining: use the freed scheduler time for more queue-wide body/receipt dispatch so active fetch depth scales with available ready peers.
 
+- Challenge: validated-header suffix reuse and active-fetch floor refill looked like direct fixes for observed idle windows, but each regressed sustained floor progress as a standalone patch.
+  - Resolution: rejected both candidates after live Mac mini sampling and restored the accepted scheduler build.
+  - Remaining: implement the queue-wide live request scheduler instead of more local refill heuristics.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -380,7 +390,7 @@ Primary body/receipt completions now emit only the contiguous prefix that was ac
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`; `perf: adapt historical request pressure to peer capacity`; `perf: queue historical fetch plans before admission`; pending commit for primary residual suppression.
+- Commits made during this run: `docs: record live scheduler candidate results`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; ready-plan admission/status tests; lookahead sequence, residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, body/receipt prefix salvage, live lane, peer-score, and request-timeout tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; focused status endpoint test; remote release builds and smokes on the Mac mini.
