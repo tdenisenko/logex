@@ -86,6 +86,7 @@ const HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS: usize = 64;
 const HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS: usize = 4;
 const HISTORICAL_HEADER_GAS_WINDOW_MIN_BLOCKS: usize = 1_024;
 const HISTORICAL_HEADER_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
+const HISTORICAL_HEADER_PLAN_SEGMENT_BLOCKS: usize = 1_024;
 #[cfg(target_os = "linux")]
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
@@ -3270,10 +3271,6 @@ impl SyncEngine {
             .insert(sequence, HistoricalQueuedFetchPlan { sequence, plan });
     }
 
-    fn try_spawn_ready_historical_fetch_plan(&mut self) -> bool {
-        self.try_spawn_ready_historical_fetch_plans(1) > 0
-    }
-
     fn try_spawn_ready_historical_fetch_plans(&mut self, max_plans: usize) -> usize {
         if max_plans == 0 {
             return 0;
@@ -3536,20 +3533,24 @@ impl SyncEngine {
             return Ok(false);
         };
 
-        let Some(plan) = self
-            .prepare_historical_fetch_plan_from_header_batch(header_batch)
-            .await?
-        else {
+        let plans = self
+            .prepare_historical_fetch_plans_from_header_batch(header_batch)
+            .await?;
+        if plans.is_empty() {
             if self.pending_historical_fetch_count() == 0 {
                 self.reset_historical_fetch_pipeline();
             } else {
                 self.historical_fetch_planned_child = None;
             }
             return Ok(false);
-        };
+        }
 
-        self.queue_historical_fetch_plan_at_sequence(outcome.sequence, plan);
-        self.try_spawn_ready_historical_fetch_plan();
+        let mut sequence = outcome.sequence;
+        for plan in plans {
+            self.queue_historical_fetch_plan_at_sequence(sequence, plan);
+            sequence = sequence.saturating_add(1);
+        }
+        self.try_spawn_ready_historical_fetch_plans(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT);
         Ok(true)
     }
 
@@ -4086,6 +4087,113 @@ impl SyncEngine {
                 body_receipt_plan,
             }
         }))
+    }
+
+    fn cap_historical_fetch_plan_to_prefix(
+        mut plan: HistoricalFetchPlan,
+        prefix_blocks: usize,
+    ) -> Option<HistoricalFetchPlan> {
+        if prefix_blocks == 0 {
+            return None;
+        }
+        let prefix_blocks = prefix_blocks
+            .min(plan.header_batch.headers.len())
+            .min(plan.header_batch.hashes.len());
+        if prefix_blocks == 0 {
+            return None;
+        }
+        plan.header_batch.headers.truncate(prefix_blocks);
+        plan.header_batch.hashes.truncate(prefix_blocks);
+        plan.header_batch.required_block = plan
+            .header_batch
+            .headers
+            .last()
+            .map(|header| header.number())
+            .unwrap_or(plan.header_batch.required_block);
+        plan.planned_next_child_header = plan.header_batch.headers.last().cloned();
+        plan.body_receipt_plan = plan.body_receipt_plan.with_max_return_blocks(prefix_blocks);
+        Some(plan)
+    }
+
+    async fn prepare_historical_fetch_plans_from_header_batch(
+        &mut self,
+        header_batch: HistoricalHeaderBatch,
+    ) -> Result<Vec<HistoricalFetchPlan>> {
+        let total_headers = header_batch.headers.len();
+        if total_headers <= HISTORICAL_HEADER_PLAN_SEGMENT_BLOCKS {
+            return Ok(self
+                .prepare_historical_fetch_plan_from_header_batch(header_batch)
+                .await?
+                .into_iter()
+                .collect());
+        }
+
+        let HistoricalHeaderBatch {
+            child_header,
+            header_peer,
+            headers,
+            hashes,
+            required_block: _,
+            header_elapsed,
+        } = header_batch;
+
+        if headers.len() != hashes.len() {
+            return Ok(Vec::new());
+        }
+
+        let mut offset = 0usize;
+        let mut plans = Vec::new();
+        while offset < total_headers && plans.len() < HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT {
+            let end = offset
+                .saturating_add(HISTORICAL_HEADER_PLAN_SEGMENT_BLOCKS)
+                .min(total_headers);
+            let segment_headers = headers[offset..end].to_vec();
+            let segment_hashes = hashes[offset..end].to_vec();
+            let segment_child_header = if offset == 0 {
+                child_header.clone()
+            } else {
+                headers[offset - 1].clone()
+            };
+            let Some(required_block) = segment_headers.last().map(|header| header.number()) else {
+                break;
+            };
+            let segment_header_elapsed = if offset == 0 {
+                header_elapsed
+            } else {
+                Duration::ZERO
+            };
+            let segment_header_count = segment_headers.len();
+            let segment_batch = HistoricalHeaderBatch {
+                child_header: segment_child_header,
+                header_peer,
+                headers: segment_headers,
+                hashes: segment_hashes,
+                required_block,
+                header_elapsed: segment_header_elapsed,
+            };
+
+            let Some(plan) = self
+                .prepare_historical_fetch_plan_from_header_batch(segment_batch)
+                .await?
+            else {
+                break;
+            };
+
+            let planned_prefix = plan
+                .body_receipt_plan
+                .planned_prefix_blocks()
+                .min(segment_header_count);
+            if planned_prefix == 0 {
+                break;
+            }
+            let Some(plan) = Self::cap_historical_fetch_plan_to_prefix(plan, planned_prefix) else {
+                break;
+            };
+            offset = offset.saturating_add(planned_prefix);
+            plans.push(plan);
+        }
+
+        Ok(plans)
     }
 
     fn materialize_parallel_historical_header_batch(

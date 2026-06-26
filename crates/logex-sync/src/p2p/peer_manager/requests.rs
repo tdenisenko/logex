@@ -1196,6 +1196,11 @@ impl BodyReceiptRequestPlan {
         planned_body_receipt_prefix_blocks(&self.ranges, self.return_blocks, self.hashes.len())
     }
 
+    pub(crate) fn with_max_return_blocks(mut self, return_blocks: usize) -> Self {
+        self.return_blocks = self.return_blocks.min(return_blocks).min(self.hashes.len());
+        self
+    }
+
     pub(crate) fn reservations(&self) -> BodyReceiptRequestReservations {
         if self.should_use_decoupled_dense_pipeline() {
             return self.decoupled_initial_reservations();
@@ -7088,6 +7093,33 @@ mod tests {
         );
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 512, 1024), 512);
         assert_eq!(planned_body_receipt_prefix_blocks(&ranges, 1024, 640), 640);
+    }
+
+    #[test]
+    fn body_receipt_plan_max_return_blocks_caps_speculative_prefix() {
+        let ranges = vec![0..300, 300..690, 690..1_100, 1_100..1_500];
+        let plan = BodyReceiptRequestPlan {
+            hashes: vec![B256::ZERO; 1_500],
+            range_indices_by_start: ranges
+                .iter()
+                .enumerate()
+                .map(|(index, range)| (range.start, index))
+                .collect(),
+            ranges,
+            return_blocks: 1_500,
+            body_peer_ids: Vec::new(),
+            receipt_peer_ids: Vec::new(),
+            max_in_flight: 0,
+            body_max_in_flight: 0,
+            receipt_max_in_flight: 0,
+            peer_rotation: 0,
+            peers: HashMap::new(),
+            accounting_tx: None,
+        };
+
+        let capped = plan.with_max_return_blocks(512);
+
+        assert_eq!(capped.planned_prefix_blocks(), 512);
     }
 
     #[test]
