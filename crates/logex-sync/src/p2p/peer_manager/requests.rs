@@ -16,6 +16,8 @@ const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_millis(1_500);
 const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_MAX: Duration = Duration::from_secs(8);
+const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_SAFETY_FACTOR: f64 = 1.75;
 const PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT: Duration = Duration::from_secs(45);
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES: usize = 64;
 const PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK: usize = 4;
@@ -275,6 +277,34 @@ pub(crate) struct BodyReceiptRequestCompletion {
 struct RequestPeerSnapshot {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     version: EthVersion,
+    metrics: RequestPeerRoleMetrics,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RequestPeerRoleMetrics {
+    is_serving: bool,
+    consecutive_timeouts: u32,
+    body_blocks_per_sec: f64,
+    receipt_blocks_per_sec: f64,
+    body_active_requests: usize,
+    receipt_active_requests: usize,
+    body_reserved_requests: usize,
+    receipt_reserved_requests: usize,
+}
+
+impl RequestPeerRoleMetrics {
+    fn from_active_peer(peer: &ActivePeer) -> Self {
+        Self {
+            is_serving: peer.is_serving,
+            consecutive_timeouts: peer.consecutive_timeouts,
+            body_blocks_per_sec: peer.body_blocks_per_sec,
+            receipt_blocks_per_sec: peer.receipt_blocks_per_sec,
+            body_active_requests: peer.body_active_requests,
+            receipt_active_requests: peer.receipt_active_requests,
+            body_reserved_requests: peer.body_reserved_requests,
+            receipt_reserved_requests: peer.receipt_reserved_requests,
+        }
+    }
 }
 
 struct HeaderPageResult {
@@ -888,6 +918,7 @@ impl PeerManager {
                         RequestPeerSnapshot {
                             sender: peer.sender.clone(),
                             version: peer.version,
+                            metrics: RequestPeerRoleMetrics::from_active_peer(peer),
                         },
                     )
                 })
@@ -1919,6 +1950,8 @@ impl BodyReceiptRequestPlan {
             &body_bad_peers,
             &empty_in_flight,
             chunk_index,
+            PeerRequestKind::Bodies,
+            &self.peers,
         );
 
         for body_peer in body_ordered
@@ -1985,6 +2018,8 @@ impl BodyReceiptRequestPlan {
                 &receipt_bad_peers,
                 &empty_in_flight,
                 chunk_index,
+                PeerRequestKind::Receipts,
+                &self.peers,
             );
             let receipt_candidates = receipt_candidates_for_body_peer(
                 receipt_ordered,
@@ -2572,8 +2607,10 @@ impl BodyReceiptRequestPlan {
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
+            let request_timeout =
+                self.role_request_timeout(peer_id, PeerRequestKind::Bodies, request_hashes.len());
             let response = self
-                .request_bodies(peer_id, request_hashes.clone())
+                .request_bodies(peer_id, request_hashes.clone(), request_timeout)
                 .await
                 .map_err(ChunkFailureKind::Request)?;
 
@@ -2638,11 +2675,14 @@ impl BodyReceiptRequestPlan {
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
+            let request_timeout =
+                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_hashes.len());
             let response = if version >= EthVersion::Eth69 {
-                self.request_receipts69(peer_id, request_hashes.clone())
+                self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
                     .await
             } else {
-                self.request_receipts(peer_id, request_hashes.clone()).await
+                self.request_receipts(peer_id, request_hashes.clone(), request_timeout)
+                    .await
             }
             .map_err(ChunkFailureKind::Request)?;
 
@@ -2691,14 +2731,19 @@ impl BodyReceiptRequestPlan {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
+        request_timeout: Duration,
     ) -> std::result::Result<
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
         RequestAttempt,
     > {
-        self.request_with_channel(peer_id, &move |response| PeerRequest::GetBlockBodies {
-            request: GetBlockBodies(hashes.clone()),
-            response,
-        })
+        self.request_with_channel(
+            peer_id,
+            &move |response| PeerRequest::GetBlockBodies {
+                request: GetBlockBodies(hashes.clone()),
+                response,
+            },
+            request_timeout,
+        )
         .await
     }
 
@@ -2706,6 +2751,7 @@ impl BodyReceiptRequestPlan {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
+        request_timeout: Duration,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -2716,10 +2762,14 @@ impl BodyReceiptRequestPlan {
         >,
         RequestAttempt,
     > {
-        self.request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts {
-            request: GetReceipts(hashes.clone()),
-            response,
-        })
+        self.request_with_channel(
+            peer_id,
+            &move |response| PeerRequest::GetReceipts {
+                request: GetReceipts(hashes.clone()),
+                response,
+            },
+            request_timeout,
+        )
         .await
     }
 
@@ -2727,6 +2777,7 @@ impl BodyReceiptRequestPlan {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
+        request_timeout: Duration,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -2738,10 +2789,14 @@ impl BodyReceiptRequestPlan {
         RequestAttempt,
     > {
         let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
-            .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts69 {
-                request: GetReceipts(hashes.clone()),
-                response,
-            })
+            .request_with_channel(
+                peer_id,
+                &move |response| PeerRequest::GetReceipts69 {
+                    request: GetReceipts(hashes.clone()),
+                    response,
+                },
+                request_timeout,
+            )
             .await?;
         let mut bloom_cache = ReceiptBloomCache::default();
         Ok(logex_receipt_batches_with_cached_blooms(
@@ -2771,14 +2826,20 @@ impl BodyReceiptRequestPlan {
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
+            let request_timeout =
+                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_hashes.len());
             let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
-                .request_with_channel(peer_id, &move |response| PeerRequest::GetReceipts70 {
-                    request: GetReceipts70 {
-                        first_block_receipt_index,
-                        block_hashes: request_hashes.clone(),
+                .request_with_channel(
+                    peer_id,
+                    &move |response| PeerRequest::GetReceipts70 {
+                        request: GetReceipts70 {
+                            first_block_receipt_index,
+                            block_hashes: request_hashes.clone(),
+                        },
+                        response,
                     },
-                    response,
-                })
+                    request_timeout,
+                )
                 .await?;
 
             let (updated_block_index, updated_receipt_index) = merge_receipts70_response(
@@ -2802,6 +2863,7 @@ impl BodyReceiptRequestPlan {
         &self,
         peer_id: PeerId,
         make_request: &MakeRequest,
+        request_timeout: Duration,
     ) -> std::result::Result<T, RequestAttempt>
     where
         W: IntoResponseValue<T>,
@@ -2821,7 +2883,7 @@ impl BodyReceiptRequestPlan {
             .await
             .map_err(|_| RequestAttempt::Disconnected)?;
 
-        match timeout(PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT, response_rx).await {
+        match timeout(request_timeout, response_rx).await {
             Ok(Ok(Ok(response))) => Ok(response.into_value()),
             Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
             Ok(Err(_)) => Err(RequestAttempt::Disconnected),
@@ -2829,6 +2891,19 @@ impl BodyReceiptRequestPlan {
                 reth_network::p2p::error::RequestError::Timeout,
             )),
         }
+    }
+
+    fn role_request_timeout(
+        &self,
+        peer_id: PeerId,
+        kind: PeerRequestKind,
+        requested: usize,
+    ) -> Duration {
+        body_receipt_role_request_timeout(
+            self.peers.get(&peer_id).map(|peer| &peer.metrics),
+            kind,
+            requested,
+        )
     }
 }
 
@@ -4565,6 +4640,8 @@ fn add_paired_initial_chunk_reservation(
         &peer_state.body_bad_peers,
         &peer_state.body_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Bodies,
+        &plan.peers,
     );
     let body_peer = body_peer.or_else(|| body_candidates.first().copied());
     if let Some(peer_id) = body_peer {
@@ -4577,6 +4654,8 @@ fn add_paired_initial_chunk_reservation(
         &peer_state.receipt_bad_peers,
         &peer_state.receipt_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Receipts,
+        &plan.peers,
     );
     let receipt_candidates = if let Some(body_peer) = body_peer {
         receipt_candidates_for_body_peer(receipt_ordered, body_peer, PIPELINED_CHUNK_REQUEST_PEERS)
@@ -4614,12 +4693,16 @@ fn schedule_body_receipt_plan_chunk<'a>(
         &peer_state.body_bad_peers,
         &peer_state.body_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Bodies,
+        &plan.peers,
     );
     let (receipt_ordered, _) = body_receipt_attempt_peer_ids(
         &plan.receipt_peer_ids,
         &peer_state.receipt_bad_peers,
         &peer_state.receipt_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Receipts,
+        &plan.peers,
     );
     let mut receipt_candidates = if let Some(body_peer) = body_peer {
         receipt_candidates_for_body_peer(receipt_ordered, body_peer, PIPELINED_CHUNK_REQUEST_PEERS)
@@ -5150,6 +5233,8 @@ fn extend_body_receipt_plan_chunk_candidates(
         &peer_state.body_bad_peers,
         &peer_state.body_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Bodies,
+        &plan.peers,
     );
     append_body_receipt_plan_candidates(
         &mut chunk.candidates.bodies,
@@ -5163,6 +5248,8 @@ fn extend_body_receipt_plan_chunk_candidates(
         &peer_state.receipt_bad_peers,
         &peer_state.receipt_in_flight_peers,
         chunk_index,
+        PeerRequestKind::Receipts,
+        &plan.peers,
     );
     append_body_receipt_plan_candidates(
         &mut chunk.candidates.receipts,
@@ -5198,9 +5285,15 @@ fn body_receipt_attempt_peer_ids(
     peer_ids: &[PeerId],
     bad_peers: &HashSet<PeerId>,
     in_flight_peers: &HashMap<PeerId, usize>,
-    _chunk_index: usize,
+    chunk_index: usize,
+    kind: PeerRequestKind,
+    peers: &HashMap<PeerId, RequestPeerSnapshot>,
 ) -> (Vec<PeerId>, Option<PeerId>) {
-    let ordered = peer_ids.to_vec();
+    let mut ordered = peer_ids.to_vec();
+    if !ordered.is_empty() {
+        let rotation = chunk_index % ordered.len();
+        ordered.rotate_left(rotation);
+    }
 
     let mut eligible = ordered
         .iter()
@@ -5211,22 +5304,102 @@ fn body_receipt_attempt_peer_ids(
         eligible = ordered;
     }
 
-    let Some(min_in_flight) = eligible
-        .iter()
-        .map(|peer_id| in_flight_peers.get(peer_id).copied().unwrap_or_default())
-        .min()
-    else {
-        return (Vec::new(), None);
-    };
-
-    if let Some(index) = eligible.iter().position(|peer_id| {
-        in_flight_peers.get(peer_id).copied().unwrap_or_default() == min_in_flight
-    }) {
-        eligible.rotate_left(index);
-    }
+    eligible.sort_by(|left, right| {
+        let left_score = body_receipt_plan_peer_role_score(
+            peers.get(left).map(|peer| &peer.metrics),
+            kind,
+            in_flight_peers.get(left).copied().unwrap_or_default(),
+        );
+        let right_score = body_receipt_plan_peer_role_score(
+            peers.get(right).map(|peer| &peer.metrics),
+            kind,
+            in_flight_peers.get(right).copied().unwrap_or_default(),
+        );
+        right_score
+            .partial_cmp(&left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let primary_peer = eligible.first().copied();
     (eligible, primary_peer)
+}
+
+fn body_receipt_plan_peer_role_score(
+    metrics: Option<&RequestPeerRoleMetrics>,
+    kind: PeerRequestKind,
+    local_in_flight: usize,
+) -> f64 {
+    let Some(metrics) = metrics else {
+        return body_receipt_load_adjusted_peer_rate(1.0, local_in_flight);
+    };
+    let measured_rate = body_receipt_peer_role_rate(metrics, kind);
+    let base_rate = if measured_rate > 0.0 {
+        measured_rate
+    } else {
+        1.0
+    };
+    let active_load = body_receipt_peer_role_load(metrics, kind).saturating_add(local_in_flight);
+    let serving_bonus = if metrics.is_serving { 4.0 } else { 0.0 };
+    let timeout_penalty = f64::from(metrics.consecutive_timeouts) * 8.0;
+
+    body_receipt_load_adjusted_peer_rate(base_rate, active_load) + serving_bonus - timeout_penalty
+}
+
+fn body_receipt_load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
+    base_rate / (1.0 + active_requests as f64)
+}
+
+fn body_receipt_role_request_timeout(
+    metrics: Option<&RequestPeerRoleMetrics>,
+    kind: PeerRequestKind,
+    requested: usize,
+) -> Duration {
+    let Some(metrics) = metrics else {
+        return PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT;
+    };
+    if requested == 0 {
+        return PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT;
+    }
+
+    let measured_rate = body_receipt_peer_role_rate(metrics, kind);
+    if measured_rate <= 0.0 {
+        return PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT;
+    }
+
+    let active_load = body_receipt_peer_role_load(metrics, kind);
+    let effective_rate = body_receipt_load_adjusted_peer_rate(measured_rate, active_load).max(0.1);
+    let expected_secs = requested as f64 / effective_rate;
+    if expected_secs > PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT.as_secs_f64() {
+        return PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT;
+    }
+
+    let adaptive_timeout = Duration::from_secs_f64(
+        expected_secs * PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_SAFETY_FACTOR,
+    );
+
+    adaptive_timeout
+        .max(PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT)
+        .min(PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_MAX)
+}
+
+fn body_receipt_peer_role_rate(metrics: &RequestPeerRoleMetrics, kind: PeerRequestKind) -> f64 {
+    match kind {
+        PeerRequestKind::Headers => 0.0,
+        PeerRequestKind::Bodies => metrics.body_blocks_per_sec,
+        PeerRequestKind::Receipts => metrics.receipt_blocks_per_sec,
+    }
+}
+
+fn body_receipt_peer_role_load(metrics: &RequestPeerRoleMetrics, kind: PeerRequestKind) -> usize {
+    match kind {
+        PeerRequestKind::Headers => 0,
+        PeerRequestKind::Bodies => metrics
+            .body_active_requests
+            .saturating_add(metrics.body_reserved_requests),
+        PeerRequestKind::Receipts => metrics
+            .receipt_active_requests
+            .saturating_add(metrics.receipt_reserved_requests),
+    }
 }
 
 fn record_body_receipt_attempt_peer(
@@ -6481,10 +6654,17 @@ mod tests {
         let bad_peers = HashSet::from([third]);
         let in_flight = HashMap::from([(first, 2), (second, 1), (fourth, 3)]);
 
-        let (ordered, primary) = body_receipt_attempt_peer_ids(&peers, &bad_peers, &in_flight, 0);
+        let (ordered, primary) = body_receipt_attempt_peer_ids(
+            &peers,
+            &bad_peers,
+            &in_flight,
+            0,
+            PeerRequestKind::Bodies,
+            &HashMap::new(),
+        );
 
         assert_eq!(primary, Some(second));
-        assert_eq!(ordered, vec![second, fourth, first]);
+        assert_eq!(ordered, vec![second, first, fourth]);
     }
 
     #[test]
@@ -6494,11 +6674,109 @@ mod tests {
         let third = PeerId::repeat_byte(0x33);
         let peers = vec![first, second, third];
 
-        let (ordered, primary) =
-            body_receipt_attempt_peer_ids(&peers, &HashSet::new(), &HashMap::new(), 1);
+        let (ordered, primary) = body_receipt_attempt_peer_ids(
+            &peers,
+            &HashSet::new(),
+            &HashMap::new(),
+            0,
+            PeerRequestKind::Bodies,
+            &HashMap::new(),
+        );
 
         assert_eq!(primary, Some(first));
         assert_eq!(ordered, vec![first, second, third]);
+    }
+
+    #[test]
+    fn body_receipt_attempt_peers_rotate_equal_score_ties_by_chunk() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let peers = vec![first, second, third];
+
+        let (ordered, primary) = body_receipt_attempt_peer_ids(
+            &peers,
+            &HashSet::new(),
+            &HashMap::new(),
+            1,
+            PeerRequestKind::Bodies,
+            &HashMap::new(),
+        );
+
+        assert_eq!(primary, Some(second));
+        assert_eq!(ordered, vec![second, third, first]);
+    }
+
+    #[test]
+    fn body_receipt_plan_peer_score_uses_role_rate_and_load() {
+        let fast_loaded = RequestPeerRoleMetrics {
+            is_serving: true,
+            body_blocks_per_sec: 120.0,
+            body_active_requests: 3,
+            ..Default::default()
+        };
+        let slow_idle = RequestPeerRoleMetrics {
+            is_serving: true,
+            body_blocks_per_sec: 20.0,
+            ..Default::default()
+        };
+
+        assert!(
+            body_receipt_plan_peer_role_score(Some(&fast_loaded), PeerRequestKind::Bodies, 0)
+                > body_receipt_plan_peer_role_score(Some(&slow_idle), PeerRequestKind::Bodies, 0)
+        );
+    }
+
+    #[test]
+    fn body_receipt_plan_peer_score_is_role_specific() {
+        let peer = RequestPeerRoleMetrics {
+            is_serving: true,
+            body_blocks_per_sec: 10.0,
+            receipt_blocks_per_sec: 120.0,
+            ..Default::default()
+        };
+
+        assert!(
+            body_receipt_plan_peer_role_score(Some(&peer), PeerRequestKind::Receipts, 0)
+                > body_receipt_plan_peer_role_score(Some(&peer), PeerRequestKind::Bodies, 0)
+        );
+    }
+
+    #[test]
+    fn body_receipt_role_request_timeout_uses_bounded_peer_rate() {
+        let unproven = RequestPeerRoleMetrics::default();
+        assert_eq!(
+            body_receipt_role_request_timeout(Some(&unproven), PeerRequestKind::Receipts, 128),
+            PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT
+        );
+
+        let fast = RequestPeerRoleMetrics {
+            receipt_blocks_per_sec: 1_000.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            body_receipt_role_request_timeout(Some(&fast), PeerRequestKind::Receipts, 128),
+            PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT
+        );
+
+        let medium = RequestPeerRoleMetrics {
+            receipt_blocks_per_sec: 40.0,
+            ..Default::default()
+        };
+        let timeout =
+            body_receipt_role_request_timeout(Some(&medium), PeerRequestKind::Receipts, 128);
+        assert!(timeout > PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT);
+        assert!(timeout < PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_MAX);
+
+        let slow_loaded = RequestPeerRoleMetrics {
+            receipt_blocks_per_sec: 16.0,
+            receipt_active_requests: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            body_receipt_role_request_timeout(Some(&slow_loaded), PeerRequestKind::Receipts, 128),
+            PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT
+        );
     }
 
     #[test]
