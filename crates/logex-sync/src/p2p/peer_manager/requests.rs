@@ -807,6 +807,30 @@ impl PeerManager {
         .await
     }
 
+    pub(crate) fn refresh_bodies_and_receipts_request_plan(
+        &self,
+        plan: &mut BodyReceiptRequestPlan,
+    ) {
+        let mut plan_peer_ids = plan
+            .body_peer_ids
+            .iter()
+            .chain(plan.receipt_peer_ids.iter())
+            .copied()
+            .collect::<HashSet<_>>();
+
+        for peer_id in plan_peer_ids.drain() {
+            let Some(peer) = self.peers.get(&peer_id) else {
+                continue;
+            };
+            let snapshot = RequestPeerSnapshot {
+                sender: peer.sender.clone(),
+                version: peer.version,
+                metrics: RequestPeerRoleMetrics::from_active_peer(peer),
+            };
+            plan.peers.insert(peer_id, snapshot);
+        }
+    }
+
     async fn prepare_bodies_and_receipts_request_inner(
         &mut self,
         hashes: Vec<B256>,
@@ -5325,7 +5349,7 @@ fn body_receipt_plan_peer_role_score(
     let serving_bonus = if metrics.is_serving { 4.0 } else { 0.0 };
     let timeout_penalty = f64::from(metrics.consecutive_timeouts) * 8.0;
 
-    body_receipt_load_adjusted_peer_rate(base_rate, active_load) + serving_bonus - timeout_penalty
+    body_receipt_load_adjusted_peer_rate(base_rate + serving_bonus, active_load) - timeout_penalty
 }
 
 fn body_receipt_load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
@@ -6784,6 +6808,26 @@ mod tests {
         assert!(
             body_receipt_plan_peer_role_score(Some(&peer), PeerRequestKind::Receipts, 0)
                 > body_receipt_plan_peer_role_score(Some(&peer), PeerRequestKind::Bodies, 0)
+        );
+    }
+
+    #[test]
+    fn body_receipt_plan_peer_score_load_adjusts_serving_bonus() {
+        let overloaded_serving = RequestPeerRoleMetrics {
+            is_serving: true,
+            body_active_requests: 4,
+            body_reserved_requests: 4,
+            ..Default::default()
+        };
+        let idle_unproven = RequestPeerRoleMetrics::default();
+
+        assert!(
+            body_receipt_plan_peer_role_score(Some(&idle_unproven), PeerRequestKind::Bodies, 0)
+                > body_receipt_plan_peer_role_score(
+                    Some(&overloaded_serving),
+                    PeerRequestKind::Bodies,
+                    0
+                )
         );
     }
 
