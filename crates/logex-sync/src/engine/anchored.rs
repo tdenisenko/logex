@@ -717,7 +717,7 @@ fn historical_expected_fetch_retry_permitted(state: HistoricalExpectedFetchRetry
     }
 
     state.waited >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
-        && state.completed_fetches >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
+        && state.completed_fetches >= HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED
         && state.request_pressure_allows_refill
 }
 
@@ -6116,7 +6116,7 @@ mod tests {
             HistoricalExpectedFetchRetryState {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
-                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED - 1,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED - 1,
                 request_pressure_allows_refill: true,
             }
         ));
@@ -6144,7 +6144,7 @@ mod tests {
             HistoricalExpectedFetchRetryState {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
-                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
                 request_pressure_allows_refill: true,
             }
         ));
@@ -6152,7 +6152,7 @@ mod tests {
             HistoricalExpectedFetchRetryState {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
-                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
                 request_pressure_allows_refill: false,
             }
         ));

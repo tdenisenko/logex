@@ -22,8 +22,15 @@ The engine now prepares completed historical lookahead fetches out of order whil
 
 The live body/receipt scheduler now carries role-specific peer metrics into each request plan. Plan-local dispatch ranks body and receipt candidates by measured role rate plus active/reserved/local load, keeps deterministic chunk rotation as an equal-score tie-breaker, and uses bounded adaptive request deadlines only for peers predicted to complete inside the normal timeout window. A permissive timeout variant was rejected after remote smoke showed slow peers lingering too long; the accepted version restored useful floor progress without resets.
 
+Expected-fetch duplicate recovery now uses the duplicate threshold consistently. One completed later fetch plus request-pressure headroom can launch the bounded duplicate attempt after the head-of-line delay, while destructive reset still requires the stronger reset threshold and zero active attempts.
+
 ## Completed Since Last Run
 
+- Fixed the expected-fetch duplicate retry threshold:
+  - Active expected fetches no longer wait for the destructive-reset threshold before launching a bounded duplicate.
+  - One completed later fetch is enough to prove useful suffix work is buffered, but reset remains gated by the stricter two-fetch threshold and no active expected attempts.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-190227.log` showed no resets or zero-prefix failures; the duplicate path did not trigger in the short sample, so this is retained as a correctness fix for the scheduler threshold rather than a measured throughput win.
 - Added plan-local peer-tail admission for live body/receipt plans:
   - Request plans now snapshot body/receipt peer rates, active load, reserved load, serving state, and timeout pressure.
   - Body and receipt roles rank candidates independently using role-specific measured throughput and load, while equal-score peers still rotate by chunk for distribution.
@@ -184,6 +191,7 @@ The live body/receipt scheduler now carries role-specific peer metrics into each
 - Background lane work is opportunistic only. The plan may briefly drain already-started background chunks after prefix completion, but it must not delay ordered progress beyond the bounded grace window or extend residual repair to data that was not actually fetched.
 - Completed lookahead fetches may be prepared out of order when the expected fetch is still in flight. This overlaps validation/extraction with peer-tail waits and frees fetch-buffer capacity, but writes remain sequence-ordered so verified storage coverage stays contiguous.
 - Body/receipt request plans may use measured role-specific peer throughput and active load for plan-local dispatch. Adaptive request deadlines are deliberately conservative: they only extend the baseline timeout for peers predicted to complete inside that baseline, because live smoke showed that protecting predicted-slow peers worsens prefix tails.
+- Expected-fetch duplicate retry and destructive reset deliberately use different thresholds. A single completed later fetch can justify one bounded duplicate under request-pressure headroom; destructive reset still requires stronger evidence and no active expected attempt.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -285,6 +293,10 @@ The live body/receipt scheduler now carries role-specific peer metrics into each
   - Resolution: kept role-specific peer scoring but changed adaptive deadlines to extend only peers expected to complete within the baseline timeout; slow peers keep the baseline timeout so prefix work can retry quickly.
   - Remaining: move from plan-local admission to the queue-wide scheduler so cross-plan requests share the same latency and pressure model.
 
+- Challenge: expected-fetch duplicate retry used the stronger destructive-reset completed-fetch threshold even though the duplicate retry threshold was intentionally lower.
+  - Resolution: changed the retry predicate to use `HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED`; reset behavior still uses `HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED`.
+  - Remaining: make duplicate/refill timing queue-wide instead of a local predicate once the central scheduler owns cross-plan dispatch.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -310,13 +322,14 @@ The live body/receipt scheduler now carries role-specific peer metrics into each
 - Removed the rejected soft partial-prefix return experiment after live smoke showed it worsened useful throughput. The retained background-drain helper and tests remain because they preserve already-launched background work without changing the prefix target.
 - Inspected historical fetch and prepare helpers after adding out-of-order lookahead preparation. No existing ordered-ingest or reset path was removed because writes still need contiguous sequence safety.
 - Inspected live body/receipt request dispatch after adding role-specific peer metrics. No obsolete recovery path was removed because prefix salvage, prefix-critical retries, and ordered residual repair are still needed until the cross-plan scheduler owns those decisions.
+- Inspected expected-fetch retry/reset predicates after aligning duplicate retry with its lower threshold. No reset path was removed because destructive reset remains required for unrecoverable ordered-state gaps.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; lookahead sequence, residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, body/receipt prefix salvage, live lane, peer-score, and request-timeout tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
