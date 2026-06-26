@@ -52,7 +52,7 @@ const PIPELINED_BODY_RECEIPT_MIN_ACCEPTED_PREFIX_BLOCKS: usize =
     PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT;
 const PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS: usize = 16;
 const PIPELINED_BODY_RECEIPT_MAX_CONTIGUOUS_RETURN_BLOCKS: usize = 10_000;
-const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 100.0;
+const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 300.0;
 const PIPELINED_BODY_RECEIPT_VERY_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 1_500.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
@@ -6957,8 +6957,9 @@ mod tests {
         assert_eq!(body_receipt_chunk_cap(31, None), 128);
         assert_eq!(body_receipt_chunk_cap(32, Some(50.0)), 128);
         assert_eq!(body_receipt_chunk_cap(15, Some(250.0)), 128);
-        assert_eq!(body_receipt_chunk_cap(32, Some(100.0)), 48);
-        assert_eq!(body_receipt_chunk_cap(32, Some(250.0)), 48);
+        assert_eq!(body_receipt_chunk_cap(32, Some(100.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(250.0)), 128);
+        assert_eq!(body_receipt_chunk_cap(32, Some(300.0)), 48);
         assert_eq!(body_receipt_chunk_cap(32, Some(1500.0)), 32);
         assert_eq!(body_receipt_chunk_limit(128, 128, 128), 128);
         assert_eq!(body_receipt_chunk_limit(16, 128, 128), 16);
@@ -7014,6 +7015,10 @@ mod tests {
         );
         assert_eq!(
             body_receipt_return_blocks(4096, Some(&dense), Some(80.0)),
+            4096
+        );
+        assert_eq!(
+            body_receipt_return_blocks(4096, Some(&dense), Some(120.0)),
             4096
         );
         assert_eq!(

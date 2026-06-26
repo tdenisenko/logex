@@ -6,6 +6,8 @@ LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execu
 
 PR #96, on branch `perf/historical-sync-live-scheduler`, is the active historical sync scheduler/performance pass. The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` through full VPS routing for useful P2P coverage. The accepted scheduler keeps the paired body/receipt prefix model, schedules body and receipt roles live at the plan level, releases per-role peer ownership as soon as each role completes, reserves first-wave queued body/receipt peer work before network tasks start, supports bounded duplicate attempts for a stalled expected fetch, gates refill by active body/receipt request pressure, bounds prepared body/receipt plans by per-role request windows, reports scheduler/backpressure metrics, and keeps ordered verified ingestion intact.
 
+The latest accepted slice is intentionally small: medium-density body/receipt batches are no longer classified as dense until roughly the same 300 rows/block threshold used by historical density planning. Remote A/B sampling improved useful floor movement against the previous accepted baseline. Wider progress-target variants and a post-prefix background drain lane were tested and rejected because they increased peer-tail waits and reduced verified floor progress. The remaining live request scheduler work is a larger top-level queue/refill/ownership change, not more local timeout or chunk-size tuning.
+
 Reverse historical header page downloads now have an owned async reservation path. Header page network I/O can run outside the synchronous refill loop, then materialize into the existing body/receipt fetch plan with the same validation and peer accounting. Body/receipt fetch plans now reserve queued peer load up front so later queued plans do not over-select the same fastest peers before request-start accounting catches up. Completed body/receipt chunks that sit behind a prefix gap are now carried into residual repair and verified/written once they become contiguous instead of being discarded and refetched. Prefix-critical body/receipt role retries are now bounded and candidate-expanded only when later chunks are already buffered behind a prefix gap. Stalled expected fetches can now launch one bounded duplicate attempt without discarding the original attempt or resetting lookahead. The scheduler now counts active fetch attempts instead of only sequence handles and stops refilling when body/receipt subrequest pressure is already above the ready peer pool target. The next meaningful change is finishing the broader bounded queue/backpressure scheduler, not more timeout/fanout/lookahead tuning.
 
 The historical fetch refill policy is now centralized behind an explicit scheduler snapshot and refill scope. Full, critical-path, and write-path refill callers consume the same pressure, memory, pipeline-depth, and buffer-depth decision logic. Write-path refill can temporarily expand queued fetch admission when the buffer is low, but remains bounded by request pressure and memory limits.
@@ -36,6 +38,13 @@ Two standalone scheduler candidates were tested after that baseline and rejected
 
 ## Completed Since Last Run
 
+- Accepted a medium-density body/receipt chunking fix:
+  - Raised the dense return threshold from 100 to 300 rows/block so medium-density ranges can keep wider 128-block chunks and larger return windows.
+  - Added focused tests for the density threshold and medium-density return size.
+  - Remote A/B sampling improved useful historical floor progress versus the prior accepted baseline.
+- Rejected local scheduler tuning candidates:
+  - 2,048-block and 1,024-block progress-target variants increased low/zero progress windows.
+  - A post-prefix background drain lane kept more in-plan work alive but regressed verified floor progress, so it was removed.
 - Evaluated and rejected two standalone live-scheduler candidates:
   - Validated header-suffix reuse plus request-prefix truncation passed local `logex-sync` tests/clippy but measured about 215 blocks/sec with low windows on the Mac mini.
   - Active-fetch floor refill passed local `logex-sync` tests/clippy but measured about 219 blocks/sec with low windows on the Mac mini.
