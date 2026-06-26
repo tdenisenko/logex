@@ -268,6 +268,18 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_stale_role_retries: u64,
     /// Cumulative prefix-critical chunk reassignments scheduled by the historical scheduler.
     pub historical_scheduler_prefix_reassignments: u64,
+    /// Cumulative successful historical body request attempts.
+    pub historical_scheduler_body_successes: u64,
+    /// Cumulative successful historical receipt request attempts.
+    pub historical_scheduler_receipt_successes: u64,
+    /// Cumulative historical body request failures.
+    pub historical_scheduler_body_failures: u64,
+    /// Cumulative historical receipt request failures.
+    pub historical_scheduler_receipt_failures: u64,
+    /// Cumulative blocks returned by successful historical body requests.
+    pub historical_scheduler_body_blocks: u64,
+    /// Cumulative blocks returned by successful historical receipt requests.
+    pub historical_scheduler_receipt_blocks: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

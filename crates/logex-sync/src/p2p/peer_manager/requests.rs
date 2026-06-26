@@ -1080,11 +1080,50 @@ impl PeerManager {
         }
 
         let mut dead_peers = HashSet::new();
-        for (peer_id, kind, blocks, elapsed) in stats {
-            self.record_peer_request_success(peer_id, kind, blocks, elapsed);
+        update_body_receipt_scheduler_attempt_metrics(
+            &mut self.body_receipt_scheduler_metrics,
+            &stats,
+            &failures,
+        );
+        for (peer_id, kind, blocks, elapsed) in &stats {
+            self.record_peer_request_success(*peer_id, *kind, *blocks, *elapsed);
         }
         self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
         self.remove_dead_peers(&dead_peers);
+    }
+}
+
+fn update_body_receipt_scheduler_attempt_metrics(
+    metrics: &mut BodyReceiptSchedulerMetrics,
+    stats: &TypedRequestStats,
+    failures: &[ChunkRequestFailure],
+) {
+    for (_, kind, blocks, _) in stats {
+        match kind {
+            PeerRequestKind::Bodies => {
+                metrics.body_successes = metrics.body_successes.saturating_add(1);
+                metrics.body_blocks = metrics
+                    .body_blocks
+                    .saturating_add((*blocks).try_into().unwrap_or(u64::MAX));
+            }
+            PeerRequestKind::Receipts => {
+                metrics.receipt_successes = metrics.receipt_successes.saturating_add(1);
+                metrics.receipt_blocks = metrics
+                    .receipt_blocks
+                    .saturating_add((*blocks).try_into().unwrap_or(u64::MAX));
+            }
+            PeerRequestKind::Headers => {}
+        }
+    }
+    for failure in failures {
+        match failure.role {
+            ChunkRequestRole::Bodies => {
+                metrics.body_failures = metrics.body_failures.saturating_add(1);
+            }
+            ChunkRequestRole::Receipts => {
+                metrics.receipt_failures = metrics.receipt_failures.saturating_add(1);
+            }
+        }
     }
 }
 
@@ -8268,6 +8307,48 @@ mod tests {
         assert_eq!(accounting.stats.len(), 1);
         assert_eq!(accounting.failures.len(), 1);
         assert!(accounting.active_requests.is_empty());
+    }
+
+    #[test]
+    fn body_receipt_scheduler_attempt_metrics_track_roles_separately() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut metrics = BodyReceiptSchedulerMetrics::default();
+        let stats = vec![
+            (peer, PeerRequestKind::Bodies, 4, Duration::from_millis(100)),
+            (
+                peer,
+                PeerRequestKind::Receipts,
+                3,
+                Duration::from_millis(150),
+            ),
+        ];
+        let failures = vec![
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Bodies,
+                peer_id: peer,
+                requested: 8,
+                kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::Timeout,
+                )),
+            },
+            ChunkRequestFailure {
+                role: ChunkRequestRole::Receipts,
+                peer_id: peer,
+                requested: 8,
+                kind: ChunkFailureKind::Request(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::Timeout,
+                )),
+            },
+        ];
+
+        update_body_receipt_scheduler_attempt_metrics(&mut metrics, &stats, &failures);
+
+        assert_eq!(metrics.body_successes, 1);
+        assert_eq!(metrics.receipt_successes, 1);
+        assert_eq!(metrics.body_failures, 1);
+        assert_eq!(metrics.receipt_failures, 1);
+        assert_eq!(metrics.body_blocks, 4);
+        assert_eq!(metrics.receipt_blocks, 3);
     }
 
     #[test]

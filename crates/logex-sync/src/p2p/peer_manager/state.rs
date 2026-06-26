@@ -255,6 +255,16 @@ impl PeerManager {
             historical_scheduler_prefix_reassignments: self
                 .body_receipt_scheduler_metrics
                 .prefix_reassignments,
+            historical_scheduler_body_successes: self.body_receipt_scheduler_metrics.body_successes,
+            historical_scheduler_receipt_successes: self
+                .body_receipt_scheduler_metrics
+                .receipt_successes,
+            historical_scheduler_body_failures: self.body_receipt_scheduler_metrics.body_failures,
+            historical_scheduler_receipt_failures: self
+                .body_receipt_scheduler_metrics
+                .receipt_failures,
+            historical_scheduler_body_blocks: self.body_receipt_scheduler_metrics.body_blocks,
+            historical_scheduler_receipt_blocks: self.body_receipt_scheduler_metrics.receipt_blocks,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,

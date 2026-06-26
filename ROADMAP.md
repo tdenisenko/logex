@@ -12,6 +12,8 @@ After genesis was reached, the old full-sync backup was removed, the completed d
 
 Four follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window, queued expected-prefix admission produced `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows, and routing dense plans through the existing chunk-owned paired scheduler produced `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
 
+The current diagnostics build adds cumulative body/receipt success, failure, and returned-block counters under `execution_network`. A warm Mac mini snapshot on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-131721.log` confirmed the counters increment during historical work and showed receipt-side failures slightly ahead of body-side failures (`94` receipt failures vs `73` body failures) while prefix reassignments continued to accumulate (`392`).
+
 ## Completed Since Last Run
 
 - Kept the conservative live scheduler checkpoint:
@@ -67,6 +69,10 @@ Four follow-up scheduler candidates were tested and rejected: a scored decoupled
   - The candidate disabled the decoupled dense body/receipt executor and routed dense plans through the existing chunk-owned paired scheduler.
   - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-125836.log` regressed to `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows despite reaching about 30 serving peers.
   - The candidate was reverted locally and on the Mac mini; the remote client was restarted on the accepted scheduler checkpoint.
+- Added role-specific scheduler diagnostics:
+  - Execution-network status now exposes cumulative historical body/receipt successes, failures, and returned blocks.
+  - Added a focused unit test for the role-specific accounting helper.
+  - Remote smoke confirmed the counters increment during live historical sync.
 
 ## Remaining TODOs
 
@@ -78,6 +84,7 @@ Four follow-up scheduler candidates were tested and rejected: a scored decoupled
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
    - Completion criteria: status/debug metrics expose useful live request backlog, prefix wait age, retry/hedge counts, peer timeout share, bandwidth use, and write/prepare pressure; scheduler admission uses those signals without spamming the dashboard.
+   - Current progress: body/receipt success, failure, and returned-block counters are now available in status. Prefix wait age and role-specific hedge/backlog details are still needed before changing admission again.
 
 3. Validate a full historical sync run.
    - Reason: short samples can mislead across log-dense and sparse block ranges.
@@ -127,6 +134,9 @@ Four follow-up scheduler candidates were tested and rejected: a scored decoupled
 - Challenge: follow-up scheduler tweaks did not improve live throughput.
   - Resolution: scored decoupled peer dispatch, prepare-wait refill, queued expected-prefix admission, and chunk-owned dense routing were benchmarked, rejected, reverted, and the remote client was restored to the accepted checkpoint.
   - Remaining: the next improvement needs better subrequest-level diagnostics and scheduling inside the decoupled dense path, not replacement with the slower paired scheduler.
+- Challenge: existing scheduler counters did not show which body/receipt role was failing or succeeding during idle windows.
+  - Resolution: added cumulative role-specific success, failure, and returned-block counters to execution-network status.
+  - Remaining: add prefix wait-age and role-specific hedge/backlog counters so low-window samples can identify the exact stalled prefix chunk.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -134,12 +144,13 @@ Four follow-up scheduler candidates were tested and rejected: a scored decoupled
 - Removed obsolete paired redundant-prefix helper logic and its tests because the paired executor rejects duplicate chunk starts.
 - `.DS_Store` remains untracked and unrelated.
 - Remaining verification: once the scheduler is complete, search for obsolete status fields or debug-only metrics introduced during performance work.
+- Added role-specific scheduler counters using existing accounting events; no obsolete code was introduced by this diagnostics pass.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; `perf: hedge dense prefix chunk requests`; `docs: record rejected scheduler candidates`.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; `perf: hedge dense prefix chunk requests`; `docs: record rejected scheduler candidates`; `docs: record bounded prefix scheduler rejection`; `docs: record chunk scheduler regression`; `perf: expose historical role request counters`.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.

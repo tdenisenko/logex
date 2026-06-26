@@ -152,6 +152,12 @@ struct ExecutionPeerSessionMetrics {
 struct BodyReceiptSchedulerMetrics {
     stale_role_retries: u64,
     prefix_reassignments: u64,
+    body_successes: u64,
+    receipt_successes: u64,
+    body_failures: u64,
+    receipt_failures: u64,
+    body_blocks: u64,
+    receipt_blocks: u64,
 }
 
 #[derive(Clone)]
