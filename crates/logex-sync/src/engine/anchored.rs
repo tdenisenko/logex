@@ -908,6 +908,16 @@ fn historical_next_completed_fetch_sequence<T>(completed: &BTreeMap<u64, T>) -> 
     completed.keys().next().copied()
 }
 
+fn historical_next_completed_fetch_sequence_after<T>(
+    completed: &BTreeMap<u64, T>,
+    sequence: u64,
+) -> Option<u64> {
+    completed
+        .keys()
+        .copied()
+        .find(|candidate| *candidate > sequence)
+}
+
 fn historical_sequence_available(
     sequence: u64,
     active_sequences: impl Iterator<Item = u64>,
@@ -2764,6 +2774,49 @@ impl SyncEngine {
         self.spawn_ready_historical_prepare_tasks_inner(false).await
     }
 
+    async fn spawn_lookahead_historical_prepare_tasks_without_refill(&mut self) -> Result<bool> {
+        self.drain_historical_prepare_tasks().await?;
+
+        let mut progressed = false;
+        let mut prepared_sequences = Vec::new();
+        let prepare_buffer_depth =
+            historical_prepare_buffer_depth(historical_available_memory_bytes());
+        while self.active_historical_prepare_count() < HISTORICAL_PREPARE_LOOKAHEAD_DEPTH
+            && self.pending_historical_prepare_count() < prepare_buffer_depth
+        {
+            let Some(sequence) = self.next_lookahead_historical_fetch_sequence_to_prepare() else {
+                break;
+            };
+            let Some(outcome) = self.historical_fetch_completed.remove(&sequence) else {
+                break;
+            };
+            let Some((sequence, batch, _next_child_header)) =
+                self.materialize_historical_fetch_outcome(outcome)?
+            else {
+                self.reset_historical_fetch_pipeline();
+                progressed = true;
+                break;
+            };
+            let task = spawn_historical_prepare_task(sequence, batch);
+            self.historical_prepare_handles.insert(sequence, task);
+            self.advance_historical_fetch_sequence_through_materialized();
+            prepared_sequences.push(sequence);
+            progressed = true;
+        }
+
+        if !prepared_sequences.is_empty() {
+            tracing::debug!(
+                expected_sequence = self.historical_fetch_expected_sequence,
+                prepared_sequences = ?prepared_sequences,
+                active_prepares = self.active_historical_prepare_count(),
+                pending_prepares = self.pending_historical_prepare_count(),
+                "scheduled lookahead historical prepare tasks behind expected fetch"
+            );
+        }
+
+        Ok(progressed)
+    }
+
     async fn spawn_ready_historical_prepare_tasks_inner(
         &mut self,
         refill_fetch_pipeline: bool,
@@ -2816,6 +2869,13 @@ impl SyncEngine {
 
     fn next_historical_fetch_sequence_to_prepare(&self) -> Option<u64> {
         historical_next_completed_fetch_sequence(&self.historical_fetch_completed)
+    }
+
+    fn next_lookahead_historical_fetch_sequence_to_prepare(&self) -> Option<u64> {
+        historical_next_completed_fetch_sequence_after(
+            &self.historical_fetch_completed,
+            self.historical_fetch_expected_sequence,
+        )
     }
 
     fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> bool {
@@ -3500,6 +3560,19 @@ impl SyncEngine {
                 return Ok(None);
             }
 
+            if self
+                .spawn_lookahead_historical_prepare_tasks_without_refill()
+                .await?
+            {
+                self.ensure_historical_fetch_pipeline_limited(
+                    child_header.clone(),
+                    HistoricalFetchRefillScope::CriticalPath,
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                )
+                .await?;
+                continue;
+            }
+
             let active_expected_attempts = self.active_expected_historical_fetch_attempt_count();
             let expected_fetch_is_active = active_expected_attempts > 0;
             if wait_started.elapsed() >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
@@ -3553,6 +3626,8 @@ impl SyncEngine {
                         return Ok(None);
                     };
                     self.store_historical_fetch_outcome(outcome);
+                    self.spawn_lookahead_historical_prepare_tasks_without_refill()
+                        .await?;
                     self.ensure_historical_fetch_pipeline(child_header.clone())
                         .await?;
                 }
@@ -3561,6 +3636,8 @@ impl SyncEngine {
                         return Ok(None);
                     };
                     self.store_historical_header_fetch_outcome(outcome).await?;
+                    self.spawn_lookahead_historical_prepare_tasks_without_refill()
+                        .await?;
                     self.ensure_historical_fetch_pipeline(child_header.clone())
                         .await?;
                 }
@@ -6347,6 +6424,23 @@ mod tests {
         assert_eq!(
             historical_next_completed_fetch_sequence(&completed),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn historical_next_completed_fetch_sequence_after_skips_ordered_gate() {
+        let mut completed = BTreeMap::new();
+        completed.insert(7, ());
+        completed.insert(3, ());
+        completed.insert(5, ());
+
+        assert_eq!(
+            historical_next_completed_fetch_sequence_after(&completed, 3),
+            Some(5)
+        );
+        assert_eq!(
+            historical_next_completed_fetch_sequence_after(&completed, 7),
+            None
         );
     }
 
