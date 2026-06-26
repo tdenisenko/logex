@@ -177,6 +177,8 @@ struct HistoricalFetchSchedulerSnapshot {
     pending_prepares: usize,
     body_ready_peers: usize,
     receipt_ready_peers: usize,
+    body_request_capacity: usize,
+    receipt_request_capacity: usize,
     active_body_requests: usize,
     active_receipt_requests: usize,
 }
@@ -800,6 +802,8 @@ fn historical_fetch_scheduler_decision(
     let request_pressure_allows_refill = historical_body_receipt_request_pressure_allows_refill(
         snapshot.body_ready_peers,
         snapshot.receipt_ready_peers,
+        snapshot.body_request_capacity,
+        snapshot.receipt_request_capacity,
         snapshot.active_body_requests,
         snapshot.active_receipt_requests,
     );
@@ -847,6 +851,8 @@ fn historical_fetch_scheduler_decision(
 fn historical_body_receipt_request_pressure_allows_refill(
     body_ready_peers: usize,
     receipt_ready_peers: usize,
+    body_request_capacity: usize,
+    receipt_request_capacity: usize,
     active_body_requests: usize,
     active_receipt_requests: usize,
 ) -> bool {
@@ -855,10 +861,11 @@ fn historical_body_receipt_request_pressure_allows_refill(
         return false;
     }
 
-    let request_limit = ready_peers
-        .saturating_mul(HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET)
-        .max(HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT);
-    active_body_requests < request_limit && active_receipt_requests < request_limit
+    let body_request_limit =
+        body_request_capacity.max(HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT);
+    let receipt_request_limit =
+        receipt_request_capacity.max(HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT);
+    active_body_requests < body_request_limit && active_receipt_requests < receipt_request_limit
 }
 
 fn historical_critical_refill_buffer_floor(available_memory_bytes: Option<u64>) -> usize {
@@ -3048,6 +3055,10 @@ impl SyncEngine {
     fn historical_fetch_scheduler_snapshot(&self) -> HistoricalFetchSchedulerSnapshot {
         let (body_ready_peers, receipt_ready_peers) =
             self.peers.body_receipt_request_ready_peer_counts();
+        let (body_request_capacity, receipt_request_capacity) =
+            self.peers.body_receipt_request_slot_capacity_counts(
+                HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
+            );
         let (active_body_requests, active_receipt_requests) =
             self.peers.active_body_receipt_request_counts();
         HistoricalFetchSchedulerSnapshot {
@@ -3061,6 +3072,8 @@ impl SyncEngine {
             pending_prepares: self.pending_historical_prepare_count(),
             body_ready_peers,
             receipt_ready_peers,
+            body_request_capacity,
+            receipt_request_capacity,
             active_body_requests,
             active_receipt_requests,
         }
@@ -3083,6 +3096,8 @@ impl SyncEngine {
         historical_body_receipt_request_pressure_allows_refill(
             snapshot.body_ready_peers,
             snapshot.receipt_ready_peers,
+            snapshot.body_request_capacity,
+            snapshot.receipt_request_capacity,
             snapshot.active_body_requests,
             snapshot.active_receipt_requests,
         )
@@ -6234,31 +6249,68 @@ mod tests {
     #[test]
     fn historical_request_pressure_gates_refill_by_ready_peer_pool() {
         assert!(!historical_body_receipt_request_pressure_allows_refill(
-            0, 12, 0, 0
+            0, 12, 0, 0, 0, 0
         ));
         assert!(historical_body_receipt_request_pressure_allows_refill(
             2,
             2,
+            0,
+            0,
             HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT - 1,
             HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT - 1,
         ));
         assert!(!historical_body_receipt_request_pressure_allows_refill(
             2,
             2,
+            0,
+            0,
             HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT,
             0,
         ));
         assert!(!historical_body_receipt_request_pressure_allows_refill(
             10,
             10,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
             0,
             10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
         ));
         assert!(historical_body_receipt_request_pressure_allows_refill(
             10,
             10,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
+            10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
             10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET - 1,
             10 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET - 1,
+        ));
+    }
+
+    #[test]
+    fn historical_request_pressure_uses_adaptive_peer_capacity() {
+        let static_limit = 4 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET;
+        assert!(!historical_body_receipt_request_pressure_allows_refill(
+            4,
+            4,
+            static_limit + 20,
+            static_limit + 20,
+            static_limit + 20,
+            static_limit + 20,
+        ));
+        assert!(historical_body_receipt_request_pressure_allows_refill(
+            4,
+            4,
+            static_limit + 20,
+            static_limit + 20,
+            static_limit + 19,
+            static_limit + 19,
+        ));
+        assert!(!historical_body_receipt_request_pressure_allows_refill(
+            4,
+            4,
+            static_limit - 4,
+            static_limit - 4,
+            static_limit - 4,
+            static_limit - 4,
         ));
     }
 
@@ -6341,6 +6393,8 @@ mod tests {
             pending_prepares: 0,
             body_ready_peers: 20,
             receipt_ready_peers: 20,
+            body_request_capacity: 20 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
+            receipt_request_capacity: 20 * HISTORICAL_BODY_RECEIPT_REQUESTS_PER_READY_PEER_TARGET,
             active_body_requests: 0,
             active_receipt_requests: 0,
         }
@@ -6383,6 +6437,8 @@ mod tests {
         let mut snapshot = scheduler_snapshot_for_refill_tests();
         snapshot.body_ready_peers = 2;
         snapshot.receipt_ready_peers = 2;
+        snapshot.body_request_capacity = HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT;
+        snapshot.receipt_request_capacity = HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT;
         snapshot.active_body_requests = HISTORICAL_BODY_RECEIPT_REQUEST_PRESSURE_MIN_LIMIT;
         let decision = historical_fetch_scheduler_decision(
             snapshot,

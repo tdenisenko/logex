@@ -24,8 +24,15 @@ The live body/receipt scheduler now carries role-specific peer metrics into each
 
 Expected-fetch duplicate recovery now uses the duplicate threshold consistently. One completed later fetch plus request-pressure headroom can launch the bounded duplicate attempt after the head-of-line delay, while destructive reset still requires the stronger reset threshold and zero active attempts.
 
+Historical fetch refill now uses adaptive body/receipt request-slot capacity derived from the peer manager's warmed request limits. This makes queue admission respond to proven peer behavior instead of treating every ready peer as identical, while preserving an absolute pressure floor for small peer pools.
+
 ## Completed Since Last Run
 
+- Added adaptive scheduler-level request pressure:
+  - The peer manager now exposes body/receipt request-slot capacity scaled from per-peer block request limits that increase on fast complete responses and shrink on slow, partial, or unproven peers.
+  - Historical fetch scheduler snapshots now use that adaptive capacity when deciding whether more queued body/receipt plans can be admitted.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-191918.log` showed the client running after restart, live head current, no reset or zero-prefix logs in the sample, and the historical floor moving with about 280k logs/sec at 26 serving peers.
 - Fixed the expected-fetch duplicate retry threshold:
   - Active expected fetches no longer wait for the destructive-reset threshold before launching a bounded duplicate.
   - One completed later fetch is enough to prove useful suffix work is buffered, but reset remains gated by the stricter two-fetch threshold and no active expected attempts.
@@ -323,13 +330,14 @@ Expected-fetch duplicate recovery now uses the duplicate threshold consistently.
 - Inspected historical fetch and prepare helpers after adding out-of-order lookahead preparation. No existing ordered-ingest or reset path was removed because writes still need contiguous sequence safety.
 - Inspected live body/receipt request dispatch after adding role-specific peer metrics. No obsolete recovery path was removed because prefix salvage, prefix-critical retries, and ordered residual repair are still needed until the cross-plan scheduler owns those decisions.
 - Inspected expected-fetch retry/reset predicates after aligning duplicate retry with its lower threshold. No reset path was removed because destructive reset remains required for unrecoverable ordered-state gaps.
+- Inspected scheduler admission after adding adaptive request-slot capacity. No obsolete refill or reset path could be removed because the broader queued scheduler still depends on existing recovery paths until it owns cross-plan dispatch.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`; `perf: adapt historical request pressure to peer capacity`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; lookahead sequence, residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, body/receipt prefix salvage, live lane, peer-score, and request-timeout tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.

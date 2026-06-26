@@ -80,6 +80,41 @@ impl PeerManager {
         (active_body_requests, active_receipt_requests)
     }
 
+    /// Adaptive concurrent request-slot capacity currently available for
+    /// historical body/receipt fetches, derived from per-peer block limits
+    /// that rise on fast complete responses and shrink on slow or partial
+    /// responses.
+    pub fn body_receipt_request_slot_capacity_counts(
+        &self,
+        per_ready_peer_target: usize,
+    ) -> (usize, usize) {
+        let mut body_capacity = 0usize;
+        let mut receipt_capacity = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_capacity =
+                    body_capacity.saturating_add(adaptive_request_slot_capacity_for_peer(
+                        PeerRequestKind::Bodies,
+                        peer.is_serving,
+                        peer.body_request_limit,
+                        per_ready_peer_target,
+                    ));
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_capacity =
+                    receipt_capacity.saturating_add(adaptive_request_slot_capacity_for_peer(
+                        PeerRequestKind::Receipts,
+                        peer.is_serving,
+                        peer.receipt_request_limit,
+                        per_ready_peer_target,
+                    ));
+            }
+        }
+        (body_capacity, receipt_capacity)
+    }
+
     /// Highest advertised canonical block across connected peers.
     pub fn highest_peer_block(&self) -> Option<u64> {
         self.peers
@@ -940,6 +975,19 @@ fn average_peer_request_limit(total: usize, peers: usize, kind: PeerRequestKind)
     }
 }
 
+fn adaptive_request_slot_capacity_for_peer(
+    kind: PeerRequestKind,
+    is_serving: bool,
+    limit: usize,
+    per_ready_peer_target: usize,
+) -> usize {
+    let effective_limit = effective_peer_request_limit(kind, is_serving, limit);
+    effective_limit
+        .saturating_mul(per_ready_peer_target.max(1))
+        .div_ceil(request_limit_initial(kind).max(1))
+        .clamp(1, REQUEST_LIMIT_MAX)
+}
+
 pub(super) fn inherited_peer_request_limit(
     limits: impl Iterator<Item = usize>,
     kind: PeerRequestKind,
@@ -1374,6 +1422,46 @@ mod tests {
         assert_eq!(
             average_peer_request_limit(96, 2, PeerRequestKind::Receipts),
             48
+        );
+    }
+
+    #[test]
+    fn adaptive_request_slot_capacity_scales_relative_to_initial_limit() {
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Bodies,
+                true,
+                BODY_REQUEST_LIMIT_INITIAL,
+                6
+            ),
+            6
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Bodies,
+                true,
+                BODY_REQUEST_LIMIT_INITIAL / 3,
+                6
+            ),
+            2
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Receipts,
+                true,
+                REQUEST_LIMIT_MAX,
+                6
+            ),
+            16
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Receipts,
+                false,
+                REQUEST_LIMIT_MAX,
+                6
+            ),
+            2
         );
     }
 
