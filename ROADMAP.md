@@ -30,8 +30,16 @@ Dense decoupled body/receipt requests now return as soon as the accepted contigu
 
 The engine now has an explicit ready body/receipt plan queue between header materialization and network execution. A materialized header window can wait for queue-wide body/receipt slot margin and write/prepare pressure instead of being spawned immediately or refetched later, and `/status` exposes the queued-plan count, body/receipt slot margins, and write-backpressure state for advanced diagnostics.
 
+Primary body/receipt completions now emit only the contiguous prefix that was actually returned. Residual chunk preservation remains limited to the explicit residual-repair path. Live Mac mini smoke on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-212122.log` showed zero artificial residual repairs across the sampled batches, no zero-progress windows, and the remaining bottleneck shifted back to queue depth, peer-tail timeouts, and refill gaps with active fetches around seven despite much larger ready peer capacity.
+
 ## Completed Since Last Run
 
+- Eliminated artificial primary residual repairs:
+  - Normal body/receipt completions now report exactly the contiguous returned prefix as their planned range.
+  - Only explicit residual-repair completions preserve suffix chunks for later ordered repair.
+  - Added focused tests for primary prefix-only completion and residual suffix preservation.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, and `cargo test -p logex-sync`.
+  - Remote release build passed; live smoke on the Mac mini showed `partial=0`, `residual_ingested=0`, `residual_scheduled=0`, 56 completed batches, one low-progress window, and zero zero-progress windows in the sample.
 - Added a bounded queued body/receipt admission layer:
   - Header fetch outcomes and synchronous header batches now materialize into a ready body/receipt plan before execution.
   - Ready plans keep their sequence ownership and are only started when body/receipt slot margins and write/prepare pressure allow it.
@@ -174,7 +182,7 @@ The engine now has an explicit ready body/receipt plan queue between header mate
 
 1. Finish the bounded queued live request scheduler.
    - Reason: historical sync is still peer-tail bound; a slow prefix chunk can stall contiguous verified progress while other peers and later work are available.
-   - Completion criteria: stale prefix-critical chunks can be reassigned from bounded queued work; downloads, verification, and ordered writes are overlapped with explicit memory/backpressure limits; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes. Out-of-order lookahead preparation, plan-local peer-tail admission, adaptive request pressure, dense accepted-prefix early return, and single ready-plan admission are complete; cross-plan body/receipt dispatch and queue-wide stale-prefix ownership remain.
+   - Completion criteria: stale prefix-critical chunks can be reassigned from bounded queued work; downloads, verification, and ordered writes are overlapped with explicit memory/backpressure limits; ordered verified ingestion is preserved; useful network utilization stays high during peer churn; sustained full-run throughput improves without extra peer churn; and the design avoids the rejected broad role-split, duplicate whole-window, and unbounded request-pressure failure modes. Out-of-order lookahead preparation, plan-local peer-tail admission, adaptive request pressure, dense accepted-prefix early return, primary residual suppression, and single ready-plan admission are complete; cross-plan body/receipt dispatch and queue-wide stale-prefix ownership remain.
 
 2. Complete scheduler-level backpressure.
    - Reason: the next scheduler needs to distinguish true network saturation, peer-tail stalls, prepared-buffer pressure, and ordered-write pressure.
@@ -220,6 +228,7 @@ The engine now has an explicit ready body/receipt plan queue between header mate
 - Expected-fetch duplicate retry and destructive reset deliberately use different thresholds. A single completed later fetch can justify one bounded duplicate under request-pressure headroom; destructive reset still requires stronger evidence and no active expected attempt.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
+- Primary body/receipt completions must not create residual repair over undownloaded blocks. The normal path now advances by the actual contiguous prefix, while the explicit residual path remains the only path that preserves suffix chunks for repair.
 
 ## Challenges and Resolutions
 
@@ -331,6 +340,10 @@ The engine now has an explicit ready body/receipt plan queue between header mate
   - Resolution: changed the retry predicate to use `HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED`; reset behavior still uses `HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED`.
   - Remaining: make duplicate/refill timing queue-wide instead of a local predicate once the central scheduler owns cross-plan dispatch.
 
+- Challenge: primary body/receipt completions still created residual repair for the difference between the planned dense window and the shorter contiguous prefix a peer actually returned.
+  - Resolution: changed primary completion to emit only the actual contiguous prefix; residual suffix preservation is now restricted to explicit residual repair.
+  - Remaining: use the freed scheduler time for more queue-wide body/receipt dispatch so active fetch depth scales with available ready peers.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -360,13 +373,14 @@ The engine now has an explicit ready body/receipt plan queue between header mate
 - Inspected scheduler admission after adding adaptive request-slot capacity. No obsolete refill or reset path could be removed because the broader queued scheduler still depends on existing recovery paths until it owns cross-plan dispatch.
 - Removed the obsolete direct historical fetch spawn helper after header outcomes began entering the ready body/receipt plan queue.
 - Inspected ready-plan accounting, sequence-gap detection, reset handling, status wiring, and dashboard diagnostics after adding queued body/receipt admission. Cross-plan dispatch and stale-prefix ownership remain required before more recovery helpers can be removed safely.
+- Removed the obsolete contiguous body/receipt prefix wrapper after extracting testable completion chunk handling.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`; `perf: adapt historical request pressure to peer capacity`; `perf: queue historical fetch plans before admission`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`; `perf: preserve background body receipt work`; `perf: prepare historical lookahead out of order`; `perf: add role-aware live scheduler admission`; `perf: align expected fetch duplicate threshold`; `perf: adapt historical request pressure to peer capacity`; `perf: queue historical fetch plans before admission`; pending commit for primary residual suppression.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; ready-plan admission/status tests; lookahead sequence, residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, body/receipt prefix salvage, live lane, peer-score, and request-timeout tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; focused status endpoint test; remote release builds and smokes on the Mac mini.

@@ -78,6 +78,7 @@ const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
 const HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT: usize = 4;
+const HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR: usize = 2;
 const HISTORICAL_WRITE_COALESCE_MAX_BATCHES: usize = 4;
 const HISTORICAL_WRITE_COALESCE_TARGET_ROWS: u64 = 500_000;
 const HISTORICAL_RESIDUAL_VALIDATION_RETRY_LIMIT: usize = 4;
@@ -764,7 +765,11 @@ fn historical_write_path_fetch_refill_limit(
     pipeline_depth: usize,
     snapshot: HistoricalFetchSchedulerSnapshot,
 ) -> usize {
-    let pipeline_gap = pipeline_depth.saturating_sub(snapshot.active_fetches);
+    let pipeline_gap = pipeline_depth.saturating_sub(
+        snapshot
+            .active_fetches
+            .saturating_add(snapshot.ready_fetches),
+    );
     let base_limit = requested_limit
         .min(HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT)
         .min(pipeline_gap);
@@ -825,6 +830,17 @@ fn historical_fetch_scheduler_decision(
         snapshot.ingest_active,
         snapshot.available_memory_bytes,
     );
+    let pipeline_occupancy = snapshot
+        .active_fetches
+        .saturating_add(snapshot.ready_fetches);
+    let write_backpressure_refill_limit = if write_backpressure {
+        HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR.saturating_sub(pipeline_occupancy)
+    } else {
+        usize::MAX
+    };
+    let write_backpressure_allows_refill = !write_backpressure
+        || (!historical_available_memory_is_low(snapshot.available_memory_bytes)
+            && write_backpressure_refill_limit > 0);
     let fetch_budget_allows_refill = historical_fetch_budget_has_capacity(
         snapshot.pending_fetches,
         snapshot.completed_fetches,
@@ -851,11 +867,14 @@ fn historical_fetch_scheduler_decision(
         }
     };
 
-    let pipeline_gap = pipeline_depth.saturating_sub(snapshot.active_fetches);
-    let new_fetch_limit = if snapshot.ready_fetches > 0 {
-        0
-    } else if request_pressure_allows_refill && fetch_budget_allows_refill && !write_backpressure {
-        scope_limit.min(pipeline_gap)
+    let pipeline_gap = pipeline_depth.saturating_sub(pipeline_occupancy);
+    let new_fetch_limit = if request_pressure_allows_refill
+        && fetch_budget_allows_refill
+        && write_backpressure_allows_refill
+    {
+        scope_limit
+            .min(pipeline_gap)
+            .min(write_backpressure_refill_limit)
     } else {
         0
     };
@@ -896,11 +915,15 @@ fn historical_fetch_ready_plan_can_spawn(
         return true;
     }
 
-    if historical_write_backpressure_blocks_refill(
+    let write_backpressure = historical_write_backpressure_blocks_refill(
         snapshot.pending_prepares,
         snapshot.ingest_active,
         snapshot.available_memory_bytes,
-    ) {
+    );
+    if write_backpressure
+        && (historical_available_memory_is_low(snapshot.available_memory_bytes)
+            || snapshot.active_fetches >= HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR)
+    {
         return false;
     }
 
@@ -2642,7 +2665,7 @@ impl SyncEngine {
         if let Some(fetch) = self.historical_header_fetch_handle.take() {
             fetch.handle.abort();
         }
-        self.historical_fetch_ready_plan = None;
+        self.historical_fetch_ready_plans.clear();
         for (_, fetch) in self.historical_fetch_handles.drain() {
             for (_, attempt) in fetch.attempts {
                 self.peers
@@ -2993,7 +3016,7 @@ impl SyncEngine {
     pub(super) fn pending_historical_fetch_count(&self) -> usize {
         self.active_historical_fetch_count()
             + self.historical_fetch_completed.len()
-            + usize::from(self.historical_fetch_ready_plan.is_some())
+            + self.historical_fetch_ready_plans.len()
     }
 
     pub(super) fn active_historical_fetch_count(&self) -> usize {
@@ -3038,17 +3061,13 @@ impl SyncEngine {
             .historical_header_fetch_handle
             .as_ref()
             .map(|fetch| fetch.sequence);
-        let ready_sequence = self
-            .historical_fetch_ready_plan
-            .as_ref()
-            .map(|fetch| fetch.sequence);
         historical_sequence_available(
             sequence,
             self.historical_fetch_handles
                 .keys()
                 .copied()
                 .chain(header_sequence)
-                .chain(ready_sequence),
+                .chain(self.historical_fetch_ready_plans.keys().copied()),
             self.historical_fetch_completed.keys().copied(),
             None,
         )
@@ -3059,17 +3078,13 @@ impl SyncEngine {
             .historical_header_fetch_handle
             .as_ref()
             .map(|fetch| fetch.sequence);
-        let ready_sequence = self
-            .historical_fetch_ready_plan
-            .as_ref()
-            .map(|fetch| fetch.sequence);
         has_historical_sequence_after(
             sequence,
             self.historical_fetch_handles
                 .keys()
                 .copied()
                 .chain(header_sequence)
-                .chain(ready_sequence),
+                .chain(self.historical_fetch_ready_plans.keys().copied()),
             self.historical_fetch_completed.keys().copied(),
             None,
         )
@@ -3154,7 +3169,7 @@ impl SyncEngine {
             total_memory_bytes: historical_total_memory_bytes(),
             available_memory_bytes: historical_available_memory_bytes(),
             rows_per_block_ewma: self.historical_rows_per_block_ewma,
-            ready_fetches: usize::from(self.historical_fetch_ready_plan.is_some()),
+            ready_fetches: self.historical_fetch_ready_plans.len(),
             active_fetches: self.active_historical_fetch_count(),
             pending_fetches: self.pending_historical_fetch_count(),
             completed_fetches: self.historical_fetch_completed.len(),
@@ -3251,37 +3266,59 @@ impl SyncEngine {
             .historical_fetch_next_sequence
             .max(sequence.saturating_add(1));
         self.historical_fetch_planned_child = plan.planned_next_child_header.clone();
-        self.historical_fetch_ready_plan = Some(HistoricalQueuedFetchPlan { sequence, plan });
+        self.historical_fetch_ready_plans
+            .insert(sequence, HistoricalQueuedFetchPlan { sequence, plan });
     }
 
     fn try_spawn_ready_historical_fetch_plan(&mut self) -> bool {
-        self.drain_historical_request_accounting();
-        let Some(ready) = self.historical_fetch_ready_plan.take() else {
-            return false;
-        };
-        let reservations = ready.plan.body_receipt_plan.reservations();
-        let (body_reservations, receipt_reservations) = reservations.body_receipt_counts();
-        let snapshot = self.historical_fetch_scheduler_snapshot();
-        if !historical_fetch_ready_plan_can_spawn(snapshot, body_reservations, receipt_reservations)
-        {
-            self.historical_fetch_ready_plan = Some(ready);
-            return false;
-        }
+        self.try_spawn_ready_historical_fetch_plans(1) > 0
+    }
 
-        tracing::trace!(
-            sequence = ready.sequence,
-            body_reservations,
-            receipt_reservations,
-            body_slot_margin = snapshot
-                .body_request_capacity
-                .saturating_sub(snapshot.active_body_requests),
-            receipt_slot_margin = snapshot
-                .receipt_request_capacity
-                .saturating_sub(snapshot.active_receipt_requests),
-            "starting queued historical body/receipt fetch plan"
-        );
-        self.spawn_historical_fetch_plan_at_sequence(ready.sequence, ready.plan);
-        true
+    fn try_spawn_ready_historical_fetch_plans(&mut self, max_plans: usize) -> usize {
+        if max_plans == 0 {
+            return 0;
+        }
+        self.drain_historical_request_accounting();
+        let mut spawned = 0usize;
+        while spawned < max_plans {
+            let Some(sequence) = self.historical_fetch_ready_plans.keys().next().copied() else {
+                break;
+            };
+            let Some(ready) = self.historical_fetch_ready_plans.remove(&sequence) else {
+                break;
+            };
+            let reservations = ready.plan.body_receipt_plan.reservations();
+            let (body_reservations, receipt_reservations) = reservations.body_receipt_counts();
+            let snapshot = self.historical_fetch_scheduler_snapshot();
+            if !historical_fetch_ready_plan_can_spawn(
+                snapshot,
+                body_reservations,
+                receipt_reservations,
+            ) {
+                self.historical_fetch_ready_plans.insert(sequence, ready);
+                break;
+            }
+
+            tracing::trace!(
+                sequence = ready.sequence,
+                queued_ready_fetches = self.historical_fetch_ready_plans.len(),
+                body_reservations,
+                receipt_reservations,
+                body_slot_margin = historical_body_receipt_request_slot_margin(
+                    snapshot.body_request_capacity,
+                    snapshot.active_body_requests
+                ),
+                receipt_slot_margin = historical_body_receipt_request_slot_margin(
+                    snapshot.receipt_request_capacity,
+                    snapshot.active_receipt_requests
+                ),
+                "starting queued historical body/receipt fetch plan"
+            );
+            self.spawn_historical_fetch_plan_at_sequence(ready.sequence, ready.plan);
+            spawned = spawned.saturating_add(1);
+            self.drain_historical_request_accounting();
+        }
+        spawned
     }
 
     fn spawn_historical_fetch_retry_plan_at_sequence(
@@ -3633,13 +3670,15 @@ impl SyncEngine {
         }
         let mut new_fetches = 0usize;
         loop {
-            if self.historical_fetch_ready_plan.is_some() {
-                if self.try_spawn_ready_historical_fetch_plan() {
-                    new_fetches = new_fetches.saturating_add(1);
-                    tokio::task::yield_now().await;
-                    self.drain_historical_request_accounting();
-                    continue;
-                }
+            let remaining_fetches = max_new_fetches.saturating_sub(new_fetches);
+            let spawned_ready = self.try_spawn_ready_historical_fetch_plans(remaining_fetches);
+            if spawned_ready > 0 {
+                new_fetches = new_fetches.saturating_add(spawned_ready);
+                tokio::task::yield_now().await;
+                self.drain_historical_request_accounting();
+                continue;
+            }
+            if !self.historical_fetch_ready_plans.is_empty() {
                 break;
             }
 
@@ -3680,12 +3719,13 @@ impl SyncEngine {
             self.historical_fetch_planned_child = plan.planned_next_child_header.clone();
             let sequence = self.historical_fetch_next_sequence;
             self.queue_historical_fetch_plan_at_sequence(sequence, plan);
-            if self.try_spawn_ready_historical_fetch_plan() {
-                new_fetches = new_fetches.saturating_add(1);
+            let spawned_ready = self.try_spawn_ready_historical_fetch_plans(remaining_fetches);
+            if spawned_ready > 0 {
+                new_fetches = new_fetches.saturating_add(spawned_ready);
                 tokio::task::yield_now().await;
                 self.drain_historical_request_accounting();
             } else {
-                break;
+                continue;
             }
         }
 
@@ -3719,15 +3759,17 @@ impl SyncEngine {
                 return Ok(None);
             }
 
-            if self.historical_fetch_ready_plan.is_none()
+            if self.historical_fetch_ready_plans.is_empty()
                 && self.historical_fetch_handles.is_empty()
                 && self.historical_header_fetch_handle.is_none()
             {
                 return Ok(None);
             }
 
-            if self.historical_fetch_ready_plan.is_some() {
-                self.try_spawn_ready_historical_fetch_plan();
+            if !self.historical_fetch_ready_plans.is_empty() {
+                self.try_spawn_ready_historical_fetch_plans(
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                );
             }
 
             if self
@@ -3812,7 +3854,9 @@ impl SyncEngine {
                         .await?;
                 }
                 _ = tokio::time::sleep(HISTORICAL_FETCH_WAIT_POLL_INTERVAL) => {
-                    self.try_spawn_ready_historical_fetch_plan();
+                    self.try_spawn_ready_historical_fetch_plans(
+                        HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                    );
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && self.shutdown_requested() {
@@ -6609,9 +6653,33 @@ mod tests {
     }
 
     #[test]
-    fn historical_scheduler_decision_admits_only_one_ready_plan() {
+    fn historical_scheduler_decision_accounts_ready_queue_in_pipeline_gap() {
         let mut snapshot = scheduler_snapshot_for_refill_tests();
-        snapshot.ready_fetches = 1;
+        snapshot.active_fetches = 2;
+        snapshot.ready_fetches = 2;
+        let decision = historical_fetch_scheduler_decision(
+            snapshot,
+            HistoricalFetchRefillScope::Full,
+            usize::MAX,
+        );
+
+        assert_eq!(
+            decision.new_fetch_limit,
+            decision
+                .pipeline_depth
+                .saturating_sub(snapshot.active_fetches + snapshot.ready_fetches)
+        );
+    }
+
+    #[test]
+    fn historical_scheduler_decision_stops_refill_when_ready_queue_fills_pipeline() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.ready_fetches = historical_fetch_pipeline_depth(
+            snapshot.peer_capacity,
+            snapshot.total_memory_bytes,
+            snapshot.available_memory_bytes,
+            snapshot.rows_per_block_ewma,
+        );
         let decision = historical_fetch_scheduler_decision(
             snapshot,
             HistoricalFetchRefillScope::Full,
@@ -6663,6 +6731,28 @@ mod tests {
         assert_eq!(decision.new_fetch_limit, 0);
         assert!(decision.write_backpressure);
         assert!(!historical_fetch_ready_plan_can_spawn(snapshot, 1, 1));
+    }
+
+    #[test]
+    fn historical_scheduler_keeps_minimum_fetches_during_write_backpressure() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.active_fetches = 0;
+        snapshot.pending_fetches = 0;
+        snapshot.ingest_active = true;
+        snapshot.pending_prepares =
+            historical_prepare_buffer_depth(snapshot.available_memory_bytes);
+        let decision = historical_fetch_scheduler_decision(
+            snapshot,
+            HistoricalFetchRefillScope::Full,
+            usize::MAX,
+        );
+
+        assert_eq!(
+            decision.new_fetch_limit,
+            HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR
+        );
+        assert!(decision.write_backpressure);
+        assert!(historical_fetch_ready_plan_can_spawn(snapshot, 1, 1));
     }
 
     #[test]

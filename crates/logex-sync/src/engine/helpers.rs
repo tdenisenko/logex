@@ -11,7 +11,7 @@ impl SyncEngine {
         let (body_slot_margin, receipt_slot_margin, write_backpressure) =
             self.historical_scheduler_status_fields();
         status.historical_fetch_active = self.active_historical_fetch_count();
-        status.historical_fetch_ready = usize::from(self.historical_fetch_ready_plan.is_some());
+        status.historical_fetch_ready = self.historical_fetch_ready_plans.len();
         status.historical_fetch_completed = self.historical_fetch_completed.len();
         status.historical_fetch_pending = self.pending_historical_fetch_count();
         status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;

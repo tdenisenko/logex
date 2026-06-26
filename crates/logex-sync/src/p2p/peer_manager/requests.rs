@@ -979,13 +979,15 @@ impl PeerManager {
             planned_return_blocks,
             total_hashes,
         );
-        let (blocks, residual_chunks) =
-            split_contiguous_body_receipt_prefix(completion_return_blocks, chunks);
-
-        let min_accepted_prefix = body_receipt_completion_min_accepted_prefix(
+        let BodyReceiptCompletionChunks {
+            blocks,
+            planned_return_blocks,
+            residual_chunks,
+            min_accepted_prefix,
+        } = body_receipt_completion_chunks(
             completion_return_blocks,
+            chunks,
             min_accepted_prefix_override,
-            !residual_chunks.is_empty(),
         );
         if blocks.len() >= min_accepted_prefix {
             self.advance_request_cursor();
@@ -1877,7 +1879,6 @@ impl BodyReceiptRequestPlan {
             return_blocks: self.return_blocks,
             planned_return_blocks: body_receipt_completed_plan_return_blocks(
                 &chunks,
-                self.planned_prefix_blocks(),
                 self.return_blocks,
             ),
             chunks,
@@ -5860,14 +5861,42 @@ fn contiguous_chunk_blocks<T>(chunks: &BTreeMap<usize, Vec<T>>) -> usize {
     expected_start
 }
 
-fn split_contiguous_body_receipt_prefix(
-    return_blocks: usize,
-    chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-) -> (
-    Vec<SourcedBodyReceipts>,
-    BTreeMap<usize, Vec<SourcedBodyReceipts>>,
-) {
-    split_contiguous_prefix(return_blocks, chunks)
+struct BodyReceiptCompletionChunks<T> {
+    blocks: Vec<T>,
+    planned_return_blocks: usize,
+    residual_chunks: BTreeMap<usize, Vec<T>>,
+    min_accepted_prefix: usize,
+}
+
+fn body_receipt_completion_chunks<T>(
+    completion_return_blocks: usize,
+    chunks: BTreeMap<usize, Vec<T>>,
+    min_accepted_prefix_override: Option<usize>,
+) -> BodyReceiptCompletionChunks<T> {
+    let preserve_residual_chunks = min_accepted_prefix_override.is_some();
+    let (blocks, residual_chunks) = split_contiguous_prefix(completion_return_blocks, chunks);
+    let min_accepted_prefix = body_receipt_completion_min_accepted_prefix(
+        completion_return_blocks,
+        min_accepted_prefix_override,
+        !residual_chunks.is_empty(),
+    );
+    let planned_return_blocks = if preserve_residual_chunks {
+        completion_return_blocks
+    } else {
+        blocks.len()
+    };
+    let residual_chunks = if preserve_residual_chunks {
+        residual_chunks
+    } else {
+        BTreeMap::new()
+    };
+
+    BodyReceiptCompletionChunks {
+        blocks,
+        planned_return_blocks,
+        residual_chunks,
+        min_accepted_prefix,
+    }
 }
 
 fn split_contiguous_prefix<T>(
@@ -6449,14 +6478,9 @@ fn body_receipt_completion_return_blocks(
 
 fn body_receipt_completed_plan_return_blocks<T>(
     chunks: &BTreeMap<usize, Vec<T>>,
-    planned_prefix_blocks: usize,
     return_blocks: usize,
 ) -> usize {
-    chunks
-        .iter()
-        .filter(|(start, blocks)| **start < return_blocks && !blocks.is_empty())
-        .map(|(start, blocks)| start.saturating_add(blocks.len()).min(return_blocks))
-        .fold(planned_prefix_blocks.min(return_blocks), usize::max)
+    contiguous_chunk_blocks(chunks).min(return_blocks)
 }
 
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
@@ -7004,29 +7028,26 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_completed_plan_return_blocks_tracks_actual_background_work() {
+    fn body_receipt_completed_plan_return_blocks_tracks_contiguous_progress() {
         let mut chunks = BTreeMap::new();
-        assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
-            512
-        );
+        assert_eq!(body_receipt_completed_plan_return_blocks(&chunks, 2048), 0);
 
         chunks.insert(0, vec![0u8; 512]);
         assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            body_receipt_completed_plan_return_blocks(&chunks, 2048),
             512
         );
 
         chunks.insert(512, vec![0u8; 256]);
         assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            body_receipt_completed_plan_return_blocks(&chunks, 2048),
             768
         );
 
         chunks.insert(1536, vec![0u8; 1024]);
         assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
-            2048
+            body_receipt_completed_plan_return_blocks(&chunks, 2048),
+            768
         );
     }
 
@@ -7929,6 +7950,44 @@ mod tests {
         assert_eq!(blocks, vec![0, 1, 2, 3]);
         assert_eq!(residual_chunks.get(&4), Some(&vec![8, 9, 10, 11]));
         assert_eq!(residual_chunks.get(&8), Some(&vec![12, 13, 14, 15]));
+    }
+
+    #[test]
+    fn primary_body_receipt_completion_emits_only_contiguous_prefix() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![0u8; 128]);
+        chunks.insert(256, vec![1u8; 128]);
+
+        let completion = body_receipt_completion_chunks(512, chunks, None);
+
+        assert_eq!(completion.blocks.len(), 128);
+        assert_eq!(completion.planned_return_blocks, 128);
+        assert!(completion.residual_chunks.is_empty());
+        assert_eq!(
+            completion.min_accepted_prefix,
+            PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
+        );
+    }
+
+    #[test]
+    fn residual_body_receipt_completion_preserves_suffix_chunks() {
+        let mut chunks = BTreeMap::new();
+        chunks.insert(0, vec![0u8; 128]);
+        chunks.insert(256, vec![1u8; 128]);
+
+        let completion = body_receipt_completion_chunks(
+            512,
+            chunks,
+            Some(PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS),
+        );
+
+        assert_eq!(completion.blocks.len(), 128);
+        assert_eq!(completion.planned_return_blocks, 512);
+        assert_eq!(completion.residual_chunks.get(&128), Some(&vec![1u8; 128]));
+        assert_eq!(
+            completion.min_accepted_prefix,
+            PIPELINED_BODY_RECEIPT_RESIDUAL_MIN_ACCEPTED_PREFIX_BLOCKS
+        );
     }
 
     #[test]
