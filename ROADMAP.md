@@ -10,7 +10,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. Dense startup validation then exposed stale queued-plan peer load and decoupled prefix tail latency as the next scheduler bottlenecks. The current build refreshes queued body/receipt plan peer snapshots before ready-plan admission, load-adjusts the serving-peer score, and adds bounded prefix hedging inside the decoupled dense body/receipt executor. The latest warm dense sample on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-113342.log` measured `148.3` actual blocks/sec with `5` low windows and `0` zero-progress windows, improving over the prior accepted dense baseline of `136.6` actual blocks/sec with `6` low windows and `0` zero-progress windows.
 
-Three follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window, and queued expected-prefix admission produced `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
+Four follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window, queued expected-prefix admission produced `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows, and routing dense plans through the existing chunk-owned paired scheduler produced `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
 
 ## Completed Since Last Run
 
@@ -63,13 +63,17 @@ Three follow-up scheduler candidates were tested and rejected: a scored decouple
   - The candidate capped the expected queued plan to a request-slot-fitting prefix instead of waiting for the full plan reservation.
   - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-124445.log` regressed to `57.9` actual blocks/sec with `15` low windows and `6` zero-progress windows.
   - The candidate was reverted locally and on the Mac mini; the remote client was restarted on the accepted scheduler checkpoint.
+- Rejected chunk-owned dense routing:
+  - The candidate disabled the decoupled dense body/receipt executor and routed dense plans through the existing chunk-owned paired scheduler.
+  - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-125836.log` regressed to `91.2` actual blocks/sec with `13` low windows and `3` zero-progress windows despite reaching about 30 serving peers.
+  - The candidate was reverted locally and on the Mac mini; the remote client was restarted on the accepted scheduler checkpoint.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. Scored decoupled peer selection, prepare-wait refill, and queued expected-prefix admission were measured regressions. The next scheduler step should be a true subrequest-level live queue that owns expected-prefix body/receipt work directly, with richer diagnostics, rather than another ready-plan admission tweak.
+   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. Scored decoupled peer selection, prepare-wait refill, queued expected-prefix admission, and reusing the existing chunk-owned paired scheduler for dense plans were measured regressions. The next scheduler step should preserve the faster decoupled dense body/receipt role execution while adding shared subrequest diagnostics and completion accounting, rather than swapping back to paired chunk ownership.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -121,8 +125,8 @@ Three follow-up scheduler candidates were tested and rejected: a scored decouple
   - Resolution: added bounded prefix hedging for the earliest missing accepted-prefix body/receipt chunk, using unused peers and the existing spare hedge budget.
   - Remaining: low windows still occur under poor peer mixes, so adaptive role admission and queue-level critical work remain open.
 - Challenge: follow-up scheduler tweaks did not improve live throughput.
-  - Resolution: scored decoupled peer dispatch, prepare-wait refill, and queued expected-prefix admission were benchmarked, rejected, reverted, and the remote client was restored to the accepted checkpoint.
-  - Remaining: the next improvement needs a subrequest-level live scheduler that preserves ordered writes while keeping expected-sequence body/receipt work prioritized.
+  - Resolution: scored decoupled peer dispatch, prepare-wait refill, queued expected-prefix admission, and chunk-owned dense routing were benchmarked, rejected, reverted, and the remote client was restored to the accepted checkpoint.
+  - Remaining: the next improvement needs better subrequest-level diagnostics and scheduling inside the decoupled dense path, not replacement with the slower paired scheduler.
 
 ## Dead Code and Obsolescence Cleanup
 
