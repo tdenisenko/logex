@@ -4806,43 +4806,41 @@ fn schedule_body_receipt_plan_body_role<'a>(
     chunk: &mut PlanLiveBodyReceiptChunk,
     hashes: &[B256],
 ) -> bool {
-    while chunk.state.bodies.next_index < chunk.candidates.bodies.len() {
-        let peer_id = chunk.candidates.bodies[chunk.state.bodies.next_index];
-        chunk.state.bodies.next_index += 1;
-        if !chunk.state.bodies.used_peers.insert(peer_id) {
-            continue;
-        }
+    let Some(peer_id) = next_body_receipt_role_candidate(
+        &chunk.candidates.bodies,
+        &mut chunk.state.bodies,
+        &peer_state.body_bad_peers,
+    ) else {
+        return false;
+    };
 
-        let request_hashes = hashes.to_vec();
-        record_body_receipt_attempt_peer(&mut peer_state.body_in_flight_peers, Some(peer_id));
-        chunk.state.bodies.in_flight += 1;
-        chunk.state.bodies.last_scheduled_at = Some(Instant::now());
-        attempts.push(
-            async move {
-                let started_at = Instant::now();
-                let requested = request_hashes.len();
-                let _active = BodyReceiptActiveRequestGuard::new(
-                    &plan.accounting_tx,
-                    peer_id,
-                    PeerRequestKind::Bodies,
-                );
-                let result = plan
-                    .request_bodies_until_complete(peer_id, request_hashes)
-                    .await;
-                BodyReceiptPlanRoleAttempt::Bodies {
-                    start,
-                    peer_id,
-                    requested,
-                    elapsed: started_at.elapsed(),
-                    result,
-                }
+    let request_hashes = hashes.to_vec();
+    record_body_receipt_attempt_peer(&mut peer_state.body_in_flight_peers, Some(peer_id));
+    chunk.state.bodies.in_flight += 1;
+    chunk.state.bodies.last_scheduled_at = Some(Instant::now());
+    attempts.push(
+        async move {
+            let started_at = Instant::now();
+            let requested = request_hashes.len();
+            let _active = BodyReceiptActiveRequestGuard::new(
+                &plan.accounting_tx,
+                peer_id,
+                PeerRequestKind::Bodies,
+            );
+            let result = plan
+                .request_bodies_until_complete(peer_id, request_hashes)
+                .await;
+            BodyReceiptPlanRoleAttempt::Bodies {
+                start,
+                peer_id,
+                requested,
+                elapsed: started_at.elapsed(),
+                result,
             }
-            .boxed(),
-        );
-        return true;
-    }
-
-    false
+        }
+        .boxed(),
+    );
+    true
 }
 
 fn schedule_body_receipt_plan_receipt_role<'a>(
@@ -4856,48 +4854,59 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
     hashes: &[B256],
     expected_receipt_counts: Option<&[usize]>,
 ) -> bool {
-    while chunk.state.receipts.next_index < chunk.candidates.receipts.len() {
-        let peer_id = chunk.candidates.receipts[chunk.state.receipts.next_index];
-        chunk.state.receipts.next_index += 1;
-        if !chunk.state.receipts.used_peers.insert(peer_id) {
+    let Some(peer_id) = next_body_receipt_role_candidate(
+        &chunk.candidates.receipts,
+        &mut chunk.state.receipts,
+        &peer_state.receipt_bad_peers,
+    ) else {
+        return false;
+    };
+
+    let request_hashes = hashes.to_vec();
+    let expected_receipt_counts = expected_receipt_counts.map(|counts| counts.to_vec());
+    record_body_receipt_attempt_peer(&mut peer_state.receipt_in_flight_peers, Some(peer_id));
+    chunk.state.receipts.in_flight += 1;
+    chunk.state.receipts.last_scheduled_at = Some(Instant::now());
+    attempts.push(
+        async move {
+            let started_at = Instant::now();
+            let requested = request_hashes.len();
+            let _active = BodyReceiptActiveRequestGuard::new(
+                &plan.accounting_tx,
+                peer_id,
+                PeerRequestKind::Receipts,
+            );
+            let result = plan
+                .request_receipts_until_complete(peer_id, request_hashes, expected_receipt_counts)
+                .await;
+            BodyReceiptPlanRoleAttempt::Receipts {
+                start,
+                peer_id,
+                requested,
+                elapsed: started_at.elapsed(),
+                result,
+            }
+        }
+        .boxed(),
+    );
+    true
+}
+
+fn next_body_receipt_role_candidate(
+    candidates: &[PeerId],
+    state: &mut BodyReceiptChunkLiveRoleState,
+    bad_peers: &HashSet<PeerId>,
+) -> Option<PeerId> {
+    while state.next_index < candidates.len() {
+        let peer_id = candidates[state.next_index];
+        state.next_index += 1;
+        if bad_peers.contains(&peer_id) || !state.used_peers.insert(peer_id) {
             continue;
         }
-
-        let request_hashes = hashes.to_vec();
-        let expected_receipt_counts = expected_receipt_counts.map(|counts| counts.to_vec());
-        record_body_receipt_attempt_peer(&mut peer_state.receipt_in_flight_peers, Some(peer_id));
-        chunk.state.receipts.in_flight += 1;
-        chunk.state.receipts.last_scheduled_at = Some(Instant::now());
-        attempts.push(
-            async move {
-                let started_at = Instant::now();
-                let requested = request_hashes.len();
-                let _active = BodyReceiptActiveRequestGuard::new(
-                    &plan.accounting_tx,
-                    peer_id,
-                    PeerRequestKind::Receipts,
-                );
-                let result = plan
-                    .request_receipts_until_complete(
-                        peer_id,
-                        request_hashes,
-                        expected_receipt_counts,
-                    )
-                    .await;
-                BodyReceiptPlanRoleAttempt::Receipts {
-                    start,
-                    peer_id,
-                    requested,
-                    elapsed: started_at.elapsed(),
-                    result,
-                }
-            }
-            .boxed(),
-        );
-        return true;
+        return Some(peer_id);
     }
 
-    false
+    None
 }
 
 fn body_receipt_plan_role_attempt_start(attempt: &BodyReceiptPlanRoleAttempt) -> usize {
@@ -6706,6 +6715,41 @@ mod tests {
 
         assert_eq!(primary, Some(second));
         assert_eq!(ordered, vec![second, third, first]);
+    }
+
+    #[test]
+    fn body_receipt_role_candidate_skips_used_and_bad_peers() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let candidates = vec![first, second, third];
+        let mut state = BodyReceiptChunkLiveRoleState {
+            used_peers: HashSet::from([first]),
+            ..Default::default()
+        };
+        let bad_peers = HashSet::from([second]);
+
+        let selected = next_body_receipt_role_candidate(&candidates, &mut state, &bad_peers);
+
+        assert_eq!(selected, Some(third));
+        assert_eq!(state.next_index, candidates.len());
+        assert!(state.used_peers.contains(&third));
+        assert!(!state.used_peers.contains(&second));
+    }
+
+    #[test]
+    fn body_receipt_role_candidate_returns_none_after_bad_peers_exhaust_candidates() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let candidates = vec![first, second];
+        let mut state = BodyReceiptChunkLiveRoleState::default();
+        let bad_peers = HashSet::from([first, second]);
+
+        let selected = next_body_receipt_role_candidate(&candidates, &mut state, &bad_peers);
+
+        assert_eq!(selected, None);
+        assert_eq!(state.next_index, candidates.len());
+        assert!(state.used_peers.is_empty());
     }
 
     #[test]

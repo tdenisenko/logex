@@ -4,9 +4,9 @@
 
 LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed log segments, and serves verified logs through the dashboard, query APIs, and live transfer notifications.
 
-The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch is focused on making historical EL sync stable under peer-tail latency. The latest accepted scheduler checkpoint keeps ordered verification/writes intact while improving downloader continuity: reverse header batches can materialize multiple body/receipt plans, ordered coalesced writes advance the fetch cursor immediately, ready plans count toward active body/receipt work, low-peer prefix hedging starts earlier, reverse header pages can race a small batch of candidates, paired body/receipt plans no longer reserve redundant prefix work that the executor does not start, and write-path refill begins before the storage write instead of waiting for the write timer or write completion.
+The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch is focused on making historical EL sync stable under peer-tail latency. The latest accepted scheduler checkpoint keeps ordered verification/writes intact while improving downloader continuity: reverse header batches can materialize multiple body/receipt plans, ordered coalesced writes advance the fetch cursor immediately, ready plans count toward active body/receipt work, low-peer prefix hedging starts earlier, reverse header pages can race a small batch of candidates, paired body/receipt plans no longer reserve redundant prefix work that the executor does not start, write-path refill begins before the storage write instead of waiting for the write timer or write completion, and live body/receipt chunks stop reusing peers that already failed the same role inside the current plan.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The latest accepted five-minute sample measured `531.2` actual blocks/sec with `2` low windows and `1` zero-progress window during peer warm-up. The remaining performance gap is still scheduler cadence under peer-tail/head-of-line pressure, not storage integrity or consensus validation.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The latest accepted warm five-minute sample measured `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows while connected peers grew from 44 to 68 and serving peers grew from 20 to 32. The remaining proof point is longer/full-run validation across dense and sparse ranges, not the short-sample scheduler cadence that was previously producing repeated stalls.
 
 ## Completed Since Last Run
 
@@ -32,13 +32,17 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
   - `cargo test -p logex-sync`
   - Remote release build on the Mac mini
   - Remote five-minute throughput smoke on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-092820.log`
+- Tightened the live body/receipt role scheduler:
+  - Role scheduling now re-checks the plan-level bad-peer set before assigning a prebuilt candidate to another chunk.
+  - This prevents a peer that timed out or disconnected for bodies/receipts from being reused elsewhere in the same live plan.
+  - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-094234.log` produced a warm five-minute sample of `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: the latest checkpoint improves active-lane continuity, but one zero-progress floor window still appeared in a five-minute sample, so the scheduler is not complete.
+   - Current gap: the latest checkpoint removed zero-progress windows in a warm five-minute sample, but the scheduler still needs longer validation across dense and sparse ranges before this TODO can be removed.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -76,7 +80,10 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
   - Remaining: continue testing long runs to ensure the lower reservation pressure does not reduce resilience in sparse peer conditions.
 - Challenge: write-path refill could happen only after a timer tick or after write completion.
   - Resolution: added an immediate bounded refill after the ordered fetch cursor advances and before the write task starts.
-  - Remaining: remove the final zero-progress cadence window by tightening the live expected-prefix lane.
+  - Remaining: validate that the improvement holds over longer dense and sparse ranges.
+- Challenge: timed-out body/receipt peers could remain in other chunks' prebuilt candidate lists inside the same live plan.
+  - Resolution: live role scheduling now skips role-bad peers at assignment time, not only when candidate lists are initially built or extended.
+  - Remaining: confirm with longer runs that this removes repeated peer-tail stalls without reducing recovery options in poor peer conditions.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -89,9 +96,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; pending commit for live role bad-peer avoidance.
 - Pull request status: PR #96 remains the active draft performance PR.
-- Merge status: not ready; live scheduler work is improved but not complete.
+- Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.
 
 ## Known Issues or Risks
