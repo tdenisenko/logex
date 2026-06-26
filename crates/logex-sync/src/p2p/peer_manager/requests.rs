@@ -25,6 +25,7 @@ const PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_PEER_LIMIT: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_CHUNKS: usize = 2;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT: Duration = Duration::from_secs(12);
+const PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
     PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
@@ -1427,6 +1428,7 @@ impl BodyReceiptRequestPlan {
         let mut failures = Vec::new();
         let mut stats = Vec::new();
         let mut hedge_count = 0usize;
+        let mut prefix_completed_at: Option<Instant> = None;
         let lane_schedule: BodyReceiptLiveLaneSchedule;
         let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
         {
@@ -1529,6 +1531,15 @@ impl BodyReceiptRequestPlan {
             );
 
             while !attempts.is_empty() {
+                if let Some(completed_at) = prefix_completed_at
+                    && (body_receipt_plan_live_in_flight_background_chunk_count(
+                        &active_chunks,
+                        min_return_blocks,
+                    ) == 0
+                        || completed_at.elapsed() >= PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE)
+                {
+                    break;
+                }
                 let Some(wait_timeout) =
                     PIPELINED_BODY_RECEIPT_PLAN_TIMEOUT.checked_sub(plan_started_at.elapsed())
                 else {
@@ -1548,11 +1559,18 @@ impl BodyReceiptRequestPlan {
                     );
                     break;
                 };
-                let role_attempt = match timeout(
-                    wait_timeout.min(PIPELINED_BODY_RECEIPT_HEDGE_DELAY),
-                    attempts.next(),
-                )
-                .await
+                let wait_slice = prefix_completed_at
+                    .and_then(|completed_at| {
+                        PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE
+                            .checked_sub(completed_at.elapsed())
+                    })
+                    .unwrap_or(PIPELINED_BODY_RECEIPT_HEDGE_DELAY)
+                    .min(PIPELINED_BODY_RECEIPT_HEDGE_DELAY);
+                if wait_slice.is_zero() {
+                    break;
+                }
+                let role_attempt = match timeout(wait_timeout.min(wait_slice), attempts.next())
+                    .await
                 {
                     Ok(Some(role_attempt)) => role_attempt,
                     Ok(None) => break,
@@ -1574,6 +1592,9 @@ impl BodyReceiptRequestPlan {
                                     ),
                                 "body/receipt chunk pipeline hit plan timeout"
                             );
+                            break;
+                        }
+                        if prefix_completed_at.is_some() {
                             break;
                         }
                         let prefix_critical = body_receipt_has_buffered_suffix_after_prefix(
@@ -1643,9 +1664,17 @@ impl BodyReceiptRequestPlan {
                 let contiguous_blocks = contiguous_chunk_blocks(&chunks);
                 if contiguous_blocks >= min_return_blocks || contiguous_blocks == self.hashes.len()
                 {
-                    break;
+                    if contiguous_blocks == self.hashes.len()
+                        || body_receipt_plan_live_in_flight_background_chunk_count(
+                            &active_chunks,
+                            min_return_blocks,
+                        ) == 0
+                    {
+                        break;
+                    }
+                    prefix_completed_at.get_or_insert_with(Instant::now);
+                    continue;
                 }
-
                 let prefix_critical =
                     body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks);
                 let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
@@ -1805,6 +1834,9 @@ impl BodyReceiptRequestPlan {
             max_prefix_chunks = lane_schedule.max_prefix_chunks,
             max_background_chunks = lane_schedule.max_background_chunks,
             max_attempts = lane_schedule.max_role_attempts,
+            prefix_background_drain_ms = prefix_completed_at
+                .map(|completed_at| completed_at.elapsed().as_millis())
+                .unwrap_or(0),
             plan_ms = plan_started_at.elapsed().as_millis(),
             "body/receipt live role pipeline plan completed"
         );
@@ -1812,7 +1844,11 @@ impl BodyReceiptRequestPlan {
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
             return_blocks: self.return_blocks,
-            planned_return_blocks: self.planned_prefix_blocks(),
+            planned_return_blocks: body_receipt_completed_plan_return_blocks(
+                &chunks,
+                self.planned_prefix_blocks(),
+                self.return_blocks,
+            ),
             chunks,
             failures,
             stats,
@@ -4376,6 +4412,18 @@ fn body_receipt_plan_live_active_background_chunk_count(
         .count()
 }
 
+fn body_receipt_plan_live_in_flight_background_chunk_count(
+    chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    min_return_blocks: usize,
+) -> usize {
+    chunks
+        .values()
+        .filter(|chunk| {
+            chunk.range.start >= min_return_blocks && body_receipt_chunk_has_in_flight_roles(chunk)
+        })
+        .count()
+}
+
 fn body_receipt_plan_live_in_flight_chunks(
     chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
 ) -> HashSet<usize> {
@@ -6209,6 +6257,18 @@ fn body_receipt_completion_return_blocks(
     planned_return_blocks.min(return_blocks).min(total_hashes)
 }
 
+fn body_receipt_completed_plan_return_blocks<T>(
+    chunks: &BTreeMap<usize, Vec<T>>,
+    planned_prefix_blocks: usize,
+    return_blocks: usize,
+) -> usize {
+    chunks
+        .iter()
+        .filter(|(start, blocks)| **start < return_blocks && !blocks.is_empty())
+        .map(|(start, blocks)| start.saturating_add(blocks.len()).min(return_blocks))
+        .fold(planned_prefix_blocks.min(return_blocks), usize::max)
+}
+
 fn body_receipt_min_accepted_prefix_override(return_blocks: usize, prefix: usize) -> usize {
     return_blocks.min(prefix)
 }
@@ -6649,6 +6709,33 @@ mod tests {
     }
 
     #[test]
+    fn body_receipt_completed_plan_return_blocks_tracks_actual_background_work() {
+        let mut chunks = BTreeMap::new();
+        assert_eq!(
+            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            512
+        );
+
+        chunks.insert(0, vec![0u8; 512]);
+        assert_eq!(
+            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            512
+        );
+
+        chunks.insert(512, vec![0u8; 256]);
+        assert_eq!(
+            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            768
+        );
+
+        chunks.insert(1536, vec![0u8; 1024]);
+        assert_eq!(
+            body_receipt_completed_plan_return_blocks(&chunks, 512, 2048),
+            2048
+        );
+    }
+
+    #[test]
     fn body_receipt_min_accepted_prefix_accepts_dense_chunk_progress() {
         assert_eq!(body_receipt_min_accepted_prefix(32), 32);
         assert_eq!(body_receipt_min_accepted_prefix(64), 32);
@@ -6944,6 +7031,15 @@ mod tests {
         );
         assert_eq!(
             body_receipt_plan_live_active_background_chunk_count(&chunks, 64),
+            1
+        );
+        assert_eq!(
+            body_receipt_plan_live_in_flight_background_chunk_count(&chunks, 64),
+            0
+        );
+        chunks.get_mut(&64).unwrap().state.receipts.in_flight = 1;
+        assert_eq!(
+            body_receipt_plan_live_in_flight_background_chunk_count(&chunks, 64),
             1
         );
         assert_eq!(body_receipt_plan_live_active_chunk_count(&chunks), 2);
