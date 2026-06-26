@@ -4647,6 +4647,8 @@ impl SyncEngine {
         self.historical_ingest_sequence = Some(sequence);
         self.historical_ingest_started_at = Some(std::time::Instant::now());
         self.sync_status_peers();
+        let pre_write_refilled_fetch_pipeline =
+            self.refill_historical_fetch_pipeline_during_write().await?;
         let mut write_task = Box::pin(write_prepared_historical_batch(
             prepared,
             Arc::clone(&self.storage),
@@ -4751,7 +4753,8 @@ impl SyncEngine {
             self.reset_historical_fetch_pipeline();
         }
         let refill_started = std::time::Instant::now();
-        let refilled_fetch_pipeline = self.prime_historical_backfill_pipeline().await?;
+        let refilled_fetch_pipeline =
+            pre_write_refilled_fetch_pipeline || self.prime_historical_backfill_pipeline().await?;
         let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 

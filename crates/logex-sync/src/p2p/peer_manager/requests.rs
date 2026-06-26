@@ -13,7 +13,6 @@ use crate::primitives::{
 use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
-const PIPELINED_GAP_RETRY_ROUNDS: usize = 2;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_millis(1_500);
 const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT_MAX: Duration = Duration::from_secs(8);
@@ -1301,9 +1300,8 @@ impl BodyReceiptRequestPlan {
                 .min(self.max_in_flight);
         let mut peer_state = BodyReceiptPlanPeerState::default();
         let mut reservations = BodyReceiptRequestReservations::default();
-        let mut scheduled_prefix_ranges = Vec::with_capacity(max_scheduled_chunks);
         for _ in 0..max_scheduled_chunks {
-            let Some((chunk_index, range)) = pending_ranges.next() else {
+            let Some((chunk_index, _range)) = pending_ranges.next() else {
                 break;
             };
             add_paired_initial_chunk_reservation(
@@ -1311,29 +1309,6 @@ impl BodyReceiptRequestPlan {
                 &mut peer_state,
                 &mut reservations,
                 chunk_index,
-            );
-            scheduled_prefix_ranges.push((chunk_index, range));
-        }
-
-        let redundant_prefix_chunks = body_receipt_initial_prefix_redundancy_count(
-            &self.ranges,
-            min_return_blocks,
-            max_scheduled_chunks,
-            self.max_in_flight,
-            self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
-        );
-        for (duplicate_index, (base_chunk_index, _range)) in scheduled_prefix_ranges
-            .iter()
-            .take(redundant_prefix_chunks)
-            .cloned()
-            .enumerate()
-        {
-            add_paired_initial_chunk_reservation(
-                self,
-                &mut peer_state,
-                &mut reservations,
-                base_chunk_index
-                    + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
             );
         }
 
@@ -1522,7 +1497,6 @@ impl BodyReceiptRequestPlan {
                 max_live_chunks,
                 max_role_attempts,
             };
-            let mut scheduled_prefix_ranges = Vec::with_capacity(lane_schedule.max_prefix_chunks);
             for _ in 0..lane_schedule.max_prefix_chunks {
                 let Some((chunk_index, range)) = pending_prefix_ranges.pop_front() else {
                     break;
@@ -1534,31 +1508,6 @@ impl BodyReceiptRequestPlan {
                     &mut peer_state,
                     range.clone(),
                     chunk_index,
-                );
-                scheduled_prefix_ranges.push((chunk_index, range));
-            }
-
-            let redundant_prefix_chunks = body_receipt_initial_prefix_redundancy_count(
-                &self.ranges,
-                min_return_blocks,
-                lane_schedule.max_prefix_chunks,
-                self.max_in_flight,
-                self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
-            );
-            for (duplicate_index, (base_chunk_index, range)) in scheduled_prefix_ranges
-                .iter()
-                .take(redundant_prefix_chunks)
-                .cloned()
-                .enumerate()
-            {
-                schedule_body_receipt_plan_chunk(
-                    &self,
-                    &mut attempts,
-                    &mut active_chunks,
-                    &mut peer_state,
-                    range,
-                    base_chunk_index
-                        + ((PIPELINED_GAP_RETRY_ROUNDS + 1 + duplicate_index) * self.ranges.len()),
                 );
             }
             schedule_body_receipt_background_chunks(
@@ -6589,32 +6538,6 @@ fn body_receipt_background_chunk_limit(
         .min(background_chunks)
 }
 
-fn body_receipt_initial_prefix_redundancy_count(
-    ranges: &[std::ops::Range<usize>],
-    min_return_blocks: usize,
-    scheduled_chunks: usize,
-    max_in_flight: usize,
-    peer_count: usize,
-) -> usize {
-    if ranges.is_empty()
-        || min_return_blocks == 0
-        || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
-        || peer_count < PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS
-    {
-        return 0;
-    }
-
-    let spare_attempts = max_in_flight.saturating_sub(scheduled_chunks);
-    if spare_attempts == 0 {
-        return 0;
-    }
-
-    let prefix_chunks = body_receipt_scheduled_chunk_limit(ranges, min_return_blocks);
-    spare_attempts
-        .min(prefix_chunks)
-        .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
-}
-
 fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count: usize) -> usize {
     if min_return_blocks == 0
         || min_return_blocks > PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
@@ -7241,44 +7164,6 @@ mod tests {
         );
         assert_eq!(
             body_receipt_background_chunk_limit(&ranges, 64, 64, 2, 8),
-            0
-        );
-    }
-
-    #[test]
-    fn body_receipt_initial_prefix_redundancy_uses_only_spare_dense_capacity() {
-        let ranges = vec![0..32, 32..64, 64..96, 96..128, 128..160, 160..192];
-
-        assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 8, 16),
-            4
-        );
-        assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 6, 16),
-            2
-        );
-        assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 128, 4, 4, 16),
-            0
-        );
-    }
-
-    #[test]
-    fn body_receipt_initial_prefix_redundancy_skips_sparse_or_underpeered_plans() {
-        let ranges = vec![0..128, 128..256, 256..384, 384..512, 512..640];
-
-        assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(&ranges, 2048, 5, 10, 32),
-            0
-        );
-        assert_eq!(
-            body_receipt_initial_prefix_redundancy_count(
-                &ranges,
-                512,
-                4,
-                8,
-                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS - 1
-            ),
             0
         );
     }
