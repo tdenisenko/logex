@@ -6,7 +6,7 @@ LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execu
 
 The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch focuses on making historical EL sync stable under peer-tail latency while preserving ordered cryptographic verification and storage writes.
 
-The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The decoupled path reached higher bursts in some samples, but repeatedly stalled behind under-owned prefix chunks. The live path produced a cleaner remote sample after warm-up: `135.5` actual blocks/sec, `4` low windows, and `1` startup zero-progress window over five minutes, then restarted cleanly and warmed to `~322k` logs/sec with active body and receipt requests.
+The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The decoupled path reached higher bursts in some samples, but repeatedly stalled behind under-owned prefix chunks. The live path now treats stale or candidate-exhausted expected-prefix roles as prefix-critical work before falling back to salvage. The latest five-minute remote sample measured `195.4` actual blocks/sec with `1` low window and `0` zero-progress windows, improving over the previous live-scheduler sample of `125.5` actual blocks/sec with `8` low windows and `3` zero-progress windows.
 
 ## Completed Since Last Run
 
@@ -21,12 +21,18 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
   - `cargo fmt --check`
   - `cargo clippy -p logex-sync -- -D warnings`
 - Deployed the cleaned source to the Mac mini, rebuilt `logex-node --release`, restarted LogEx, and confirmed `/status` responds after peer warm-up.
+- Tightened live prefix repair:
+  - Earliest missing prefix roles now become prefix-critical when the active role is stale or all current candidates are exhausted, not only after a buffered suffix exists.
+  - This lets the live scheduler extend fresh candidates and use the bounded prefix-critical role lane before the slower salvage fallback.
+  - Added tests for stale in-flight prefix roles, fresh in-flight roles, and exhausted prefix candidate lists.
+  - Remote validation improved the five-minute sample from `125.5` blocks/sec, `8` low windows, and `3` zero windows to `195.4` blocks/sec, `1` low window, and `0` zero windows.
 
 ## Remaining TODOs
 
 1. Validate the live scheduler over a long historical run.
    - Reason: five-minute dense samples prove the stall mode improved, but full-run performance varies by log density and peer mix.
    - Completion criteria: record start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, low/zero-progress windows, bandwidth, CPU, memory, disk, peer counts, resets, and failures.
+   - Current progress: the latest dense sample had `0` zero-progress windows and sustained high receive bandwidth, but a full fresh run is still required before closing this TODO.
 
 2. Remove or formally rework the disabled decoupled dense path.
    - Reason: the active production path no longer selects it, but its helper code remains in the file for now to avoid mixing a large deletion with the scheduler routing change.
@@ -56,7 +62,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 ## Challenges and Resolutions
 
 - Challenge: historical progress had recurring spikes and plunges despite available peers.
-  - Resolution: instrumented the scheduler, identified under-owned prefix chunks in the decoupled dense path, and switched dense plans to the live scheduler path.
+  - Resolution: instrumented the scheduler, identified under-owned prefix chunks in the decoupled dense path, switched dense plans to the live scheduler path, and made stale/exhausted live prefix roles prefix-critical before salvage.
   - Remaining: full-run validation is still required before concluding PR #96.
 - Challenge: several small scheduler experiments improved isolated metrics but regressed end-to-end samples.
   - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows.
@@ -75,7 +81,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: pending.
+- Commits made during this run: `perf: route dense history through live scheduler`; pending prefix-repair commit.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until the live scheduler candidate has longer validation or the user accepts this milestone as the PR boundary.
 - Blockers: none.

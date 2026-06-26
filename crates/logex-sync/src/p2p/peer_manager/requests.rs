@@ -1649,7 +1649,8 @@ impl BodyReceiptRequestPlan {
                         if prefix_completed_at.is_some() {
                             break;
                         }
-                        let prefix_critical = body_receipt_has_buffered_suffix_after_prefix(
+                        let prefix_critical = body_receipt_prefix_critical_repair_needed(
+                            &active_chunks,
                             &chunks,
                             min_return_blocks,
                         );
@@ -1727,8 +1728,11 @@ impl BodyReceiptRequestPlan {
                     prefix_completed_at.get_or_insert_with(Instant::now);
                     continue;
                 }
-                let prefix_critical =
-                    body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks);
+                let prefix_critical = body_receipt_prefix_critical_repair_needed(
+                    &active_chunks,
+                    &chunks,
+                    min_return_blocks,
+                );
                 let role_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
                     lane_schedule.max_role_attempts,
                     prefix_critical,
@@ -1767,7 +1771,11 @@ impl BodyReceiptRequestPlan {
 
                 let missing_prefix_attempt_limit = body_receipt_prefix_critical_role_attempt_limit(
                     lane_schedule.max_role_attempts,
-                    body_receipt_has_buffered_suffix_after_prefix(&chunks, min_return_blocks),
+                    body_receipt_prefix_critical_repair_needed(
+                        &active_chunks,
+                        &chunks,
+                        min_return_blocks,
+                    ),
                 );
                 if attempts.len() < missing_prefix_attempt_limit
                     && let Some((range, chunk_index)) =
@@ -5445,6 +5453,73 @@ fn body_receipt_has_buffered_suffix_after_prefix<T>(
             .any(|start| *start > contiguous_blocks)
 }
 
+fn body_receipt_prefix_critical_repair_needed<T>(
+    active_chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    completed_chunks: &BTreeMap<usize, Vec<T>>,
+    min_return_blocks: usize,
+) -> bool {
+    body_receipt_has_buffered_suffix_after_prefix(completed_chunks, min_return_blocks)
+        || body_receipt_earliest_missing_prefix_role_needs_repair(
+            active_chunks,
+            completed_chunks,
+            min_return_blocks,
+        )
+}
+
+fn body_receipt_earliest_missing_prefix_role_needs_repair<T>(
+    active_chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    completed_chunks: &BTreeMap<usize, Vec<T>>,
+    min_return_blocks: usize,
+) -> bool {
+    let contiguous_blocks = contiguous_chunk_blocks(completed_chunks);
+    let Some(start) = active_chunks
+        .keys()
+        .copied()
+        .filter(|start| {
+            *start <= contiguous_blocks
+                && *start < min_return_blocks
+                && !completed_chunks.contains_key(start)
+        })
+        .min()
+    else {
+        return false;
+    };
+    let Some(chunk) = active_chunks.get(&start) else {
+        return false;
+    };
+    if chunk.completed {
+        return false;
+    }
+
+    let status = BodyReceiptChunkLiveStatus {
+        has_bodies: chunk.bodies.is_some(),
+        has_cached_receipts: !chunk.cached_receipts.is_empty(),
+        force: false,
+    };
+    let body_needs_repair = body_receipt_chunk_should_schedule_body(&chunk.state.bodies, &status)
+        && body_receipt_role_needs_prefix_critical_repair(
+            &chunk.state.bodies,
+            chunk.candidates.bodies.len(),
+        );
+    let receipt_needs_repair =
+        body_receipt_chunk_should_schedule_receipts(&chunk.state.receipts, &status)
+            && body_receipt_role_needs_prefix_critical_repair(
+                &chunk.state.receipts,
+                chunk.candidates.receipts.len(),
+            );
+
+    body_needs_repair || receipt_needs_repair
+}
+
+fn body_receipt_role_needs_prefix_critical_repair(
+    state: &BodyReceiptChunkLiveRoleState,
+    candidate_count: usize,
+) -> bool {
+    state.next_index >= candidate_count
+        || (state.in_flight > 0
+            && body_receipt_chunk_role_hedge_due(state.last_scheduled_at, false))
+}
+
 fn extend_body_receipt_plan_chunk_candidates(
     plan: &BodyReceiptRequestPlan,
     peer_state: &BodyReceiptPlanPeerState,
@@ -7929,6 +8004,133 @@ mod tests {
 
         let chunks = BTreeMap::from([(32usize, vec![1u8; 32])]);
         assert!(body_receipt_has_buffered_suffix_after_prefix(&chunks, 16));
+    }
+
+    #[test]
+    fn body_receipt_prefix_critical_repair_detects_stale_inflight_prefix_role() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut active_chunks = HashMap::new();
+        active_chunks.insert(
+            0usize,
+            PlanLiveBodyReceiptChunk {
+                range: 0..32,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: vec![peer, PeerId::repeat_byte(0x22)],
+                    receipts: vec![peer],
+                },
+                state: BodyReceiptChunkLiveState {
+                    bodies: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 1,
+                        last_scheduled_at: Some(
+                            Instant::now()
+                                - PIPELINED_BODY_RECEIPT_HEDGE_DELAY
+                                - Duration::from_millis(1),
+                        ),
+                    },
+                    receipts: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 1,
+                        last_scheduled_at: Some(Instant::now()),
+                    },
+                },
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: false,
+                hedges: 0,
+            },
+        );
+
+        assert!(body_receipt_prefix_critical_repair_needed(
+            &active_chunks,
+            &BTreeMap::<usize, Vec<u8>>::new(),
+            32,
+        ));
+    }
+
+    #[test]
+    fn body_receipt_prefix_critical_repair_ignores_fresh_inflight_prefix_role() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut active_chunks = HashMap::new();
+        active_chunks.insert(
+            0usize,
+            PlanLiveBodyReceiptChunk {
+                range: 0..32,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: vec![peer, PeerId::repeat_byte(0x22)],
+                    receipts: vec![peer],
+                },
+                state: BodyReceiptChunkLiveState {
+                    bodies: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 1,
+                        last_scheduled_at: Some(Instant::now()),
+                    },
+                    receipts: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 1,
+                        last_scheduled_at: Some(Instant::now()),
+                    },
+                },
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: false,
+                hedges: 0,
+            },
+        );
+
+        assert!(!body_receipt_prefix_critical_repair_needed(
+            &active_chunks,
+            &BTreeMap::<usize, Vec<u8>>::new(),
+            32,
+        ));
+    }
+
+    #[test]
+    fn body_receipt_prefix_critical_repair_detects_exhausted_prefix_role_candidates() {
+        let peer = PeerId::repeat_byte(0x11);
+        let mut active_chunks = HashMap::new();
+        active_chunks.insert(
+            0usize,
+            PlanLiveBodyReceiptChunk {
+                range: 0..32,
+                candidates: BodyReceiptChunkLiveCandidates {
+                    bodies: vec![peer],
+                    receipts: vec![peer],
+                },
+                state: BodyReceiptChunkLiveState {
+                    bodies: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 0,
+                        last_scheduled_at: Some(Instant::now()),
+                    },
+                    receipts: BodyReceiptChunkLiveRoleState {
+                        next_index: 1,
+                        used_peers: HashSet::from([peer]),
+                        in_flight: 1,
+                        last_scheduled_at: Some(Instant::now()),
+                    },
+                },
+                bodies: None,
+                expected_receipt_counts: None,
+                cached_receipts: Vec::new(),
+                completed: false,
+                hedges: 0,
+            },
+        );
+
+        assert!(body_receipt_prefix_critical_repair_needed(
+            &active_chunks,
+            &BTreeMap::<usize, Vec<u8>>::new(),
+            32,
+        ));
     }
 
     #[test]
