@@ -6,7 +6,9 @@ LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execu
 
 The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch is focused on making historical EL sync stable under peer-tail latency. The latest accepted scheduler checkpoint keeps ordered verification/writes intact while improving downloader continuity: reverse header batches can materialize multiple body/receipt plans, ordered coalesced writes advance the fetch cursor immediately, ready plans count toward active body/receipt work, low-peer prefix hedging starts earlier, reverse header pages can race a small batch of candidates, paired body/receipt plans no longer reserve redundant prefix work that the executor does not start, write-path refill begins before the storage write instead of waiting for the write timer or write completion, and live body/receipt chunks stop reusing peers that already failed the same role inside the current plan.
 
-The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The latest accepted warm five-minute sample measured `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows while connected peers grew from 44 to 68 and serving peers grew from 20 to 32. The remaining proof point is longer/full-run validation across dense and sparse ranges, not the short-sample scheduler cadence that was previously producing repeated stalls.
+The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The latest accepted warm five-minute sample measured `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows while connected peers grew from 44 to 68 and serving peers grew from 20 to 32. A follow-up sparse-tail sample measured `3,599.7` actual blocks/sec with `0` low windows and `0` zero-progress windows, and that run reached genesis.
+
+After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. The fresh run is active from `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-101835.log`; early dense-range throughput reached about `475k` logs/sec while the peer pool was still warming.
 
 ## Completed Since Last Run
 
@@ -36,13 +38,19 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
   - Role scheduling now re-checks the plan-level bad-peer set before assigning a prebuilt candidate to another chunk.
   - This prevents a peer that timed out or disconnected for bodies/receipts from being reused elsewhere in the same live plan.
   - Remote validation on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-094234.log` produced a warm five-minute sample of `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows.
+- Completed and preserved the latest full historical sync:
+  - The accepted scheduler build reached historical floor `0`.
+  - A sparse-tail validation sample produced `3,599.7` actual blocks/sec with `0` low windows and `0` zero-progress windows.
+  - The completed data dir was moved to `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`.
+  - A fresh data dir was created and seeded with `known-peers.json`, `discovery-secret`, `cl/known-peers.json`, and `cl/discovery-secret`.
+  - The old backup `/Volumes/SSD 4TB/LogEx-full-sync-20260625-102716` was removed, restoring about `1.0T` free space on the external SSD.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: the latest checkpoint removed zero-progress windows in a warm five-minute sample, but the scheduler still needs longer validation across dense and sparse ranges before this TODO can be removed.
+   - Current gap: the latest checkpoint removed zero-progress windows in warm and sparse-tail five-minute samples and completed genesis, but the fresh dense-range run still needs longer observation as peers warm up before this TODO can be removed.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -50,7 +58,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 3. Validate a full historical sync run.
    - Reason: short samples can mislead across log-dense and sparse block ranges.
-   - Completion criteria: record start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, zero-progress windows, bandwidth, CPU, memory, disk, peer counts, resets, and failures. The target remains a materially lower full-sync time, with a long-term goal of about four hours on this class of machine/network if peers and bandwidth allow it.
+   - Completion criteria: record start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, zero-progress windows, bandwidth, CPU, memory, disk, peer counts, resets, and failures. The target remains a materially lower full-sync time, with a long-term goal of about four hours on this class of machine/network if peers and bandwidth allow it. The latest partial-resume run completed genesis, but a fresh start-to-genesis run is still needed for a comparable full-sync number.
 
 4. Complete EL production hardening.
    - Reason: scheduler improvements must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
@@ -84,6 +92,9 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 - Challenge: timed-out body/receipt peers could remain in other chunks' prebuilt candidate lists inside the same live plan.
   - Resolution: live role scheduling now skips role-bad peers at assignment time, not only when candidate lists are initially built or extended.
   - Remaining: confirm with longer runs that this removes repeated peer-tail stalls without reducing recovery options in poor peer conditions.
+- Challenge: full-sync backups were consuming nearly all external disk space.
+  - Resolution: after the new run reached genesis, removed the old backup, preserved the completed data dir under a dated full-sync backup, and restarted from a fresh data dir seeded with peer identity/cache files.
+  - Remaining: track whether the fresh run's filesystem allocation remains close to the logical storage metric after compression and compaction settle.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -96,7 +107,7 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`; pending commit for live role bad-peer avoidance.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; pending documentation commit for full-sync completion and backup rotation.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.
@@ -106,3 +117,4 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 - The current accepted checkpoint improves stability but does not yet hit the target throughput. More architectural scheduler work is still required.
 - Five-minute samples are useful for regressions but not enough to prove full-run performance.
 - Peer mix and network routing can materially affect measurements; benchmark notes must record routing mode, serving peers, and bandwidth.
+- After full sync, EL live head advanced correctly, but the node state briefly reported `Waiting For Consensus` while CL optimistic update RPCs were backing off. This needs follow-up if it persists in fresh runs.
