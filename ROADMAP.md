@@ -31,6 +31,9 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 - Rejected a bounded slot-overdraft admission experiment.
   - Reason: it increased active fetches but reintroduced zero-progress windows and lower throughput.
   - Result: the rejected sample measured `144.5` blocks/sec with `5` low windows and `3` zero windows; the code was reverted locally and the Mac mini was redeployed to the kept candidate.
+- Rejected slot-margin concurrency capping for queued ready plans.
+  - Reason: reducing a blocked ready plan's live chunk concurrency to current body/receipt slot margins avoided overdraft, but did not materially improve end-to-end floor advancement.
+  - Result: the five-minute sample measured `193.1` blocks/sec with `5` low windows and `0` zero windows, only slightly above the kept `187.5` blocks/sec baseline and with worse low-window behavior; the code was reverted and the Mac mini was restored to the kept candidate.
 
 ## Remaining TODOs
 
@@ -70,7 +73,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
   - Resolution: instrumented the scheduler, identified under-owned prefix chunks in the decoupled dense path, switched dense plans to the live scheduler path, made stale in-flight live prefix roles prefix-critical before salvage, and raised the healthy active-fetch floor to six.
   - Remaining: full-run validation is still required before concluding PR #96.
 - Challenge: several small scheduler experiments improved isolated metrics but regressed end-to-end samples.
-  - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows, including bounded slot overdraft.
+  - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows, including bounded slot overdraft and slot-margin concurrency capping.
   - Remaining: future work should stop one-line tuning and move to a deliberate admission/scheduler change compared against the kept live-scheduler baseline.
 - Challenge: the roadmap had accumulated too much experiment-by-experiment detail.
   - Resolution: condensed it to current state, decisions, and remaining work.
@@ -86,7 +89,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: route dense history through live scheduler`; pending scheduler-stabilization commit.
+- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; pending roadmap update for the rejected slot-cap experiment.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready as a production-complete scheduler; can be accepted only as a measured live-scheduler milestone before the larger admission redesign.
 - Blockers: none.
