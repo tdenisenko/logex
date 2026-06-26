@@ -39,7 +39,7 @@ const PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS: usize = 4;
 const PIPELINED_BODY_RECEIPT_IDLE_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS: usize = 8;
-const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = true;
+const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = false;
 const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_DENSE_CHUNK_BLOCKS: usize = 48;
@@ -7745,7 +7745,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_decoupled_plan_reservations_cover_initial_role_windows() {
+    fn body_receipt_dense_plan_uses_live_scheduler_reservations() {
         let body_peers = (0..PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 1) as u8))
             .collect::<Vec<_>>();
@@ -7772,7 +7772,7 @@ mod tests {
             accounting_tx: None,
         };
 
-        assert!(plan.should_use_decoupled_dense_pipeline());
+        assert!(!plan.should_use_decoupled_dense_pipeline());
         let reservations = plan.reservations();
         let body_reservations = reservations
             .entries()
@@ -7792,7 +7792,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_decoupled_plan_reservations_use_spare_window_for_prefix_redundancy() {
+    fn body_receipt_dense_plan_does_not_reserve_decoupled_spare_windows() {
         let body_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 1) as u8))
             .collect::<Vec<_>>();
@@ -7819,7 +7819,7 @@ mod tests {
             accounting_tx: None,
         };
 
-        assert!(plan.should_use_decoupled_dense_pipeline());
+        assert!(!plan.should_use_decoupled_dense_pipeline());
         let reservations = plan.reservations();
         let body_reservations = reservations
             .entries()
@@ -7834,8 +7834,8 @@ mod tests {
             .map(|entry| entry.count)
             .sum::<usize>();
 
-        assert_eq!(body_reservations, 8);
-        assert_eq!(receipt_reservations, 8);
+        assert_eq!(body_reservations, 4);
+        assert_eq!(receipt_reservations, 4);
     }
 
     #[test]
