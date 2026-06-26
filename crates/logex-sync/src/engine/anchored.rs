@@ -189,6 +189,14 @@ struct HistoricalFetchSchedulerDecision {
     reset_for_memory_pressure: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HistoricalExpectedFetchRetryState {
+    expected_fetch_is_active: bool,
+    waited: Duration,
+    completed_fetches: usize,
+    request_pressure_allows_refill: bool,
+}
+
 async fn validate_historical_blocks_parallel(
     headers: &[Header],
     hashes: &[B256],
@@ -700,15 +708,35 @@ fn historical_fetch_buffer_depth(
         .min(HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT)
 }
 
-fn historical_expected_fetch_retry_permitted(
-    expected_fetch_is_active: bool,
-    waited: Duration,
-) -> bool {
-    !expected_fetch_is_active || waited >= HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
+fn historical_expected_fetch_retry_permitted(state: HistoricalExpectedFetchRetryState) -> bool {
+    if !state.expected_fetch_is_active {
+        return true;
+    }
+    if state.waited >= HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY {
+        return true;
+    }
+
+    state.waited >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
+        && state.completed_fetches >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
+        && state.request_pressure_allows_refill
 }
 
 fn historical_fetch_duplicate_retry_permitted(active_attempts: usize) -> bool {
     active_attempts > 0 && active_attempts < HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE
+}
+
+fn historical_expected_fetch_attempt_allows_retry(active_attempts: usize) -> bool {
+    active_attempts == 0 || historical_fetch_duplicate_retry_permitted(active_attempts)
+}
+
+fn historical_expected_fetch_head_of_line_reset_permitted(
+    active_attempts: usize,
+    completed_fetches: usize,
+    retry_permitted: bool,
+) -> bool {
+    active_attempts == 0
+        && retry_permitted
+        && completed_fetches >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
 }
 
 fn historical_fetch_budget_has_capacity(
@@ -2990,6 +3018,16 @@ impl SyncEngine {
         )
     }
 
+    fn historical_body_receipt_request_pressure_allows_refill(&self) -> bool {
+        let snapshot = self.historical_fetch_scheduler_snapshot();
+        historical_body_receipt_request_pressure_allows_refill(
+            snapshot.body_ready_peers,
+            snapshot.receipt_ready_peers,
+            snapshot.active_body_requests,
+            snapshot.active_receipt_requests,
+        )
+    }
+
     fn historical_fetch_window_blocks(&self) -> u64 {
         let total_memory_bytes = historical_total_memory_bytes();
         let available_memory_bytes = historical_available_memory_bytes();
@@ -3279,7 +3317,7 @@ impl SyncEngine {
     async fn retry_expected_historical_fetch(&mut self, child_header: &Header) -> Result<bool> {
         let sequence = self.historical_fetch_expected_sequence;
         let active_attempts = self.active_expected_historical_fetch_attempt_count();
-        if !historical_fetch_duplicate_retry_permitted(active_attempts) {
+        if !historical_expected_fetch_attempt_allows_retry(active_attempts) {
             return Ok(false);
         }
         self.drain_historical_request_accounting();
@@ -3320,8 +3358,13 @@ impl SyncEngine {
         }
         let waited = started_at.elapsed();
         let active_attempts = self.active_expected_historical_fetch_attempt_count();
-        if !historical_expected_fetch_retry_permitted(active_attempts > 0, waited)
-            || !historical_fetch_duplicate_retry_permitted(active_attempts)
+        if !historical_expected_fetch_retry_permitted(HistoricalExpectedFetchRetryState {
+            expected_fetch_is_active: active_attempts > 0,
+            waited,
+            completed_fetches: self.historical_fetch_completed.len(),
+            request_pressure_allows_refill: self
+                .historical_body_receipt_request_pressure_allows_refill(),
+        }) || !historical_fetch_duplicate_retry_permitted(active_attempts)
         {
             return Ok(false);
         }
@@ -3457,27 +3500,33 @@ impl SyncEngine {
                 return Ok(None);
             }
 
-            let expected_fetch_is_active = self
-                .historical_fetch_handles
-                .contains_key(&self.historical_fetch_expected_sequence);
+            let active_expected_attempts = self.active_expected_historical_fetch_attempt_count();
+            let expected_fetch_is_active = active_expected_attempts > 0;
             if wait_started.elapsed() >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
                 && self.historical_fetch_completed.len()
                     >= HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED
             {
                 let waited = wait_started.elapsed();
                 let retry_permitted =
-                    historical_expected_fetch_retry_permitted(expected_fetch_is_active, waited);
+                    historical_expected_fetch_retry_permitted(HistoricalExpectedFetchRetryState {
+                        expected_fetch_is_active,
+                        waited,
+                        completed_fetches: self.historical_fetch_completed.len(),
+                        request_pressure_allows_refill: self
+                            .historical_body_receipt_request_pressure_allows_refill(),
+                    });
                 if retry_permitted
-                    && expected_fetch_is_active
+                    && historical_expected_fetch_attempt_allows_retry(active_expected_attempts)
                     && self.retry_expected_historical_fetch(child_header).await?
                 {
                     wait_started = Instant::now();
                     continue;
                 }
-                if retry_permitted
-                    && self.historical_fetch_completed.len()
-                        >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
-                {
+                if historical_expected_fetch_head_of_line_reset_permitted(
+                    active_expected_attempts,
+                    self.historical_fetch_completed.len(),
+                    retry_permitted,
+                ) {
                     tracing::debug!(
                         expected_sequence = self.historical_fetch_expected_sequence,
                         completed_fetches = self.historical_fetch_completed.len(),
@@ -5987,16 +6036,86 @@ mod tests {
     #[test]
     fn active_expected_fetch_gets_time_to_finish_before_retry() {
         assert!(!historical_expected_fetch_retry_permitted(
-            true,
-            HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
+            HistoricalExpectedFetchRetryState {
+                expected_fetch_is_active: true,
+                waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED - 1,
+                request_pressure_allows_refill: true,
+            }
         ));
         assert!(historical_expected_fetch_retry_permitted(
-            true,
-            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
+            HistoricalExpectedFetchRetryState {
+                expected_fetch_is_active: true,
+                waited: HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY,
+                completed_fetches: 0,
+                request_pressure_allows_refill: false,
+            }
         ));
         assert!(historical_expected_fetch_retry_permitted(
+            HistoricalExpectedFetchRetryState {
+                expected_fetch_is_active: false,
+                waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
+                completed_fetches: 0,
+                request_pressure_allows_refill: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn buffered_head_of_line_fetch_can_retry_when_pressure_allows() {
+        assert!(historical_expected_fetch_retry_permitted(
+            HistoricalExpectedFetchRetryState {
+                expected_fetch_is_active: true,
+                waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+                request_pressure_allows_refill: true,
+            }
+        ));
+        assert!(!historical_expected_fetch_retry_permitted(
+            HistoricalExpectedFetchRetryState {
+                expected_fetch_is_active: true,
+                waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
+                completed_fetches: HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+                request_pressure_allows_refill: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_expected_fetch_can_be_refilled_without_duplicate_attempt() {
+        assert!(historical_expected_fetch_attempt_allows_retry(0));
+        assert!(historical_expected_fetch_attempt_allows_retry(1));
+        assert!(!historical_expected_fetch_attempt_allows_retry(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE
+        ));
+    }
+
+    #[test]
+    fn active_expected_fetch_attempts_block_head_of_line_reset() {
+        assert!(historical_expected_fetch_head_of_line_reset_permitted(
+            0,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+            true,
+        ));
+        assert!(!historical_expected_fetch_head_of_line_reset_permitted(
+            1,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+            true,
+        ));
+        assert!(!historical_expected_fetch_head_of_line_reset_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+            true,
+        ));
+        assert!(!historical_expected_fetch_head_of_line_reset_permitted(
+            0,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED - 1,
+            true,
+        ));
+        assert!(!historical_expected_fetch_head_of_line_reset_permitted(
+            0,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
             false,
-            HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
         ));
     }
 

@@ -14,6 +14,8 @@ Latest live scheduler work fixed a zero-prefix reset path in the body/receipt pl
 
 The latest scheduler slice splits live body/receipt work into explicit prefix and background lanes. The prefix lane keeps the contiguous verification target reserved, while the background lane can use only spare per-role capacity after the prefix lane is protected. This is accepted as a correctness-preserving architecture step, not as the final queued scheduler: live smoke in the dense recent range showed zero resets and strong throughput, but no background lane activation because those batches returned exactly the protected 512-block prefix window.
 
+The expected-fetch recovery path now treats a slow or missing expected sequence as a bounded recoverable condition before falling back to destructive lookahead reset. Missing expected fetches can be refilled immediately, active expected attempts get time to finish, and duplicate expected attempts suppress head-of-line reset while they are still active.
+
 ## Completed Since Last Run
 
 - Preserved completed body/receipt chunks after residual prefix gaps:
@@ -107,6 +109,12 @@ The latest scheduler slice splits live body/receipt work into explicit prefix an
   - Background chunks are scheduled from the same plan only when per-role request windows have spare capacity beyond the prefix lane.
   - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, targeted lane tests, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
   - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-165511.log` showed 90 completed batches, zero resets, zero zero-prefix failures, and about 572k logs/sec at the sample point with 12 serving peers. The background lane did not activate in that dense range because the planner returned 512-block prefix windows with no spare returned suffix range.
+- Hardened expected-fetch recovery:
+  - Missing expected fetch sequences can now be refilled even when no duplicate attempt is active.
+  - Slow expected sequences can launch a bounded duplicate earlier when later fetches are buffered and body/receipt request pressure allows the refill.
+  - Full lookahead reset now requires zero active attempts for the expected sequence, preventing active duplicates from triggering destructive reset.
+  - Local validation passed with `cargo fmt --check`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, and `cargo test -p logex-sync`.
+  - Remote smoke log `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260625-172228.log` showed bounded duplicate recovery completing without pipeline resets or zero-prefix failures in the sample.
 
 ## Remaining TODOs
 
@@ -149,6 +157,7 @@ The latest scheduler slice splits live body/receipt work into explicit prefix an
 - Prefix-critical body/receipt repair is triggered by any completed suffix chunk while contiguous progress is below the accepted floor, not only suffix chunks below that floor. A completed chunk past the accepted floor is still useful evidence that the missing prefix should be recovered rather than resetting the whole plan.
 - The live body/receipt plan now has a bounded final prefix salvage lane. It reuses the normal body/receipt request and count-validation path, but caps chunks, peers, and elapsed time so it remains a recovery lane rather than an unbounded serial fallback.
 - The live body/receipt plan now separates protected prefix work from background returned-range work. Background work is allowed only when the per-role request window has spare capacity after the prefix lane is reserved, preventing a repeat of the rejected broad full-window expansion.
+- Expected-fetch recovery now prefers bounded refill/duplicate recovery over destructive reset. Reset is reserved for cases where no expected-sequence attempt is active and enough buffered later work proves the ordered pipeline is blocked.
 - Transient request transport failures pause and demote peers for that request kind instead of forcing immediate local peer removal. Bad protocol responses and unsupported capabilities still receive strict reputation penalties.
 - Full VPS routing is currently used for benchmark-quality P2P coverage. Dashboard-only routing exists for cost control, but it is not the current benchmark mode.
 
@@ -234,6 +243,10 @@ The latest scheduler slice splits live body/receipt work into explicit prefix an
   - Resolution: added explicit prefix and background lanes; the background lane spends only role-window spare capacity and stayed inactive in the dense smoke where no safe suffix return window existed.
   - Remaining: the broader queued scheduler still needs to move this from per-plan lanes into cross-plan reservation and dispatch.
 
+- Challenge: the first earlier expected-fetch retry variant still reset the whole lookahead while a duplicate expected attempt was active.
+  - Resolution: changed the reset predicate to require zero active expected-sequence attempts and added tests for active duplicate reset suppression.
+  - Remaining: the broader queued scheduler should make duplicate/refill timing driven by measured peer latency and queue pressure rather than fixed delays alone.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Inspected `crates/logex-sync/src/engine/mod.rs`, `crates/logex-sync/src/engine/anchored.rs`, `crates/logex-sync/src/p2p/peer_manager/mod.rs`, and `crates/logex-sync/src/p2p/peer_manager/requests.rs`.
@@ -255,13 +268,14 @@ The latest scheduler slice splits live body/receipt work into explicit prefix an
 - Rejected and removed the aggressive full paired-window expansion after remote smoke showed it still produced a zero-prefix reset.
 - Inspected live body/receipt prefix repair helpers after the accepted fix; the bounded salvage lane remains required until the broader queued scheduler owns prefix-critical work proactively.
 - Inspected live lane scheduling after adding prefix/background queues; no existing helper became obsolete because the salvage and prefix-critical retry paths remain required recovery mechanisms.
+- Inspected expected-fetch retry and head-of-line reset helpers after hardening recovery; destructive reset remains required for unrecoverable ordered-state gaps, so no reset path was removed in this slice.
 - Could not safely remove the untracked `.DS_Store` without a destructive filesystem action; it remains untracked and was not staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`
 - New branch created this run: no
-- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`.
+- Commits made during this run: `perf: preserve residual body receipt chunks`; `perf: add prefix critical receipt retries`; `docs: record scheduler refill experiment`; `perf: add bounded expected fetch retries`; `perf: gate historical refill by request pressure`; `perf: bound body receipt plan windows`; `perf: preserve buffered partial prefixes`; `perf: refill missing expected historical fetches`; `perf: centralize historical refill scheduling`; `perf: stabilize live prefix scheduler`; `perf: add live scheduler background lane`; `perf: recover stalled expected fetches without reset`.
 - Pull request status: draft PR #96 remains open for scheduler work.
 - Merge status: not merged; bounded queued scheduler/backpressure work remains incomplete.
 - Validation run this pass: `cargo fmt --check`; `cargo check -p logex-sync`; residual, prefix-critical, refill/backpressure, bounded expected-fetch retry, scheduler decision, request-pressure, body/receipt prefix salvage, and live lane tests; `cargo clippy -p logex-sync -- -D warnings`; `cargo test -p logex-sync`; remote release builds and smokes on the Mac mini.
