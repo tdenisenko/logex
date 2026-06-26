@@ -10,6 +10,8 @@ The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683
 
 After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. Dense startup validation then exposed stale queued-plan peer load and decoupled prefix tail latency as the next scheduler bottlenecks. The current build refreshes queued body/receipt plan peer snapshots before ready-plan admission, load-adjusts the serving-peer score, and adds bounded prefix hedging inside the decoupled dense body/receipt executor. The latest warm dense sample on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-113342.log` measured `148.3` actual blocks/sec with `5` low windows and `0` zero-progress windows, improving over the prior accepted dense baseline of `136.6` actual blocks/sec with `6` low windows and `0` zero-progress windows.
 
+Two follow-up scheduler candidates were tested and rejected: a scored decoupled peer selector produced `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows, and prepare-wait pipeline refill produced `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window. The remote client was restored to the accepted scheduler checkpoint after each rejected test.
+
 ## Completed Since Last Run
 
 - Kept the conservative live scheduler checkpoint:
@@ -53,13 +55,17 @@ After genesis was reached, the old full-sync backup was removed, the completed d
   - Decoupled dense body and receipt chunk loops now reassign the earliest missing accepted-prefix chunk after the hedge delay to an unused peer while staying within the existing spare hedge budget.
   - Added tests for hedge peer selection and budget limits.
   - Remote warm validation improved the accepted dense baseline from `136.6` to `148.3` actual blocks/sec while keeping zero-progress windows at `0`.
+- Rejected two post-checkpoint candidates:
+  - Scored decoupled role peer selection was tested on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-120231.log` and regressed to `114.1` actual blocks/sec with `8` low windows and `4` zero-progress windows.
+  - Prepare-wait pipeline refill was tested on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-121651.log` and regressed to `85.5` actual blocks/sec with `13` low windows and `1` zero-progress window.
+  - Both candidates were reverted locally and on the Mac mini; the remote client was restarted on the accepted scheduler checkpoint.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. The next scheduler step is a stronger queue-owned critical lane or adaptive role admission so later completed work cannot sit behind a weak expected sequence.
+   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. Scored decoupled peer selection and prepare-wait refill were both measured regressions, so the next scheduler step should be a stronger queue-owned critical lane with explicit expected-sequence priority and richer diagnostics, not another local retry/refill tweak.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -110,6 +116,9 @@ After genesis was reached, the old full-sync backup was removed, the completed d
 - Challenge: decoupled dense body/receipt loops waited for slow prefix requests to finish before assigning spare work to another peer.
   - Resolution: added bounded prefix hedging for the earliest missing accepted-prefix body/receipt chunk, using unused peers and the existing spare hedge budget.
   - Remaining: low windows still occur under poor peer mixes, so adaptive role admission and queue-level critical work remain open.
+- Challenge: obvious follow-up scheduler tweaks did not improve live throughput.
+  - Resolution: scored decoupled peer dispatch and prepare-wait refill were benchmarked, rejected, reverted, and the remote client was restored to the accepted checkpoint.
+  - Remaining: the next improvement needs a queue-level critical-lane design that preserves ordered writes while keeping expected-sequence body/receipt work prioritized.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -122,7 +131,7 @@ After genesis was reached, the old full-sync backup was removed, the completed d
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; pending commit for bounded decoupled prefix hedging.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; `perf: hedge dense prefix chunk requests`; `docs: record rejected scheduler candidates`.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.
