@@ -5513,11 +5513,9 @@ fn body_receipt_earliest_missing_prefix_role_needs_repair<T>(
 
 fn body_receipt_role_needs_prefix_critical_repair(
     state: &BodyReceiptChunkLiveRoleState,
-    candidate_count: usize,
+    _candidate_count: usize,
 ) -> bool {
-    state.next_index >= candidate_count
-        || (state.in_flight > 0
-            && body_receipt_chunk_role_hedge_due(state.last_scheduled_at, false))
+    state.in_flight > 0 && body_receipt_chunk_role_hedge_due(state.last_scheduled_at, false)
 }
 
 fn extend_body_receipt_plan_chunk_candidates(
@@ -8093,7 +8091,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_prefix_critical_repair_detects_exhausted_prefix_role_candidates() {
+    fn body_receipt_prefix_critical_repair_ignores_exhausted_prefix_role_candidates() {
         let peer = PeerId::repeat_byte(0x11);
         let mut active_chunks = HashMap::new();
         active_chunks.insert(
@@ -8126,7 +8124,7 @@ mod tests {
             },
         );
 
-        assert!(body_receipt_prefix_critical_repair_needed(
+        assert!(!body_receipt_prefix_critical_repair_needed(
             &active_chunks,
             &BTreeMap::<usize, Vec<u8>>::new(),
             32,
