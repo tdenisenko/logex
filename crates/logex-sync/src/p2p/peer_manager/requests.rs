@@ -2112,6 +2112,8 @@ impl BodyReceiptRequestPlan {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
+        let mut prefix_hedge_counts = HashMap::<usize, usize>::new();
+        let mut scheduled_peers = HashMap::<usize, HashSet<PeerId>>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
         let initial_ranges = request_window.min(ranges.len());
         let redundant_prefix_chunks =
@@ -2121,14 +2123,15 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
-            schedule_decoupled_body_chunk(
+            let peer_id = schedule_decoupled_body_chunk(
                 self,
                 &mut attempts,
                 peer_ids,
                 &hashes,
                 rotated_chunk_index(chunk_index, peer_rotation),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
         for (duplicate_index, range) in ranges
             .iter()
@@ -2140,7 +2143,7 @@ impl BodyReceiptRequestPlan {
                 .get(&range.start)
                 .copied()
                 .unwrap_or_default();
-            schedule_decoupled_body_chunk(
+            let peer_id = schedule_decoupled_body_chunk(
                 self,
                 &mut attempts,
                 peer_ids,
@@ -2150,16 +2153,57 @@ impl BodyReceiptRequestPlan {
                         + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
                     peer_rotation,
                 ),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
 
         let mut chunks = BTreeMap::new();
         let mut stats = Vec::new();
         let mut failures = Vec::new();
-        while let Some((chunk_index, range, peer_id, requested, elapsed, result)) =
-            attempts.next().await
-        {
+        while !attempts.is_empty() {
+            let next_attempt = timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await;
+            let (chunk_index, range, peer_id, requested, elapsed, result) = match next_attempt {
+                Ok(Some(attempt)) => attempt,
+                Ok(None) => break,
+                Err(_) => {
+                    if let Some((chunk_index, range, retry_peer_ids)) =
+                        decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
+                            ranges: &ranges,
+                            range_indices_by_start: &range_indices_by_start,
+                            chunks: &chunks,
+                            accepted_prefix,
+                            peer_ids,
+                            bad_peers: &bad_peers,
+                            scheduled_peers: &scheduled_peers,
+                            prefix_hedge_counts: &prefix_hedge_counts,
+                            range_count,
+                            peer_rotation,
+                            attempts_len: attempts.len(),
+                            request_window,
+                        })
+                    {
+                        let peer_id = schedule_decoupled_body_chunk(
+                            self,
+                            &mut attempts,
+                            &retry_peer_ids,
+                            &hashes,
+                            chunk_index,
+                            range.clone(),
+                        );
+                        record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
+                        *prefix_hedge_counts.entry(range.start).or_default() += 1;
+                        emit_body_receipt_scheduler_accounting(
+                            &self.accounting_tx,
+                            BodyReceiptSchedulerAccounting {
+                                stale_role_retries: 0,
+                                prefix_reassignments: 1,
+                            },
+                        );
+                    }
+                    continue;
+                }
+            };
             let request_failed = result.is_err();
             let chunk_already_completed = chunks.contains_key(&range.start);
             match result {
@@ -2237,18 +2281,20 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
-            let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
+            let used_peers = scheduled_peers.get(&range.start);
+            let chunk_peer_ids = decoupled_chunk_candidate_peers(peer_ids, &bad_peers, used_peers);
             if chunk_peer_ids.is_empty() {
                 continue;
             }
-            schedule_decoupled_body_chunk(
+            let peer_id = schedule_decoupled_body_chunk(
                 self,
                 &mut attempts,
                 &chunk_peer_ids,
                 &hashes,
                 rotated_chunk_index(chunk_index, peer_rotation),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
 
         let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
@@ -2357,6 +2403,8 @@ impl BodyReceiptRequestPlan {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         let mut pending_ranges = ranges.iter().cloned().enumerate();
         let mut retry_counts = HashMap::<usize, usize>::new();
+        let mut prefix_hedge_counts = HashMap::<usize, usize>::new();
+        let mut scheduled_peers = HashMap::<usize, HashSet<PeerId>>::new();
         let mut bad_peers = HashSet::<PeerId>::new();
         let initial_ranges = request_window.min(ranges.len());
         let redundant_prefix_chunks =
@@ -2366,14 +2414,15 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = pending_ranges.next() else {
                 break;
             };
-            schedule_decoupled_receipt_chunk(
+            let peer_id = schedule_decoupled_receipt_chunk(
                 self,
                 &mut attempts,
                 peer_ids,
                 &hashes,
                 rotated_chunk_index(chunk_index, peer_rotation),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
         for (duplicate_index, range) in ranges
             .iter()
@@ -2385,7 +2434,7 @@ impl BodyReceiptRequestPlan {
                 .get(&range.start)
                 .copied()
                 .unwrap_or_default();
-            schedule_decoupled_receipt_chunk(
+            let peer_id = schedule_decoupled_receipt_chunk(
                 self,
                 &mut attempts,
                 peer_ids,
@@ -2395,16 +2444,57 @@ impl BodyReceiptRequestPlan {
                         + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
                     peer_rotation,
                 ),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
 
         let mut chunks = BTreeMap::new();
         let mut stats = Vec::new();
         let mut failures = Vec::new();
-        while let Some((chunk_index, range, peer_id, requested, elapsed, result)) =
-            attempts.next().await
-        {
+        while !attempts.is_empty() {
+            let next_attempt = timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await;
+            let (chunk_index, range, peer_id, requested, elapsed, result) = match next_attempt {
+                Ok(Some(attempt)) => attempt,
+                Ok(None) => break,
+                Err(_) => {
+                    if let Some((chunk_index, range, retry_peer_ids)) =
+                        decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
+                            ranges: &ranges,
+                            range_indices_by_start: &range_indices_by_start,
+                            chunks: &chunks,
+                            accepted_prefix,
+                            peer_ids,
+                            bad_peers: &bad_peers,
+                            scheduled_peers: &scheduled_peers,
+                            prefix_hedge_counts: &prefix_hedge_counts,
+                            range_count,
+                            peer_rotation,
+                            attempts_len: attempts.len(),
+                            request_window,
+                        })
+                    {
+                        let peer_id = schedule_decoupled_receipt_chunk(
+                            self,
+                            &mut attempts,
+                            &retry_peer_ids,
+                            &hashes,
+                            chunk_index,
+                            range.clone(),
+                        );
+                        record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
+                        *prefix_hedge_counts.entry(range.start).or_default() += 1;
+                        emit_body_receipt_scheduler_accounting(
+                            &self.accounting_tx,
+                            BodyReceiptSchedulerAccounting {
+                                stale_role_retries: 0,
+                                prefix_reassignments: 1,
+                            },
+                        );
+                    }
+                    continue;
+                }
+            };
             let request_failed = result.is_err();
             let chunk_already_completed = chunks.contains_key(&range.start);
             match result {
@@ -2482,18 +2572,20 @@ impl BodyReceiptRequestPlan {
             let Some((chunk_index, range)) = next_range else {
                 continue;
             };
-            let chunk_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
+            let used_peers = scheduled_peers.get(&range.start);
+            let chunk_peer_ids = decoupled_chunk_candidate_peers(peer_ids, &bad_peers, used_peers);
             if chunk_peer_ids.is_empty() {
                 continue;
             }
-            schedule_decoupled_receipt_chunk(
+            let peer_id = schedule_decoupled_receipt_chunk(
                 self,
                 &mut attempts,
                 &chunk_peer_ids,
                 &hashes,
                 rotated_chunk_index(chunk_index, peer_rotation),
-                range,
+                range.clone(),
             );
+            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
         }
 
         let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
@@ -4377,6 +4469,91 @@ fn peer_ids_excluding(peer_ids: &[PeerId], bad_peers: &HashSet<PeerId>) -> Vec<P
         .collect()
 }
 
+fn decoupled_chunk_candidate_peers(
+    peer_ids: &[PeerId],
+    bad_peers: &HashSet<PeerId>,
+    used_peers: Option<&HashSet<PeerId>>,
+) -> Vec<PeerId> {
+    let mut candidates = peer_ids_excluding(peer_ids, bad_peers)
+        .into_iter()
+        .filter(|peer_id| used_peers.is_none_or(|used| !used.contains(peer_id)))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() && used_peers.is_some() {
+        candidates = peer_ids_excluding(peer_ids, bad_peers);
+    }
+    candidates
+}
+
+fn record_decoupled_scheduled_peer(
+    scheduled_peers: &mut HashMap<usize, HashSet<PeerId>>,
+    range_start: usize,
+    peer_id: PeerId,
+) {
+    scheduled_peers
+        .entry(range_start)
+        .or_default()
+        .insert(peer_id);
+}
+
+struct DecoupledPrefixHedgeContext<'a, T> {
+    ranges: &'a [std::ops::Range<usize>],
+    range_indices_by_start: &'a HashMap<usize, usize>,
+    chunks: &'a BTreeMap<usize, (PeerId, Vec<T>)>,
+    accepted_prefix: usize,
+    peer_ids: &'a [PeerId],
+    bad_peers: &'a HashSet<PeerId>,
+    scheduled_peers: &'a HashMap<usize, HashSet<PeerId>>,
+    prefix_hedge_counts: &'a HashMap<usize, usize>,
+    range_count: usize,
+    peer_rotation: usize,
+    attempts_len: usize,
+    request_window: usize,
+}
+
+fn decoupled_prefix_hedge_candidate<T>(
+    context: DecoupledPrefixHedgeContext<'_, T>,
+) -> Option<(usize, std::ops::Range<usize>, Vec<PeerId>)> {
+    let max_attempts = context
+        .request_window
+        .saturating_add(PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS);
+    if context.attempts_len >= max_attempts {
+        return None;
+    }
+
+    for range in
+        missing_prefix_chunk_ranges(context.ranges, context.chunks, context.accepted_prefix)
+    {
+        let hedge_count = context
+            .prefix_hedge_counts
+            .get(&range.start)
+            .copied()
+            .unwrap_or_default();
+        if hedge_count >= PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK {
+            continue;
+        }
+        let used_peers = context.scheduled_peers.get(&range.start);
+        let mut retry_peer_ids =
+            decoupled_chunk_candidate_peers(context.peer_ids, context.bad_peers, used_peers);
+        if retry_peer_ids.is_empty() {
+            continue;
+        }
+        let base_chunk_index = context
+            .range_indices_by_start
+            .get(&range.start)
+            .copied()
+            .unwrap_or_default();
+        let chunk_index = rotated_chunk_index(
+            base_chunk_index
+                + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + hedge_count) * context.range_count),
+            context.peer_rotation,
+        );
+        rotate_request_candidates(&mut retry_peer_ids, chunk_index);
+        return Some((chunk_index, range, retry_peer_ids));
+    }
+
+    None
+}
+
 fn disabled_chunk_peers(
     failures: &[ChunkRequestFailure],
     role: ChunkRequestRole,
@@ -5669,7 +5846,7 @@ fn schedule_decoupled_body_chunk<'a>(
     hashes: &[B256],
     chunk_index: usize,
     range: std::ops::Range<usize>,
-) {
+) -> PeerId {
     let peer_id = peer_ids[chunk_index % peer_ids.len()];
     let request_hashes = hashes[range.clone()].to_vec();
     attempts.push(
@@ -5695,6 +5872,7 @@ fn schedule_decoupled_body_chunk<'a>(
         }
         .boxed(),
     );
+    peer_id
 }
 
 fn rotated_chunk_index(chunk_index: usize, peer_rotation: usize) -> usize {
@@ -5710,7 +5888,7 @@ fn schedule_decoupled_receipt_chunk<'a>(
     hashes: &[B256],
     chunk_index: usize,
     range: std::ops::Range<usize>,
-) {
+) -> PeerId {
     let peer_id = peer_ids[chunk_index % peer_ids.len()];
     let request_hashes = hashes[range.clone()].to_vec();
     attempts.push(
@@ -5736,6 +5914,7 @@ fn schedule_decoupled_receipt_chunk<'a>(
         }
         .boxed(),
     );
+    peer_id
 }
 
 fn receipt_candidates_for_body_peer(
@@ -8281,6 +8460,81 @@ mod tests {
         let second = PeerId::repeat_byte(0x22);
 
         assert!(peer_ids_excluding(&[first, second], &HashSet::from([first, second])).is_empty());
+    }
+
+    #[test]
+    fn decoupled_prefix_hedge_targets_earliest_missing_prefix_on_unused_peer() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let third = PeerId::repeat_byte(0x33);
+        let ranges = vec![0..32, 32..64, 64..96];
+        let range_indices = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| (range.start, index))
+            .collect::<HashMap<_, _>>();
+        let chunks = BTreeMap::from([
+            (32usize, (second, vec![0u8; 32])),
+            (64usize, (third, vec![0u8; 32])),
+        ]);
+        let scheduled_peers = HashMap::from([(0usize, HashSet::from([first]))]);
+
+        let bad_peers = HashSet::new();
+        let prefix_hedge_counts = HashMap::new();
+        let (_, range, retry_peers) =
+            decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
+                ranges: &ranges,
+                range_indices_by_start: &range_indices,
+                chunks: &chunks,
+                accepted_prefix: 96,
+                peer_ids: &[first, second, third],
+                bad_peers: &bad_peers,
+                scheduled_peers: &scheduled_peers,
+                prefix_hedge_counts: &prefix_hedge_counts,
+                range_count: ranges.len(),
+                peer_rotation: 0,
+                attempts_len: 1,
+                request_window: 2,
+            })
+            .expect("missing prefix should be hedgeable");
+
+        assert_eq!(range, 0..32);
+        assert!(!retry_peers.contains(&first));
+        assert!(retry_peers.contains(&second) || retry_peers.contains(&third));
+    }
+
+    #[test]
+    fn decoupled_prefix_hedge_respects_spare_attempt_budget() {
+        let first = PeerId::repeat_byte(0x11);
+        let second = PeerId::repeat_byte(0x22);
+        let ranges = vec![0..32, 32..64];
+        let range_indices = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| (range.start, index))
+            .collect::<HashMap<_, _>>();
+        let chunks = BTreeMap::from([(32usize, (second, vec![0u8; 32]))]);
+        let bad_peers = HashSet::new();
+        let scheduled_peers = HashMap::new();
+        let prefix_hedge_counts = HashMap::new();
+
+        assert!(
+            decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
+                ranges: &ranges,
+                range_indices_by_start: &range_indices,
+                chunks: &chunks,
+                accepted_prefix: 64,
+                peer_ids: &[first, second],
+                bad_peers: &bad_peers,
+                scheduled_peers: &scheduled_peers,
+                prefix_hedge_counts: &prefix_hedge_counts,
+                range_count: ranges.len(),
+                peer_rotation: 0,
+                attempts_len: 2 + PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS,
+                request_window: 2,
+            })
+            .is_none()
+        );
     }
 
     #[test]

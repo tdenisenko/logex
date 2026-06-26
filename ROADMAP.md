@@ -8,7 +8,7 @@ The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This 
 
 The Mac mini client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The latest accepted warm five-minute sample measured `3,321.9` actual blocks/sec with `0` low windows and `0` zero-progress windows while connected peers grew from 44 to 68 and serving peers grew from 20 to 32. A follow-up sparse-tail sample measured `3,599.7` actual blocks/sec with `0` low windows and `0` zero-progress windows, and that run reached genesis.
 
-After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. Dense startup validation then exposed stale queued-plan peer load as the next scheduler bottleneck. The current build refreshes queued body/receipt plan peer snapshots immediately before spawn and load-adjusts the serving-peer score; on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-103920.log`, the dense five-minute sample improved from `82.7` to `136.6` actual blocks/sec, with zero-progress windows reduced from `2` to `0`.
+After genesis was reached, the old full-sync backup was removed, the completed data dir was preserved as `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349`, and a fresh `/Volumes/SSD 4TB/LogEx` was created with only EL/CL peer caches and discovery secrets. Dense startup validation then exposed stale queued-plan peer load and decoupled prefix tail latency as the next scheduler bottlenecks. The current build refreshes queued body/receipt plan peer snapshots before ready-plan admission, load-adjusts the serving-peer score, and adds bounded prefix hedging inside the decoupled dense body/receipt executor. The latest warm dense sample on `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-113342.log` measured `148.3` actual blocks/sec with `5` low windows and `0` zero-progress windows, improving over the prior accepted dense baseline of `136.6` actual blocks/sec with `6` low windows and `0` zero-progress windows.
 
 ## Completed Since Last Run
 
@@ -48,13 +48,18 @@ After genesis was reached, the old full-sync backup was removed, the completed d
   - Queued historical body/receipt plans now refresh peer sender/version/load snapshots immediately before reservation and execution.
   - Serving-peer preference is now load-adjusted so an overloaded serving peer no longer outranks an idle candidate solely because it previously served successfully.
   - Dense five-minute validation improved from `82.7` actual blocks/sec, `13` low windows, and `2` zero-progress windows to `136.6` actual blocks/sec, `6` low windows, and `0` zero-progress windows.
+- Added bounded decoupled prefix hedging:
+  - Ready queued plans now refresh body/receipt peer snapshots before admission as well as before execution.
+  - Decoupled dense body and receipt chunk loops now reassign the earliest missing accepted-prefix chunk after the hedge delay to an unused peer while staying within the existing spare hedge budget.
+  - Added tests for hedge peer selection and budget limits.
+  - Remote warm validation improved the accepted dense baseline from `136.6` to `148.3` actual blocks/sec while keeping zero-progress windows at `0`.
 
 ## Remaining TODOs
 
 1. Finish the bounded live request scheduler.
    - Reason: floor progress can still be limited by the slowest required body/receipt prefix chunk even while later work or peers are available.
    - Completion criteria: expected-sequence body/receipt chunks have explicit priority, stale prefix-critical chunks are reassigned without destructive resets, active body/receipt lanes stay occupied under healthy peer/memory pressure, zero-progress windows remain rare in long samples, and ordered verified ingestion is unchanged.
-   - Current gap: stale queued-plan load was reduced, but dense-range logs still show occasional head-of-line plans completing with only a small prefix after peer timeouts. The next scheduler step is an explicit queue-owned critical lane or equivalent so later completed work cannot sit behind a weak expected sequence.
+   - Current gap: queued-plan load and in-plan prefix tail latency are improved, but dense-range logs still show low windows when the serving peer set is small or a cluster of peers time out. The next scheduler step is a stronger queue-owned critical lane or adaptive role admission so later completed work cannot sit behind a weak expected sequence.
 
 2. Add bandwidth-aware scheduler diagnostics and admission.
    - Reason: current metrics distinguish some request pressure, but not enough to tell whether a slowdown is peer tail latency, network saturation, backpressure, or local processing.
@@ -101,7 +106,10 @@ After genesis was reached, the old full-sync backup was removed, the completed d
   - Remaining: track whether the fresh run's filesystem allocation remains close to the logical storage metric after compression and compaction settle.
 - Challenge: queued dense body/receipt plans reused stale peer-load snapshots and could concentrate work on already-busy serving peers.
   - Resolution: refresh plan peer snapshots at spawn time and make the serving-peer score decay with active/reserved role load.
-  - Remaining: add a stronger head-of-line recovery lane for dense ranges where a plan returns only a small prefix after multiple peer timeouts.
+  - Remaining: continue validating long runs and add broader diagnostics for peer-tail failure share.
+- Challenge: decoupled dense body/receipt loops waited for slow prefix requests to finish before assigning spare work to another peer.
+  - Resolution: added bounded prefix hedging for the earliest missing accepted-prefix body/receipt chunk, using unused peers and the existing spare hedge budget.
+  - Remaining: low windows still occur under poor peer mixes, so adaptive role admission and queue-level critical work remain open.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -114,7 +122,7 @@ After genesis was reached, the old full-sync backup was removed, the completed d
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; pending commit for queued-plan peer-load refresh.
+- Commits made during this run: `perf: reduce historical scheduler idle gaps`; `perf: avoid retrying bad live role peers`; `docs: record scheduler validation and backup rotation`; `perf: refresh queued body receipt peer load`; pending commit for bounded decoupled prefix hedging.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready; live scheduler work is substantially improved, but longer validation is still needed before concluding PR #96.
 - Blockers: none for the current checkpoint.

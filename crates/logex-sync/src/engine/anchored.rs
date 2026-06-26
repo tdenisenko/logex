@@ -3336,9 +3336,11 @@ impl SyncEngine {
             let Some(sequence) = self.historical_fetch_ready_plans.keys().next().copied() else {
                 break;
             };
-            let Some(ready) = self.historical_fetch_ready_plans.remove(&sequence) else {
+            let Some(mut ready) = self.historical_fetch_ready_plans.remove(&sequence) else {
                 break;
             };
+            self.peers
+                .refresh_bodies_and_receipts_request_plan(&mut ready.plan.body_receipt_plan);
             let reservations = ready.plan.body_receipt_plan.reservations();
             let (body_reservations, receipt_reservations) = reservations.body_receipt_counts();
             let snapshot = self.historical_fetch_scheduler_snapshot();
