@@ -6,11 +6,12 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/historical-sync-live-scheduler` for PR #96. The branch now uses the chunk-owned live body/receipt scheduler for dense historical EL sync and keeps the Mac mini client running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. When outside the home network, checks route through `ssh pi-remote` to `gremlinmaster@192.168.50.44`.
 
-Latest accepted candidate: expected historical fetch retries bypass the ordinary request-pressure refill gate after the head-of-line delay, while still keeping the existing two-attempt cap per sequence. Remote Pi-routed validation improved the observed stall mode from baseline `384.8` blocks/sec with `2` low windows and `1` zero window to `547.1` blocks/sec with `0` low windows and `0` zero windows over a 290 second sample.
+Latest accepted candidate: expected historical fetch retries bypass the ordinary request-pressure refill gate after the head-of-line delay, while still keeping the existing two-attempt cap per sequence. Remote Pi-routed validation improved the observed stall mode from baseline `384.8` blocks/sec with `2` low windows and `1` zero window to `599.3` blocks/sec with `0` low windows and `0` zero windows over a 291 second sample.
 
 ## Completed Since Last Run
 
 - Re-ran remote validation through the Raspberry Pi jump host after direct Mac mini access failed.
+- Confirmed the Mac mini is reachable through `ssh -J pi-remote gremlinmaster@192.168.50.44` and reran the throughput sampler with `SSH_JUMP_HOST=pi-remote`.
 - Rejected and reverted two scheduler candidates that did not improve the real sample:
   - Parallel late prefix salvage.
   - Primary residual suffix preservation.
@@ -62,15 +63,15 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Removed the obsolete `SyncEngine::historical_body_receipt_request_pressure_allows_refill` wrapper.
 - Rechecked scheduler candidates and reverted unproductive code before committing.
-- `.DS_Store` remains untracked and unrelated.
+- Removed the untracked `.DS_Store` workspace noise.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: pending commit for the accepted expected-fetch retry admission change.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries` was committed and pushed.
 - Pull request status: PR #96 remains the active draft performance PR.
-- Merge status: not ready until the accepted candidate is committed, pushed, and longer validation/CI are reviewed.
+- Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
 
 ## Known Issues or Risks
