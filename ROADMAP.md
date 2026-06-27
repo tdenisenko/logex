@@ -18,6 +18,7 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
 - Early fresh-run sampling reached `62` connected / `49` serving peers, with current status around `956k logs/sec`; monitor samples show p50 `~362k logs/sec`, p95 `~681k`, max `~926k`, and physical RX commonly near the `300 Mbps` link limit.
 - Investigated zero floor-advance sample windows; they occurred while physical RX remained high and were followed by larger ordered floor advances, so they are not currently evidence of an idle scheduler stall.
 - Reduced the high-peer body/receipt fast pool from `24` to `16` peers after timeout churn appeared at high peer counts. Warmed remote sampling improved from roughly `231k-320k` average logs/sec to `~451k` average logs/sec over the 40+ serving-peer window, with p50 `~410k`, p90 `~818k`, max `~993k`, and physical RX near the available link limit.
+- Added partial-prefix flushing for dense historical body/receipt fetches. Remote sampling confirmed the path was active and improved the 40+ serving-peer warmed average to `~464k logs/sec`; the 45+ serving-peer window averaged `~499k logs/sec` with no `<100k logs/sec` samples.
 - Reran remote status, log, disk, and live-head validation through the Raspberry Pi jump host after direct Mac mini access failed.
 - Parsed the remote run log from `/Users/gremlinmaster/logex-src/run/logex-pr96-baseline-restored-20260627-165855.log`.
 - Confirmed the run had no severe storage, panic, fatal, low-disk, or corruption markers. Three receipt-root mismatch warnings were invalid peer responses that were rejected.
@@ -49,6 +50,10 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
 - High-peer body/receipt fast-pool fanout is capped at `16`.
   - Why: remote sampling showed the previous wider fanout fed too many marginal peers, increasing timeout penalties and request-limit collapse under dense historical sync.
   - Tradeoff: lower fanout can reduce instantaneous parallelism, but the measured warmed run had higher sustained logs/sec and fewer severe low-progress samples.
+
+- Dense body/receipt plans may flush a verified partial prefix after a short grace period.
+  - Why: contiguous verified prefix chunks can safely advance while slow tail chunks remain residual work, reducing head-of-line stalls without weakening block/receipt validation.
+  - Tradeoff: very slow tails can split a planned fetch into more writes, so this is gated by a substantial prefix threshold and observed prefix pressure.
 
 - Storage metrics keep the sealed-segment size cache but include direct index-file signatures.
   - Why: this preserves cheap recurring dashboard refreshes while preventing stale cached sizes from excluding indexes built after the first scan.
@@ -85,7 +90,7 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: `perf/fresh-historical-baseline`.
-- Commits made during this run: pending fast-pool tuning commit.
+- Commits made during this run: `ecb2f86` plus pending partial-prefix commit.
 - Pull request status: not created yet for this branch.
 - Merge status: PR #96 merged; this branch is pending baseline work.
 - Blockers: none known.

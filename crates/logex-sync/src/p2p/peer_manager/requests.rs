@@ -27,6 +27,8 @@ const PIPELINED_BODY_RECEIPT_PREFIX_CRITICAL_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_PEER_LIMIT: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_CHUNKS: usize = 2;
 const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT: Duration = Duration::from_secs(12);
+const PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY: Duration = Duration::from_secs(4);
+const PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_MIN_BLOCKS: usize = 256;
 const PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
@@ -1307,6 +1309,8 @@ impl BodyReceiptRequestPlan {
         let mut prefix_completed_at: Option<Instant> = None;
         let lane_schedule: BodyReceiptLiveLaneSchedule;
         let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
+        let partial_prefix_flush_blocks =
+            body_receipt_partial_prefix_flush_blocks(self.return_blocks, min_return_blocks);
         {
             let mut attempts = futures_util::stream::FuturesUnordered::new();
             let mut pending_prefix_ranges = self
@@ -1525,6 +1529,23 @@ impl BodyReceiptRequestPlan {
                     }
                     prefix_completed_at.get_or_insert_with(Instant::now);
                     continue;
+                }
+                if body_receipt_partial_prefix_flush_ready(
+                    contiguous_blocks,
+                    partial_prefix_flush_blocks,
+                    min_return_blocks,
+                    plan_started_at.elapsed(),
+                    &active_chunks,
+                    &chunks,
+                ) {
+                    debug!(
+                        contiguous_blocks,
+                        min_return_blocks,
+                        partial_prefix_flush_blocks,
+                        elapsed_ms = plan_started_at.elapsed().as_millis(),
+                        "body/receipt chunk pipeline flushing partial prefix before slow tail"
+                    );
+                    break;
                 }
                 let prefix_critical = body_receipt_prefix_critical_repair_needed(
                     &active_chunks,
@@ -4554,6 +4575,38 @@ fn body_receipt_prefix_critical_repair_needed<T>(
         )
 }
 
+fn body_receipt_partial_prefix_flush_blocks(
+    return_blocks: usize,
+    min_return_blocks: usize,
+) -> usize {
+    if min_return_blocks == 0 {
+        return 0;
+    }
+
+    let min_accepted_prefix = body_receipt_min_accepted_prefix(return_blocks);
+    min_return_blocks
+        .min(PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_MIN_BLOCKS.max(min_accepted_prefix))
+}
+
+fn body_receipt_partial_prefix_flush_ready<T>(
+    contiguous_blocks: usize,
+    flush_blocks: usize,
+    min_return_blocks: usize,
+    elapsed: Duration,
+    active_chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
+    completed_chunks: &BTreeMap<usize, Vec<T>>,
+) -> bool {
+    flush_blocks > 0
+        && contiguous_blocks >= flush_blocks
+        && contiguous_blocks < min_return_blocks
+        && elapsed >= PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY
+        && body_receipt_prefix_critical_repair_needed(
+            active_chunks,
+            completed_chunks,
+            min_return_blocks,
+        )
+}
+
 fn body_receipt_earliest_missing_prefix_role_needs_repair<T>(
     active_chunks: &HashMap<usize, PlanLiveBodyReceiptChunk>,
     completed_chunks: &BTreeMap<usize, Vec<T>>,
@@ -6410,6 +6463,54 @@ mod tests {
             body_receipt_plan_progress_target(10_000),
             PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
         );
+    }
+
+    #[test]
+    fn body_receipt_partial_prefix_flush_target_keeps_progress_substantial() {
+        assert_eq!(body_receipt_partial_prefix_flush_blocks(32, 32), 32);
+        assert_eq!(body_receipt_partial_prefix_flush_blocks(512, 512), 256);
+        assert_eq!(body_receipt_partial_prefix_flush_blocks(10_000, 512), 256);
+        assert_eq!(body_receipt_partial_prefix_flush_blocks(0, 0), 0);
+    }
+
+    #[test]
+    fn body_receipt_partial_prefix_flush_requires_delay_and_prefix_pressure() {
+        let active_chunks = HashMap::new();
+        let mut chunks = BTreeMap::from([(0usize, vec![1u8; 256])]);
+        assert!(!body_receipt_partial_prefix_flush_ready(
+            256,
+            256,
+            512,
+            PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY + Duration::from_millis(1),
+            &active_chunks,
+            &chunks,
+        ));
+
+        chunks.insert(384, vec![1u8; 32]);
+        assert!(!body_receipt_partial_prefix_flush_ready(
+            256,
+            256,
+            512,
+            PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY - Duration::from_millis(1),
+            &active_chunks,
+            &chunks,
+        ));
+        assert!(!body_receipt_partial_prefix_flush_ready(
+            255,
+            256,
+            512,
+            PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY + Duration::from_millis(1),
+            &active_chunks,
+            &chunks,
+        ));
+        assert!(body_receipt_partial_prefix_flush_ready(
+            256,
+            256,
+            512,
+            PIPELINED_BODY_RECEIPT_PARTIAL_PREFIX_FLUSH_DELAY + Duration::from_millis(1),
+            &active_chunks,
+            &chunks,
+        ));
     }
 
     #[test]
