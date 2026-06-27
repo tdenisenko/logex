@@ -28,6 +28,9 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Restored the accepted baseline on the Mac mini after the rejected sparse-prefix candidate and left the client running under tmux.
 - Tested and rejected prefix-wide stale role repair: focused tests and clippy passed, but the remote sample immediately regressed into repeated low/zero-progress windows, so the change was reverted.
 - Restored the accepted baseline on the Mac mini again after the rejected prefix-wide repair candidate.
+- Reran validation through `ssh -J pi-remote` after the direct Mac mini network-unreachable error; the accepted baseline sample measured `429.1` blocks/sec with `2` low windows and `0` zero windows while serving peers were still limited.
+- Tested and rejected a per-plan peer isolation candidate that capped per-peer role in-flight selection and treated transport failures as bad for both live body/receipt roles: focused tests passed, but the remote sample regressed to `459.6` blocks/sec with `3` low windows and `1` zero window, so the code was reverted.
+- Restored the accepted baseline on the Mac mini and left it running under tmux from `/Volumes/SSD 4TB/LogEx`.
 
 ## Remaining TODOs
 
@@ -89,6 +92,10 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
   - Resolution: implemented and tested prefix-wide stale role repair, then rejected it after the remote sample produced repeated low/zero-progress windows within the first minute.
   - Remaining: avoid increasing in-plan hedge fanout without stronger per-peer demotion or measured slot isolation.
 
+- Challenge: per-plan peer isolation looked like it could prevent one failing peer from consuming multiple live chunk roles before global failure accounting caught up.
+  - Resolution: tested per-peer role caps and cross-role transport-failure isolation, then rejected it after the remote sample produced more low/zero windows than the accepted baseline.
+  - Remaining: peer-tail mitigation still needs better evidence from role-level metrics before changing admission or demotion behavior.
+
 - Challenge: direct Mac mini SSH was unavailable from the current network.
   - Resolution: reran all operational checks and the throughput sample through `pi-remote`.
 
@@ -102,7 +109,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, and `17743d4 docs: record restored scheduler baseline` were committed and pushed.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, and `0b64380 docs: record rejected prefix repair candidate` were committed and pushed. A follow-up docs commit for the rejected per-plan peer isolation candidate is pending.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
