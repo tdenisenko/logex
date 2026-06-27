@@ -4011,9 +4011,12 @@ impl SyncEngine {
                         .await?;
                 }
                 _ = tokio::time::sleep(HISTORICAL_FETCH_WAIT_POLL_INTERVAL) => {
-                    self.try_spawn_ready_historical_fetch_plans(
+                    self.ensure_historical_fetch_pipeline_limited(
+                        child_header.clone(),
+                        HistoricalFetchRefillScope::CriticalPath,
                         HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
-                    );
+                    )
+                    .await?;
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && self.shutdown_requested() {
