@@ -849,9 +849,21 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
 
+    fn checkpoint_at_slot(slot: u64) -> String {
+        format!("{slot}@{:#x}", B256::repeat_byte(0x42))
+    }
+
+    fn open_storage_at(path: &Path) -> PartitionManager {
+        PartitionManager::open(PartitionManagerConfig {
+            data_dir: path.to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap()
+    }
+
     fn consensus_store_at_slot(slot: u64) -> (tempfile::TempDir, ConsensusStore) {
         let temp = tempfile::tempdir().unwrap();
-        let checkpoint = format!("{slot}@{:#x}", B256::repeat_byte(0x42));
+        let checkpoint = checkpoint_at_slot(slot);
         let store = ConsensusStore::open(temp.path(), Some(&checkpoint)).unwrap();
         (temp, store)
     }
@@ -875,6 +887,29 @@ mod tests {
             finalized: true,
             parent_beacon_root: None,
         }
+    }
+
+    #[test]
+    fn fresh_data_directory_requires_checkpoint_before_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = open_storage_at(temp.path());
+
+        let error = maybe_open_consensus_store(temp.path(), &storage, None).unwrap_err();
+
+        assert!(matches!(error, ConsensusStateError::MissingCheckpoint));
+    }
+
+    #[test]
+    fn fresh_data_directory_accepts_recent_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = open_storage_at(temp.path());
+        let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+
+        let consensus = maybe_open_consensus_store(temp.path(), &storage, Some(&checkpoint))
+            .unwrap()
+            .unwrap();
+
+        assert!(recent_consensus_state_staleness(&consensus).is_none());
     }
 
     #[test]

@@ -33,7 +33,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Restored the accepted baseline on the Mac mini and left it running under tmux from `/Volumes/SSD 4TB/LogEx`.
 - After peer warm-up recovered through the Pi route, reran the accepted baseline and measured `647.7` blocks/sec over 295 seconds with `1` low window and `1` zero window while peers climbed to `64` connected and `25` serving.
 - Reran the throughput sampler through `ssh -J pi-remote` after a direct-route network-unreachable error; the accepted scheduler moved `838,120` historical blocks in `297` seconds, averaging `2822.0` actual blocks/sec with `0` low windows and `0` zero windows.
-- Added focused restart-guard coverage for recent vs stale consensus trusted slots, recent vs stale local EL progress, and the case where a recent contiguous consensus anchor allows restart even if the persisted EL sync head is older.
+- Added focused startup coverage for fresh data directories requiring a checkpoint, fresh data directories accepting a recent checkpoint, recent vs stale consensus trusted slots, recent vs stale local EL progress, and the case where a recent contiguous consensus anchor allows restart even if the persisted EL sync head is older.
 - Validated the restart-guard tests with `cargo test -p logex-node` and `cargo clippy -p logex-node -- -D warnings`.
 
 ## Remaining TODOs
@@ -52,7 +52,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
-   - Completion criteria: checkpoint freshness and stale restart rejection are covered by unit tests; remaining tests or smokes cover CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
+   - Completion criteria: fresh-checkpoint enforcement, checkpoint freshness, and stale restart rejection are covered by unit tests; remaining tests or smokes cover CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
 
 ## Design Decisions
 
@@ -117,7 +117,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, `33e4b19 docs: record rejected peer isolation candidate`, `020d424 docs: record warmed scheduler baseline`, and `test: cover stale restart guards` were committed and pushed.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, `33e4b19 docs: record rejected peer isolation candidate`, `020d424 docs: record warmed scheduler baseline`, `db97f5e test: cover stale restart guards`, and `test: cover fresh checkpoint startup guard` were committed and pushed.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
