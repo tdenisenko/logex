@@ -204,7 +204,6 @@ struct HistoricalExpectedFetchRetryState {
     expected_fetch_is_active: bool,
     waited: Duration,
     lookahead_work: usize,
-    request_pressure_allows_refill: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -755,7 +754,6 @@ fn historical_expected_fetch_retry_permitted(state: HistoricalExpectedFetchRetry
 
     state.waited >= HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY
         && state.lookahead_work >= HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED
-        && state.request_pressure_allows_refill
 }
 
 fn historical_fetch_duplicate_retry_permitted(active_attempts: usize) -> bool {
@@ -3340,18 +3338,6 @@ impl SyncEngine {
         }
     }
 
-    fn historical_body_receipt_request_pressure_allows_refill(&self) -> bool {
-        let snapshot = self.historical_fetch_scheduler_snapshot();
-        historical_body_receipt_request_pressure_allows_refill(
-            snapshot.body_ready_peers,
-            snapshot.receipt_ready_peers,
-            snapshot.body_request_capacity,
-            snapshot.receipt_request_capacity,
-            snapshot.active_body_requests,
-            snapshot.active_receipt_requests,
-        )
-    }
-
     fn historical_fetch_window_blocks(&self) -> u64 {
         let total_memory_bytes = historical_total_memory_bytes();
         let available_memory_bytes = historical_available_memory_bytes();
@@ -3744,8 +3730,6 @@ impl SyncEngine {
             expected_fetch_is_active: active_attempts > 0,
             waited,
             lookahead_work,
-            request_pressure_allows_refill: self
-                .historical_body_receipt_request_pressure_allows_refill(),
         }) || !historical_fetch_duplicate_retry_permitted(active_attempts)
         {
             return Ok(false);
@@ -3953,8 +3937,6 @@ impl SyncEngine {
                         expected_fetch_is_active,
                         waited,
                         lookahead_work,
-                        request_pressure_allows_refill: self
-                            .historical_body_receipt_request_pressure_allows_refill(),
                     });
                 if retry_permitted
                     && historical_expected_fetch_attempt_allows_retry(active_expected_attempts)
@@ -6660,7 +6642,6 @@ mod tests {
                 waited: HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
                     .saturating_sub(Duration::from_millis(1)),
                 lookahead_work: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED - 1,
-                request_pressure_allows_refill: true,
             }
         ));
         assert!(historical_expected_fetch_retry_permitted(
@@ -6668,7 +6649,6 @@ mod tests {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY,
                 lookahead_work: 0,
-                request_pressure_allows_refill: false,
             }
         ));
         assert!(historical_expected_fetch_retry_permitted(
@@ -6676,27 +6656,24 @@ mod tests {
                 expected_fetch_is_active: false,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
                 lookahead_work: 0,
-                request_pressure_allows_refill: false,
             }
         ));
     }
 
     #[test]
-    fn buffered_head_of_line_fetch_can_retry_when_pressure_allows() {
+    fn buffered_head_of_line_fetch_can_retry_under_request_pressure() {
         assert!(historical_expected_fetch_retry_permitted(
             HistoricalExpectedFetchRetryState {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
                 lookahead_work: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
-                request_pressure_allows_refill: true,
             }
         ));
         assert!(!historical_expected_fetch_retry_permitted(
             HistoricalExpectedFetchRetryState {
                 expected_fetch_is_active: true,
                 waited: HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY,
-                lookahead_work: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
-                request_pressure_allows_refill: false,
+                lookahead_work: HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED - 1,
             }
         ));
     }
