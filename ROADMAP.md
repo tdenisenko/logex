@@ -2,134 +2,79 @@
 
 ## Current Status
 
-LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves them through the dashboard, query APIs, and live transfer notifications.
+LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-Active branch: `perf/historical-sync-live-scheduler` for PR #96. The branch now uses the chunk-owned live body/receipt scheduler for dense historical EL sync and keeps the Mac mini client running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. When outside the home network, checks route through `ssh pi-remote` to `gremlinmaster@192.168.50.44`.
+Active branch: `perf/historical-sync-live-scheduler` for PR #96. Remote Mac mini checks must use `ssh -J pi-remote gremlinmaster@192.168.50.44` when outside the home network. The remote client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`.
 
-Latest accepted candidate: expected historical fetch retries bypass the ordinary request-pressure refill gate after the head-of-line delay, while still keeping the existing two-attempt cap per sequence. Remote Pi-routed validation improved the observed stall mode from baseline `384.8` blocks/sec with `2` low windows and `1` zero window to `599.3` blocks/sec with `0` low windows and `0` zero windows over a 291 second sample. A later Pi-routed rerun after restoring the accepted baseline measured `596.6` blocks/sec with `0` low windows and `0` zero windows over 295 seconds. A sparse-range rerun through `pi-remote` after a direct Mac mini network failure measured `2822.0` actual blocks/sec with `0` low windows and `0` zero windows over 297 seconds; logs/sec was lower because that range is much less log-dense.
+The latest Pi-routed validation reached genesis from historical floor `4,889,536` in `2,765.7s` (`46m05.7s`) on 2026-06-27 UTC, processing `4,856,264` historical blocks and `61,503,899` logs during that resumed run. Post-genesis live smoke passed: over 65 seconds the EL head advanced from `25,410,603` to `25,410,608`, historical floor stayed at `0`, and EL peers stayed at `77` connected / `28` serving.
 
 ## Completed Since Last Run
 
-- Re-ran remote validation through the Raspberry Pi jump host after direct Mac mini access failed.
-- Confirmed the Mac mini is reachable through `ssh -J pi-remote gremlinmaster@192.168.50.44` and reran the throughput sampler with `SSH_JUMP_HOST=pi-remote`.
-- Rejected and reverted two scheduler candidates that did not improve the real sample:
-  - Parallel late prefix salvage.
-  - Primary residual suffix preservation.
-- Kept the expected-fetch retry admission change because it removed zero-progress windows in the longer remote sample.
-- Removed the now-unused `SyncEngine` request-pressure wrapper made obsolete by the new retry decision.
-- Validated locally with `cargo test -p logex-sync` and `cargo clippy -p logex-sync -- -D warnings`.
-- Deployed the accepted candidate to the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and left the client running.
-- Tested and rejected a 2 second historical body/receipt role timeout floor: remote validation fell to `460.6` blocks/sec with `2` low windows and `2` zero windows over 294 seconds.
-- Tested and rejected lowering the serving-peer candidate-pool threshold from `16` to `8`: remote validation fell to `391.3` blocks/sec with `6` low windows and `3` zero windows over 289 seconds.
-- Tested and rejected a short `750ms` missing-expected-fetch retry delay before head-of-line reset: remote validation fell to `424.6` blocks/sec with `3` low windows and `1` zero window over 290 seconds.
-- Restored the accepted timeout behavior on the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and confirmed `/status` responds through the Pi jump host.
-- Restored the accepted baseline after the rejected retry-delay candidate and reran the sampler through `pi-remote`: `596.6` blocks/sec, `0` low windows, and `0` zero windows over 295 seconds.
-- Tested and rejected an adaptive sparse-prefix progress target: it raised contiguous plan progress from about `540` to `917` blocks, but increased plan/write latency and sampled at `584.7` blocks/sec with no low/zero windows, which was not a meaningful improvement over baseline.
-- Restored the accepted baseline on the Mac mini after the rejected sparse-prefix candidate and left the client running under tmux.
-- Tested and rejected prefix-wide stale role repair: focused tests and clippy passed, but the remote sample immediately regressed into repeated low/zero-progress windows, so the change was reverted.
-- Restored the accepted baseline on the Mac mini again after the rejected prefix-wide repair candidate.
-- Reran validation through `ssh -J pi-remote` after the direct Mac mini network-unreachable error; the accepted baseline sample measured `429.1` blocks/sec with `2` low windows and `0` zero windows while serving peers were still limited.
-- Tested and rejected a per-plan peer isolation candidate that capped per-peer role in-flight selection and treated transport failures as bad for both live body/receipt roles: focused tests passed, but the remote sample regressed to `459.6` blocks/sec with `3` low windows and `1` zero window, so the code was reverted.
-- Restored the accepted baseline on the Mac mini and left it running under tmux from `/Volumes/SSD 4TB/LogEx`.
-- After peer warm-up recovered through the Pi route, reran the accepted baseline and measured `647.7` blocks/sec over 295 seconds with `1` low window and `1` zero window while peers climbed to `64` connected and `25` serving.
-- Reran the throughput sampler through `ssh -J pi-remote` after a direct-route network-unreachable error; the accepted scheduler moved `838,120` historical blocks in `297` seconds, averaging `2822.0` actual blocks/sec with `0` low windows and `0` zero windows.
-- Added focused startup coverage for fresh data directories requiring a checkpoint, fresh data directories accepting a recent checkpoint, recent vs stale consensus trusted slots, recent vs stale local EL progress, and the case where a recent contiguous consensus anchor allows restart even if the persisted EL sync head is older.
-- Validated the restart-guard tests with `cargo test -p logex-node` and `cargo clippy -p logex-node -- -D warnings`.
-- Audited the remaining EL hardening TODO against existing tests: `runtime_state_only_reports_synced_when_caught_up_to_known_tip`, `consensus_target_can_move_backwards_after_reorg`, `historical_completion_requires_known_target_and_confirmed_empty_responses`, `consensus_forward_batch_limit_yields_while_historical_backfill_is_active`, receipt/header validation tests, consensus reorg tests, dashboard auth tests, low-disk probe tests, and `/status` metrics coverage already cover the local pieces of CL tracking, EL forward/reverse status, invalid data rejection, reorg detection, low-disk reporting, and authenticated dashboard access.
+- Reran remote status, log, disk, and live-head validation through the Raspberry Pi jump host after direct Mac mini access failed.
+- Parsed the remote run log from `/Users/gremlinmaster/logex-src/run/logex-pr96-baseline-restored-20260627-165855.log`.
+- Confirmed the run had no severe storage, panic, fatal, low-disk, or corruption markers. Three receipt-root mismatch warnings were invalid peer responses that were rejected.
+- Confirmed post-genesis forward sync still advances while historical sync remains complete.
+- Fixed `storage_used_bytes` undercounting sealed segment indexes by invalidating cached segment sizes when direct `indexes/` files change.
+- Added a regression test for index files added after a sealed segment size was cached.
+- Validated with `cargo test -p logex-node -p logex-sync -p logex-server` and `cargo clippy -p logex-node -p logex-sync -p logex-server -- -D warnings`.
 
 ## Remaining TODOs
 
-1. Validate the live scheduler over a full historical run.
-   - Reason: short dense samples now look healthy, but full-sync performance varies by peer mix, routing, and log density.
-   - Completion criteria: record start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, low/zero-progress windows, bandwidth, CPU, memory, disk, peer counts, resets, and failures.
+1. Finish PR #96 validation and merge.
+   - Reason: the branch now has a completed resumed-to-genesis run, live-head smoke, storage metrics fix, and passing local validation, but CI and final PR state still need to be checked.
+   - Completion criteria: branch is pushed, GitHub checks pass, PR is marked ready if needed, and the PR is merged.
 
-2. Continue scheduler admission work only where measurements show idle resources.
-   - Reason: the latest fix addresses head-of-line duplicate admission, but plan p90 remains high in some windows.
-   - Completion criteria: add or keep only changes that improve longer remote samples against the new baseline without increasing low/zero-progress windows.
+2. Establish the next performance baseline from a fresh dense-range run.
+   - Reason: the latest completed run covered the remaining sparse historical range, not a fresh pivot-to-genesis run through the log-dense ranges.
+   - Completion criteria: start a new branch after PR #96, run with a resource sampler, record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, and compare against the 4 hour full-sync goal.
 
-3. Investigate peer-tail mitigation without reducing the global request timeout floor.
-   - Reason: a shorter 2 second timeout, a lower serving-pool threshold, a short missing-expected retry delay, a larger sparse-prefix progress target, and prefix-wide stale repair did not improve sustained remote throughput, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, scheduler admission, or better production metrics rather than more broad timing constants.
-   - Completion criteria: identify a targeted change that improves p90 plan/body-receipt latency and remote throughput without reducing serving peer stability or adding zero-progress windows.
-
-4. Complete EL production hardening.
-   - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
-   - Completion criteria: unit coverage now covers fresh-checkpoint enforcement, checkpoint freshness, stale restart rejection, runtime synced-state gating, consensus target movement after reorg, historical completion gating, consensus-forward fairness during historical backfill, invalid header/receipt rejection, consensus reorg detection, low-disk probe behavior, authenticated dashboard access, and status exposure for CL/EL metrics. Remaining evidence needed: a clean full-sync candidate run and live smokes after completion proving CL head tracking and EL forward sync continue after historical floor reaches genesis.
+3. Continue historical sync optimization only from measured bottlenecks.
+   - Reason: broad scheduler tweaks repeatedly regressed throughput or zero-progress windows; further changes should target proven bottlenecks.
+   - Completion criteria: keep only changes that improve longer remote samples without increasing low/zero-progress windows or weakening validation.
 
 ## Design Decisions
 
-- Dense historical body/receipt sync uses the live chunk-owned scheduler.
-  - Why: it tracks per-chunk role ownership and repairs prefix-critical gaps without relying on separate body and receipt loops finishing together.
-  - Alternative considered: keep the old decoupled dense path. It was removed because it was dormant and harder to reason about.
+- Dense historical body/receipt sync uses the chunk-owned live scheduler.
+  - Why: it tracks per-chunk role ownership and repairs prefix-critical gaps while preserving ordered verified floor advancement.
+  - Tradeoff: scheduler complexity is higher, so changes are accepted only with remote measurement.
 
-- Expected-sequence duplicate retry bypasses ordinary request-pressure refill after head-of-line delay.
-  - Why: the expected sequence is the only fetch that can advance the verified floor; letting lookahead saturate request slots can create zero-progress windows.
-  - Tradeoff: this can briefly exceed the conservative refill pressure, but retries remain bounded by the existing per-sequence attempt cap.
+- Expected-sequence duplicate retries may bypass ordinary request-pressure refill after head-of-line delay.
+  - Why: the expected sequence is the only fetch that can advance the verified floor, and lookahead saturation caused zero-progress windows.
+  - Tradeoff: retries can briefly exceed the conservative refill pressure, but remain bounded by the per-sequence attempt cap.
 
-- Historical reverse sync remains ordered at storage advancement.
-  - Why: downloads, extraction, and writes may overlap, but verified floor movement must preserve parent-chain and receipt-root validation semantics.
+- Storage metrics keep the sealed-segment size cache but include direct index-file signatures.
+  - Why: this preserves cheap recurring dashboard refreshes while preventing stale cached sizes from excluding indexes built after the first scan.
+  - Alternative considered: disabling the segment cache, which would make `/status` perform a large recursive scan too often.
 
 ## Challenges and Resolutions
 
-- Challenge: progress plunged to zero while peers and network RX were still active.
-  - Resolution: identified the expected-fetch head-of-line pressure gate and allowed bounded expected retries to bypass it.
-  - Remaining: full-run validation is still required.
+- Challenge: direct Mac mini access failed from the current network.
+  - Resolution: reran operational checks and log collection through `pi-remote`.
+  - Remaining: none for this run.
 
-- Challenge: some experiments looked plausible but did not improve the real run.
-  - Resolution: rejected and reverted them, then restored the remote client before continuing.
+- Challenge: `storage_used_bytes` reported about `359G` while filesystem usage under `segments/` was about `729G`.
+  - Resolution: identified stale sealed-segment size cache entries that missed later index files and added cache invalidation coverage.
+  - Remaining: deploy the branch and confirm the dashboard reports the full data-dir footprint after refresh.
 
-- Challenge: lowering the historical body/receipt role timeout floor looked plausible because plan p90 was tail-latency bound.
-  - Resolution: tested it on the Mac mini and rejected it after the sample regressed to `460.6` blocks/sec with two zero-progress windows.
-  - Remaining: pursue more targeted prefix peer selection or per-role demotion instead of blanket timeout reduction.
-
-- Challenge: lowering the serving-peer candidate-pool threshold looked plausible because real samples often had fewer than 16 serving peers.
-  - Resolution: tested a threshold of `8` and rejected it after the sample regressed to `391.3` blocks/sec with three zero-progress windows.
-  - Remaining: avoid broad serving-pool filtering changes; focus on direct evidence from prefix-role tail events.
-
-- Challenge: retrying missing expected fetches before the full head-of-line reset looked like it could reduce idle time.
-  - Resolution: tested a `750ms` retry delay and rejected it after the sample regressed to `424.6` blocks/sec with one zero-progress window.
-  - Remaining: use stronger prefix-tail evidence before making another scheduler change.
-
-- Challenge: increasing sparse plan progress targets looked like it could reduce request-plan boundary overhead.
-  - Resolution: tested a peer-aware larger prefix target; it increased contiguous blocks per plan but did not improve sustained throughput, so it was reverted.
-  - Remaining: avoid larger-prefix tuning without a full-run or side-by-side result that clearly beats the accepted baseline.
-
-- Challenge: proactively repairing multiple stale prefix chunks looked like it could prevent the next prefix chunk from becoming the next tail.
-  - Resolution: implemented and tested prefix-wide stale role repair, then rejected it after the remote sample produced repeated low/zero-progress windows within the first minute.
-  - Remaining: avoid increasing in-plan hedge fanout without stronger per-peer demotion or measured slot isolation.
-
-- Challenge: per-plan peer isolation looked like it could prevent one failing peer from consuming multiple live chunk roles before global failure accounting caught up.
-  - Resolution: tested per-peer role caps and cross-role transport-failure isolation, then rejected it after the remote sample produced more low/zero windows than the accepted baseline.
-  - Remaining: peer-tail mitigation still needs better evidence from role-level metrics before changing admission or demotion behavior.
-
-- Challenge: direct Mac mini SSH was unavailable from the current network.
-  - Resolution: reran all operational checks and the throughput sample through `pi-remote`.
-
-- Challenge: immediate post-restart samples looked much slower than the accepted baseline.
-  - Resolution: waited for peer warm-up and reran the sampler; throughput recovered to `647.7` blocks/sec, confirming the earlier weak sample was mostly peer warm-up/mix rather than a code regression.
-
-- Challenge: the production-hardening TODO had broad wording that mixed local unit-testable behavior with live-run evidence.
-  - Resolution: audited the current test suite and narrowed the remaining proof to full-run and live-head smokes, instead of duplicating existing local tests.
-  - Remaining: run the live smokes once the remote historical floor reaches genesis.
+- Challenge: bad peers returned receipt data with mismatched roots during the completed run.
+  - Resolution: validation rejected those responses and continued without severe errors.
+  - Remaining: none observed in this run.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Removed the obsolete `SyncEngine::historical_body_receipt_request_pressure_allows_refill` wrapper.
-- Rechecked scheduler candidates and reverted unproductive code before committing.
-- Removed the untracked `.DS_Store` workspace noise.
-- Inspected the runtime restart-guard path while adding coverage; no production code was removed because the existing helpers are still active startup checks.
-- Inspected progress, sync-engine helper, validation, reorg, server auth/status, and low-disk test coverage; no redundant or obsolete test code was removed because the existing tests map to active production paths.
+- Rechecked storage metrics caching and remote data-dir layout; no obsolete production files were removed during this pass.
+- Earlier rejected scheduler experiments remain reverted; no rejected experiment code is currently staged.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, `33e4b19 docs: record rejected peer isolation candidate`, `020d424 docs: record warmed scheduler baseline`, `db97f5e test: cover stale restart guards`, `b87dbaf test: cover fresh checkpoint startup guard`, and `docs: audit production hardening coverage` were committed and pushed.
-- Pull request status: PR #96 remains the active draft performance PR.
-- Merge status: not ready until longer validation/CI are reviewed.
-- Blockers: none.
+- Commits made during this run: pending.
+- Pull request status: PR #96 remains the active performance PR.
+- Merge status: pending final validation, push, CI check, and PR readiness.
+- Blockers: none known.
 
 ## Known Issues or Risks
 
-- The accepted sample is materially better but still short compared with a full sync.
-- Peer count and routing mode materially affect results; benchmark notes must include serving peers and network mode.
-- Further scheduler work should be measured against this new baseline, not against older rejected experiments.
+- The completed run proves resumed sparse-range completion, not a fresh dense-range full sync; the next branch still needs a clean resource-sampled benchmark against the 4 hour goal.
+- Full indexed storage footprint is larger than the older compressed-log-only estimate. After the metrics fix is deployed, the dashboard should expose the full footprint so index/storage tradeoffs can be evaluated explicitly.
