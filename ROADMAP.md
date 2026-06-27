@@ -4,12 +4,19 @@
 
 LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-Active branch: `perf/historical-sync-live-scheduler` for PR #96. Remote Mac mini checks must use `ssh -J pi-remote gremlinmaster@192.168.50.44` when outside the home network. The remote client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`.
+Active branch: `perf/fresh-historical-baseline`. Remote Mac mini checks must use `ssh -J pi-remote gremlinmaster@192.168.50.44` when outside the home network. A fresh baseline run is active from clean `origin/master` source at `/Users/gremlinmaster/logex-baseline-src`, using data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and monitor output under `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260627-182542`.
 
 The latest Pi-routed validation reached genesis from historical floor `4,889,536` in `2,765.7s` (`46m05.7s`) on 2026-06-27 UTC, processing `4,856,264` historical blocks and `61,503,899` logs during that resumed run. Post-genesis live smoke passed: over 65 seconds the EL head advanced from `25,410,603` to `25,410,608`, historical floor stayed at `0`, and EL peers stayed at `77` connected / `28` serving.
 
 ## Completed Since Last Run
 
+- Merged PR #96 into `master` with all GitHub checks passing.
+- Created `perf/fresh-historical-baseline` for the next measured full-run baseline.
+- Confirmed the Mac mini is reachable through `pi-remote`, the current client is full-synced, and the remote source checkout is dirty on an older performance branch, so the next run must use a separate clean source worktree.
+- Audited remote disk use: current `/Volumes/SSD 4TB/LogEx` is about `732G`, old backup `/Volumes/SSD 4TB/LogEx-full-sync-20260626-170349` is about `805G`, and the volume has about `268G` free before cleanup.
+- Started a fresh dense-range baseline from clean `origin/master`, preserved the previous full sync at `/Volumes/SSD 4TB/LogEx-full-sync-20260627-182542`, removed the older backup, and confirmed public VPS dashboard access.
+- Early fresh-run sampling reached `62` connected / `49` serving peers, with current status around `956k logs/sec`; monitor samples show p50 `~362k logs/sec`, p95 `~681k`, max `~926k`, and physical RX commonly near the `300 Mbps` link limit.
+- Investigated zero floor-advance sample windows; they occurred while physical RX remained high and were followed by larger ordered floor advances, so they are not currently evidence of an idle scheduler stall.
 - Reran remote status, log, disk, and live-head validation through the Raspberry Pi jump host after direct Mac mini access failed.
 - Parsed the remote run log from `/Users/gremlinmaster/logex-src/run/logex-pr96-baseline-restored-20260627-165855.log`.
 - Confirmed the run had no severe storage, panic, fatal, low-disk, or corruption markers. Three receipt-root mismatch warnings were invalid peer responses that were rejected.
@@ -20,15 +27,11 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
 
 ## Remaining TODOs
 
-1. Finish PR #96 validation and merge.
-   - Reason: the branch now has a completed resumed-to-genesis run, live-head smoke, storage metrics fix, and passing local validation, but CI and final PR state still need to be checked.
-   - Completion criteria: branch is pushed, GitHub checks pass, PR is marked ready if needed, and the PR is merged.
-
-2. Establish the next performance baseline from a fresh dense-range run.
+1. Establish the next performance baseline from a fresh dense-range run.
    - Reason: the latest completed run covered the remaining sparse historical range, not a fresh pivot-to-genesis run through the log-dense ranges.
-   - Completion criteria: start a new branch after PR #96, run with a resource sampler, record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, and compare against the 4 hour full-sync goal.
+   - Completion criteria: let the active fresh run reach genesis or fail with a diagnosed cause, then record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, resets/failures, and compare against the 4 hour full-sync goal.
 
-3. Continue historical sync optimization only from measured bottlenecks.
+2. Continue historical sync optimization only from measured bottlenecks.
    - Reason: broad scheduler tweaks repeatedly regressed throughput or zero-progress windows; further changes should target proven bottlenecks.
    - Completion criteria: keep only changes that improve longer remote samples without increasing low/zero-progress windows or weakening validation.
 
@@ -52,6 +55,10 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
   - Resolution: reran operational checks and log collection through `pi-remote`.
   - Remaining: none for this run.
 
+- Challenge: the two-endpoint checkpoint command failed because `https://lodestar-mainnet.chainsafe.io` returned 404 for the selected checkpoint header while PublicNode succeeded.
+  - Resolution: restarted the fresh baseline with `https://ethereum-beacon-api.publicnode.com` only.
+  - Remaining: choose a stable multi-source checkpoint policy or service before treating that endpoint set as production default.
+
 - Challenge: `storage_used_bytes` reported about `359G` while filesystem usage under `segments/` was about `729G`.
   - Resolution: identified stale sealed-segment size cache entries that missed later index files and added cache invalidation coverage.
   - Remaining: deploy the branch and confirm the dashboard reports the full data-dir footprint after refresh.
@@ -67,11 +74,11 @@ The latest Pi-routed validation reached genesis from historical floor `4,889,536
 
 ## Git Workflow
 
-- Current branch: `perf/historical-sync-live-scheduler`.
-- New branch created this run: no.
+- Current branch: `perf/fresh-historical-baseline`.
+- New branch created this run: `perf/fresh-historical-baseline`.
 - Commits made during this run: pending.
-- Pull request status: PR #96 remains the active performance PR.
-- Merge status: pending final validation, push, CI check, and PR readiness.
+- Pull request status: not created yet for this branch.
+- Merge status: PR #96 merged; this branch is pending baseline work.
 - Blockers: none known.
 
 ## Known Issues or Risks
