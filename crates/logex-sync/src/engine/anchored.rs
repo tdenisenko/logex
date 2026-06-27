@@ -774,6 +774,16 @@ fn historical_expected_fetch_head_of_line_reset_permitted(
         && lookahead_work >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
 }
 
+fn historical_expected_fetch_replace_permitted(
+    active_attempts: usize,
+    waited: Duration,
+    lookahead_work: usize,
+) -> bool {
+    active_attempts >= HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE
+        && waited >= HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY
+        && lookahead_work >= HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED
+}
+
 fn historical_fetch_budget_has_capacity(
     pending_fetches: usize,
     completed_fetches: usize,
@@ -1122,11 +1132,13 @@ fn historical_sequence_gap_action_for_state(
         return HistoricalSequenceGapAction::Reset;
     }
 
-    if state.missing_fetch && state.later_fetch && !state.planned_child_exists {
+    if state.missing_fetch && state.later_fetch {
         if state.expected_child_exists && state.active_expected_fetch_attempts == 0 {
             HistoricalSequenceGapAction::RefillMissingExpectedFetch
-        } else {
+        } else if !state.planned_child_exists {
             HistoricalSequenceGapAction::Reset
+        } else {
+            HistoricalSequenceGapAction::None
         }
     } else {
         HistoricalSequenceGapAction::None
@@ -2848,7 +2860,73 @@ impl SyncEngine {
         while let Ok(outcome) = self.historical_fetch_rx.try_recv() {
             self.store_historical_fetch_outcome(outcome);
         }
+        self.abort_stale_historical_fetch_work();
         self.refresh_historical_fetch_head_of_line_timer();
+    }
+
+    fn abort_stale_historical_fetch_work(&mut self) -> usize {
+        let expected_sequence = self.historical_fetch_expected_sequence;
+        let mut aborted = 0usize;
+
+        if self
+            .historical_header_fetch_handle
+            .as_ref()
+            .is_some_and(|fetch| fetch.sequence < expected_sequence)
+        {
+            if let Some(fetch) = self.historical_header_fetch_handle.take() {
+                fetch.handle.abort();
+                aborted = aborted.saturating_add(1);
+            }
+        }
+
+        let stale_ready = self
+            .historical_fetch_ready_plans
+            .keys()
+            .copied()
+            .take_while(|sequence| *sequence < expected_sequence)
+            .collect::<Vec<_>>();
+        for sequence in stale_ready {
+            self.historical_fetch_ready_plans.remove(&sequence);
+            aborted = aborted.saturating_add(1);
+        }
+
+        let stale_completed = self
+            .historical_fetch_completed
+            .keys()
+            .copied()
+            .take_while(|sequence| *sequence < expected_sequence)
+            .collect::<Vec<_>>();
+        for sequence in stale_completed {
+            self.historical_fetch_completed.remove(&sequence);
+            aborted = aborted.saturating_add(1);
+        }
+
+        let stale_active = self
+            .historical_fetch_handles
+            .keys()
+            .copied()
+            .filter(|sequence| *sequence < expected_sequence)
+            .collect::<Vec<_>>();
+        for sequence in stale_active {
+            let Some(fetch) = self.historical_fetch_handles.remove(&sequence) else {
+                continue;
+            };
+            for (_, attempt) in fetch.attempts {
+                self.peers
+                    .release_body_receipt_request_reservations(&attempt.reservations);
+                attempt.handle.abort();
+                aborted = aborted.saturating_add(1);
+            }
+        }
+
+        if aborted > 0 {
+            tracing::debug!(
+                expected_sequence,
+                aborted,
+                "aborted stale historical fetch work below expected sequence"
+            );
+        }
+        aborted
     }
 
     fn refresh_historical_fetch_head_of_line_timer(&mut self) {
@@ -3715,6 +3793,46 @@ impl SyncEngine {
         Ok(self.spawn_historical_fetch_retry_plan_at_sequence(sequence, plan))
     }
 
+    async fn replace_stalled_expected_historical_fetch(
+        &mut self,
+        child_header: &Header,
+        lookahead_work: usize,
+    ) -> Result<bool> {
+        let sequence = self.historical_fetch_expected_sequence;
+        let active_attempts = self.active_expected_historical_fetch_attempt_count();
+        if active_attempts == 0 {
+            return Ok(false);
+        }
+        self.drain_historical_request_accounting();
+        tokio::task::yield_now().await;
+        self.drain_historical_request_accounting();
+
+        let Some(plan) = self
+            .prepare_historical_fetch_plan(child_header.clone())
+            .await?
+        else {
+            tracing::debug!(
+                sequence,
+                child_block = child_header.number(),
+                active_attempts,
+                lookahead_work,
+                "unable to prepare replacement for stalled expected historical fetch"
+            );
+            return Ok(false);
+        };
+        tracing::debug!(
+            sequence,
+            child_block = child_header.number(),
+            completed_fetches = self.historical_fetch_completed.len(),
+            active_fetches = self.active_historical_fetch_count(),
+            active_attempts,
+            lookahead_work,
+            "replacing stalled expected historical fetch attempts without discarding lookahead"
+        );
+        self.spawn_historical_fetch_plan_at_sequence(sequence, plan);
+        Ok(true)
+    }
+
     async fn retry_stalled_expected_historical_fetch_if_needed(&mut self) -> Result<bool> {
         self.refresh_historical_fetch_head_of_line_timer();
         let Some(started_at) = self.historical_fetch_head_of_line_started_at else {
@@ -3730,18 +3848,31 @@ impl SyncEngine {
             expected_fetch_is_active: active_attempts > 0,
             waited,
             lookahead_work,
-        }) || !historical_fetch_duplicate_retry_permitted(active_attempts)
-        {
+        }) {
             return Ok(false);
         }
         let Some(child_header) = self.historical_fetch_expected_child.clone() else {
             return Ok(false);
         };
-        let retried = self.retry_expected_historical_fetch(&child_header).await?;
-        if retried {
+        if historical_fetch_duplicate_retry_permitted(active_attempts) {
+            let retried = self.retry_expected_historical_fetch(&child_header).await?;
+            if retried {
+                self.historical_fetch_head_of_line_started_at = Some(Instant::now());
+            }
+            return Ok(retried);
+        }
+        let replaced =
+            if historical_expected_fetch_replace_permitted(active_attempts, waited, lookahead_work)
+            {
+                self.replace_stalled_expected_historical_fetch(&child_header, lookahead_work)
+                    .await?
+            } else {
+                false
+            };
+        if replaced {
             self.historical_fetch_head_of_line_started_at = Some(Instant::now());
         }
-        Ok(retried)
+        Ok(replaced)
     }
 
     async fn ensure_historical_fetch_pipeline(&mut self, child_header: Header) -> Result<()> {
@@ -3941,6 +4072,17 @@ impl SyncEngine {
                 if retry_permitted
                     && historical_expected_fetch_attempt_allows_retry(active_expected_attempts)
                     && self.retry_expected_historical_fetch(child_header).await?
+                {
+                    wait_started = Instant::now();
+                    continue;
+                }
+                if historical_expected_fetch_replace_permitted(
+                    active_expected_attempts,
+                    waited,
+                    lookahead_work,
+                ) && self
+                    .replace_stalled_expected_historical_fetch(child_header, lookahead_work)
+                    .await?
                 {
                     wait_started = Instant::now();
                     continue;
@@ -6717,6 +6859,30 @@ mod tests {
     }
 
     #[test]
+    fn maxed_expected_fetch_attempts_can_be_replaced_after_retry_window() {
+        assert!(!historical_expected_fetch_replace_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE - 1,
+            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+        ));
+        assert!(!historical_expected_fetch_replace_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE,
+            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY - Duration::from_millis(1),
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+        ));
+        assert!(!historical_expected_fetch_replace_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE,
+            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED - 1,
+        ));
+        assert!(historical_expected_fetch_replace_permitted(
+            HISTORICAL_FETCH_MAX_ATTEMPTS_PER_SEQUENCE,
+            HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY,
+            HISTORICAL_FETCH_HEAD_OF_LINE_MIN_COMPLETED,
+        ));
+    }
+
+    #[test]
     fn historical_fetch_duplicate_retry_is_bounded() {
         assert_eq!(
             HISTORICAL_FETCH_HEAD_OF_LINE_DUPLICATE_MIN_COMPLETED,
@@ -7215,6 +7381,24 @@ mod tests {
                 missing_fetch: true,
                 later_fetch: true,
                 planned_child_exists: false,
+                expected_child_exists: true,
+                active_expected_fetch_attempts: 0,
+            }),
+            HistoricalSequenceGapAction::RefillMissingExpectedFetch
+        );
+    }
+
+    #[test]
+    fn historical_sequence_gap_refills_missing_expected_fetch_with_planned_lookahead() {
+        assert_eq!(
+            historical_sequence_gap_action_for_state(HistoricalSequenceGapState {
+                prepare_expected: 0,
+                fetch_expected: 3,
+                missing_prepare: false,
+                later_prepare: false,
+                missing_fetch: true,
+                later_fetch: true,
+                planned_child_exists: true,
                 expected_child_exists: true,
                 active_expected_fetch_attempts: 0,
             }),
