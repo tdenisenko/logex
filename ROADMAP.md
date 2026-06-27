@@ -19,6 +19,8 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Removed the now-unused `SyncEngine` request-pressure wrapper made obsolete by the new retry decision.
 - Validated locally with `cargo test -p logex-sync` and `cargo clippy -p logex-sync -- -D warnings`.
 - Deployed the accepted candidate to the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and left the client running.
+- Tested and rejected a 2 second historical body/receipt role timeout floor: remote validation fell to `460.6` blocks/sec with `2` low windows and `2` zero windows over 294 seconds.
+- Restored the accepted timeout behavior on the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and confirmed `/status` responds through the Pi jump host.
 
 ## Remaining TODOs
 
@@ -30,7 +32,11 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
    - Reason: the latest fix addresses head-of-line duplicate admission, but plan p90 remains high in some windows.
    - Completion criteria: add or keep only changes that improve longer remote samples against the new baseline without increasing low/zero-progress windows.
 
-3. Complete EL production hardening.
+3. Investigate peer-tail mitigation without reducing the global request timeout floor.
+   - Reason: a shorter 2 second timeout increased zero-progress windows and weakened the candidate sample, so the remaining tail-latency fix likely needs better prefix peer selection, per-role demotion, or scheduler admission rather than a blanket timeout cut.
+   - Completion criteria: identify a targeted change that improves p90 plan/body-receipt latency and remote throughput without reducing serving peer stability or adding zero-progress windows.
+
+4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
    - Completion criteria: tests or smokes cover fresh-checkpoint enforcement, stale restart rejection, CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
 
@@ -55,6 +61,10 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Challenge: some experiments looked plausible but did not improve the real run.
   - Resolution: rejected and reverted them, then restored the remote client before continuing.
+
+- Challenge: lowering the historical body/receipt role timeout floor looked plausible because plan p90 was tail-latency bound.
+  - Resolution: tested it on the Mac mini and rejected it after the sample regressed to `460.6` blocks/sec with two zero-progress windows.
+  - Remaining: pursue more targeted prefix peer selection or per-role demotion instead of blanket timeout reduction.
 
 - Challenge: direct Mac mini SSH was unavailable from the current network.
   - Resolution: reran all operational checks through `pi-remote`.
