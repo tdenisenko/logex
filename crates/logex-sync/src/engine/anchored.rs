@@ -3220,24 +3220,38 @@ impl SyncEngine {
         })
     }
 
+    async fn refill_missing_expected_historical_fetch(
+        &mut self,
+        child_header: &Header,
+    ) -> Result<bool> {
+        if self.historical_sequence_gap_action()
+            != HistoricalSequenceGapAction::RefillMissingExpectedFetch
+        {
+            return Ok(false);
+        }
+
+        let Some(expected_child) = self.historical_fetch_expected_child.clone() else {
+            return Ok(false);
+        };
+        tracing::debug!(
+            child_block = child_header.number(),
+            expected_child = expected_child.number(),
+            fetch_expected = self.historical_fetch_expected_sequence,
+            fetch_next = self.historical_fetch_next_sequence,
+            completed_fetches = self.historical_fetch_completed.len(),
+            active_fetches = self.active_historical_fetch_count(),
+            "refilling missing expected historical fetch without resetting buffered lookahead"
+        );
+        self.retry_expected_historical_fetch(&expected_child).await
+    }
+
     async fn recover_historical_sequence_gap(&mut self, child_header: &Header) -> Result<bool> {
         self.drain_historical_fetch_outcomes();
         match self.historical_sequence_gap_action() {
             HistoricalSequenceGapAction::None => Ok(false),
             HistoricalSequenceGapAction::RefillMissingExpectedFetch => {
-                let Some(expected_child) = self.historical_fetch_expected_child.clone() else {
-                    return Ok(false);
-                };
-                tracing::debug!(
-                    child_block = child_header.number(),
-                    expected_child = expected_child.number(),
-                    fetch_expected = self.historical_fetch_expected_sequence,
-                    fetch_next = self.historical_fetch_next_sequence,
-                    completed_fetches = self.historical_fetch_completed.len(),
-                    active_fetches = self.active_historical_fetch_count(),
-                    "refilling missing expected historical fetch without resetting buffered lookahead"
-                );
-                self.retry_expected_historical_fetch(&expected_child).await
+                self.refill_missing_expected_historical_fetch(child_header)
+                    .await
             }
             HistoricalSequenceGapAction::Reset => {
                 tracing::debug!(
@@ -3916,6 +3930,14 @@ impl SyncEngine {
                     HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
                 )
                 .await?;
+                continue;
+            }
+
+            if self
+                .refill_missing_expected_historical_fetch(child_header)
+                .await?
+            {
+                wait_started = Instant::now();
                 continue;
             }
 

@@ -6,47 +6,23 @@ LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execu
 
 The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch focuses on making historical EL sync stable under peer-tail latency while preserving ordered cryptographic verification and storage writes.
 
-The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The live scheduler now consumes body/receipt reservations when requests actually start, discards mismatched expected-sequence attempts without resetting lookahead, and refills the exact expected sequence instead of throwing away valid buffered work. The latest five-minute remote sample measured `288.1` actual blocks/sec with `1` low/zero-progress window while warming from a low serving-peer count; the previous destructive mismatch-reset pattern did not recur.
+The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The live scheduler now consumes body/receipt reservations when requests actually start, discards mismatched expected-sequence attempts without resetting lookahead, and refills a missing expected sequence from inside the wait loop instead of waiting for the timed head-of-line retry path. The latest five-minute remote sample measured `290.0` actual blocks/sec with `0` low-progress windows and `0` zero-progress windows while physical receive bandwidth stayed high.
 
 ## Completed Since Last Run
 
-- Switched dense historical body/receipt plans to the live scheduler path.
-  - Reason: diagnostics showed the decoupled dense path could have available peers and bandwidth while the earliest required prefix chunk had too few in-flight owners.
-  - Result: remote validation improved the latest candidate from `101.3` blocks/sec with `11` low windows and `2` zero windows to `135.5` blocks/sec with `4` low windows and `1` startup zero window.
-- Removed the diagnostic-only status API additions from the final local patch.
-  - Reason: the prefix wait/owner fields were useful to identify the decoupled-path bottleneck, but would be misleading once that path is no longer selected.
-- Updated reservation tests so dense plans now assert live-scheduler routing and no longer expect decoupled spare-window reservations.
-- Validated locally:
-  - `cargo test -p logex-sync`
-  - `cargo fmt --check`
-  - `cargo clippy -p logex-sync -- -D warnings`
-- Deployed the cleaned source to the Mac mini, rebuilt `logex-node --release`, restarted LogEx, and confirmed `/status` responds after peer warm-up.
-- Tightened live prefix repair:
-  - Earliest missing prefix roles now become prefix-critical only when an in-flight role is stale.
-  - Exhausted candidate lists are left to the normal exhausted-prefix removal and reassignment path, which avoids retry amplification.
-  - Remote validation improved from `120.6` blocks/sec, `10` low windows, and `4` zero windows to `170.7` blocks/sec, `4` low windows, and `0` zero windows.
-- Raised the healthy historical body/receipt active-fetch floor from four to six.
-  - Reason: after prefix retry amplification was removed, active fetches could still drain too low during otherwise healthy samples.
-  - Result: the kept remote sample improved to `187.5` blocks/sec with `1` low window and `0` zero windows.
-- Rejected a bounded slot-overdraft admission experiment.
-  - Reason: it increased active fetches but reintroduced zero-progress windows and lower throughput.
-  - Result: the rejected sample measured `144.5` blocks/sec with `5` low windows and `3` zero windows; the code was reverted locally and the Mac mini was redeployed to the kept candidate.
-- Rejected slot-margin concurrency capping for queued ready plans.
-  - Reason: reducing a blocked ready plan's live chunk concurrency to current body/receipt slot margins avoided overdraft, but did not materially improve end-to-end floor advancement.
-  - Result: the five-minute sample measured `193.1` blocks/sec with `5` low windows and `0` zero windows, only slightly above the kept `187.5` blocks/sec baseline and with worse low-window behavior; the code was reverted and the Mac mini was restored to the kept candidate.
-- Added focused live scheduler refill diagnostics to `/status` and the dashboard advanced section.
-  - Reason: the remaining low-progress windows need to be classified before another architectural change; raw logs/sec alone cannot distinguish request-slot pressure, refill policy denial, write backpressure, or prepare pressure.
-  - Result: status now exposes scheduler pipeline depth, buffer depth, critical/write refill limits, body/receipt slot margins, and write backpressure. The current remote run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-163104.log`.
-- Fixed live scheduler request accounting and stale-attempt recovery.
-  - Reason: active body/receipt requests were double-counted while still reserved, and a stale duplicate for the expected sequence could win first, abort the correct retry, and reset all lookahead.
-  - Result: request starts now consume their matching reservation, mismatched expected attempts are discarded without resetting, and buffered mismatches refill the expected sequence. The current remote run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-182605.log`.
+- Fixed a live-scheduler head-of-line idle path.
+  - Reason: after a mismatched expected-sequence attempt was discarded, the expected sequence could have no active attempt while later work stayed buffered, leaving progress dependent on the slower timed retry path.
+  - Result: the wait loop now refills only the missing expected fetch immediately and preserves buffered lookahead.
+- Validated locally with `cargo fmt --check`, `cargo test -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
+- Deployed the exact changed source file to the Mac mini, rebuilt `logex-node --release`, restarted LogEx without clearing data, and sampled the remote run `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-184907.log`.
+- Remote validation: five minutes, `83,816` blocks advanced, `290.0` actual blocks/sec, `0` low-progress windows, `0` zero-progress windows, and no destructive historical fetch pipeline reset recurrence.
 
 ## Remaining TODOs
 
 1. Validate the live scheduler over a long historical run.
    - Reason: five-minute dense samples prove the stall mode improved, but full-run performance varies by log density and peer mix.
    - Completion criteria: record start-to-genesis time, p50/p90/max logs/sec, actual floor blocks/sec, low/zero-progress windows, bandwidth, CPU, memory, disk, peer counts, resets, and failures.
-   - Current progress: the latest dense sample had `0` zero-progress windows and sustained high receive bandwidth, but a full fresh run is still required before closing this TODO.
+   - Current progress: the latest dense sample had `0` low/zero-progress windows and sustained high receive bandwidth, but a full fresh run is still required before closing this TODO.
 
 2. Remove or formally rework the disabled decoupled dense path.
    - Reason: the active production path no longer selects it, but its helper code remains in the file for now to avoid mixing a large deletion with the scheduler routing change.
@@ -55,7 +31,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 3. Complete the live request scheduler admission design.
    - Reason: the current live scheduler is better than the decoupled path, but still relies on conservative slot admission and can leave useful bandwidth idle when peer-tail latency rises. The rejected overdraft experiment showed that simply borrowing more slots increases duplicate pressure and hurts end-to-end progress.
    - Completion criteria: implement admission that keeps enough independent prefix work active without overfilling per-peer request slots; expose focused debug metrics for live backlog, prefix wait age, retry/hedge counts, peer timeout share, bandwidth use, and write/prepare pressure; validate against the kept baseline with longer samples and no recurring zero-progress windows.
-   - Current progress: refill diagnostics exposed the reservation overcount and mismatched expected-attempt reset. Both are fixed and remotely validated, but a longer run is still needed before declaring the live scheduler production-complete.
+   - Current progress: refill diagnostics exposed reservation overcounting, mismatched expected-attempt resets, and a missing-expected-fetch wait-loop gap. These are fixed and remotely validated; the remaining work is long-run validation plus any admission redesign that is justified by measured idle bandwidth or CPU.
 
 4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
@@ -83,7 +59,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
   - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows, including bounded slot overdraft and slot-margin concurrency capping.
   - Remaining: future work should stop one-line tuning and move to a deliberate admission/scheduler change compared against the kept live-scheduler baseline.
 - Challenge: low-progress windows still need a precise cause after the live scheduler milestone.
-  - Resolution: diagnostics identified reservation double-counting and stale expected-sequence attempts as reset causes; both are now handled without dropping valid lookahead.
+  - Resolution: diagnostics identified reservation double-counting, stale expected-sequence attempts, and a wait-loop missing-expected-fetch gap; all are now handled without dropping valid lookahead.
   - Remaining: validate over a longer run and continue admission work only where bandwidth or CPU is demonstrably idle.
 - Challenge: the roadmap had accumulated too much experiment-by-experiment detail.
   - Resolution: condensed it to current state, decisions, and remaining work.
@@ -100,7 +76,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; `docs: record rejected scheduler admission cap`; `feat: expose historical scheduler refill diagnostics`; pending commit for stale-attempt recovery.
+- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; `docs: record rejected scheduler admission cap`; `feat: expose historical scheduler refill diagnostics`; `fix: preserve lookahead on stale historical attempts`; pending commit for wait-loop expected-fetch refill.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready as a production-complete scheduler; can be accepted only as a measured live-scheduler milestone before the larger admission redesign.
 - Blockers: none.
