@@ -20,6 +20,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Validated locally with `cargo test -p logex-sync` and `cargo clippy -p logex-sync -- -D warnings`.
 - Deployed the accepted candidate to the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and left the client running.
 - Tested and rejected a 2 second historical body/receipt role timeout floor: remote validation fell to `460.6` blocks/sec with `2` low windows and `2` zero windows over 294 seconds.
+- Tested and rejected lowering the serving-peer candidate-pool threshold from `16` to `8`: remote validation fell to `391.3` blocks/sec with `6` low windows and `3` zero windows over 289 seconds.
 - Restored the accepted timeout behavior on the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and confirmed `/status` responds through the Pi jump host.
 
 ## Remaining TODOs
@@ -33,7 +34,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
    - Completion criteria: add or keep only changes that improve longer remote samples against the new baseline without increasing low/zero-progress windows.
 
 3. Investigate peer-tail mitigation without reducing the global request timeout floor.
-   - Reason: a shorter 2 second timeout increased zero-progress windows and weakened the candidate sample, so the remaining tail-latency fix likely needs better prefix peer selection, per-role demotion, or scheduler admission rather than a blanket timeout cut.
+   - Reason: a shorter 2 second timeout and a lower serving-pool threshold both increased low/zero-progress windows, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, or scheduler admission rather than broad candidate-pool changes.
    - Completion criteria: identify a targeted change that improves p90 plan/body-receipt latency and remote throughput without reducing serving peer stability or adding zero-progress windows.
 
 4. Complete EL production hardening.
@@ -65,6 +66,10 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Challenge: lowering the historical body/receipt role timeout floor looked plausible because plan p90 was tail-latency bound.
   - Resolution: tested it on the Mac mini and rejected it after the sample regressed to `460.6` blocks/sec with two zero-progress windows.
   - Remaining: pursue more targeted prefix peer selection or per-role demotion instead of blanket timeout reduction.
+
+- Challenge: lowering the serving-peer candidate-pool threshold looked plausible because real samples often had fewer than 16 serving peers.
+  - Resolution: tested a threshold of `8` and rejected it after the sample regressed to `391.3` blocks/sec with three zero-progress windows.
+  - Remaining: avoid broad serving-pool filtering changes; focus on direct evidence from prefix-role tail events.
 
 - Challenge: direct Mac mini SSH was unavailable from the current network.
   - Resolution: reran all operational checks through `pi-remote`.
