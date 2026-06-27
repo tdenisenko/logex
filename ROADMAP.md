@@ -35,6 +35,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Reran the throughput sampler through `ssh -J pi-remote` after a direct-route network-unreachable error; the accepted scheduler moved `838,120` historical blocks in `297` seconds, averaging `2822.0` actual blocks/sec with `0` low windows and `0` zero windows.
 - Added focused startup coverage for fresh data directories requiring a checkpoint, fresh data directories accepting a recent checkpoint, recent vs stale consensus trusted slots, recent vs stale local EL progress, and the case where a recent contiguous consensus anchor allows restart even if the persisted EL sync head is older.
 - Validated the restart-guard tests with `cargo test -p logex-node` and `cargo clippy -p logex-node -- -D warnings`.
+- Audited the remaining EL hardening TODO against existing tests: `runtime_state_only_reports_synced_when_caught_up_to_known_tip`, `consensus_target_can_move_backwards_after_reorg`, `historical_completion_requires_known_target_and_confirmed_empty_responses`, `consensus_forward_batch_limit_yields_while_historical_backfill_is_active`, receipt/header validation tests, consensus reorg tests, dashboard auth tests, low-disk probe tests, and `/status` metrics coverage already cover the local pieces of CL tracking, EL forward/reverse status, invalid data rejection, reorg detection, low-disk reporting, and authenticated dashboard access.
 
 ## Remaining TODOs
 
@@ -52,7 +53,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
-   - Completion criteria: fresh-checkpoint enforcement, checkpoint freshness, and stale restart rejection are covered by unit tests; remaining tests or smokes cover CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
+   - Completion criteria: unit coverage now covers fresh-checkpoint enforcement, checkpoint freshness, stale restart rejection, runtime synced-state gating, consensus target movement after reorg, historical completion gating, consensus-forward fairness during historical backfill, invalid header/receipt rejection, consensus reorg detection, low-disk probe behavior, authenticated dashboard access, and status exposure for CL/EL metrics. Remaining evidence needed: a clean full-sync candidate run and live smokes after completion proving CL head tracking and EL forward sync continue after historical floor reaches genesis.
 
 ## Design Decisions
 
@@ -106,18 +107,23 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Challenge: immediate post-restart samples looked much slower than the accepted baseline.
   - Resolution: waited for peer warm-up and reran the sampler; throughput recovered to `647.7` blocks/sec, confirming the earlier weak sample was mostly peer warm-up/mix rather than a code regression.
 
+- Challenge: the production-hardening TODO had broad wording that mixed local unit-testable behavior with live-run evidence.
+  - Resolution: audited the current test suite and narrowed the remaining proof to full-run and live-head smokes, instead of duplicating existing local tests.
+  - Remaining: run the live smokes once the remote historical floor reaches genesis.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Removed the obsolete `SyncEngine::historical_body_receipt_request_pressure_allows_refill` wrapper.
 - Rechecked scheduler candidates and reverted unproductive code before committing.
 - Removed the untracked `.DS_Store` workspace noise.
 - Inspected the runtime restart-guard path while adding coverage; no production code was removed because the existing helpers are still active startup checks.
+- Inspected progress, sync-engine helper, validation, reorg, server auth/status, and low-disk test coverage; no redundant or obsolete test code was removed because the existing tests map to active production paths.
 
 ## Git Workflow
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, `33e4b19 docs: record rejected peer isolation candidate`, `020d424 docs: record warmed scheduler baseline`, `db97f5e test: cover stale restart guards`, and `test: cover fresh checkpoint startup guard` were committed and pushed.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, `33e4b19 docs: record rejected peer isolation candidate`, `020d424 docs: record warmed scheduler baseline`, `db97f5e test: cover stale restart guards`, `b87dbaf test: cover fresh checkpoint startup guard`, and `docs: audit production hardening coverage` were committed and pushed.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
