@@ -31,6 +31,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Reran validation through `ssh -J pi-remote` after the direct Mac mini network-unreachable error; the accepted baseline sample measured `429.1` blocks/sec with `2` low windows and `0` zero windows while serving peers were still limited.
 - Tested and rejected a per-plan peer isolation candidate that capped per-peer role in-flight selection and treated transport failures as bad for both live body/receipt roles: focused tests passed, but the remote sample regressed to `459.6` blocks/sec with `3` low windows and `1` zero window, so the code was reverted.
 - Restored the accepted baseline on the Mac mini and left it running under tmux from `/Volumes/SSD 4TB/LogEx`.
+- After peer warm-up recovered through the Pi route, reran the accepted baseline and measured `647.7` blocks/sec over 295 seconds with `1` low window and `1` zero window while peers climbed to `64` connected and `25` serving.
 
 ## Remaining TODOs
 
@@ -99,6 +100,9 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Challenge: direct Mac mini SSH was unavailable from the current network.
   - Resolution: reran all operational checks and the throughput sample through `pi-remote`.
 
+- Challenge: immediate post-restart samples looked much slower than the accepted baseline.
+  - Resolution: waited for peer warm-up and reran the sampler; throughput recovered to `647.7` blocks/sec, confirming the earlier weak sample was mostly peer warm-up/mix rather than a code regression.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Removed the obsolete `SyncEngine::historical_body_receipt_request_pressure_allows_refill` wrapper.
@@ -109,7 +113,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, and `0b64380 docs: record rejected prefix repair candidate` were committed and pushed. A follow-up docs commit for the rejected per-plan peer isolation candidate is pending.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, `17743d4 docs: record restored scheduler baseline`, `ab384e9 docs: record rejected sparse prefix candidate`, `0b64380 docs: record rejected prefix repair candidate`, and `33e4b19 docs: record rejected peer isolation candidate` were committed and pushed. A follow-up docs commit for the warmed baseline sample is pending.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
