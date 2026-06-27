@@ -2,71 +2,79 @@
 
 ## Current Status
 
-LogEx verifies a recent checkpoint-backed CL pivot, tracks the live execution head, reverse-syncs EL history toward genesis, and serves verified logs through the dashboard and query APIs. The current historical sync branch is ready as a mergeable baseline improvement; the next performance milestone is a larger geth/Nethermind-style live request scheduler.
+LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-The Mac mini run is active on `/Volumes/SSD 4TB/LogEx` with HTTP port `18683`. A previous full-sync data directory is preserved at `/Volumes/SSD 4TB/LogEx-full-sync-20260621-231449`. If the current historical sync reaches genesis during performance work, stop the client cleanly, move `/Volumes/SSD 4TB/LogEx` to a timestamped backup directory on the same storage, recreate `/Volumes/SSD 4TB/LogEx`, restore peer metadata if available, and continue testing from a fresh run.
+Active branch: `perf/historical-sync-live-scheduler` for PR #96. Remote Mac mini checks must use `ssh -J pi-remote gremlinmaster@192.168.50.44` when outside the home network. The remote client is running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`.
+
+The latest Pi-routed validation reached genesis from historical floor `4,889,536` in `2,765.7s` (`46m05.7s`) on 2026-06-27 UTC, processing `4,856,264` historical blocks and `61,503,899` logs during that resumed run. Post-genesis live smoke passed: over 65 seconds the EL head advanced from `25,410,603` to `25,410,608`, historical floor stayed at `0`, and EL peers stayed at `77` connected / `28` serving.
 
 ## Completed Since Last Run
 
-- Confirmed the branch still beats current `master` on the Mac mini data dir: `master` sampled at about 105k completed logs/sec with a 28s max gap, while the retained branch baseline sampled about 124k-175k completed logs/sec with lower max gaps in comparable windows.
-- Rejected and reverted additional small tuning experiments that did not beat the retained baseline: 3s pipelined timeout, larger dense return windows, and lower high-memory pipeline threshold.
-- Fixed a clippy `if_same_then_else` warning in historical density sizing without changing behavior.
-- Restored the remote Mac mini source and running binary to the retained branch baseline after comparison. The client is running in `tmux` and remains on port `18683`.
+- Reran remote status, log, disk, and live-head validation through the Raspberry Pi jump host after direct Mac mini access failed.
+- Parsed the remote run log from `/Users/gremlinmaster/logex-src/run/logex-pr96-baseline-restored-20260627-165855.log`.
+- Confirmed the run had no severe storage, panic, fatal, low-disk, or corruption markers. Three receipt-root mismatch warnings were invalid peer responses that were rejected.
+- Confirmed post-genesis forward sync still advances while historical sync remains complete.
+- Fixed `storage_used_bytes` undercounting sealed segment indexes by invalidating cached segment sizes when direct `indexes/` files change.
+- Added a regression test for index files added after a sealed segment size was cached.
+- Validated with `cargo test -p logex-node -p logex-sync -p logex-server` and `cargo clippy -p logex-node -p logex-sync -p logex-server -- -D warnings`.
 
 ## Remaining TODOs
 
-1. Replace static historical body/receipt plan boundaries with a live request scheduler.
-   - Reason: current dense sync is still peer-tail bound. A slow prefix request can stall completed batches even when later work or other peers are available.
-   - Completion criteria: implement or prove unnecessary a geth/Nethermind-style queue that reserves chunks for idle peers, reassigns timed-out work without resetting useful lookahead, preserves ordered verified ingestion, and improves sustained full-run throughput without more timeout churn.
+1. Finish PR #96 validation and merge.
+   - Reason: the branch now has a completed resumed-to-genesis run, live-head smoke, storage metrics fix, and passing local validation, but CI and final PR state still need to be checked.
+   - Completion criteria: branch is pushed, GitHub checks pass, PR is marked ready if needed, and the PR is merged.
 
-2. Improve dense historical sync benchmark stability.
-   - Reason: peak logs/sec can be high, but low-throughput windows still make the full-sync ETA too long.
-   - Completion criteria: sustained benchmark windows show materially lower max gaps and higher completed logs/sec while tracking active fetch depth, body/receipt latency, failures, serving peers, CPU, memory, disk, and network.
+2. Establish the next performance baseline from a fresh dense-range run.
+   - Reason: the latest completed run covered the remaining sparse historical range, not a fresh pivot-to-genesis run through the log-dense ranges.
+   - Completion criteria: start a new branch after PR #96, run with a resource sampler, record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, and compare against the 4 hour full-sync goal.
 
-3. Complete EL production hardening.
-   - Reason: performance work must not weaken restart safety, checkpoint freshness, forward sync, or verified query correctness.
-   - Completion criteria: tests or smokes cover recent-checkpoint enforcement, restart/resume, CL tracking, EL forward sync, EL reverse sync, invalid peer data, reorg handling, low disk behavior, authenticated dashboard access, and a clean full-sync candidate run.
+3. Continue historical sync optimization only from measured bottlenecks.
+   - Reason: broad scheduler tweaks repeatedly regressed throughput or zero-progress windows; further changes should target proven bottlenecks.
+   - Completion criteria: keep only changes that improve longer remote samples without increasing low/zero-progress windows or weakening validation.
 
 ## Design Decisions
 
-- Historical reverse sync remains independent of CL live-head tracking after a valid checkpoint-backed pivot exists.
-- Keep changes only when live benchmarks beat the current baseline on sustained throughput and tail behavior, not peak logs/sec alone.
-- Dense body/receipt plans should prefer full verified prefixes when sufficiently peered; half-prefix acceptance was rejected because residual repair serialized the pipeline.
-- Simple duplicate-request pressure at low peer counts is not beneficial on the current Mac mini run; it increased failures and reduced completed throughput.
-- The current branch should merge as the new baseline because it improves over `master` and contains no retained failed experiments.
-- The next meaningful performance path is scheduler architecture, not more local threshold tweaks.
+- Dense historical body/receipt sync uses the chunk-owned live scheduler.
+  - Why: it tracks per-chunk role ownership and repairs prefix-critical gaps while preserving ordered verified floor advancement.
+  - Tradeoff: scheduler complexity is higher, so changes are accepted only with remote measurement.
+
+- Expected-sequence duplicate retries may bypass ordinary request-pressure refill after head-of-line delay.
+  - Why: the expected sequence is the only fetch that can advance the verified floor, and lookahead saturation caused zero-progress windows.
+  - Tradeoff: retries can briefly exceed the conservative refill pressure, but remain bounded by the per-sequence attempt cap.
+
+- Storage metrics keep the sealed-segment size cache but include direct index-file signatures.
+  - Why: this preserves cheap recurring dashboard refreshes while preventing stale cached sizes from excluding indexes built after the first scan.
+  - Alternative considered: disabling the segment cache, which would make `/status` perform a large recursive scan too often.
 
 ## Challenges and Resolutions
 
-- Challenge: historical sync could idle when connected peers dropped below four.
-  - Resolution: lowered the historical backfill connected-peer floor cap to `1`.
-  - Remaining: throughput can still dip when the active body/receipt prefix is held by slow peers.
-- Challenge: request-level hedging and partial-prefix experiments looked plausible but worsened real runs.
-  - Resolution: reverted all unhelpful experiments locally and remotely after measurement.
-  - Remaining: a live work queue with per-peer assignment and reassignment is still needed to attack peer-tail latency cleanly.
-- Challenge: `master` needed a same-data comparison before concluding this branch.
-  - Resolution: temporarily deployed `master` (`b504fe4`) to the Mac mini, measured completed-batch throughput, then restored the branch source and binary.
-  - Remaining: none for this PR.
+- Challenge: direct Mac mini access failed from the current network.
+  - Resolution: reran operational checks and log collection through `pi-remote`.
+  - Remaining: none for this run.
+
+- Challenge: `storage_used_bytes` reported about `359G` while filesystem usage under `segments/` was about `729G`.
+  - Resolution: identified stale sealed-segment size cache entries that missed later index files and added cache invalidation coverage.
+  - Remaining: deploy the branch and confirm the dashboard reports the full data-dir footprint after refresh.
+
+- Challenge: bad peers returned receipt data with mismatched roots during the completed run.
+  - Resolution: validation rejected those responses and continued without severe errors.
+  - Remaining: none observed in this run.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected `crates/logex-sync/src/engine/anchored.rs`; rejected timeout/window/depth experiments were reverted, and duplicated density-branch logic was removed for clippy.
-- Inspected `crates/logex-sync/src/p2p/peer_manager/requests.rs`; rejected decoupled redundancy, half-prefix, timeout, and larger-prefix experiments were reverted.
-- Inspected peer request scoring in `crates/logex-sync/src/p2p/peer_manager/state.rs`; existing EWMA speed, active-load adjustment, serving bonus, and timeout penalty remain in use.
-- No obsolete experimental code from this pass remains in the local diff.
+- Rechecked storage metrics caching and remote data-dir layout; no obsolete production files were removed during this pass.
+- Earlier rejected scheduler experiments remain reverted; no rejected experiment code is currently staged.
 
 ## Git Workflow
 
-- Current branch: `perf/historical-sync-throughput-v3`
-- New branch created this run: no
-- Commits made during this run: pending
-- Pull request status: draft PR open at `https://github.com/tdenisenko/logex/pull/95`; ready to update and merge after this roadmap/clippy commit.
-- Merge status: pending
-- Validation: `cargo fmt --check`, `cargo test --workspace --quiet`, and `cargo clippy --workspace --all-targets -- -D warnings` pass locally.
-- Blockers: none for this PR; the 4-hour target remains follow-up scheduler work.
+- Current branch: `perf/historical-sync-live-scheduler`.
+- New branch created this run: no.
+- Commits made during this run: pending.
+- Pull request status: PR #96 remains the active performance PR.
+- Merge status: pending final validation, push, CI check, and PR readiness.
+- Blockers: none known.
 
 ## Known Issues or Risks
 
-- Current historical sync remains peer-tail bound and can still show low-throughput windows.
-- The running Mac mini data directory must be backed up and rotated if it reaches genesis during continued optimization.
-- A larger request-scheduler refactor may be required to approach the 4-hour full-sync target.
+- The completed run proves resumed sparse-range completion, not a fresh dense-range full sync; the next branch still needs a clean resource-sampled benchmark against the 4 hour goal.
+- Full indexed storage footprint is larger than the older compressed-log-only estimate. After the metrics fix is deployed, the dashboard should expose the full footprint so index/storage tradeoffs can be evaluated explicitly.

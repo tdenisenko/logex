@@ -847,6 +847,149 @@ fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::B256;
+
+    fn checkpoint_at_slot(slot: u64) -> String {
+        format!("{slot}@{:#x}", B256::repeat_byte(0x42))
+    }
+
+    fn open_storage_at(path: &Path) -> PartitionManager {
+        PartitionManager::open(PartitionManagerConfig {
+            data_dir: path.to_path_buf(),
+            ..PartitionManagerConfig::default()
+        })
+        .unwrap()
+    }
+
+    fn consensus_store_at_slot(slot: u64) -> (tempfile::TempDir, ConsensusStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = checkpoint_at_slot(slot);
+        let store = ConsensusStore::open(temp.path(), Some(&checkpoint)).unwrap();
+        (temp, store)
+    }
+
+    fn recent_checkpoint_slot(epoch_lag: u64) -> u64 {
+        MAINNET_CONSENSUS_CHAIN_SPEC
+            .wall_clock_epoch()
+            .saturating_sub(epoch_lag)
+            .saturating_mul(MAINNET_SLOTS_PER_EPOCH)
+    }
+
+    fn anchor_record(block_number: u64, beacon_slot: u64) -> logex_cl::AnchorRecord {
+        logex_cl::AnchorRecord {
+            anchor: logex_types::ExecutionAnchor {
+                beacon_root: B256::repeat_byte(0x51),
+                beacon_slot,
+                block_number,
+                block_hash: B256::repeat_byte(0x52),
+                receipts_root: B256::repeat_byte(0x53),
+            },
+            finalized: true,
+            parent_beacon_root: None,
+        }
+    }
+
+    #[test]
+    fn fresh_data_directory_requires_checkpoint_before_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = open_storage_at(temp.path());
+
+        let error = maybe_open_consensus_store(temp.path(), &storage, None).unwrap_err();
+
+        assert!(matches!(error, ConsensusStateError::MissingCheckpoint));
+    }
+
+    #[test]
+    fn fresh_data_directory_accepts_recent_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = open_storage_at(temp.path());
+        let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+
+        let consensus = maybe_open_consensus_store(temp.path(), &storage, Some(&checkpoint))
+            .unwrap()
+            .unwrap();
+
+        assert!(recent_consensus_state_staleness(&consensus).is_none());
+    }
+
+    #[test]
+    fn restart_guard_accepts_recent_consensus_trusted_slot() {
+        let recent_slot = recent_checkpoint_slot(1);
+        let (_temp, consensus) = consensus_store_at_slot(recent_slot);
+
+        assert!(recent_consensus_state_staleness(&consensus).is_none());
+    }
+
+    #[test]
+    fn restart_guard_rejects_consensus_trusted_slot_outside_recent_window() {
+        let stale_slot =
+            recent_checkpoint_slot(RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG.saturating_add(1));
+        let (_temp, consensus) = consensus_store_at_slot(stale_slot);
+
+        let staleness = recent_consensus_state_staleness(&consensus).unwrap();
+
+        assert_eq!(staleness.trusted_slot, stale_slot);
+        assert_eq!(
+            staleness.trusted_epoch,
+            MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(stale_slot)
+        );
+        assert_eq!(
+            staleness.max_epochs,
+            RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG
+        );
+    }
+
+    #[test]
+    fn restart_guard_accepts_recent_local_execution_progress() {
+        let recent_slot = recent_checkpoint_slot(1);
+        let (_temp, consensus) = consensus_store_at_slot(recent_slot);
+        let sync_head = SyncHead {
+            block_number: 25_000_000,
+            block_hash: B256::repeat_byte(0x61),
+            timestamp: current_unix_timestamp(),
+        };
+
+        assert!(local_execution_progress_staleness(Some(sync_head), &consensus).is_none());
+    }
+
+    #[test]
+    fn restart_guard_rejects_stale_local_execution_progress() {
+        let recent_slot = recent_checkpoint_slot(1);
+        let (_temp, consensus) = consensus_store_at_slot(recent_slot);
+        let stale_timestamp = current_unix_timestamp()
+            .saturating_sub(recent_checkpoint_max_age_secs())
+            .saturating_sub(1);
+        let sync_head = SyncHead {
+            block_number: 24_000_000,
+            block_hash: B256::repeat_byte(0x62),
+            timestamp: stale_timestamp,
+        };
+
+        let staleness = local_execution_progress_staleness(Some(sync_head), &consensus).unwrap();
+
+        assert_eq!(staleness.block_number, sync_head.block_number);
+        assert_eq!(staleness.timestamp, stale_timestamp);
+        assert!(staleness.age_secs > staleness.max_age_secs);
+    }
+
+    #[test]
+    fn restart_guard_uses_recent_contiguous_consensus_anchor_for_progress() {
+        let recent_slot = recent_checkpoint_slot(1);
+        let (_temp, consensus) = consensus_store_at_slot(recent_slot);
+        consensus
+            .append_anchors(vec![anchor_record(25_000_000, recent_slot)])
+            .unwrap();
+        let stale_timestamp = current_unix_timestamp()
+            .saturating_sub(recent_checkpoint_max_age_secs())
+            .saturating_sub(1);
+        let sync_head = SyncHead {
+            block_number: 24_000_000,
+            block_hash: B256::repeat_byte(0x63),
+            timestamp: stale_timestamp,
+        };
+
+        assert!(local_execution_progress_staleness(Some(sync_head), &consensus).is_none());
+    }
 
     #[test]
     fn initial_sync_status_does_not_treat_resume_block_as_network_target() {

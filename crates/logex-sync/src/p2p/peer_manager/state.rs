@@ -9,6 +9,13 @@ const PEER_RATE_EWMA_WEIGHT: f64 = 0.25;
 const RECEIPT_QUARANTINE_DURATION: Duration = Duration::from_secs(5 * 60);
 const RECEIPT_REQUEST_FAILURE_QUARANTINE_DURATION: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestErrorDisposition {
+    Pause,
+    Timeout,
+    DropBadProtocol,
+}
+
 impl PeerManager {
     /// Number of currently connected peers.
     pub fn peer_count(&self) -> usize {
@@ -36,6 +43,76 @@ impl PeerManager {
             }
         }
         body_ready.min(receipt_ready)
+    }
+
+    /// Connected peers currently eligible for body and receipt requests,
+    /// returned separately so scheduler backpressure can respect asymmetric
+    /// receipt pauses/quarantines.
+    pub fn body_receipt_request_ready_peer_counts(&self) -> (usize, usize) {
+        let mut body_ready = 0usize;
+        let mut receipt_ready = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_ready = body_ready.saturating_add(1);
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_ready = receipt_ready.saturating_add(1);
+            }
+        }
+        (body_ready, receipt_ready)
+    }
+
+    /// Active plus reserved body/receipt request slots currently charged to
+    /// peers by historical background fetch plans.
+    pub fn active_body_receipt_request_counts(&self) -> (usize, usize) {
+        let mut active_body_requests = 0usize;
+        let mut active_receipt_requests = 0usize;
+        for peer in self.peers.values() {
+            active_body_requests = active_body_requests
+                .saturating_add(peer.body_active_requests)
+                .saturating_add(peer.body_reserved_requests);
+            active_receipt_requests = active_receipt_requests
+                .saturating_add(peer.receipt_active_requests)
+                .saturating_add(peer.receipt_reserved_requests);
+        }
+        (active_body_requests, active_receipt_requests)
+    }
+
+    /// Adaptive concurrent request-slot capacity currently available for
+    /// historical body/receipt fetches, derived from per-peer block limits
+    /// that rise on fast complete responses and shrink on slow or partial
+    /// responses.
+    pub fn body_receipt_request_slot_capacity_counts(
+        &self,
+        per_ready_peer_target: usize,
+    ) -> (usize, usize) {
+        let mut body_capacity = 0usize;
+        let mut receipt_capacity = 0usize;
+        for peer in self.peers.values() {
+            if !peer_request_is_paused(peer, PeerRequestKind::Bodies) {
+                body_capacity =
+                    body_capacity.saturating_add(adaptive_request_slot_capacity_for_peer(
+                        PeerRequestKind::Bodies,
+                        peer.is_serving,
+                        peer.body_request_limit,
+                        per_ready_peer_target,
+                    ));
+            }
+            if !peer_request_is_paused(peer, PeerRequestKind::Receipts)
+                && !peer_receipts_are_quarantined(peer)
+            {
+                receipt_capacity =
+                    receipt_capacity.saturating_add(adaptive_request_slot_capacity_for_peer(
+                        PeerRequestKind::Receipts,
+                        peer.is_serving,
+                        peer.receipt_request_limit,
+                        per_ready_peer_target,
+                    ));
+            }
+        }
+        (body_capacity, receipt_capacity)
     }
 
     /// Highest advertised canonical block across connected peers.
@@ -104,9 +181,12 @@ impl PeerManager {
             } else if !peer_receipts_are_quarantined(peer) {
                 receipt_request_ready_peers = receipt_request_ready_peers.saturating_add(1);
             }
-            active_body_requests = active_body_requests.saturating_add(peer.body_active_requests);
-            active_receipt_requests =
-                active_receipt_requests.saturating_add(peer.receipt_active_requests);
+            active_body_requests = active_body_requests
+                .saturating_add(peer.body_active_requests)
+                .saturating_add(peer.body_reserved_requests);
+            active_receipt_requests = active_receipt_requests
+                .saturating_add(peer.receipt_active_requests)
+                .saturating_add(peer.receipt_reserved_requests);
             if peer.consecutive_timeouts > 0 {
                 timeout_penalized_peers = timeout_penalized_peers.saturating_add(1);
             }
@@ -149,10 +229,15 @@ impl PeerManager {
             body_request_limit_avg,
             receipt_request_limit_avg,
             historical_fetch_active: 0,
+            historical_fetch_ready: 0,
             historical_fetch_completed: 0,
             historical_fetch_pending: 0,
             historical_fetch_expected_sequence: 0,
             historical_fetch_next_sequence: 0,
+            historical_fetch_head_of_line_blocked: false,
+            historical_fetch_head_of_line_completed: 0,
+            historical_fetch_expected_active: false,
+            historical_fetch_head_of_line_elapsed_ms: None,
             historical_prepare_active: 0,
             historical_prepare_ready: 0,
             historical_prepare_completed: 0,
@@ -161,6 +246,29 @@ impl PeerManager {
             historical_ingest_active: false,
             historical_ingest_sequence: None,
             historical_ingest_elapsed_ms: None,
+            historical_scheduler_body_slot_margin: 0,
+            historical_scheduler_receipt_slot_margin: 0,
+            historical_scheduler_write_backpressure: false,
+            historical_scheduler_pipeline_depth: 0,
+            historical_scheduler_buffer_depth: 0,
+            historical_scheduler_critical_refill_limit: 0,
+            historical_scheduler_write_refill_limit: 0,
+            historical_scheduler_stale_role_retries: self
+                .body_receipt_scheduler_metrics
+                .stale_role_retries,
+            historical_scheduler_prefix_reassignments: self
+                .body_receipt_scheduler_metrics
+                .prefix_reassignments,
+            historical_scheduler_body_successes: self.body_receipt_scheduler_metrics.body_successes,
+            historical_scheduler_receipt_successes: self
+                .body_receipt_scheduler_metrics
+                .receipt_successes,
+            historical_scheduler_body_failures: self.body_receipt_scheduler_metrics.body_failures,
+            historical_scheduler_receipt_failures: self
+                .body_receipt_scheduler_metrics
+                .receipt_failures,
+            historical_scheduler_body_blocks: self.body_receipt_scheduler_metrics.body_blocks,
+            historical_scheduler_receipt_blocks: self.body_receipt_scheduler_metrics.receipt_blocks,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -409,18 +517,57 @@ impl PeerManager {
             let Some(peer) = self.peers.get_mut(&delta.peer_id) else {
                 continue;
             };
-            let active_requests = match delta.kind {
+            let (active_requests, reserved_requests) = match delta.kind {
                 PeerRequestKind::Headers => continue,
-                PeerRequestKind::Bodies => &mut peer.body_active_requests,
-                PeerRequestKind::Receipts => &mut peer.receipt_active_requests,
+                PeerRequestKind::Bodies => (
+                    &mut peer.body_active_requests,
+                    &mut peer.body_reserved_requests,
+                ),
+                PeerRequestKind::Receipts => (
+                    &mut peer.receipt_active_requests,
+                    &mut peer.receipt_reserved_requests,
+                ),
             };
-            match delta.delta {
-                BodyReceiptActiveRequestDelta::Started => {
-                    *active_requests = active_requests.saturating_add(1);
-                }
-                BodyReceiptActiveRequestDelta::Finished => {
-                    *active_requests = active_requests.saturating_sub(1);
-                }
+            apply_body_receipt_active_request_delta_counts(
+                active_requests,
+                reserved_requests,
+                delta.delta,
+            );
+        }
+    }
+
+    pub(crate) fn reserve_body_receipt_requests(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+    ) {
+        self.apply_body_receipt_request_reservations(reservations, true);
+    }
+
+    pub(crate) fn release_body_receipt_request_reservations(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+    ) {
+        self.apply_body_receipt_request_reservations(reservations, false);
+    }
+
+    fn apply_body_receipt_request_reservations(
+        &mut self,
+        reservations: &BodyReceiptRequestReservations,
+        reserve: bool,
+    ) {
+        for reservation in reservations.entries() {
+            let Some(peer) = self.peers.get_mut(&reservation.peer_id) else {
+                continue;
+            };
+            let reserved_requests = match reservation.kind {
+                PeerRequestKind::Headers => continue,
+                PeerRequestKind::Bodies => &mut peer.body_reserved_requests,
+                PeerRequestKind::Receipts => &mut peer.receipt_reserved_requests,
+            };
+            if reserve {
+                *reserved_requests = reserved_requests.saturating_add(reservation.count);
+            } else {
+                *reserved_requests = reserved_requests.saturating_sub(reservation.count);
             }
         }
     }
@@ -429,6 +576,8 @@ impl PeerManager {
         for peer in self.peers.values_mut() {
             peer.body_active_requests = 0;
             peer.receipt_active_requests = 0;
+            peer.body_reserved_requests = 0;
+            peer.receipt_reserved_requests = 0;
         }
     }
 
@@ -481,32 +630,27 @@ impl PeerManager {
         kind: PeerRequestKind,
         error: &RequestAttempt,
     ) -> bool {
-        match error {
-            RequestAttempt::Disconnected => true,
-            RequestAttempt::Request(request_error) => match request_error {
-                reth_network::p2p::error::RequestError::Timeout => {
-                    self.reduce_peer_request_limit(peer_id, kind);
-                    let consecutive_timeouts = self.record_timeout(peer_id);
-                    self.pause_peer_requests(
-                        peer_id,
-                        kind,
-                        request_timeout_pause_duration(consecutive_timeouts),
-                    );
-                    consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
-                }
-                reth_network::p2p::error::RequestError::BadResponse => {
-                    self.network
-                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
-                    true
-                }
-                reth_network::p2p::error::RequestError::UnsupportedCapability => {
-                    self.network
-                        .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
-                    true
-                }
-                reth_network::p2p::error::RequestError::ChannelClosed
-                | reth_network::p2p::error::RequestError::ConnectionDropped => true,
-            },
+        match request_error_disposition(error) {
+            RequestErrorDisposition::Pause => {
+                self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
+                self.record_soft_failure(peer_id);
+                false
+            }
+            RequestErrorDisposition::Timeout => {
+                self.reduce_peer_request_limit(peer_id, kind);
+                let consecutive_timeouts = self.record_timeout(peer_id);
+                self.pause_peer_requests(
+                    peer_id,
+                    kind,
+                    request_timeout_pause_duration(consecutive_timeouts),
+                );
+                consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS
+            }
+            RequestErrorDisposition::DropBadProtocol => {
+                self.network
+                    .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
+                true
+            }
         }
     }
 
@@ -852,6 +996,19 @@ fn average_peer_request_limit(total: usize, peers: usize, kind: PeerRequestKind)
     }
 }
 
+fn adaptive_request_slot_capacity_for_peer(
+    kind: PeerRequestKind,
+    is_serving: bool,
+    limit: usize,
+    per_ready_peer_target: usize,
+) -> usize {
+    let effective_limit = effective_peer_request_limit(kind, is_serving, limit);
+    effective_limit
+        .saturating_mul(per_ready_peer_target.max(1))
+        .div_ceil(request_limit_initial(kind).max(1))
+        .clamp(1, REQUEST_LIMIT_MAX)
+}
+
 pub(super) fn inherited_peer_request_limit(
     limits: impl Iterator<Item = usize>,
     kind: PeerRequestKind,
@@ -1060,14 +1217,15 @@ impl ExecutionClientFamilyCounts {
     }
 }
 
-enum ExecutionClientFamily {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ExecutionClientFamily {
     Geth,
     Nethermind,
     Reth,
     Other,
 }
 
-fn execution_client_family(client_version: &str) -> ExecutionClientFamily {
+pub(crate) fn execution_client_family(client_version: &str) -> ExecutionClientFamily {
     let client_version = client_version.to_ascii_lowercase();
     if client_version.starts_with("geth/") {
         ExecutionClientFamily::Geth
@@ -1113,6 +1271,23 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
     }
 }
 
+fn request_error_disposition(error: &RequestAttempt) -> RequestErrorDisposition {
+    match error {
+        RequestAttempt::Disconnected => RequestErrorDisposition::Pause,
+        RequestAttempt::Request(request_error) => match request_error {
+            reth_network::p2p::error::RequestError::Timeout => RequestErrorDisposition::Timeout,
+            reth_network::p2p::error::RequestError::BadResponse
+            | reth_network::p2p::error::RequestError::UnsupportedCapability => {
+                RequestErrorDisposition::DropBadProtocol
+            }
+            reth_network::p2p::error::RequestError::ChannelClosed
+            | reth_network::p2p::error::RequestError::ConnectionDropped => {
+                RequestErrorDisposition::Pause
+            }
+        },
+    }
+}
+
 fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
     REQUEST_KIND_PAUSE_DURATION
         .saturating_mul(consecutive_timeouts.max(1))
@@ -1122,13 +1297,33 @@ fn request_timeout_pause_duration(consecutive_timeouts: u32) -> Duration {
 fn peer_active_request_count(peer: &ActivePeer, kind: PeerRequestKind) -> usize {
     match kind {
         PeerRequestKind::Headers => 0,
-        PeerRequestKind::Bodies => peer.body_active_requests,
-        PeerRequestKind::Receipts => peer.receipt_active_requests,
+        PeerRequestKind::Bodies => peer
+            .body_active_requests
+            .saturating_add(peer.body_reserved_requests),
+        PeerRequestKind::Receipts => peer
+            .receipt_active_requests
+            .saturating_add(peer.receipt_reserved_requests),
     }
 }
 
 fn load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
     base_rate / (1.0 + active_requests as f64)
+}
+
+fn apply_body_receipt_active_request_delta_counts(
+    active_requests: &mut usize,
+    reserved_requests: &mut usize,
+    delta: BodyReceiptActiveRequestDelta,
+) {
+    match delta {
+        BodyReceiptActiveRequestDelta::Started => {
+            *reserved_requests = reserved_requests.saturating_sub(1);
+            *active_requests = active_requests.saturating_add(1);
+        }
+        BodyReceiptActiveRequestDelta::Finished => {
+            *active_requests = active_requests.saturating_sub(1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1461,91 @@ mod tests {
             average_peer_request_limit(96, 2, PeerRequestKind::Receipts),
             48
         );
+    }
+
+    #[test]
+    fn adaptive_request_slot_capacity_scales_relative_to_initial_limit() {
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Bodies,
+                true,
+                BODY_REQUEST_LIMIT_INITIAL,
+                6
+            ),
+            6
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Bodies,
+                true,
+                BODY_REQUEST_LIMIT_INITIAL / 3,
+                6
+            ),
+            2
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Receipts,
+                true,
+                REQUEST_LIMIT_MAX,
+                6
+            ),
+            16
+        );
+        assert_eq!(
+            adaptive_request_slot_capacity_for_peer(
+                PeerRequestKind::Receipts,
+                false,
+                REQUEST_LIMIT_MAX,
+                6
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn active_request_start_consumes_matching_reservation() {
+        let mut active = 0usize;
+        let mut reserved = 3usize;
+
+        apply_body_receipt_active_request_delta_counts(
+            &mut active,
+            &mut reserved,
+            BodyReceiptActiveRequestDelta::Started,
+        );
+
+        assert_eq!(active, 1);
+        assert_eq!(reserved, 2);
+    }
+
+    #[test]
+    fn active_request_start_without_reservation_counts_active_only() {
+        let mut active = 0usize;
+        let mut reserved = 0usize;
+
+        apply_body_receipt_active_request_delta_counts(
+            &mut active,
+            &mut reserved,
+            BodyReceiptActiveRequestDelta::Started,
+        );
+
+        assert_eq!(active, 1);
+        assert_eq!(reserved, 0);
+    }
+
+    #[test]
+    fn active_request_finish_does_not_restore_consumed_reservation() {
+        let mut active = 1usize;
+        let mut reserved = 2usize;
+
+        apply_body_receipt_active_request_delta_counts(
+            &mut active,
+            &mut reserved,
+            BodyReceiptActiveRequestDelta::Finished,
+        );
+
+        assert_eq!(active, 0);
+        assert_eq!(reserved, 2);
     }
 
     #[test]
@@ -1474,6 +1754,42 @@ mod tests {
         assert_eq!(
             request_timeout_pause_duration(100),
             REQUEST_TIMEOUT_PAUSE_MAX_DURATION
+        );
+    }
+
+    #[test]
+    fn transient_transport_request_errors_pause_without_dropping_peer() {
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Disconnected),
+            RequestErrorDisposition::Pause
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::ChannelClosed
+            )),
+            RequestErrorDisposition::Pause
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::ConnectionDropped
+            )),
+            RequestErrorDisposition::Pause
+        );
+    }
+
+    #[test]
+    fn protocol_request_errors_still_drop_peer() {
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::BadResponse
+            )),
+            RequestErrorDisposition::DropBadProtocol
+        );
+        assert_eq!(
+            request_error_disposition(&RequestAttempt::Request(
+                reth_network::p2p::error::RequestError::UnsupportedCapability
+            )),
+            RequestErrorDisposition::DropBadProtocol
         );
     }
 }

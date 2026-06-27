@@ -945,10 +945,8 @@ fn decode_beacon_blocks_by_root_request(payload: &[u8]) -> io::Result<Vec<B256>>
             payload.len()
         )));
     }
-    Ok(payload
-        .chunks_exact(32)
-        .map(B256::from_slice)
-        .collect::<Vec<_>>())
+    let (chunks, _) = payload.as_chunks::<32>();
+    Ok(chunks.iter().map(|chunk| B256::from_slice(chunk)).collect())
 }
 
 fn decode_stream_response(

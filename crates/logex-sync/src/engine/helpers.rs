@@ -8,12 +8,32 @@ use std::future::Future;
 impl SyncEngine {
     fn execution_network_status(&self) -> logex_types::ExecutionNetworkStatus {
         let mut status = self.peers.execution_network_status();
-        status.historical_fetch_active = self.historical_fetch_handles.len();
+        let scheduler = self.historical_scheduler_status_fields();
+        status.historical_fetch_active = self.active_historical_fetch_count();
+        status.historical_fetch_ready = self.historical_fetch_ready_plans.len();
         status.historical_fetch_completed = self.historical_fetch_completed.len();
-        status.historical_fetch_pending =
-            status.historical_fetch_active + status.historical_fetch_completed;
+        status.historical_fetch_pending = self.pending_historical_fetch_count();
         status.historical_fetch_expected_sequence = self.historical_fetch_expected_sequence;
         status.historical_fetch_next_sequence = self.historical_fetch_next_sequence;
+        status.historical_fetch_expected_active = self
+            .historical_fetch_handles
+            .contains_key(&self.historical_fetch_expected_sequence);
+        status.historical_fetch_head_of_line_completed = self
+            .historical_fetch_completed
+            .keys()
+            .filter(|sequence| **sequence > self.historical_fetch_expected_sequence)
+            .count();
+        status.historical_fetch_head_of_line_blocked = !self
+            .historical_fetch_completed
+            .contains_key(&self.historical_fetch_expected_sequence)
+            && status.historical_fetch_head_of_line_completed > 0;
+        status.historical_fetch_head_of_line_elapsed_ms = status
+            .historical_fetch_head_of_line_blocked
+            .then(|| {
+                self.historical_fetch_head_of_line_started_at
+                    .map(|started_at| started_at.elapsed().as_millis() as u64)
+            })
+            .flatten();
         status.historical_prepare_active = self.historical_prepare_handles.len();
         status.historical_prepare_ready = self
             .historical_prepare_handles
@@ -30,6 +50,13 @@ impl SyncEngine {
         status.historical_ingest_elapsed_ms = self
             .historical_ingest_started_at
             .map(|started_at| started_at.elapsed().as_millis() as u64);
+        status.historical_scheduler_body_slot_margin = scheduler.body_slot_margin;
+        status.historical_scheduler_receipt_slot_margin = scheduler.receipt_slot_margin;
+        status.historical_scheduler_write_backpressure = scheduler.write_backpressure;
+        status.historical_scheduler_pipeline_depth = scheduler.pipeline_depth;
+        status.historical_scheduler_buffer_depth = scheduler.buffer_depth;
+        status.historical_scheduler_critical_refill_limit = scheduler.critical_refill_limit;
+        status.historical_scheduler_write_refill_limit = scheduler.write_refill_limit;
         status
     }
 

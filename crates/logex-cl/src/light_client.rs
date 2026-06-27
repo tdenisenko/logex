@@ -1562,7 +1562,8 @@ fn sync_committee_pubkeys_root_from_bytes(
     pubkeys: &FixedBytes<SYNC_COMMITTEE_PUBKEY_BYTES>,
 ) -> B256 {
     let mut roots = Vec::with_capacity(SYNC_COMMITTEE_PUBKEYS * 32);
-    for pubkey in pubkeys.as_slice().chunks_exact(BLS_PUBKEY_BYTES) {
+    let (pubkey_chunks, _) = pubkeys.as_slice().as_chunks::<BLS_PUBKEY_BYTES>();
+    for pubkey in pubkey_chunks {
         let root = FixedBytes::<BLS_PUBKEY_BYTES>::from_slice(pubkey).tree_hash_root();
         roots.extend_from_slice(root.as_slice());
     }
@@ -1635,11 +1636,8 @@ fn bytes_list_root(bytes: &[u8]) -> B256 {
 }
 
 fn branch_from_fixed<const N: usize>(branch: &FixedBytes<N>) -> Vec<B256> {
-    branch
-        .as_slice()
-        .chunks_exact(32)
-        .map(B256::from_slice)
-        .collect()
+    let (chunks, _) = branch.as_slice().as_chunks::<32>();
+    chunks.iter().map(|chunk| B256::from_slice(chunk)).collect()
 }
 
 fn is_valid_normalized_merkle_branch(
@@ -1698,8 +1696,10 @@ impl SyncCommitteeRaw {
             pubkeys: self
                 .pubkeys
                 .as_slice()
-                .chunks_exact(BLS_PUBKEY_BYTES)
-                .map(BlsPublicKey::from_slice)
+                .as_chunks::<BLS_PUBKEY_BYTES>()
+                .0
+                .iter()
+                .map(|pubkey| BlsPublicKey::from_slice(pubkey))
                 .collect(),
             aggregate_pubkey: self.aggregate_pubkey,
         }

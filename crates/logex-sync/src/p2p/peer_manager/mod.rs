@@ -40,9 +40,14 @@ mod lifecycle;
 mod requests;
 mod state;
 
-use self::requests::{BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, RequestAttempt};
+use self::requests::{
+    BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, BodyReceiptRequestReservations,
+    RequestAttempt,
+};
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
+    BodyReceiptRequestReservations as BodyReceiptPeerReservations,
+    ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan,
 };
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
@@ -129,6 +134,7 @@ pub struct PeerManager {
     network_activated: bool,
     max_peers: usize,
     session_metrics: ExecutionPeerSessionMetrics,
+    body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics,
 }
 
 #[derive(Default)]
@@ -140,6 +146,18 @@ struct ExecutionPeerSessionMetrics {
     nonserving_disconnects: u64,
     missing_fork_id_candidates: u64,
     fork_id_rejected_candidates: u64,
+}
+
+#[derive(Default)]
+struct BodyReceiptSchedulerMetrics {
+    stale_role_retries: u64,
+    prefix_reassignments: u64,
+    body_successes: u64,
+    receipt_successes: u64,
+    body_failures: u64,
+    receipt_failures: u64,
+    body_blocks: u64,
+    receipt_blocks: u64,
 }
 
 #[derive(Clone)]
@@ -157,6 +175,8 @@ struct ActivePeer {
     receipt_blocks_per_sec: f64,
     body_active_requests: usize,
     receipt_active_requests: usize,
+    body_reserved_requests: usize,
+    receipt_reserved_requests: usize,
     body_request_limit: usize,
     receipt_request_limit: usize,
     body_paused_until: Option<Instant>,
@@ -297,6 +317,7 @@ impl PeerManager {
             network_activated,
             max_peers,
             session_metrics: ExecutionPeerSessionMetrics::default(),
+            body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
         };
 
         manager.seed_known_peers();

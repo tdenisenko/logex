@@ -219,16 +219,27 @@ pub struct ExecutionNetworkStatus {
     pub body_request_limit_avg: usize,
     /// Average adaptive receipt request block limit across connected peers.
     pub receipt_request_limit_avg: usize,
-    /// Historical fetch tasks currently in flight.
+    /// Historical fetch request attempts currently in flight.
     pub historical_fetch_active: usize,
+    /// Historical body/receipt fetch plans waiting for scheduler admission.
+    pub historical_fetch_ready: usize,
     /// Historical fetch outcomes buffered and waiting for ordered ingest.
     pub historical_fetch_completed: usize,
-    /// Historical fetch tasks plus buffered outcomes.
+    /// Historical fetch request attempts plus buffered outcomes.
     pub historical_fetch_pending: usize,
     /// Historical fetch sequence currently required by ordered ingest.
     pub historical_fetch_expected_sequence: u64,
     /// Next historical fetch sequence that will be assigned to a new plan.
     pub historical_fetch_next_sequence: u64,
+    /// Whether the required historical fetch sequence is blocking behind later work.
+    pub historical_fetch_head_of_line_blocked: bool,
+    /// Later historical fetch outcomes buffered while the required sequence is missing.
+    pub historical_fetch_head_of_line_completed: usize,
+    /// Whether the required historical fetch sequence still has an active request task.
+    pub historical_fetch_expected_active: bool,
+    /// Milliseconds elapsed since the required historical fetch sequence started blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_fetch_head_of_line_elapsed_ms: Option<u64>,
     /// Historical prepare tasks currently in flight.
     pub historical_prepare_active: usize,
     /// Historical prepare tasks whose join handles are already ready.
@@ -247,6 +258,36 @@ pub struct ExecutionNetworkStatus {
     /// Milliseconds elapsed since the active historical ingest started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_ingest_elapsed_ms: Option<u64>,
+    /// Body request slots available after active and reserved historical work.
+    pub historical_scheduler_body_slot_margin: usize,
+    /// Receipt request slots available after active and reserved historical work.
+    pub historical_scheduler_receipt_slot_margin: usize,
+    /// Whether ordered write or prepare backlog is currently blocking scheduler refill.
+    pub historical_scheduler_write_backpressure: bool,
+    /// Current target depth for the historical fetch pipeline.
+    pub historical_scheduler_pipeline_depth: usize,
+    /// Current target depth for buffered historical fetch outcomes.
+    pub historical_scheduler_buffer_depth: usize,
+    /// Number of new fetches currently admitted by critical-path refill.
+    pub historical_scheduler_critical_refill_limit: usize,
+    /// Number of new fetches currently admitted by write-period refill.
+    pub historical_scheduler_write_refill_limit: usize,
+    /// Cumulative stale body/receipt role retries scheduled by the historical scheduler.
+    pub historical_scheduler_stale_role_retries: u64,
+    /// Cumulative prefix-critical chunk reassignments scheduled by the historical scheduler.
+    pub historical_scheduler_prefix_reassignments: u64,
+    /// Cumulative successful historical body request attempts.
+    pub historical_scheduler_body_successes: u64,
+    /// Cumulative successful historical receipt request attempts.
+    pub historical_scheduler_receipt_successes: u64,
+    /// Cumulative historical body request failures.
+    pub historical_scheduler_body_failures: u64,
+    /// Cumulative historical receipt request failures.
+    pub historical_scheduler_receipt_failures: u64,
+    /// Cumulative blocks returned by successful historical body requests.
+    pub historical_scheduler_body_blocks: u64,
+    /// Cumulative blocks returned by successful historical receipt requests.
+    pub historical_scheduler_receipt_blocks: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

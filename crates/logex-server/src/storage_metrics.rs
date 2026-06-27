@@ -232,6 +232,15 @@ struct SegmentDirSignature {
     manifest_modified: Option<SystemTime>,
     manifest_len: u64,
     manifest_id: Option<MetadataId>,
+    index_files: Vec<SegmentIndexFileSignature>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SegmentIndexFileSignature {
+    name: String,
+    modified: Option<SystemTime>,
+    len: u64,
+    id: Option<MetadataId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -389,7 +398,39 @@ fn segment_dir_signature(
         manifest_modified: manifest_metadata.modified().ok(),
         manifest_len: manifest_metadata.len(),
         manifest_id: metadata_id(&manifest_metadata),
+        index_files: segment_index_file_signatures(path)?,
     }))
+}
+
+fn segment_index_file_signatures(path: &Path) -> io::Result<Vec<SegmentIndexFileSignature>> {
+    let indexes_dir = path.join("indexes");
+    let entries = match fs::read_dir(&indexes_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut signatures = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+
+        signatures.push(SegmentIndexFileSignature {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+            id: metadata_id(&metadata),
+        });
+    }
+    signatures.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(signatures)
 }
 
 fn size_cache_key(path: &Path, metadata: &fs::Metadata) -> SizeCacheKey {
@@ -677,6 +718,22 @@ mod tests {
         let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
         fs::write(segment.join("compacted.bin"), [0_u8; 7]).expect("compacted file");
         fs::write(segment.join("segment.json"), br#"{"generation":1}"#).expect("manifest");
+
+        let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
+        assert_eq!(second, first + 7);
+    }
+
+    #[test]
+    fn segment_size_cache_refreshes_when_index_files_change() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_active_hot_catalog(tmp.path(), 9);
+        let segment = create_segment(tmp.path(), 1, 4);
+        let index_dir = segment.join("indexes");
+        fs::create_dir_all(&index_dir).expect("indexes dir");
+        let mut cache = StorageSizeCache::default();
+
+        let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
+        fs::write(index_dir.join("address.bptree"), [0_u8; 7]).expect("index file");
 
         let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
         assert_eq!(second, first + 7);
