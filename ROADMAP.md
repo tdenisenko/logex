@@ -24,6 +24,8 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Tested and rejected a short `750ms` missing-expected-fetch retry delay before head-of-line reset: remote validation fell to `424.6` blocks/sec with `3` low windows and `1` zero window over 290 seconds.
 - Restored the accepted timeout behavior on the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and confirmed `/status` responds through the Pi jump host.
 - Restored the accepted baseline after the rejected retry-delay candidate and reran the sampler through `pi-remote`: `596.6` blocks/sec, `0` low windows, and `0` zero windows over 295 seconds.
+- Tested and rejected an adaptive sparse-prefix progress target: it raised contiguous plan progress from about `540` to `917` blocks, but increased plan/write latency and sampled at `584.7` blocks/sec with no low/zero windows, which was not a meaningful improvement over baseline.
+- Restored the accepted baseline on the Mac mini after the rejected sparse-prefix candidate and left the client running under tmux.
 
 ## Remaining TODOs
 
@@ -36,7 +38,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
    - Completion criteria: add or keep only changes that improve longer remote samples against the new baseline without increasing low/zero-progress windows.
 
 3. Investigate peer-tail mitigation without reducing the global request timeout floor.
-   - Reason: a shorter 2 second timeout, a lower serving-pool threshold, and a short missing-expected retry delay all increased low/zero-progress windows, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, scheduler admission, or better production metrics rather than more broad timing constants.
+   - Reason: a shorter 2 second timeout, a lower serving-pool threshold, a short missing-expected retry delay, and a larger sparse-prefix progress target did not improve sustained remote throughput, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, scheduler admission, or better production metrics rather than more broad timing constants.
    - Completion criteria: identify a targeted change that improves p90 plan/body-receipt latency and remote throughput without reducing serving peer stability or adding zero-progress windows.
 
 4. Complete EL production hardening.
@@ -77,6 +79,10 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
   - Resolution: tested a `750ms` retry delay and rejected it after the sample regressed to `424.6` blocks/sec with one zero-progress window.
   - Remaining: use stronger prefix-tail evidence before making another scheduler change.
 
+- Challenge: increasing sparse plan progress targets looked like it could reduce request-plan boundary overhead.
+  - Resolution: tested a peer-aware larger prefix target; it increased contiguous blocks per plan but did not improve sustained throughput, so it was reverted.
+  - Remaining: avoid larger-prefix tuning without a full-run or side-by-side result that clearly beats the accepted baseline.
+
 - Challenge: direct Mac mini SSH was unavailable from the current network.
   - Resolution: reran all operational checks and the throughput sample through `pi-remote`.
 
@@ -90,7 +96,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, and `7c30fe0 docs: record rejected serving-pool candidate` were committed and pushed.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, `7c30fe0 docs: record rejected serving-pool candidate`, and `17743d4 docs: record restored scheduler baseline` were committed and pushed.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
