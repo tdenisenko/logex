@@ -30,9 +30,6 @@ const PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT: Duration = Duration::from_s
 const PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
-const PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS: usize =
-    PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS;
-const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS: usize = 4;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 24;
@@ -40,8 +37,6 @@ const PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS: usize = 4;
 const PIPELINED_BODY_RECEIPT_IDLE_POOL_PROBE_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS: usize = 8;
-const PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE: bool = false;
-const PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_CHUNK_BLOCKS_DEFAULT: usize = 128;
 const PIPELINED_BODY_RECEIPT_DENSE_CHUNK_BLOCKS: usize = 48;
 const PIPELINED_BODY_RECEIPT_VERY_DENSE_CHUNK_BLOCKS: usize = 32;
@@ -57,7 +52,6 @@ const PIPELINED_BODY_RECEIPT_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 300.0;
 const PIPELINED_BODY_RECEIPT_VERY_DENSE_RETURN_ROWS_PER_BLOCK: f64 = 1_500.0;
 const PIPELINED_BODY_RECEIPT_RETURN_GAS_PER_BLOCK_TARGET: u128 = 30_000_000;
 const PARALLEL_CHUNK_RETRY_ROUNDS: usize = 2;
-const PARALLEL_CHUNK_SALVAGE_PEER_LIMIT: usize = 4;
 const PARALLEL_REQUESTS_PER_PEER_LOW: usize = 1;
 const PARALLEL_REQUESTS_PER_PEER_HIGH: usize = 2;
 const PARALLEL_HIGH_FANOUT_MIN_PEERS: usize = 16;
@@ -79,25 +73,6 @@ type RawBlockBodies = Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBo
 type ParallelBodies = (Vec<SourcedBlockBody>, RequestStats, ParallelChunkFailures);
 type ParallelSourcedReceipts = (Vec<SourcedReceiptSet>, RequestStats, ParallelChunkFailures);
 type ParallelReceipts = (PeerId, ReceiptBatch, RequestStats, ParallelChunkFailures);
-type DecoupledBodyChunkResult = (
-    usize,
-    std::ops::Range<usize>,
-    PeerId,
-    usize,
-    Duration,
-    std::result::Result<
-        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
-        ChunkFailureKind,
-    >,
-);
-type DecoupledReceiptChunkResult = (
-    usize,
-    std::ops::Range<usize>,
-    PeerId,
-    usize,
-    Duration,
-    std::result::Result<ReceiptBatch, ChunkFailureKind>,
-);
 
 #[derive(Debug, Clone)]
 struct ChunkRequestFailure {
@@ -1267,10 +1242,6 @@ impl BodyReceiptRequestPlan {
     }
 
     pub(crate) fn reservations(&self) -> BodyReceiptRequestReservations {
-        if self.should_use_decoupled_dense_pipeline() {
-            return self.decoupled_initial_reservations();
-        }
-
         self.paired_initial_reservations()
     }
 
@@ -1288,64 +1259,7 @@ impl BodyReceiptRequestPlan {
     }
 
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
-        if self.should_use_decoupled_dense_pipeline() {
-            let outcome = self.execute_decoupled_dense().await;
-            if !outcome.chunks.is_empty() {
-                return outcome;
-            }
-            debug!(
-                total_hashes = outcome.total_hashes,
-                return_blocks = outcome.return_blocks,
-                failures = outcome.failures.len(),
-                stats = outcome.stats.len(),
-                "decoupled body/receipt pipeline did not produce a prefix, falling back"
-            );
-            let mut fallback = self.execute_paired().await;
-            if !outcome.accounting_forwarded {
-                fallback.stats.extend(outcome.stats);
-                fallback.failures.extend(outcome.failures);
-            }
-            return fallback;
-        }
-
         self.execute_paired().await
-    }
-
-    fn should_use_decoupled_dense_pipeline(&self) -> bool {
-        PIPELINED_BODY_RECEIPT_DECOUPLED_DENSE
-            && self.return_blocks <= PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS
-            && self.body_peer_ids.len().min(self.receipt_peer_ids.len())
-                >= PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS
-    }
-
-    fn decoupled_initial_reservations(&self) -> BodyReceiptRequestReservations {
-        let return_blocks = self.return_blocks.min(self.hashes.len());
-        let ranges = self
-            .ranges
-            .iter()
-            .cloned()
-            .filter_map(|range| body_receipt_prefix_range(range, return_blocks))
-            .collect::<Vec<_>>();
-        let mut reservations = BodyReceiptRequestReservations::default();
-        add_decoupled_initial_reservations(
-            &mut reservations,
-            &self.body_peer_ids,
-            &ranges,
-            return_blocks,
-            self.peer_rotation,
-            PeerRequestKind::Bodies,
-            self.body_max_in_flight,
-        );
-        add_decoupled_initial_reservations(
-            &mut reservations,
-            &self.receipt_peer_ids,
-            &ranges,
-            return_blocks,
-            self.peer_rotation,
-            PeerRequestKind::Receipts,
-            self.receipt_max_in_flight,
-        );
-        reservations
     }
 
     fn paired_initial_reservations(&self) -> BodyReceiptRequestReservations {
@@ -1377,123 +1291,6 @@ impl BodyReceiptRequestPlan {
         }
 
         reservations
-    }
-
-    async fn execute_decoupled_dense(&self) -> BodyReceiptRequestOutcome {
-        let accounting_forwarded = self.accounting_tx.is_some();
-        let return_blocks = self.return_blocks.min(self.hashes.len());
-        let hashes = self.hashes[..return_blocks].to_vec();
-        let ranges = self
-            .ranges
-            .iter()
-            .cloned()
-            .filter_map(|range| body_receipt_prefix_range(range, return_blocks))
-            .collect::<Vec<_>>();
-        let bodies_request = self.request_decoupled_body_chunks(
-            &self.body_peer_ids,
-            hashes.clone(),
-            ranges.clone(),
-            self.peer_rotation,
-            self.body_max_in_flight,
-        );
-        let receipts_request = self.request_decoupled_sourced_receipt_chunks(
-            &self.receipt_peer_ids,
-            hashes,
-            ranges,
-            self.peer_rotation,
-            self.receipt_max_in_flight,
-        );
-        let (bodies_result, receipts_result) = tokio::join!(bodies_request, receipts_request);
-
-        let mut chunks = BTreeMap::new();
-        let mut failures = Vec::new();
-        let mut stats = Vec::new();
-
-        let bodies = match bodies_result {
-            Ok(Some((bodies, body_stats, body_failures))) => {
-                stats.extend(body_stats.into_iter().map(|(peer_id, blocks, elapsed)| {
-                    (peer_id, PeerRequestKind::Bodies, blocks, elapsed)
-                }));
-                failures.extend(body_failures);
-                Some(bodies)
-            }
-            Ok(None) => None,
-            Err((body_failures, body_stats)) => {
-                stats.extend(body_stats.into_iter().map(|(peer_id, blocks, elapsed)| {
-                    (peer_id, PeerRequestKind::Bodies, blocks, elapsed)
-                }));
-                failures.extend(body_failures);
-                None
-            }
-        };
-
-        let receipts = match receipts_result {
-            Ok(Some((receipts, receipt_stats, receipt_failures))) => {
-                stats.extend(receipt_stats.into_iter().map(|(peer_id, blocks, elapsed)| {
-                    (peer_id, PeerRequestKind::Receipts, blocks, elapsed)
-                }));
-                failures.extend(receipt_failures);
-                Some(receipts)
-            }
-            Ok(None) => None,
-            Err((receipt_failures, receipt_stats)) => {
-                stats.extend(receipt_stats.into_iter().map(|(peer_id, blocks, elapsed)| {
-                    (peer_id, PeerRequestKind::Receipts, blocks, elapsed)
-                }));
-                failures.extend(receipt_failures);
-                None
-            }
-        };
-
-        debug!(
-            total_hashes = self.hashes.len(),
-            return_blocks = self.return_blocks,
-            accepted_prefix = decoupled_dense_accepted_prefix(
-                return_blocks,
-                self.body_peer_ids.len().min(self.receipt_peer_ids.len())
-            ),
-            body_prefix_blocks = bodies.as_ref().map_or(0, Vec::len),
-            receipt_prefix_blocks = receipts.as_ref().map_or(0, Vec::len),
-            failures = failures.len(),
-            stats = stats.len(),
-            "decoupled dense body/receipt plan completed"
-        );
-
-        if let (Some(mut bodies), Some(mut receipts)) = (bodies, receipts) {
-            let prefix_len = bodies.len().min(receipts.len());
-            let accepted_prefix = decoupled_dense_accepted_prefix(
-                return_blocks,
-                self.body_peer_ids.len().min(self.receipt_peer_ids.len()),
-            );
-            if prefix_len >= accepted_prefix {
-                bodies.truncate(prefix_len);
-                receipts.truncate(prefix_len);
-                match body_receipt_blocks_if_sourced_counts_match(&bodies, receipts, prefix_len) {
-                    Ok(blocks) => {
-                        chunks.insert(0, blocks);
-                    }
-                    Err(error) => {
-                        let (peer_id, kind) = *error;
-                        failures.push(ChunkRequestFailure {
-                            role: ChunkRequestRole::Receipts,
-                            peer_id,
-                            requested: prefix_len,
-                            kind: ChunkFailureKind::ReceiptCountMismatch(kind),
-                        });
-                    }
-                }
-            }
-        }
-
-        BodyReceiptRequestOutcome {
-            total_hashes: self.hashes.len(),
-            return_blocks: self.return_blocks,
-            planned_return_blocks: self.planned_prefix_blocks(),
-            chunks,
-            failures,
-            stats,
-            accounting_forwarded,
-        }
     }
 
     async fn execute_paired(self) -> BodyReceiptRequestOutcome {
@@ -2132,587 +1929,6 @@ impl BodyReceiptRequestPlan {
         }
 
         None
-    }
-
-    async fn request_decoupled_body_chunks(
-        &self,
-        peer_ids: &[PeerId],
-        hashes: Vec<B256>,
-        ranges: Vec<std::ops::Range<usize>>,
-        peer_rotation: usize,
-        max_in_flight: usize,
-    ) -> std::result::Result<Option<ParallelBodies>, ParallelChunkError> {
-        if ranges.len() < 2 || peer_ids.is_empty() {
-            return Ok(None);
-        }
-        let range_count = ranges.len();
-        let range_indices_by_start: HashMap<usize, usize> = ranges
-            .iter()
-            .enumerate()
-            .map(|(index, range)| (range.start, index))
-            .collect();
-        let request_window = max_in_flight;
-        if request_window == 0 {
-            return Ok(None);
-        }
-        let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
-
-        let mut attempts = futures_util::stream::FuturesUnordered::new();
-        let mut pending_ranges = ranges.iter().cloned().enumerate();
-        let mut retry_counts = HashMap::<usize, usize>::new();
-        let mut prefix_hedge_counts = HashMap::<usize, usize>::new();
-        let mut scheduled_peers = HashMap::<usize, HashSet<PeerId>>::new();
-        let mut bad_peers = HashSet::<PeerId>::new();
-        let initial_ranges = request_window.min(ranges.len());
-        let redundant_prefix_chunks =
-            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len())
-                .min(request_window.saturating_sub(initial_ranges));
-        for _ in 0..initial_ranges {
-            let Some((chunk_index, range)) = pending_ranges.next() else {
-                break;
-            };
-            let peer_id = schedule_decoupled_body_chunk(
-                self,
-                &mut attempts,
-                peer_ids,
-                &hashes,
-                rotated_chunk_index(chunk_index, peer_rotation),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-        for (duplicate_index, range) in ranges
-            .iter()
-            .take(redundant_prefix_chunks)
-            .cloned()
-            .enumerate()
-        {
-            let base_chunk_index = range_indices_by_start
-                .get(&range.start)
-                .copied()
-                .unwrap_or_default();
-            let peer_id = schedule_decoupled_body_chunk(
-                self,
-                &mut attempts,
-                peer_ids,
-                &hashes,
-                rotated_chunk_index(
-                    base_chunk_index
-                        + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
-                    peer_rotation,
-                ),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-
-        let mut chunks = BTreeMap::new();
-        let mut stats = Vec::new();
-        let mut failures = Vec::new();
-        while !attempts.is_empty() {
-            let next_attempt = timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await;
-            let (chunk_index, range, peer_id, requested, elapsed, result) = match next_attempt {
-                Ok(Some(attempt)) => attempt,
-                Ok(None) => break,
-                Err(_) => {
-                    if let Some((chunk_index, range, retry_peer_ids)) =
-                        decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
-                            ranges: &ranges,
-                            range_indices_by_start: &range_indices_by_start,
-                            chunks: &chunks,
-                            accepted_prefix,
-                            peer_ids,
-                            bad_peers: &bad_peers,
-                            scheduled_peers: &scheduled_peers,
-                            prefix_hedge_counts: &prefix_hedge_counts,
-                            range_count,
-                            peer_rotation,
-                            attempts_len: attempts.len(),
-                            request_window,
-                        })
-                    {
-                        let peer_id = schedule_decoupled_body_chunk(
-                            self,
-                            &mut attempts,
-                            &retry_peer_ids,
-                            &hashes,
-                            chunk_index,
-                            range.clone(),
-                        );
-                        record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-                        *prefix_hedge_counts.entry(range.start).or_default() += 1;
-                        emit_body_receipt_scheduler_accounting(
-                            &self.accounting_tx,
-                            BodyReceiptSchedulerAccounting {
-                                stale_role_retries: 0,
-                                prefix_reassignments: 1,
-                            },
-                        );
-                    }
-                    continue;
-                }
-            };
-            let request_failed = result.is_err();
-            let chunk_already_completed = chunks.contains_key(&range.start);
-            match result {
-                Ok(bodies) => {
-                    stats.push((peer_id, bodies.len(), elapsed));
-                    emit_body_receipt_role_success(
-                        &self.accounting_tx,
-                        peer_id,
-                        PeerRequestKind::Bodies,
-                        bodies.len(),
-                        elapsed,
-                    );
-                    if !chunk_already_completed {
-                        chunks.insert(range.start, (peer_id, bodies));
-                    }
-                }
-                Err(kind) => {
-                    if chunk_already_completed {
-                        trace!(
-                            peer = %peer_id,
-                            requested,
-                            ?kind,
-                            "late duplicate body chunk request failed after chunk completion"
-                        );
-                        continue;
-                    }
-                    let failure = ChunkRequestFailure {
-                        role: ChunkRequestRole::Bodies,
-                        peer_id,
-                        requested,
-                        kind: kind.clone(),
-                    };
-                    emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
-                    if chunk_failure_disables_role_peer(&failure) {
-                        bad_peers.insert(peer_id);
-                    }
-                    failures.push(failure);
-                    trace!(
-                        peer = %peer_id,
-                        requested,
-                        ?kind,
-                        "decoupled body chunk request failed"
-                    );
-                }
-            }
-
-            if missing_chunk_ranges(&ranges, &chunks).is_empty() {
-                break;
-            }
-            if decoupled_dense_can_stop_early(
-                contiguous_sourced_chunk_items(&chunks),
-                accepted_prefix,
-                hashes.len(),
-            ) {
-                break;
-            }
-
-            let retry_range = if request_failed && peer_ids.len() > 1 {
-                let retry_count = retry_counts.entry(range.start).or_default();
-                if *retry_count < PARALLEL_CHUNK_RETRY_ROUNDS {
-                    *retry_count += 1;
-                    let base_chunk_index = range_indices_by_start
-                        .get(&range.start)
-                        .copied()
-                        .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let next_range = retry_range.or_else(|| pending_ranges.next());
-            let Some((chunk_index, range)) = next_range else {
-                continue;
-            };
-            let used_peers = scheduled_peers.get(&range.start);
-            let chunk_peer_ids = decoupled_chunk_candidate_peers(peer_ids, &bad_peers, used_peers);
-            if chunk_peer_ids.is_empty() {
-                continue;
-            }
-            let peer_id = schedule_decoupled_body_chunk(
-                self,
-                &mut attempts,
-                &chunk_peer_ids,
-                &hashes,
-                rotated_chunk_index(chunk_index, peer_rotation),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-
-        let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
-        if !missing_prefix_ranges.is_empty() {
-            bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Bodies));
-            for range in missing_prefix_ranges {
-                let base_chunk_index = range_indices_by_start
-                    .get(&range.start)
-                    .copied()
-                    .unwrap_or_default();
-                let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
-                rotate_request_candidates(
-                    &mut retry_peer_ids,
-                    rotated_chunk_index(
-                        base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
-                        peer_rotation,
-                    ),
-                );
-                for peer_id in retry_peer_ids
-                    .into_iter()
-                    .take(PARALLEL_CHUNK_SALVAGE_PEER_LIMIT)
-                {
-                    let request_hashes = hashes[range.clone()].to_vec();
-                    let started_at = Instant::now();
-                    let requested = request_hashes.len();
-                    let _active = BodyReceiptActiveRequestGuard::new(
-                        &self.accounting_tx,
-                        peer_id,
-                        PeerRequestKind::Bodies,
-                    );
-                    match self
-                        .request_bodies_until_complete(peer_id, request_hashes)
-                        .await
-                    {
-                        Ok(bodies) => {
-                            let elapsed = started_at.elapsed();
-                            stats.push((peer_id, bodies.len(), elapsed));
-                            emit_body_receipt_role_success(
-                                &self.accounting_tx,
-                                peer_id,
-                                PeerRequestKind::Bodies,
-                                bodies.len(),
-                                elapsed,
-                            );
-                            chunks.insert(range.start, (peer_id, bodies));
-                            break;
-                        }
-                        Err(kind) => {
-                            let failure = ChunkRequestFailure {
-                                role: ChunkRequestRole::Bodies,
-                                peer_id,
-                                requested,
-                                kind: kind.clone(),
-                            };
-                            emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
-                            if chunk_failure_disables_role_peer(&failure) {
-                                bad_peers.insert(peer_id);
-                            }
-                            failures.push(failure);
-                            trace!(
-                                peer = %peer_id,
-                                requested,
-                                ?kind,
-                                "decoupled body chunk salvage request failed"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let bodies = sourced_bodies_from_chunks(hashes.len(), chunks);
-
-        if bodies.len() >= accepted_prefix {
-            Ok(Some((bodies, stats, failures)))
-        } else if failures.is_empty() {
-            Ok(None)
-        } else {
-            Err((failures, stats))
-        }
-    }
-
-    async fn request_decoupled_sourced_receipt_chunks(
-        &self,
-        peer_ids: &[PeerId],
-        hashes: Vec<B256>,
-        ranges: Vec<std::ops::Range<usize>>,
-        peer_rotation: usize,
-        max_in_flight: usize,
-    ) -> std::result::Result<Option<ParallelSourcedReceipts>, ParallelChunkError> {
-        if ranges.len() < 2 || peer_ids.is_empty() {
-            return Ok(None);
-        }
-        let range_count = ranges.len();
-        let range_indices_by_start: HashMap<usize, usize> = ranges
-            .iter()
-            .enumerate()
-            .map(|(index, range)| (range.start, index))
-            .collect();
-        let request_window = max_in_flight;
-        if request_window == 0 {
-            return Ok(None);
-        }
-        let accepted_prefix = decoupled_dense_accepted_prefix(hashes.len(), peer_ids.len());
-
-        let mut attempts = futures_util::stream::FuturesUnordered::new();
-        let mut pending_ranges = ranges.iter().cloned().enumerate();
-        let mut retry_counts = HashMap::<usize, usize>::new();
-        let mut prefix_hedge_counts = HashMap::<usize, usize>::new();
-        let mut scheduled_peers = HashMap::<usize, HashSet<PeerId>>::new();
-        let mut bad_peers = HashSet::<PeerId>::new();
-        let initial_ranges = request_window.min(ranges.len());
-        let redundant_prefix_chunks =
-            decoupled_initial_prefix_redundancy_count(&ranges, hashes.len(), peer_ids.len())
-                .min(request_window.saturating_sub(initial_ranges));
-        for _ in 0..initial_ranges {
-            let Some((chunk_index, range)) = pending_ranges.next() else {
-                break;
-            };
-            let peer_id = schedule_decoupled_receipt_chunk(
-                self,
-                &mut attempts,
-                peer_ids,
-                &hashes,
-                rotated_chunk_index(chunk_index, peer_rotation),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-        for (duplicate_index, range) in ranges
-            .iter()
-            .take(redundant_prefix_chunks)
-            .cloned()
-            .enumerate()
-        {
-            let base_chunk_index = range_indices_by_start
-                .get(&range.start)
-                .copied()
-                .unwrap_or_default();
-            let peer_id = schedule_decoupled_receipt_chunk(
-                self,
-                &mut attempts,
-                peer_ids,
-                &hashes,
-                rotated_chunk_index(
-                    base_chunk_index
-                        + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * range_count),
-                    peer_rotation,
-                ),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-
-        let mut chunks = BTreeMap::new();
-        let mut stats = Vec::new();
-        let mut failures = Vec::new();
-        while !attempts.is_empty() {
-            let next_attempt = timeout(PIPELINED_BODY_RECEIPT_HEDGE_DELAY, attempts.next()).await;
-            let (chunk_index, range, peer_id, requested, elapsed, result) = match next_attempt {
-                Ok(Some(attempt)) => attempt,
-                Ok(None) => break,
-                Err(_) => {
-                    if let Some((chunk_index, range, retry_peer_ids)) =
-                        decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
-                            ranges: &ranges,
-                            range_indices_by_start: &range_indices_by_start,
-                            chunks: &chunks,
-                            accepted_prefix,
-                            peer_ids,
-                            bad_peers: &bad_peers,
-                            scheduled_peers: &scheduled_peers,
-                            prefix_hedge_counts: &prefix_hedge_counts,
-                            range_count,
-                            peer_rotation,
-                            attempts_len: attempts.len(),
-                            request_window,
-                        })
-                    {
-                        let peer_id = schedule_decoupled_receipt_chunk(
-                            self,
-                            &mut attempts,
-                            &retry_peer_ids,
-                            &hashes,
-                            chunk_index,
-                            range.clone(),
-                        );
-                        record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-                        *prefix_hedge_counts.entry(range.start).or_default() += 1;
-                        emit_body_receipt_scheduler_accounting(
-                            &self.accounting_tx,
-                            BodyReceiptSchedulerAccounting {
-                                stale_role_retries: 0,
-                                prefix_reassignments: 1,
-                            },
-                        );
-                    }
-                    continue;
-                }
-            };
-            let request_failed = result.is_err();
-            let chunk_already_completed = chunks.contains_key(&range.start);
-            match result {
-                Ok(receipts) => {
-                    stats.push((peer_id, receipts.len(), elapsed));
-                    emit_body_receipt_role_success(
-                        &self.accounting_tx,
-                        peer_id,
-                        PeerRequestKind::Receipts,
-                        receipts.len(),
-                        elapsed,
-                    );
-                    if !chunk_already_completed {
-                        chunks.insert(range.start, (peer_id, receipts));
-                    }
-                }
-                Err(kind) => {
-                    if chunk_already_completed {
-                        trace!(
-                            peer = %peer_id,
-                            requested,
-                            ?kind,
-                            "late duplicate receipt chunk request failed after chunk completion"
-                        );
-                        continue;
-                    }
-                    let failure = ChunkRequestFailure {
-                        role: ChunkRequestRole::Receipts,
-                        peer_id,
-                        requested,
-                        kind: kind.clone(),
-                    };
-                    emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
-                    if chunk_failure_disables_role_peer(&failure) {
-                        bad_peers.insert(peer_id);
-                    }
-                    failures.push(failure);
-                    trace!(
-                        peer = %peer_id,
-                        requested,
-                        ?kind,
-                        "decoupled receipt chunk request failed"
-                    );
-                }
-            }
-
-            if missing_chunk_ranges(&ranges, &chunks).is_empty() {
-                break;
-            }
-            if decoupled_dense_can_stop_early(
-                contiguous_sourced_chunk_items(&chunks),
-                accepted_prefix,
-                hashes.len(),
-            ) {
-                break;
-            }
-
-            let retry_range = if request_failed && peer_ids.len() > 1 {
-                let retry_count = retry_counts.entry(range.start).or_default();
-                if *retry_count < PARALLEL_CHUNK_RETRY_ROUNDS {
-                    *retry_count += 1;
-                    let base_chunk_index = range_indices_by_start
-                        .get(&range.start)
-                        .copied()
-                        .unwrap_or(chunk_index);
-                    Some((base_chunk_index + (*retry_count * range_count), range))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let next_range = retry_range.or_else(|| pending_ranges.next());
-            let Some((chunk_index, range)) = next_range else {
-                continue;
-            };
-            let used_peers = scheduled_peers.get(&range.start);
-            let chunk_peer_ids = decoupled_chunk_candidate_peers(peer_ids, &bad_peers, used_peers);
-            if chunk_peer_ids.is_empty() {
-                continue;
-            }
-            let peer_id = schedule_decoupled_receipt_chunk(
-                self,
-                &mut attempts,
-                &chunk_peer_ids,
-                &hashes,
-                rotated_chunk_index(chunk_index, peer_rotation),
-                range.clone(),
-            );
-            record_decoupled_scheduled_peer(&mut scheduled_peers, range.start, peer_id);
-        }
-
-        let missing_prefix_ranges = missing_prefix_chunk_ranges(&ranges, &chunks, accepted_prefix);
-        if !missing_prefix_ranges.is_empty() {
-            bad_peers.extend(disabled_chunk_peers(&failures, ChunkRequestRole::Receipts));
-            for range in missing_prefix_ranges {
-                let base_chunk_index = range_indices_by_start
-                    .get(&range.start)
-                    .copied()
-                    .unwrap_or_default();
-                let mut retry_peer_ids = peer_ids_excluding(peer_ids, &bad_peers);
-                rotate_request_candidates(
-                    &mut retry_peer_ids,
-                    rotated_chunk_index(
-                        base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
-                        peer_rotation,
-                    ),
-                );
-                for peer_id in retry_peer_ids
-                    .into_iter()
-                    .take(PARALLEL_CHUNK_SALVAGE_PEER_LIMIT)
-                {
-                    let request_hashes = hashes[range.clone()].to_vec();
-                    let started_at = Instant::now();
-                    let requested = request_hashes.len();
-                    let _active = BodyReceiptActiveRequestGuard::new(
-                        &self.accounting_tx,
-                        peer_id,
-                        PeerRequestKind::Receipts,
-                    );
-                    match self
-                        .request_receipts_until_complete(peer_id, request_hashes, None)
-                        .await
-                    {
-                        Ok(receipts) => {
-                            let elapsed = started_at.elapsed();
-                            stats.push((peer_id, receipts.len(), elapsed));
-                            emit_body_receipt_role_success(
-                                &self.accounting_tx,
-                                peer_id,
-                                PeerRequestKind::Receipts,
-                                receipts.len(),
-                                elapsed,
-                            );
-                            chunks.insert(range.start, (peer_id, receipts));
-                            break;
-                        }
-                        Err(kind) => {
-                            let failure = ChunkRequestFailure {
-                                role: ChunkRequestRole::Receipts,
-                                peer_id,
-                                requested,
-                                kind: kind.clone(),
-                            };
-                            emit_body_receipt_role_failure(&self.accounting_tx, failure.clone());
-                            if chunk_failure_disables_role_peer(&failure) {
-                                bad_peers.insert(peer_id);
-                            }
-                            failures.push(failure);
-                            trace!(
-                                peer = %peer_id,
-                                requested,
-                                ?kind,
-                                "decoupled receipt chunk salvage request failed"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let receipts = sourced_receipts_from_chunks(hashes.len(), chunks);
-        if receipts.len() >= accepted_prefix {
-            Ok(Some((receipts, stats, failures)))
-        } else if failures.is_empty() {
-            Ok(None)
-        } else {
-            Err((failures, stats))
-        }
     }
 
     async fn request_bodies_until_complete(
@@ -4517,91 +3733,6 @@ fn peer_ids_excluding(peer_ids: &[PeerId], bad_peers: &HashSet<PeerId>) -> Vec<P
         .collect()
 }
 
-fn decoupled_chunk_candidate_peers(
-    peer_ids: &[PeerId],
-    bad_peers: &HashSet<PeerId>,
-    used_peers: Option<&HashSet<PeerId>>,
-) -> Vec<PeerId> {
-    let mut candidates = peer_ids_excluding(peer_ids, bad_peers)
-        .into_iter()
-        .filter(|peer_id| used_peers.is_none_or(|used| !used.contains(peer_id)))
-        .collect::<Vec<_>>();
-    if candidates.is_empty() && used_peers.is_some() {
-        candidates = peer_ids_excluding(peer_ids, bad_peers);
-    }
-    candidates
-}
-
-fn record_decoupled_scheduled_peer(
-    scheduled_peers: &mut HashMap<usize, HashSet<PeerId>>,
-    range_start: usize,
-    peer_id: PeerId,
-) {
-    scheduled_peers
-        .entry(range_start)
-        .or_default()
-        .insert(peer_id);
-}
-
-struct DecoupledPrefixHedgeContext<'a, T> {
-    ranges: &'a [std::ops::Range<usize>],
-    range_indices_by_start: &'a HashMap<usize, usize>,
-    chunks: &'a BTreeMap<usize, (PeerId, Vec<T>)>,
-    accepted_prefix: usize,
-    peer_ids: &'a [PeerId],
-    bad_peers: &'a HashSet<PeerId>,
-    scheduled_peers: &'a HashMap<usize, HashSet<PeerId>>,
-    prefix_hedge_counts: &'a HashMap<usize, usize>,
-    range_count: usize,
-    peer_rotation: usize,
-    attempts_len: usize,
-    request_window: usize,
-}
-
-fn decoupled_prefix_hedge_candidate<T>(
-    context: DecoupledPrefixHedgeContext<'_, T>,
-) -> Option<(usize, std::ops::Range<usize>, Vec<PeerId>)> {
-    let max_attempts = context
-        .request_window
-        .saturating_add(PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS);
-    if context.attempts_len >= max_attempts {
-        return None;
-    }
-
-    for range in
-        missing_prefix_chunk_ranges(context.ranges, context.chunks, context.accepted_prefix)
-    {
-        let hedge_count = context
-            .prefix_hedge_counts
-            .get(&range.start)
-            .copied()
-            .unwrap_or_default();
-        if hedge_count >= PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK {
-            continue;
-        }
-        let used_peers = context.scheduled_peers.get(&range.start);
-        let mut retry_peer_ids =
-            decoupled_chunk_candidate_peers(context.peer_ids, context.bad_peers, used_peers);
-        if retry_peer_ids.is_empty() {
-            continue;
-        }
-        let base_chunk_index = context
-            .range_indices_by_start
-            .get(&range.start)
-            .copied()
-            .unwrap_or_default();
-        let chunk_index = rotated_chunk_index(
-            base_chunk_index
-                + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + hedge_count) * context.range_count),
-            context.peer_rotation,
-        );
-        rotate_request_candidates(&mut retry_peer_ids, chunk_index);
-        return Some((chunk_index, range, retry_peer_ids));
-    }
-
-    None
-}
-
 fn disabled_chunk_peers(
     failures: &[ChunkRequestFailure],
     role: ChunkRequestRole,
@@ -4625,17 +3756,6 @@ fn missing_chunk_ranges<T>(
                 .is_none_or(|(_, items)| items.len() != range.len())
         })
         .cloned()
-        .collect()
-}
-
-fn missing_prefix_chunk_ranges<T>(
-    ranges: &[std::ops::Range<usize>],
-    chunks: &BTreeMap<usize, (PeerId, Vec<T>)>,
-    min_accepted_prefix: usize,
-) -> Vec<std::ops::Range<usize>> {
-    missing_chunk_ranges(ranges, chunks)
-        .into_iter()
-        .filter(|range| range.start < min_accepted_prefix)
         .collect()
 }
 
@@ -4817,39 +3937,6 @@ fn matches_same_request_kind(left: PeerRequestKind, right: PeerRequestKind) -> b
             | (PeerRequestKind::Bodies, PeerRequestKind::Bodies)
             | (PeerRequestKind::Receipts, PeerRequestKind::Receipts)
     )
-}
-
-fn add_decoupled_initial_reservations(
-    reservations: &mut BodyReceiptRequestReservations,
-    peer_ids: &[PeerId],
-    ranges: &[std::ops::Range<usize>],
-    return_blocks: usize,
-    peer_rotation: usize,
-    kind: PeerRequestKind,
-    max_in_flight: usize,
-) {
-    if peer_ids.is_empty() || ranges.is_empty() {
-        return;
-    }
-    let initial_ranges = max_in_flight.min(ranges.len());
-    for (chunk_index, _) in ranges.iter().enumerate().take(initial_ranges) {
-        let peer_id = peer_ids[rotated_chunk_index(chunk_index, peer_rotation) % peer_ids.len()];
-        reservations.add(peer_id, kind);
-    }
-    let redundant_prefix_chunks =
-        decoupled_initial_prefix_redundancy_count(ranges, return_blocks, peer_ids.len())
-            .min(max_in_flight.saturating_sub(initial_ranges));
-    for (duplicate_index, range) in ranges.iter().take(redundant_prefix_chunks).enumerate() {
-        let base_chunk_index = ranges
-            .iter()
-            .position(|candidate| candidate.start == range.start)
-            .unwrap_or_default();
-        let peer_id = peer_ids[rotated_chunk_index(
-            base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1 + duplicate_index) * ranges.len()),
-            peer_rotation,
-        ) % peer_ids.len()];
-        reservations.add(peer_id, kind);
-    }
 }
 
 fn add_paired_initial_chunk_reservation(
@@ -5950,84 +5037,8 @@ fn body_receipt_chunk_role_hedge_due(last_scheduled_at: Option<Instant>, force: 
         })
 }
 
-fn schedule_decoupled_body_chunk<'a>(
-    plan: &'a BodyReceiptRequestPlan,
-    attempts: &mut futures_util::stream::FuturesUnordered<
-        futures_util::future::BoxFuture<'a, DecoupledBodyChunkResult>,
-    >,
-    peer_ids: &[PeerId],
-    hashes: &[B256],
-    chunk_index: usize,
-    range: std::ops::Range<usize>,
-) -> PeerId {
-    let peer_id = peer_ids[chunk_index % peer_ids.len()];
-    let request_hashes = hashes[range.clone()].to_vec();
-    attempts.push(
-        async move {
-            let started_at = Instant::now();
-            let requested = request_hashes.len();
-            let _active = BodyReceiptActiveRequestGuard::new(
-                &plan.accounting_tx,
-                peer_id,
-                PeerRequestKind::Bodies,
-            );
-            let result = plan
-                .request_bodies_until_complete(peer_id, request_hashes)
-                .await;
-            (
-                chunk_index,
-                range,
-                peer_id,
-                requested,
-                started_at.elapsed(),
-                result,
-            )
-        }
-        .boxed(),
-    );
-    peer_id
-}
-
 fn rotated_chunk_index(chunk_index: usize, peer_rotation: usize) -> usize {
     chunk_index.wrapping_add(peer_rotation)
-}
-
-fn schedule_decoupled_receipt_chunk<'a>(
-    plan: &'a BodyReceiptRequestPlan,
-    attempts: &mut futures_util::stream::FuturesUnordered<
-        futures_util::future::BoxFuture<'a, DecoupledReceiptChunkResult>,
-    >,
-    peer_ids: &[PeerId],
-    hashes: &[B256],
-    chunk_index: usize,
-    range: std::ops::Range<usize>,
-) -> PeerId {
-    let peer_id = peer_ids[chunk_index % peer_ids.len()];
-    let request_hashes = hashes[range.clone()].to_vec();
-    attempts.push(
-        async move {
-            let started_at = Instant::now();
-            let requested = request_hashes.len();
-            let _active = BodyReceiptActiveRequestGuard::new(
-                &plan.accounting_tx,
-                peer_id,
-                PeerRequestKind::Receipts,
-            );
-            let result = plan
-                .request_receipts_until_complete(peer_id, request_hashes, None)
-                .await;
-            (
-                chunk_index,
-                range,
-                peer_id,
-                requested,
-                started_at.elapsed(),
-                result,
-            )
-        }
-        .boxed(),
-    );
-    peer_id
 }
 
 fn receipt_candidates_for_body_peer(
@@ -6070,74 +5081,6 @@ fn body_receipt_blocks_if_counts_match(
                 .map(|receipts| (receipt_peer, receipts)),
         )
         .collect())
-}
-
-fn body_receipt_blocks_if_sourced_counts_match(
-    bodies: &[SourcedBlockBody],
-    receipts: Vec<SourcedReceiptSet>,
-    requested: usize,
-) -> std::result::Result<Vec<SourcedBodyReceipts>, Box<(PeerId, ReceiptCountMismatch)>> {
-    if receipts.len() != requested {
-        let peer_id = receipts
-            .last()
-            .map(|(peer_id, _)| *peer_id)
-            .unwrap_or(PeerId::ZERO);
-        return Err(Box::new((
-            peer_id,
-            ReceiptCountMismatch {
-                response_kind: "receipts",
-                requested_blocks: requested,
-                returned_blocks: receipts.len(),
-                block_index: None,
-                expected_receipts: None,
-                returned_receipts: None,
-            },
-        )));
-    }
-
-    for (block_index, ((receipt_peer, block_receipts), (_, body))) in
-        receipts.iter().zip(bodies.iter()).enumerate()
-    {
-        let expected_receipts = body.transaction_count();
-        if block_receipts.len() != expected_receipts {
-            return Err(Box::new((
-                *receipt_peer,
-                ReceiptCountMismatch {
-                    response_kind: "receipts",
-                    requested_blocks: requested,
-                    returned_blocks: receipts.len(),
-                    block_index: Some(block_index),
-                    expected_receipts: Some(expected_receipts),
-                    returned_receipts: Some(block_receipts.len()),
-                },
-            )));
-        }
-    }
-
-    Ok(bodies.iter().cloned().zip(receipts).collect())
-}
-
-fn sourced_bodies_from_chunks(
-    total_hashes: usize,
-    chunks: BTreeMap<
-        usize,
-        (
-            PeerId,
-            Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
-        ),
-    >,
-) -> Vec<SourcedBlockBody> {
-    let mut bodies = Vec::with_capacity(total_hashes);
-    let mut expected_start = 0usize;
-    for (start, (peer_id, chunk_bodies)) in chunks {
-        if start != expected_start || bodies.len() >= total_hashes {
-            break;
-        }
-        expected_start = expected_start.saturating_add(chunk_bodies.len());
-        bodies.extend(chunk_bodies.into_iter().map(|body| (peer_id, body)));
-    }
-    bodies.truncate(total_hashes);
-    bodies
 }
 
 fn sourced_receipts_from_chunks(
@@ -6930,47 +5873,6 @@ fn body_receipt_prefix_hedge_spare_attempts(min_return_blocks: usize, peer_count
     }
 
     PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS
-}
-
-fn decoupled_initial_prefix_redundancy_count(
-    ranges: &[std::ops::Range<usize>],
-    min_return_blocks: usize,
-    peer_count: usize,
-) -> usize {
-    body_receipt_scheduled_chunk_limit(ranges, min_return_blocks)
-        .min(body_receipt_prefix_hedge_spare_attempts(
-            min_return_blocks,
-            peer_count,
-        ))
-        .min(PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS)
-}
-
-fn decoupled_dense_accepted_prefix(return_blocks: usize, peer_count: usize) -> usize {
-    if peer_count >= PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS {
-        return return_blocks;
-    }
-
-    let target = (return_blocks / 2).max(body_receipt_min_accepted_prefix(return_blocks));
-    return_blocks.min(target)
-}
-
-fn decoupled_dense_can_stop_early(
-    completed_prefix: usize,
-    accepted_prefix: usize,
-    _return_blocks: usize,
-) -> bool {
-    completed_prefix >= accepted_prefix
-}
-
-fn contiguous_sourced_chunk_items<T>(chunks: &BTreeMap<usize, (PeerId, Vec<T>)>) -> usize {
-    let mut expected_start = 0usize;
-    for (start, (_, items)) in chunks {
-        if *start != expected_start {
-            break;
-        }
-        expected_start = expected_start.saturating_add(items.len());
-    }
-    expected_start
 }
 
 #[cfg(test)]
@@ -7865,10 +6767,10 @@ mod tests {
 
     #[test]
     fn body_receipt_paired_plan_reservations_cover_initial_role_wave() {
-        let body_peers = (0..(PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS - 1))
+        let body_peers = (0..PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 1) as u8))
             .collect::<Vec<_>>();
-        let receipt_peers = (0..(PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS - 1))
+        let receipt_peers = (0..PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 21) as u8))
             .collect::<Vec<_>>();
         let ranges = vec![0..64, 64..128, 128..192, 192..256];
@@ -7891,7 +6793,6 @@ mod tests {
             accounting_tx: None,
         };
 
-        assert!(!plan.should_use_decoupled_dense_pipeline());
         let reservations = plan.reservations();
         let body_reservations = reservations
             .entries()
@@ -7912,10 +6813,10 @@ mod tests {
 
     #[test]
     fn body_receipt_dense_plan_uses_live_scheduler_reservations() {
-        let body_peers = (0..PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS)
+        let body_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 1) as u8))
             .collect::<Vec<_>>();
-        let receipt_peers = (0..PIPELINED_BODY_RECEIPT_DECOUPLED_MIN_PEERS)
+        let receipt_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 41) as u8))
             .collect::<Vec<_>>();
         let ranges = vec![0..64, 64..128, 128..192, 192..256];
@@ -7938,7 +6839,6 @@ mod tests {
             accounting_tx: None,
         };
 
-        assert!(!plan.should_use_decoupled_dense_pipeline());
         let reservations = plan.reservations();
         let body_reservations = reservations
             .entries()
@@ -7958,7 +6858,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_dense_plan_does_not_reserve_decoupled_spare_windows() {
+    fn body_receipt_dense_plan_reserves_only_initial_live_wave() {
         let body_peers = (0..PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS)
             .map(|index| PeerId::repeat_byte((index + 1) as u8))
             .collect::<Vec<_>>();
@@ -7985,7 +6885,6 @@ mod tests {
             accounting_tx: None,
         };
 
-        assert!(!plan.should_use_decoupled_dense_pipeline());
         let reservations = plan.reservations();
         let body_reservations = reservations
             .entries()
@@ -8418,68 +7317,6 @@ mod tests {
     }
 
     #[test]
-    fn decoupled_prefix_redundancy_uses_low_peer_floor() {
-        let ranges = vec![0..128, 128..256, 256..384, 384..512, 512..640];
-
-        assert_eq!(
-            decoupled_initial_prefix_redundancy_count(
-                &ranges,
-                PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
-                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS - 1,
-            ),
-            0
-        );
-        assert_eq!(
-            decoupled_initial_prefix_redundancy_count(
-                &ranges,
-                PIPELINED_BODY_RECEIPT_MIN_CONTIGUOUS_RETURN_BLOCKS,
-                PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS,
-            ),
-            PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANT_CHUNKS
-        );
-    }
-
-    #[test]
-    fn decoupled_dense_prefix_targets_full_windows_with_enough_peers() {
-        assert_eq!(
-            decoupled_dense_accepted_prefix(1024, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS - 1),
-            512
-        );
-        assert_eq!(
-            decoupled_dense_accepted_prefix(1024, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
-            1024
-        );
-        assert_eq!(
-            decoupled_dense_accepted_prefix(128, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS - 1),
-            64
-        );
-        assert_eq!(
-            decoupled_dense_accepted_prefix(128, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
-            128
-        );
-        assert_eq!(
-            decoupled_dense_accepted_prefix(32, PIPELINED_BODY_RECEIPT_FULL_PREFIX_MIN_PEERS),
-            32
-        );
-
-        let peer = PeerId::repeat_byte(0x11);
-        let mut chunks = BTreeMap::new();
-        chunks.insert(0, (peer, vec![1u8; 128]));
-        chunks.insert(256, (peer, vec![1u8; 128]));
-        assert_eq!(contiguous_sourced_chunk_items(&chunks), 128);
-
-        chunks.insert(128, (peer, vec![1u8; 128]));
-        assert_eq!(contiguous_sourced_chunk_items(&chunks), 384);
-    }
-
-    #[test]
-    fn decoupled_dense_stops_when_accepted_prefix_is_complete() {
-        assert!(decoupled_dense_can_stop_early(1024, 1024, 1024));
-        assert!(decoupled_dense_can_stop_early(512, 512, 1024));
-        assert!(!decoupled_dense_can_stop_early(511, 512, 1024));
-    }
-
-    #[test]
     fn split_contiguous_prefix_returns_deterministic_prefix() {
         let mut chunks = BTreeMap::new();
         chunks.insert(0, vec![0, 1, 2, 3]);
@@ -8776,20 +7613,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_prefix_chunk_ranges_only_repairs_required_prefix() {
-        let peer = PeerId::repeat_byte(0x11);
-        let ranges = vec![0..4, 4..8, 8..12, 12..16];
-        let mut chunks = BTreeMap::new();
-        chunks.insert(0, (peer, vec![1u8, 2, 3, 4]));
-        chunks.insert(8, (peer, vec![9u8, 10, 11, 12]));
-
-        assert_eq!(
-            missing_prefix_chunk_ranges(&ranges, &chunks, 10),
-            vec![4..8]
-        );
-    }
-
-    #[test]
     fn disabled_chunk_peers_only_tracks_retry_disabling_failures_for_role() {
         let body_peer = PeerId::repeat_byte(0x11);
         let receipt_peer = PeerId::repeat_byte(0x22);
@@ -8834,81 +7657,6 @@ mod tests {
         let second = PeerId::repeat_byte(0x22);
 
         assert!(peer_ids_excluding(&[first, second], &HashSet::from([first, second])).is_empty());
-    }
-
-    #[test]
-    fn decoupled_prefix_hedge_targets_earliest_missing_prefix_on_unused_peer() {
-        let first = PeerId::repeat_byte(0x11);
-        let second = PeerId::repeat_byte(0x22);
-        let third = PeerId::repeat_byte(0x33);
-        let ranges = vec![0..32, 32..64, 64..96];
-        let range_indices = ranges
-            .iter()
-            .enumerate()
-            .map(|(index, range)| (range.start, index))
-            .collect::<HashMap<_, _>>();
-        let chunks = BTreeMap::from([
-            (32usize, (second, vec![0u8; 32])),
-            (64usize, (third, vec![0u8; 32])),
-        ]);
-        let scheduled_peers = HashMap::from([(0usize, HashSet::from([first]))]);
-
-        let bad_peers = HashSet::new();
-        let prefix_hedge_counts = HashMap::new();
-        let (_, range, retry_peers) =
-            decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
-                ranges: &ranges,
-                range_indices_by_start: &range_indices,
-                chunks: &chunks,
-                accepted_prefix: 96,
-                peer_ids: &[first, second, third],
-                bad_peers: &bad_peers,
-                scheduled_peers: &scheduled_peers,
-                prefix_hedge_counts: &prefix_hedge_counts,
-                range_count: ranges.len(),
-                peer_rotation: 0,
-                attempts_len: 1,
-                request_window: 2,
-            })
-            .expect("missing prefix should be hedgeable");
-
-        assert_eq!(range, 0..32);
-        assert!(!retry_peers.contains(&first));
-        assert!(retry_peers.contains(&second) || retry_peers.contains(&third));
-    }
-
-    #[test]
-    fn decoupled_prefix_hedge_respects_spare_attempt_budget() {
-        let first = PeerId::repeat_byte(0x11);
-        let second = PeerId::repeat_byte(0x22);
-        let ranges = vec![0..32, 32..64];
-        let range_indices = ranges
-            .iter()
-            .enumerate()
-            .map(|(index, range)| (range.start, index))
-            .collect::<HashMap<_, _>>();
-        let chunks = BTreeMap::from([(32usize, (second, vec![0u8; 32]))]);
-        let bad_peers = HashSet::new();
-        let scheduled_peers = HashMap::new();
-        let prefix_hedge_counts = HashMap::new();
-
-        assert!(
-            decoupled_prefix_hedge_candidate(DecoupledPrefixHedgeContext {
-                ranges: &ranges,
-                range_indices_by_start: &range_indices,
-                chunks: &chunks,
-                accepted_prefix: 64,
-                peer_ids: &[first, second],
-                bad_peers: &bad_peers,
-                scheduled_peers: &scheduled_peers,
-                prefix_hedge_counts: &prefix_hedge_counts,
-                range_count: ranges.len(),
-                peer_rotation: 0,
-                attempts_len: 2 + PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS,
-                request_window: 2,
-            })
-            .is_none()
-        );
     }
 
     #[test]

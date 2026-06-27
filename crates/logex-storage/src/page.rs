@@ -192,13 +192,13 @@ fn encode_adaptive_fixed_width_page(raw_values: &[u8], item_size: usize) -> io::
     candidates.push((ADAPTIVE_FIXED_ZSTD, zstd.as_slice()));
 
     let low20;
+    let (values_32, remainder) = raw_values.as_chunks::<32>();
     if item_size == 32
-        && raw_values
-            .chunks_exact(32)
-            .all(|chunk| chunk[..12] == [0; 12])
+        && remainder.is_empty()
+        && values_32.iter().all(|chunk| chunk[..12] == [0; 12])
     {
         let mut tails = Vec::with_capacity(raw_values.len() / 32 * 20);
-        for value in raw_values.chunks_exact(32) {
+        for value in values_32 {
             tails.extend_from_slice(&value[12..]);
         }
         low20 = zstd_compress_level(&tails, ZSTD_STORAGE_LEVEL)?;
@@ -256,7 +256,8 @@ fn decode_b256_low20_page(
     }
 
     let mut out = Vec::with_capacity(row_count * 32);
-    for tail in tails.chunks_exact(20) {
+    let (tail_chunks, _) = tails.as_chunks::<20>();
+    for tail in tail_chunks {
         out.extend_from_slice(&[0u8; 12]);
         out.extend_from_slice(tail);
     }
@@ -634,13 +635,8 @@ fn decode_plain_u64_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
         ));
     }
 
-    raw.chunks_exact(8)
-        .map(|chunk| {
-            chunk.try_into().map(u64::from_le_bytes).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "u64 page entry is truncated")
-            })
-        })
-        .collect()
+    let (chunks, _) = raw.as_chunks::<8>();
+    Ok(chunks.iter().copied().map(u64::from_le_bytes).collect())
 }
 
 fn decode_plain_u32_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u32>> {
@@ -651,13 +647,8 @@ fn decode_plain_u32_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u32>> {
         ));
     }
 
-    raw.chunks_exact(4)
-        .map(|chunk| {
-            chunk.try_into().map(u32::from_le_bytes).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "u32 page entry is truncated")
-            })
-        })
-        .collect()
+    let (chunks, _) = raw.as_chunks::<4>();
+    Ok(chunks.iter().copied().map(u32::from_le_bytes).collect())
 }
 
 #[cfg(test)]
