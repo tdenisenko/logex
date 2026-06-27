@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/historical-sync-live-scheduler` for PR #96. The branch now uses the chunk-owned live body/receipt scheduler for dense historical EL sync and keeps the Mac mini client running from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. When outside the home network, checks route through `ssh pi-remote` to `gremlinmaster@192.168.50.44`.
 
-Latest accepted candidate: expected historical fetch retries bypass the ordinary request-pressure refill gate after the head-of-line delay, while still keeping the existing two-attempt cap per sequence. Remote Pi-routed validation improved the observed stall mode from baseline `384.8` blocks/sec with `2` low windows and `1` zero window to `599.3` blocks/sec with `0` low windows and `0` zero windows over a 291 second sample.
+Latest accepted candidate: expected historical fetch retries bypass the ordinary request-pressure refill gate after the head-of-line delay, while still keeping the existing two-attempt cap per sequence. Remote Pi-routed validation improved the observed stall mode from baseline `384.8` blocks/sec with `2` low windows and `1` zero window to `599.3` blocks/sec with `0` low windows and `0` zero windows over a 291 second sample. A later Pi-routed rerun after restoring the accepted baseline measured `596.6` blocks/sec with `0` low windows and `0` zero windows over 295 seconds.
 
 ## Completed Since Last Run
 
@@ -21,7 +21,9 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 - Deployed the accepted candidate to the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and left the client running.
 - Tested and rejected a 2 second historical body/receipt role timeout floor: remote validation fell to `460.6` blocks/sec with `2` low windows and `2` zero windows over 294 seconds.
 - Tested and rejected lowering the serving-peer candidate-pool threshold from `16` to `8`: remote validation fell to `391.3` blocks/sec with `6` low windows and `3` zero windows over 289 seconds.
+- Tested and rejected a short `750ms` missing-expected-fetch retry delay before head-of-line reset: remote validation fell to `424.6` blocks/sec with `3` low windows and `1` zero window over 290 seconds.
 - Restored the accepted timeout behavior on the Mac mini, rebuilt `logex-node --release`, restarted under tmux, and confirmed `/status` responds through the Pi jump host.
+- Restored the accepted baseline after the rejected retry-delay candidate and reran the sampler through `pi-remote`: `596.6` blocks/sec, `0` low windows, and `0` zero windows over 295 seconds.
 
 ## Remaining TODOs
 
@@ -34,7 +36,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
    - Completion criteria: add or keep only changes that improve longer remote samples against the new baseline without increasing low/zero-progress windows.
 
 3. Investigate peer-tail mitigation without reducing the global request timeout floor.
-   - Reason: a shorter 2 second timeout and a lower serving-pool threshold both increased low/zero-progress windows, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, or scheduler admission rather than broad candidate-pool changes.
+   - Reason: a shorter 2 second timeout, a lower serving-pool threshold, and a short missing-expected retry delay all increased low/zero-progress windows, so the remaining tail-latency fix likely needs more precise prefix peer selection, per-role demotion, scheduler admission, or better production metrics rather than more broad timing constants.
    - Completion criteria: identify a targeted change that improves p90 plan/body-receipt latency and remote throughput without reducing serving peer stability or adding zero-progress windows.
 
 4. Complete EL production hardening.
@@ -71,8 +73,12 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
   - Resolution: tested a threshold of `8` and rejected it after the sample regressed to `391.3` blocks/sec with three zero-progress windows.
   - Remaining: avoid broad serving-pool filtering changes; focus on direct evidence from prefix-role tail events.
 
+- Challenge: retrying missing expected fetches before the full head-of-line reset looked like it could reduce idle time.
+  - Resolution: tested a `750ms` retry delay and rejected it after the sample regressed to `424.6` blocks/sec with one zero-progress window.
+  - Remaining: use stronger prefix-tail evidence before making another scheduler change.
+
 - Challenge: direct Mac mini SSH was unavailable from the current network.
-  - Resolution: reran all operational checks through `pi-remote`.
+  - Resolution: reran all operational checks and the throughput sample through `pi-remote`.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -84,7 +90,7 @@ Latest accepted candidate: expected historical fetch retries bypass the ordinary
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries` was committed and pushed.
+- Commits made during this run: `dd63451 fix: prioritize stalled historical fetch retries`, `49c7274 docs: record pi-routed scheduler validation`, `c0efda0 docs: record rejected timeout candidate`, and `7c30fe0 docs: record rejected serving-pool candidate` were committed and pushed.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready until longer validation/CI are reviewed.
 - Blockers: none.
