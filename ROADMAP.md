@@ -6,7 +6,7 @@ LogEx verifies a recent checkpoint-backed consensus pivot, tracks the live execu
 
 The active work is PR #96 on branch `perf/historical-sync-live-scheduler`. This branch focuses on making historical EL sync stable under peer-tail latency while preserving ordered cryptographic verification and storage writes.
 
-The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The decoupled path reached higher bursts in some samples, but repeatedly stalled behind under-owned prefix chunks. The live path now treats stale in-flight expected-prefix roles as prefix-critical work before falling back to normal prefix reassignment and salvage, and keeps a healthy floor of six active body/receipt fetches. The latest kept five-minute remote sample measured `187.5` actual blocks/sec with `1` low window and `0` zero-progress windows. A later bounded slot-overdraft admission experiment regressed to `144.5` actual blocks/sec with `5` low windows and `3` zero-progress windows, so it was reverted.
+The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The current production candidate routes dense historical body/receipt batches through the live chunk-owned scheduler instead of the older decoupled dense fast path. The live scheduler now consumes body/receipt reservations when requests actually start, discards mismatched expected-sequence attempts without resetting lookahead, and refills the exact expected sequence instead of throwing away valid buffered work. The latest five-minute remote sample measured `288.1` actual blocks/sec with `1` low/zero-progress window while warming from a low serving-peer count; the previous destructive mismatch-reset pattern did not recur.
 
 ## Completed Since Last Run
 
@@ -37,6 +37,9 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 - Added focused live scheduler refill diagnostics to `/status` and the dashboard advanced section.
   - Reason: the remaining low-progress windows need to be classified before another architectural change; raw logs/sec alone cannot distinguish request-slot pressure, refill policy denial, write backpressure, or prepare pressure.
   - Result: status now exposes scheduler pipeline depth, buffer depth, critical/write refill limits, body/receipt slot margins, and write backpressure. The current remote run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-163104.log`.
+- Fixed live scheduler request accounting and stale-attempt recovery.
+  - Reason: active body/receipt requests were double-counted while still reserved, and a stale duplicate for the expected sequence could win first, abort the correct retry, and reset all lookahead.
+  - Result: request starts now consume their matching reservation, mismatched expected attempts are discarded without resetting, and buffered mismatches refill the expected sequence. The current remote run is `/Users/gremlinmaster/logex-src/run/logex-throughput-v3-20260626-182605.log`.
 
 ## Remaining TODOs
 
@@ -52,7 +55,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 3. Complete the live request scheduler admission design.
    - Reason: the current live scheduler is better than the decoupled path, but still relies on conservative slot admission and can leave useful bandwidth idle when peer-tail latency rises. The rejected overdraft experiment showed that simply borrowing more slots increases duplicate pressure and hurts end-to-end progress.
    - Completion criteria: implement admission that keeps enough independent prefix work active without overfilling per-peer request slots; expose focused debug metrics for live backlog, prefix wait age, retry/hedge counts, peer timeout share, bandwidth use, and write/prepare pressure; validate against the kept baseline with longer samples and no recurring zero-progress windows.
-   - Current progress: refill decision diagnostics are now exposed. The next change should be a deliberate scheduler architecture pass, not another small threshold experiment.
+   - Current progress: refill diagnostics exposed the reservation overcount and mismatched expected-attempt reset. Both are fixed and remotely validated, but a longer run is still needed before declaring the live scheduler production-complete.
 
 4. Complete EL production hardening.
    - Reason: scheduler changes must not weaken checkpoint freshness, forward sync, reorg handling, restart safety, low-disk behavior, query correctness, or dashboard access.
@@ -80,8 +83,8 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
   - Resolution: rejected and reverted candidates that increased duplicate pressure, reduced dense batch efficiency, or produced more low/zero-progress windows, including bounded slot overdraft and slot-margin concurrency capping.
   - Remaining: future work should stop one-line tuning and move to a deliberate admission/scheduler change compared against the kept live-scheduler baseline.
 - Challenge: low-progress windows still need a precise cause after the live scheduler milestone.
-  - Resolution: added status/UI diagnostics for pipeline depth, buffer depth, refill limits, slot margins, and write backpressure so the next architectural change can be based on the scheduler's actual decisions.
-  - Remaining: use those diagnostics to implement the next admission/refill redesign and validate it over longer samples.
+  - Resolution: diagnostics identified reservation double-counting and stale expected-sequence attempts as reset causes; both are now handled without dropping valid lookahead.
+  - Remaining: validate over a longer run and continue admission work only where bandwidth or CPU is demonstrably idle.
 - Challenge: the roadmap had accumulated too much experiment-by-experiment detail.
   - Resolution: condensed it to current state, decisions, and remaining work.
 
@@ -97,7 +100,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. The
 
 - Current branch: `perf/historical-sync-live-scheduler`.
 - New branch created this run: no.
-- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; `docs: record rejected scheduler admission cap`; pending commit for refill diagnostics.
+- Commits made during this run: `perf: route dense history through live scheduler`; `perf: stabilize live historical scheduler`; `docs: record rejected scheduler admission cap`; `feat: expose historical scheduler refill diagnostics`; pending commit for stale-attempt recovery.
 - Pull request status: PR #96 remains the active draft performance PR.
 - Merge status: not ready as a production-complete scheduler; can be accepted only as a measured live-scheduler milestone before the larger admission redesign.
 - Blockers: none.

@@ -1056,6 +1056,13 @@ fn historical_advanced_fetch_position(
     (sequence, child)
 }
 
+fn historical_fetch_child_matches(expected_child: Option<&Header>, fetched_child: &Header) -> bool {
+    expected_child.is_none_or(|expected_child| {
+        expected_child.number() == fetched_child.number()
+            && expected_child.hash_slow() == fetched_child.hash_slow()
+    })
+}
+
 fn historical_fetch_position_after_ordered_write(
     current_sequence: u64,
     current_child: Option<Header>,
@@ -2776,6 +2783,28 @@ impl SyncEngine {
             );
             return;
         }
+        if outcome.sequence == self.historical_fetch_expected_sequence
+            && !historical_fetch_child_matches(
+                self.historical_fetch_expected_child.as_ref(),
+                &outcome.header_batch.child_header,
+            )
+        {
+            let remaining_attempts =
+                self.discard_historical_fetch_attempt(outcome.sequence, outcome.attempt);
+            tracing::debug!(
+                sequence = outcome.sequence,
+                outcome_attempt = outcome.attempt,
+                expected_child = self
+                    .historical_fetch_expected_child
+                    .as_ref()
+                    .map(|header| header.number()),
+                fetched_child = outcome.header_batch.child_header.number(),
+                remaining_attempts,
+                "discarding mismatched historical fetch attempt without resetting lookahead"
+            );
+            self.refresh_historical_fetch_head_of_line_timer();
+            return;
+        }
         let Some(fetch) = self.historical_fetch_handles.remove(&outcome.sequence) else {
             return;
         };
@@ -2800,6 +2829,20 @@ impl SyncEngine {
         self.historical_fetch_completed
             .insert(outcome.sequence, outcome);
         self.refresh_historical_fetch_head_of_line_timer();
+    }
+
+    fn discard_historical_fetch_attempt(&mut self, sequence: u64, attempt: u64) -> Option<usize> {
+        let fetch = self.historical_fetch_handles.get_mut(&sequence)?;
+        if let Some(attempt) = fetch.attempts.remove(&attempt) {
+            self.peers
+                .release_body_receipt_request_reservations(&attempt.reservations);
+            attempt.handle.abort();
+        }
+        let remaining_attempts = fetch.attempts.len();
+        if remaining_attempts == 0 {
+            self.historical_fetch_handles.remove(&sequence);
+        }
+        Some(remaining_attempts)
     }
 
     fn drain_historical_fetch_outcomes(&mut self) {
@@ -3836,10 +3879,18 @@ impl SyncEngine {
                 tracing::debug!(
                     expected_child = child_header.number(),
                     fetched_child = outcome.header_batch.child_header.number(),
-                    "discarding stale historical fetch outcome"
+                    sequence = outcome.sequence,
+                    "discarding mismatched completed historical fetch outcome and refilling expected sequence"
                 );
-                self.reset_historical_fetch_pipeline();
-                return Ok(None);
+                self.retry_expected_historical_fetch(child_header).await?;
+                self.ensure_historical_fetch_pipeline_limited(
+                    child_header.clone(),
+                    HistoricalFetchRefillScope::CriticalPath,
+                    HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+                )
+                .await?;
+                wait_started = Instant::now();
+                continue;
             }
 
             if self.historical_fetch_ready_plans.is_empty()
@@ -7241,6 +7292,31 @@ mod tests {
 
         assert_eq!(sequence, 12);
         assert_eq!(child.map(|header| header.number()), Some(80));
+    }
+
+    #[test]
+    fn historical_fetch_child_match_accepts_unknown_expected_child() {
+        let fetched = header(90, B256::ZERO, 0x01);
+
+        assert!(historical_fetch_child_matches(None, &fetched));
+    }
+
+    #[test]
+    fn historical_fetch_child_match_requires_same_number_and_hash() {
+        let expected = header(90, B256::ZERO, 0x01);
+        let matching = expected.clone();
+        let wrong_number = header(89, expected.parent_hash, 0x01);
+        let wrong_hash = header(90, expected.parent_hash, 0x02);
+
+        assert!(historical_fetch_child_matches(Some(&expected), &matching));
+        assert!(!historical_fetch_child_matches(
+            Some(&expected),
+            &wrong_number
+        ));
+        assert!(!historical_fetch_child_matches(
+            Some(&expected),
+            &wrong_hash
+        ));
     }
 
     #[test]
