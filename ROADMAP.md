@@ -31,8 +31,8 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Whe
   - Result: deleted the decoupled selector, executor, request loops, helpers, and decoupled-only tests; `cargo test -p logex-sync` and `cargo clippy -p logex-sync -- -D warnings` pass.
 - Reran the remote throughput sampler through `pi-remote` after direct Mac mini access returned a network-unreachable error.
   - Result: the client remained healthy and advanced `41,956` blocks over `106s` at `395.8` actual blocks/sec, with `68-72` connected peers and one short zero-advance floor window.
-- Fixed the GitHub workspace clippy failure caused by the newer `chunks_exact_to_as_chunks` lint in `logex-storage`.
-  - Result: page decoding now uses fixed-size slice chunks where lengths are already validated; `cargo clippy --workspace -- -D warnings` passes locally.
+- Fixed the GitHub workspace clippy failure caused by the newer `chunks_exact_to_as_chunks` lint in `logex-storage` and `logex-cl`.
+  - Result: page decoding, CL proof helpers, and CL RPC decoders now use fixed-size slice chunks where lengths are already validated; `cargo clippy --workspace -- -D warnings` passes locally.
 
 ## Remaining TODOs
 
@@ -91,7 +91,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Whe
 - Challenge: obsolete decoupled scheduler code remained after the live scheduler became the only production path.
   - Resolution: removed the disabled path and its tests, then validated the body/receipt scheduler and full `logex-sync` package.
 - Challenge: GitHub clippy failed on a newer nightly lint outside the scheduler package.
-  - Resolution: replaced constant-size `chunks_exact` usage in the storage page codec with fixed-size slice chunks and validated the full workspace clippy command locally.
+  - Resolution: replaced constant-size `chunks_exact` usage in storage and CL code with fixed-size slice chunks and validated the full workspace clippy command locally.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -99,7 +99,7 @@ The Mac mini client runs from `/Volumes/SSD 4TB/LogEx` on HTTP port `18683`. Whe
 - Removed diagnostic-only status fields from the final patch because they were tied to the rejected decoupled path.
 - Rechecked the stale remote warning about obsolete body/receipt metric fields; local code no longer contains those fields and the Mac mini source was synchronized to match.
 - Removed the disabled decoupled dense executor, selector, request loops, helper functions, and decoupled-only tests.
-- Cleaned up storage page chunk iteration flagged by the current workspace clippy job.
+- Cleaned up storage and CL chunk iteration flagged by the current workspace clippy job.
 - `.DS_Store` remains untracked and unrelated.
 
 ## Git Workflow
