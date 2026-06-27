@@ -1227,6 +1227,7 @@ mod tests {
                     historical_scheduler_write_backpressure: false,
                     historical_scheduler_pipeline_depth: 0,
                     historical_scheduler_buffer_depth: 0,
+                    historical_scheduler_ready_plan_depth: 0,
                     historical_scheduler_critical_refill_limit: 0,
                     historical_scheduler_write_refill_limit: 0,
                     historical_scheduler_stale_role_retries: 0,

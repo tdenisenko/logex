@@ -48,6 +48,7 @@ const HISTORICAL_VERY_DENSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_DENSE_LOW_PEER_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_SPARSE_FETCH_PIPELINE_DEPTH: usize = 6;
 const HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT: usize = 12;
+const HISTORICAL_READY_FETCH_PLAN_BUFFER_DEPTH_LIMIT: usize = 24;
 const HISTORICAL_DENSE_FETCH_BUFFER_EXTRA: usize = 6;
 const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 4;
 const HISTORICAL_PREPARE_COMPLETED_BUFFER_EXTRA: usize = 8;
@@ -192,6 +193,7 @@ struct HistoricalFetchSchedulerSnapshot {
 struct HistoricalFetchSchedulerDecision {
     pipeline_depth: usize,
     buffer_depth: usize,
+    ready_plan_depth: usize,
     new_fetch_limit: usize,
     reset_for_memory_pressure: bool,
     body_request_slot_margin: usize,
@@ -213,6 +215,7 @@ pub(super) struct HistoricalSchedulerStatusFields {
     pub(super) write_backpressure: bool,
     pub(super) pipeline_depth: usize,
     pub(super) buffer_depth: usize,
+    pub(super) ready_plan_depth: usize,
     pub(super) critical_refill_limit: usize,
     pub(super) write_refill_limit: usize,
 }
@@ -728,6 +731,24 @@ fn historical_fetch_buffer_depth(
         .min(HISTORICAL_FETCH_BUFFER_DEPTH_LIMIT)
 }
 
+fn historical_ready_fetch_plan_depth(
+    pipeline_depth: usize,
+    available_memory_bytes: Option<u64>,
+    rows_per_block: Option<f64>,
+) -> usize {
+    if historical_available_memory_is_low(available_memory_bytes) {
+        return pipeline_depth;
+    }
+
+    pipeline_depth
+        .saturating_add(historical_fetch_buffer_depth(
+            pipeline_depth,
+            available_memory_bytes,
+            rows_per_block,
+        ))
+        .min(HISTORICAL_READY_FETCH_PLAN_BUFFER_DEPTH_LIMIT)
+}
+
 fn historical_active_body_receipt_fetch_floor(
     pipeline_depth: usize,
     available_memory_bytes: Option<u64>,
@@ -845,9 +866,17 @@ fn historical_fetch_scheduler_decision(
         snapshot.available_memory_bytes,
         snapshot.rows_per_block_ewma,
     );
+    let ready_plan_depth = historical_ready_fetch_plan_depth(
+        pipeline_depth,
+        snapshot.available_memory_bytes,
+        snapshot.rows_per_block_ewma,
+    );
+    let heavy_pending_fetches = snapshot
+        .pending_fetches
+        .saturating_sub(snapshot.ready_fetches);
     let reset_for_memory_pressure =
         historical_available_memory_is_critical(snapshot.available_memory_bytes)
-            && snapshot.pending_fetches > buffer_depth;
+            && heavy_pending_fetches > buffer_depth;
     let request_pressure_allows_refill = historical_body_receipt_request_pressure_allows_refill(
         snapshot.body_ready_peers,
         snapshot.receipt_ready_peers,
@@ -884,7 +913,7 @@ fn historical_fetch_scheduler_decision(
         || (!historical_available_memory_is_low(snapshot.available_memory_bytes)
             && write_backpressure_refill_limit > 0);
     let fetch_budget_allows_refill = historical_fetch_budget_has_capacity(
-        snapshot.pending_fetches,
+        heavy_pending_fetches,
         snapshot.completed_fetches,
         buffer_depth,
         snapshot.available_memory_bytes,
@@ -895,7 +924,7 @@ fn historical_fetch_scheduler_decision(
         HistoricalFetchRefillScope::CriticalPath => {
             let buffer_limit = if historical_critical_refill_has_enough_buffer(
                 pipeline_occupancy,
-                snapshot.pending_fetches,
+                heavy_pending_fetches,
                 snapshot.pending_prepares,
                 snapshot.available_memory_bytes,
             ) {
@@ -910,13 +939,13 @@ fn historical_fetch_scheduler_decision(
         }
     };
 
-    let pipeline_gap = pipeline_depth.saturating_sub(pipeline_occupancy);
+    let ready_plan_gap = ready_plan_depth.saturating_sub(pipeline_occupancy);
     let new_fetch_limit = if request_pressure_allows_refill
         && fetch_budget_allows_refill
         && write_backpressure_allows_refill
     {
         scope_limit
-            .min(pipeline_gap)
+            .min(ready_plan_gap)
             .min(write_backpressure_refill_limit)
     } else {
         0
@@ -925,6 +954,7 @@ fn historical_fetch_scheduler_decision(
     HistoricalFetchSchedulerDecision {
         pipeline_depth,
         buffer_depth,
+        ready_plan_depth,
         new_fetch_limit,
         reset_for_memory_pressure,
         body_request_slot_margin,
@@ -956,6 +986,16 @@ fn historical_fetch_ready_plan_can_spawn(
 ) -> bool {
     if body_reservations == 0 && receipt_reservations == 0 {
         return true;
+    }
+
+    let pipeline_depth = historical_fetch_pipeline_depth(
+        snapshot.peer_capacity,
+        snapshot.total_memory_bytes,
+        snapshot.available_memory_bytes,
+        snapshot.rows_per_block_ewma,
+    );
+    if snapshot.active_fetches >= pipeline_depth {
+        return false;
     }
 
     let write_backpressure = historical_write_backpressure_blocks_refill(
@@ -3411,6 +3451,7 @@ impl SyncEngine {
             write_backpressure: critical_decision.write_backpressure,
             pipeline_depth: critical_decision.pipeline_depth,
             buffer_depth: critical_decision.buffer_depth,
+            ready_plan_depth: critical_decision.ready_plan_depth,
             critical_refill_limit: critical_decision.new_fetch_limit,
             write_refill_limit: write_decision.new_fetch_limit,
         }
@@ -7132,7 +7173,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_scheduler_decision_accounts_ready_queue_in_pipeline_gap() {
+    fn historical_scheduler_decision_accounts_ready_queue_in_plan_gap() {
         let mut snapshot = scheduler_snapshot_for_refill_tests();
         snapshot.active_fetches = 2;
         snapshot.ready_fetches = 2;
@@ -7145,17 +7186,21 @@ mod tests {
         assert_eq!(
             decision.new_fetch_limit,
             decision
-                .pipeline_depth
+                .ready_plan_depth
                 .saturating_sub(snapshot.active_fetches + snapshot.ready_fetches)
         );
     }
 
     #[test]
-    fn historical_scheduler_decision_stops_refill_when_ready_queue_fills_pipeline() {
+    fn historical_scheduler_decision_stops_refill_when_ready_queue_fills_plan_buffer() {
         let mut snapshot = scheduler_snapshot_for_refill_tests();
-        snapshot.ready_fetches = historical_fetch_pipeline_depth(
-            snapshot.peer_capacity,
-            snapshot.total_memory_bytes,
+        snapshot.ready_fetches = historical_ready_fetch_plan_depth(
+            historical_fetch_pipeline_depth(
+                snapshot.peer_capacity,
+                snapshot.total_memory_bytes,
+                snapshot.available_memory_bytes,
+                snapshot.rows_per_block_ewma,
+            ),
             snapshot.available_memory_bytes,
             snapshot.rows_per_block_ewma,
         );
@@ -7166,6 +7211,19 @@ mod tests {
         );
 
         assert_eq!(decision.new_fetch_limit, 0);
+    }
+
+    #[test]
+    fn historical_scheduler_ready_plan_does_not_spawn_past_active_pipeline_depth() {
+        let mut snapshot = scheduler_snapshot_for_refill_tests();
+        snapshot.active_fetches = historical_fetch_pipeline_depth(
+            snapshot.peer_capacity,
+            snapshot.total_memory_bytes,
+            snapshot.available_memory_bytes,
+            snapshot.rows_per_block_ewma,
+        );
+
+        assert!(!historical_fetch_ready_plan_can_spawn(snapshot, 1, 1));
     }
 
     #[test]
@@ -7279,7 +7337,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_scheduler_decision_counts_ready_fetches_toward_active_floor() {
+    fn historical_scheduler_decision_allows_ready_plan_refill_above_active_floor() {
         let mut snapshot = scheduler_snapshot_for_refill_tests();
         snapshot.pending_fetches =
             historical_critical_refill_buffer_floor(snapshot.available_memory_bytes);
@@ -7299,7 +7357,10 @@ mod tests {
             HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
         );
 
-        assert_eq!(decision.new_fetch_limit, 0);
+        assert_eq!(
+            decision.new_fetch_limit,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        );
     }
 
     #[test]
