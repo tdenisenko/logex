@@ -1217,14 +1217,15 @@ impl ExecutionClientFamilyCounts {
     }
 }
 
-enum ExecutionClientFamily {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ExecutionClientFamily {
     Geth,
     Nethermind,
     Reth,
     Other,
 }
 
-fn execution_client_family(client_version: &str) -> ExecutionClientFamily {
+pub(crate) fn execution_client_family(client_version: &str) -> ExecutionClientFamily {
     let client_version = client_version.to_ascii_lowercase();
     if client_version.starts_with("geth/") {
         ExecutionClientFamily::Geth

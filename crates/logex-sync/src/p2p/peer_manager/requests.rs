@@ -10,6 +10,7 @@ use crate::primitives::{
     LogexReceipt, ReceiptBloomCache, logex_receipt_batches_with_cached_blooms,
 };
 
+use super::state::execution_client_family;
 use super::*;
 
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
@@ -6565,11 +6566,26 @@ fn retain_serving_body_receipt_candidate_pool_if_enough(
     peers: &HashMap<PeerId, ActivePeer>,
     peer_ids: &mut Vec<PeerId>,
 ) {
-    retain_preferred_items_with_limited_fallbacks_if_enough(
+    let mut serving_families = HashSet::new();
+    for peer_id in peer_ids.iter() {
+        let Some(peer) = peers.get(peer_id) else {
+            continue;
+        };
+        if peer.is_serving {
+            serving_families.insert(execution_client_family(&peer.client_version));
+        }
+    }
+
+    retain_preferred_items_with_limited_fallbacks_and_required_probes_if_enough(
         peer_ids,
         PIPELINED_BODY_RECEIPT_SERVING_POOL_MIN_PEERS,
         PIPELINED_BODY_RECEIPT_SERVING_POOL_PROBE_PEERS,
         |peer_id| peers.get(peer_id).is_some_and(|peer| peer.is_serving),
+        |peer_id| {
+            let peer = peers.get(peer_id)?;
+            let family = execution_client_family(&peer.client_version);
+            (!peer.is_serving && !serving_families.contains(&family)).then_some(family)
+        },
     );
 }
 
@@ -6587,6 +6603,49 @@ fn retain_preferred_items_with_limited_fallbacks_if_enough<T>(
     let mut fallback_count = 0usize;
     items.retain(|item| {
         if is_preferred(item) {
+            return true;
+        }
+        if fallback_count < fallback_limit {
+            fallback_count += 1;
+            return true;
+        }
+        false
+    });
+}
+
+fn retain_preferred_items_with_limited_fallbacks_and_required_probes_if_enough<T, K>(
+    items: &mut Vec<T>,
+    min_preferred: usize,
+    fallback_limit: usize,
+    is_preferred: impl Fn(&T) -> bool,
+    required_probe_key: impl Fn(&T) -> Option<K>,
+) where
+    K: Eq + std::hash::Hash,
+{
+    let preferred = items.iter().filter(|item| is_preferred(*item)).count();
+    if preferred < min_preferred {
+        return;
+    }
+
+    let mut required_probe_indexes = HashSet::new();
+    let mut seen_probe_keys = HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        if is_preferred(item) {
+            continue;
+        }
+        if let Some(key) = required_probe_key(item)
+            && seen_probe_keys.insert(key)
+        {
+            required_probe_indexes.insert(index);
+        }
+    }
+
+    let mut fallback_count = 0usize;
+    let mut index = 0usize;
+    items.retain(|item| {
+        let current_index = index;
+        index = index.saturating_add(1);
+        if is_preferred(item) || required_probe_indexes.contains(&current_index) {
             return true;
         }
         if fallback_count < fallback_limit {
@@ -7289,6 +7348,40 @@ mod tests {
         });
 
         assert_eq!(items, vec![1, 2, 3, 4, 5, 7]);
+    }
+
+    #[test]
+    fn preferred_item_retention_keeps_required_probe_families() {
+        let mut items = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+        retain_preferred_items_with_limited_fallbacks_and_required_probes_if_enough(
+            &mut items,
+            3,
+            2,
+            |item| *item <= 3,
+            |item| match *item {
+                7 | 8 => Some("nethermind"),
+                9 => Some("reth"),
+                _ => None,
+            },
+        );
+
+        assert_eq!(items, vec![1, 2, 3, 4, 5, 7, 9]);
+    }
+
+    #[test]
+    fn preferred_item_retention_waits_for_minimum_preferred_count() {
+        let mut items = vec![1, 2, 3, 4, 5];
+
+        retain_preferred_items_with_limited_fallbacks_and_required_probes_if_enough(
+            &mut items,
+            4,
+            1,
+            |item| *item <= 3,
+            |item| (*item == 5).then_some("nethermind"),
+        );
+
+        assert_eq!(items, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
