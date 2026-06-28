@@ -54,7 +54,7 @@ const HISTORICAL_PREPARE_LOOKAHEAD_DEPTH: usize = 4;
 const HISTORICAL_PREPARE_COMPLETED_BUFFER_EXTRA: usize = 8;
 const HISTORICAL_PREPARE_BUFFER_DEPTH_LIMIT: usize = 12;
 const HISTORICAL_PREPARE_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
-const HISTORICAL_WRITE_REFILL_INTERVAL: Duration = Duration::from_millis(500);
+const HISTORICAL_LOCAL_WORK_REFILL_INTERVAL: Duration = Duration::from_millis(500);
 const HISTORICAL_FETCH_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HISTORICAL_FETCH_HEAD_OF_LINE_RESET_DELAY: Duration = Duration::from_secs(4);
 const HISTORICAL_FETCH_ACTIVE_EXPECTED_RETRY_DELAY: Duration = Duration::from_secs(8);
@@ -2319,7 +2319,7 @@ impl SyncEngine {
             || prepare_progressed)
     }
 
-    async fn refill_historical_fetch_pipeline_during_write(&mut self) -> Result<bool> {
+    async fn refill_historical_fetch_pipeline_during_local_work(&mut self) -> Result<bool> {
         let child_header = {
             let storage = self.storage.read().await;
             storage.historical_floor_header().cloned()
@@ -4934,6 +4934,7 @@ impl SyncEngine {
         let next_child_header = task.next_child_header.clone();
 
         let mut handle = task.handle;
+        let mut last_prepare_refill = std::time::Instant::now();
         let prepared = loop {
             tokio::select! {
                 result = &mut handle => {
@@ -4960,6 +4961,11 @@ impl SyncEngine {
                 }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
+                    if last_prepare_refill.elapsed() >= HISTORICAL_LOCAL_WORK_REFILL_INTERVAL {
+                        last_prepare_refill = std::time::Instant::now();
+                        self.refill_historical_fetch_pipeline_during_local_work()
+                            .await?;
+                    }
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && self.shutdown_requested() {
@@ -5037,8 +5043,9 @@ impl SyncEngine {
         self.historical_ingest_sequence = Some(sequence);
         self.historical_ingest_started_at = Some(std::time::Instant::now());
         self.sync_status_peers();
-        let pre_write_refilled_fetch_pipeline =
-            self.refill_historical_fetch_pipeline_during_write().await?;
+        let pre_write_refilled_fetch_pipeline = self
+            .refill_historical_fetch_pipeline_during_local_work()
+            .await?;
         let mut write_task = Box::pin(write_prepared_historical_batch(
             prepared,
             Arc::clone(&self.storage),
@@ -5069,9 +5076,9 @@ impl SyncEngine {
                 }
                 _ = tokio::time::sleep(HISTORICAL_PREPARE_DRAIN_INTERVAL) => {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
-                    if last_write_refill.elapsed() >= HISTORICAL_WRITE_REFILL_INTERVAL {
+                    if last_write_refill.elapsed() >= HISTORICAL_LOCAL_WORK_REFILL_INTERVAL {
                         last_write_refill = std::time::Instant::now();
-                        self.refill_historical_fetch_pipeline_during_write()
+                        self.refill_historical_fetch_pipeline_during_local_work()
                             .await?;
                     }
                 }
@@ -5158,7 +5165,8 @@ impl SyncEngine {
         );
         let post_write_refill = if should_block_on_post_write_refill {
             if pending_prepares > 0 {
-                self.refill_historical_fetch_pipeline_during_write().await?
+                self.refill_historical_fetch_pipeline_during_local_work()
+                    .await?
             } else {
                 self.prime_historical_backfill_pipeline().await?
             }
