@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, and forces a limited post-write refill when active body/receipt downloads fall below the write-path floor. Two follow-up live-download experiments were rejected because they did not improve the accepted baseline.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited post-write refill when active body/receipt downloads fall below the write-path floor, discards same-sequence work planned against stale expected child headers, and lets write-path refills fill the adaptive active pipeline. A shorter expected-fetch hedge delay was rejected because it increased early zero-progress windows.
 
 ## Completed Since Last Run
 
@@ -25,6 +25,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Re-ran remote validation through `pi-remote` after direct network access failed outside the home network.
 - Rejected a completed-buffer overflow experiment: it measured `279` blocks/sec with `3` low windows and `1` zero window.
 - Rejected an eight-lane active-target experiment: it measured `326` blocks/sec with `1` low window and `1` zero window versus the accepted baseline at `324` blocks/sec with `0` low windows and `0` zero windows on the same route.
+- Added active fetch child-header tracking so expected-sequence work can be discarded immediately when ordered writes advance to a different child header.
+- Increased write-path refill headroom so active body/receipt downloads can refill to the adaptive pipeline depth instead of staying capped at four total refill slots.
+- Measured the active-refill/stale-child build at `264` blocks/sec average with `4` low windows and `1` zero window; it reduced active-depth collapse but did not eliminate peer-tail stalls.
+- Rejected a shorter expected-fetch hedge delay after it produced `2` zero windows within the first few minutes despite more than 25 serving peers.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
@@ -67,9 +71,17 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: ready/completed/prepared backlog can look healthy while active network downloads have drained.
   - Tradeoff: the write loop may briefly block on a limited write-path refill when active downloads are below the floor, but it avoids multi-window floor stalls.
 
+- Expected-sequence active fetch attempts remember their planned child header.
+  - Why: ordered coalescing can advance the expected child while a same-sequence fetch planned from the old child is still active or queued.
+  - Tradeoff: the scheduler may discard a small amount of in-flight work, but it avoids waiting for a fetch that cannot advance the floor.
+
 - Rejected active-depth-only tuning as a production strategy.
   - Why: both a completed-buffer overflow gate and an eight-lane active target failed to improve the accepted warmed baseline without adding low/zero windows.
   - Alternative considered: keep the constants-only changes; rejected because the improvement was not meaningful and stability regressed.
+
+- Rejected shorter expected-fetch hedge timing.
+  - Why: duplicating the head-of-line fetch earlier increased zero-progress windows under high serving-peer counts.
+  - Alternative considered: keep the 2 second hedge; rejected in favor of the previous 4 second head-of-line delay.
 
 ## Challenges and Resolutions
 
@@ -97,18 +109,22 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: reverted both rejected experiments locally and remotely, restored the accepted baseline, and left the Mac mini client running on the baseline build.
   - Remaining: compare future changes only against the accepted baseline and keep only changes that improve longer samples.
 
+- Challenge: same-sequence fetches sometimes remained active after the expected child header changed.
+  - Resolution: active attempts now store their planned child header and the cursor-advance path discards mismatched expected-sequence queued, completed, and active work.
+  - Remaining: peer-tail body/receipt responses can still block the ordered floor even when active depth is healthy.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
-- Current branch contains only accepted scheduler changes from this pass: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, and active-download-aware post-write refill.
-- Reverted rejected completed-buffer overflow and eight-lane active-target experiments before committing.
+- Current branch contains only accepted scheduler changes: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, active-download-aware post-write refill, expected-child mismatch cleanup, and adaptive write-path active refill.
+- Reverted rejected completed-buffer overflow, eight-lane active-target, and shorter expected-hedge experiments before committing.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: accepted scheduler fixes were already committed and pushed; this update records rejected experiments and the current decision point.
+- Commits made during this run: pending local commit for expected-child mismatch cleanup and adaptive write-path refill.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.

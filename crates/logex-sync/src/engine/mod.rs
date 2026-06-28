@@ -101,6 +101,7 @@ pub(super) struct HistoricalQueuedFetchPlan {
 }
 
 pub(super) struct HistoricalFetchAttemptHandle {
+    child_header: Header,
     reservations: BodyReceiptPeerReservations,
     handle: JoinHandle<()>,
 }

@@ -79,7 +79,7 @@ const HISTORICAL_LOW_MEDIUM_LOOKAHEAD_MIN_SERVING_PEERS: usize = 6;
 const HISTORICAL_DENSE_LOW_PEER_MIN_SERVING_PEERS: usize = 8;
 const HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT: usize = 2;
 const HISTORICAL_ACTIVE_BODY_RECEIPT_FETCH_FLOOR: usize = 6;
-const HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT: usize = 4;
+const HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT: usize = 8;
 const HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR: usize = 2;
 const HISTORICAL_WRITE_COALESCE_MAX_BATCHES: usize = 4;
 const HISTORICAL_WRITE_COALESCE_TARGET_ROWS: u64 = 500_000;
@@ -1119,6 +1119,22 @@ fn historical_fetch_child_matches(expected_child: Option<&Header>, fetched_child
         expected_child.number() == fetched_child.number()
             && expected_child.hash_slow() == fetched_child.hash_slow()
     })
+}
+
+fn historical_fetch_mismatched_attempt_ids<'a>(
+    expected_child: Option<&Header>,
+    attempts: impl Iterator<Item = (u64, &'a Header)>,
+) -> Vec<u64> {
+    expected_child
+        .map(|expected_child| {
+            attempts
+                .filter_map(|(attempt_id, child_header)| {
+                    (!historical_fetch_child_matches(Some(expected_child), child_header))
+                        .then_some(attempt_id)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn historical_fetch_position_after_ordered_write(
@@ -2985,6 +3001,76 @@ impl SyncEngine {
         aborted
     }
 
+    fn discard_mismatched_expected_historical_fetch_work(&mut self) -> usize {
+        let expected_sequence = self.historical_fetch_expected_sequence;
+        let Some(expected_child) = self.historical_fetch_expected_child.as_ref() else {
+            return 0;
+        };
+        let expected_child_number = expected_child.number();
+        let mut discarded = 0usize;
+
+        if self
+            .historical_fetch_ready_plans
+            .get(&expected_sequence)
+            .is_some_and(|ready| {
+                !historical_fetch_child_matches(
+                    Some(expected_child),
+                    &ready.plan.header_batch.child_header,
+                )
+            })
+        {
+            self.historical_fetch_ready_plans.remove(&expected_sequence);
+            discarded = discarded.saturating_add(1);
+        }
+
+        if self
+            .historical_fetch_completed
+            .get(&expected_sequence)
+            .is_some_and(|outcome| {
+                !historical_fetch_child_matches(
+                    Some(expected_child),
+                    &outcome.header_batch.child_header,
+                )
+            })
+        {
+            self.historical_fetch_completed.remove(&expected_sequence);
+            discarded = discarded.saturating_add(1);
+        }
+
+        let mismatched_attempts = self
+            .historical_fetch_handles
+            .get(&expected_sequence)
+            .map(|fetch| {
+                historical_fetch_mismatched_attempt_ids(
+                    Some(expected_child),
+                    fetch
+                        .attempts
+                        .iter()
+                        .map(|(attempt_id, attempt)| (*attempt_id, &attempt.child_header)),
+                )
+            })
+            .unwrap_or_default();
+        for attempt_id in mismatched_attempts {
+            if self
+                .discard_historical_fetch_attempt(expected_sequence, attempt_id)
+                .is_some()
+            {
+                discarded = discarded.saturating_add(1);
+            }
+        }
+
+        if discarded > 0 {
+            tracing::debug!(
+                expected_sequence,
+                expected_child = expected_child_number,
+                discarded,
+                "discarded mismatched historical fetch work for advanced expected child"
+            );
+            self.refresh_historical_fetch_head_of_line_timer();
+        }
+        discarded
+    }
+
     fn refresh_historical_fetch_head_of_line_timer(&mut self) {
         let blocked = !self
             .historical_fetch_completed
@@ -3612,6 +3698,7 @@ impl SyncEngine {
         if !reservations.is_empty() {
             self.peers.reserve_body_receipt_requests(&reservations);
         }
+        let child_header = plan.header_batch.child_header.clone();
         let tx = self.historical_fetch_tx.clone();
         let handle = tokio::spawn(async move {
             let body_receipt_started = std::time::Instant::now();
@@ -3644,6 +3731,7 @@ impl SyncEngine {
         if let Some(previous) = fetch.attempts.insert(
             attempt,
             HistoricalFetchAttemptHandle {
+                child_header,
                 reservations,
                 handle,
             },
@@ -4343,6 +4431,7 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence =
             self.historical_fetch_expected_sequence.saturating_add(1);
         self.historical_fetch_expected_child = next_child_header;
+        self.discard_mismatched_expected_historical_fetch_work();
         self.refresh_historical_fetch_head_of_line_timer();
     }
 
@@ -4366,6 +4455,9 @@ impl SyncEngine {
         );
         self.historical_fetch_expected_sequence = advanced_sequence;
         self.historical_fetch_expected_child = advanced_child;
+        if advanced_sequence != expected_sequence {
+            self.discard_mismatched_expected_historical_fetch_work();
+        }
         self.refresh_historical_fetch_head_of_line_timer();
         advanced_sequence != expected_sequence
     }
@@ -4386,6 +4478,9 @@ impl SyncEngine {
         );
         self.historical_fetch_expected_sequence = advanced_sequence;
         self.historical_fetch_expected_child = advanced_child;
+        if advanced_sequence != expected_sequence {
+            self.discard_mismatched_expected_historical_fetch_work();
+        }
         self.refresh_historical_fetch_head_of_line_timer();
         advanced_sequence != expected_sequence
     }
@@ -7174,15 +7269,18 @@ mod tests {
 
     #[test]
     fn historical_scheduler_decision_expands_write_refill_when_buffer_is_low() {
+        let snapshot = scheduler_snapshot_for_refill_tests();
         let decision = historical_fetch_scheduler_decision(
-            scheduler_snapshot_for_refill_tests(),
+            snapshot,
             HistoricalFetchRefillScope::WritePath,
             HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT,
         );
 
         assert_eq!(
             decision.new_fetch_limit,
-            HISTORICAL_WRITE_PATH_FETCH_REFILL_LIMIT
+            decision
+                .pipeline_depth
+                .saturating_sub(snapshot.active_fetches)
         );
         assert!(decision.pipeline_depth > HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT);
     }
@@ -7650,6 +7748,31 @@ mod tests {
             Some(&expected),
             &wrong_hash
         ));
+    }
+
+    #[test]
+    fn historical_fetch_mismatched_attempt_ids_ignores_unknown_expected_child() {
+        let matching = header(90, B256::ZERO, 0x01);
+        let wrong = header(89, matching.hash_slow(), 0x02);
+
+        let attempts = [(1, &matching), (2, &wrong)];
+
+        assert!(historical_fetch_mismatched_attempt_ids(None, attempts.into_iter()).is_empty());
+    }
+
+    #[test]
+    fn historical_fetch_mismatched_attempt_ids_returns_only_wrong_children() {
+        let expected = header(90, B256::ZERO, 0x01);
+        let matching = expected.clone();
+        let wrong_number = header(89, expected.parent_hash, 0x01);
+        let wrong_hash = header(90, expected.parent_hash, 0x02);
+
+        let attempts = [(1, &matching), (2, &wrong_number), (3, &wrong_hash)];
+
+        assert_eq!(
+            historical_fetch_mismatched_attempt_ids(Some(&expected), attempts.into_iter()),
+            vec![2, 3]
+        );
     }
 
     #[test]
