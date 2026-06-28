@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited post-write refill when active body/receipt downloads fall below the write-path floor, discards same-sequence work planned against stale expected child headers, and lets write-path refills fill the adaptive active pipeline. A shorter expected-fetch hedge delay was rejected because it increased early zero-progress windows.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited post-write refill when active body/receipt downloads fall below the write-path floor, discards same-sequence work planned against stale expected child headers, and lets write-path refills fill the adaptive active pipeline. Recent local salvage/refill tweaks failed to beat the accepted baseline, so the next meaningful performance work should be a global live body/receipt request scheduler rather than more constants-only tuning.
 
 ## Completed Since Last Run
 
@@ -29,13 +29,17 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Increased write-path refill headroom so active body/receipt downloads can refill to the adaptive pipeline depth instead of staying capped at four total refill slots.
 - Measured the active-refill/stale-child build at `264` blocks/sec average with `4` low windows and `1` zero window; it reduced active-depth collapse but did not eliminate peer-tail stalls.
 - Rejected a shorter expected-fetch hedge delay after it produced `2` zero windows within the first few minutes despite more than 25 serving peers.
+- Re-ran the remote tests through `pi-remote` after the Mac mini direct route became unreachable outside the home network.
+- Rejected a lookahead-promotion experiment for missing expected historical fetches: it measured `126.2` blocks/sec with `8` low windows and `2` zero windows, below the accepted baseline.
+- Rejected a partial-prefix salvage skip experiment: it measured `107.9` blocks/sec with `7` low windows and `1` zero window, and changed burst shape without improving floor movement.
+- Restored and rebuilt the accepted baseline on the Mac mini tmux session after each rejected experiment.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: downloads, prepare, and ordered writes still move in bursts; simple active-depth and buffer-width changes did not beat the accepted scheduler baseline.
-   - Completion criteria: either prove the current scheduler is the practical baseline under the available network, or replace the plan-level fetch model with a global live chunk scheduler that improves longer warmed remote samples without increasing low/zero-progress windows.
+   - Reason: downloads, prepare, and ordered writes still move in bursts; local refill, promotion, active-depth, and salvage changes did not beat the accepted scheduler baseline.
+   - Completion criteria: either prove the current scheduler is the practical baseline under the available network, or replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer warmed remote samples without increasing low/zero-progress windows.
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
@@ -118,13 +122,14 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
 - Current branch contains only accepted scheduler changes: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, active-download-aware post-write refill, expected-child mismatch cleanup, and adaptive write-path active refill.
 - Reverted rejected completed-buffer overflow, eight-lane active-target, and shorter expected-hedge experiments before committing.
+- Reverted rejected lookahead-promotion and partial-prefix salvage skip experiments locally and remotely.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: pending local commit for expected-child mismatch cleanup and adaptive write-path refill.
+- Commits made during this run: `docs: record rejected scheduler experiments`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
