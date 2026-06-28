@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, and gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget. This removed the observed `active_fetches = 0` idle gap in warmed samples, but active head-of-line stalls remain, so the next meaningful performance work is still a global live body/receipt request scheduler rather than more constants-only tuning.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, and now adds bounded early redundancy for the first expected-prefix chunks. Remote samples improved to `378.0` blocks/sec with `1` low/`1` zero window and `327.7` blocks/sec with `0` low/`0` zero windows, while the client stayed bandwidth-limited near the 300 Mbps link during strong intervals.
 
 ## Completed Since Last Run
 
@@ -39,11 +39,14 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Added local-work historical fetch refill while prepare tasks are waiting, using the same bounded refill path already used during writes.
 - Measured the prepare-refill change after peers warmed to 29-32 serving peers: `238.4` blocks/sec average with `5` low windows and `2` zero windows, improving the previous warmed jump-host baseline (`175.9`, `7`, `6`) and removing the previously observed `active_fetches = 0` idle windows from the final sample.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
+- Rejected a dense-prefix yield-size experiment: it measured `216.1` blocks/sec with `2` low windows and `0` zero windows and did not remove long body/receipt plan tails.
+- Added bounded early redundancy for the first full-priority body/receipt prefix chunks; remote samples measured `378.0` blocks/sec with `1` low/`1` zero window and `327.7` blocks/sec with `0` low/`0` zero windows.
+- Validated the accepted redundancy change with `cargo fmt --check`, `cargo test -p logex-sync body_receipt_ -- --nocapture`, `cargo test -p logex-sync historical_ -- --nocapture`, and `cargo check -p logex-node`.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: prepare-wait refill fixed the observed idle-fetch gap, but ordered progress can still pause while active expected-range downloads are blocked by peer tail latency.
+   - Reason: bounded early redundancy improved warmed samples, but ordered progress can still pause under peer-tail latency.
    - Completion criteria: either prove the current scheduler is the practical baseline under the available network, or replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer warmed remote samples without increasing low/zero-progress windows.
 
 2. Establish a production baseline from a fresh dense-range run.
@@ -100,6 +103,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: a remote sample showed prepared work queued while active body/receipt downloads fell to zero.
   - Tradeoff: prepare waits may spend a small amount of time on bounded refill work, but the downloader is less likely to go idle between ordered writes.
 
+- Full-priority historical body/receipt plans now hedge the first prefix chunks immediately when enough peers are available.
+  - Why: remote logs showed long plan tails caused by early prefix chunks lagging while later chunks completed.
+  - Tradeoff: this spends extra bandwidth on the chunks that gate ordered verification, so it is limited to full-priority expected work and does not apply to lookahead plans.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -138,6 +145,14 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: local-work refill now runs during prepare waits and writes; warmed confirmation sample improved to `238.4` blocks/sec with `2` zero windows.
   - Remaining: active fetches can still stall behind slow peer tails, so the next scheduler work should target global live chunk scheduling or active expected-lane repair.
 
+- Challenge: shrinking dense plan yield size reduced return blocks but did not remove body/receipt long tails.
+  - Resolution: reverted the dense-prefix experiment and kept the accepted baseline.
+  - Remaining: use sample data, not constants-only changes, to justify any future yield-size tuning.
+
+- Challenge: expected prefix chunks could lag behind later completed chunks.
+  - Resolution: added bounded immediate redundancy for the first full-priority prefix chunks; remote samples improved while keeping failures controlled.
+  - Remaining: longer full-run validation is still needed before concluding the PR.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -146,13 +161,15 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Reverted rejected lookahead-promotion and partial-prefix salvage skip experiments locally and remotely.
 - Reverted rejected wider full-priority candidate-pool experiment locally and remotely after it worsened low/zero windows.
 - Inspected the priority-budget diff for stale experiment leftovers; no obsolete code remained beyond rejected experiment reverts.
+- Reverted the rejected dense-prefix yield-size experiment locally and remotely before accepting the prefix-redundancy change.
+- Inspected the new redundancy path for rejected experiment leftovers; no stale dense-prefix code remains.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
