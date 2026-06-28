@@ -848,7 +848,11 @@ impl PeerManager {
         );
         retain_serving_body_receipt_candidate_pool_if_enough(&self.peers, &mut body_peer_ids);
         self.sort_peer_ids_by_request_performance(&mut body_peer_ids, PeerRequestKind::Bodies);
-        limit_body_receipt_candidate_pool(&mut body_peer_ids);
+        limit_body_receipt_candidate_pool(&mut body_peer_ids, |peer_id| {
+            self.peers
+                .get(peer_id)
+                .map(|peer| execution_client_family(&peer.client_version))
+        });
         if body_peer_ids.is_empty() {
             return Ok(None);
         }
@@ -865,7 +869,11 @@ impl PeerManager {
         );
         retain_serving_body_receipt_candidate_pool_if_enough(&self.peers, &mut receipt_peer_ids);
         self.sort_peer_ids_by_request_performance(&mut receipt_peer_ids, PeerRequestKind::Receipts);
-        limit_body_receipt_candidate_pool(&mut receipt_peer_ids);
+        limit_body_receipt_candidate_pool(&mut receipt_peer_ids, |peer_id| {
+            self.peers
+                .get(peer_id)
+                .map(|peer| execution_client_family(&peer.client_version))
+        });
         if receipt_peer_ids.is_empty() {
             return Ok(None);
         }
@@ -5642,9 +5650,36 @@ fn parallel_requests_per_peer(peer_count: usize) -> usize {
     }
 }
 
-fn limit_body_receipt_candidate_pool(peer_ids: &mut Vec<PeerId>) {
+fn limit_body_receipt_candidate_pool<K>(
+    peer_ids: &mut Vec<PeerId>,
+    mut required_probe_key: impl FnMut(&PeerId) -> Option<K>,
+) where
+    K: Eq + std::hash::Hash,
+{
     if peer_ids.len() >= PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS {
-        peer_ids.truncate(PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
+        let selected_len = PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE.min(peer_ids.len());
+        let mut selected_probe_keys = peer_ids[..selected_len]
+            .iter()
+            .filter_map(&mut required_probe_key)
+            .collect::<HashSet<_>>();
+        let mut probe_indexes = Vec::new();
+        for (index, peer_id) in peer_ids.iter().enumerate().skip(selected_len) {
+            let Some(key) = required_probe_key(peer_id) else {
+                continue;
+            };
+            if selected_probe_keys.insert(key) {
+                probe_indexes.push(index);
+            }
+        }
+
+        let mut selected = Vec::with_capacity(selected_len.saturating_add(probe_indexes.len()));
+        selected.extend_from_slice(&peer_ids[..selected_len]);
+        selected.extend(
+            probe_indexes
+                .into_iter()
+                .filter_map(|index| peer_ids.get(index).copied()),
+        );
+        *peer_ids = selected;
     }
 }
 
@@ -6406,12 +6441,32 @@ mod tests {
         let mut peers = (0..PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS - 1)
             .map(|index| PeerId::repeat_byte(index as u8))
             .collect::<Vec<_>>();
-        limit_body_receipt_candidate_pool(&mut peers);
+        limit_body_receipt_candidate_pool::<u8>(&mut peers, |_| None);
         assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS - 1);
 
         peers.push(PeerId::repeat_byte(0xff));
-        limit_body_receipt_candidate_pool(&mut peers);
+        limit_body_receipt_candidate_pool::<u8>(&mut peers, |_| None);
         assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE);
+    }
+
+    #[test]
+    fn body_receipt_candidate_pool_preserves_missing_client_family_probe() {
+        let mut peers = (0..PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS)
+            .map(|index| PeerId::repeat_byte(index as u8))
+            .collect::<Vec<_>>();
+        let nethermind_probe = PeerId::repeat_byte(0xf0);
+        peers.push(nethermind_probe);
+
+        limit_body_receipt_candidate_pool(&mut peers, |peer_id| {
+            if *peer_id == nethermind_probe {
+                Some("nethermind")
+            } else {
+                Some("geth")
+            }
+        });
+
+        assert_eq!(peers.len(), PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE + 1);
+        assert!(peers.contains(&nethermind_probe));
     }
 
     #[test]

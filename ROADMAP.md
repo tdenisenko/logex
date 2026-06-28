@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, and keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor. The latest remote sample after the cursor fix measured `287.9` blocks/sec with `0` low windows and `0` zero windows while serving peers were still low after restart and the link was near 300 Mbps.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, and preserves one missing execution-client-family probe when truncating the body/receipt candidate pool. The latest remote sample through `pi-remote` measured `297.3` blocks/sec with `2` low windows and `1` zero window; it confirmed bulk traffic used the local 300 Mbps route and the remaining stall happened with prepared work queued, so the live scheduler is still the next bottleneck.
 
 ## Completed Since Last Run
 
@@ -46,6 +46,9 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Enforced the monotonic fetch cursor invariant after single fetch completion, materialized lookahead advancement, and ordered coalesced writes.
 - Deployed the fix to the Mac mini through `pi-remote`; the follow-up 5 minute sample measured `287.9` blocks/sec with `0` low windows and `0` zero windows.
 - Fixed strict clippy warnings in the touched scheduler/body-receipt areas.
+- Re-ran the remote benchmark through `pi-remote` after a network-unreachable sample; the current route is valid and bulk download traffic is local, not through the WireGuard dashboard tunnel.
+- Preserved a missing execution-client-family probe when the historical body/receipt candidate pool is truncated, so connected Nethermind peers do not remain permanently outside the request pool when the fastest/proven prefix is Geth-heavy.
+- Measured the peer-family probe build at `297.3` blocks/sec with `2` low windows and `1` zero window; the sample showed Nethermind peers entering the serving set and improved the previous warmed post-cursor sample (`235.7`, `4`, `2`), but did not eliminate the prepared-backlog zero window.
 
 ## Remaining TODOs
 
@@ -115,6 +118,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: ordered writes and materialized lookahead can advance the expected sequence by multiple batches; future refills must not reuse stale sequence ids below that cursor.
   - Tradeoff: none intended; old sequence ids are already obsolete once the ordered cursor advances.
 
+- Body/receipt candidate truncation preserves one probe for any missing execution-client family.
+  - Why: sorting by proven request performance can make the top candidate pool Geth-heavy and prevent connected Nethermind peers from ever becoming serving peers.
+  - Tradeoff: the pool may temporarily exceed the fast-pool size by a small number of client-family probes, but the active pipeline and per-peer request limits still bound memory and network work.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -165,6 +172,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: kept `historical_fetch_next_sequence` aligned with `historical_fetch_expected_sequence` on every expected-cursor advance.
   - Remaining: head-of-line refills still happen under slow peer tails, but they no longer strand the queue with `next < expected`.
 
+- Challenge: many Nethermind peers were connected but none were serving body/receipt work in a warmed run.
+  - Resolution: preserved one missing client-family probe after candidate sorting and truncation.
+  - Remaining: peer diversity improved, but a prepared-backlog zero window still occurred, so the next improvement must target ordered scheduler flow rather than discovery.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -176,6 +187,7 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Reverted the rejected dense-prefix yield-size experiment locally and remotely before accepting the prefix-redundancy change.
 - Inspected the new redundancy path for rejected experiment leftovers; no stale dense-prefix code remains.
 - Fixed clippy-only issues in the scheduler and body/receipt tests; no functional dead code was removed in this pass.
+- Inspected the peer-family probe change for experimental leftovers; it is limited to candidate truncation and focused tests.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
