@@ -1088,6 +1088,13 @@ fn historical_fetch_refill_should_use_pipeline_child(
     pending_prepares > 0 || fetch_expected_sequence > prepare_expected_sequence
 }
 
+fn historical_post_write_refill_should_block(
+    pending_prepares: usize,
+    pending_fetches: usize,
+) -> bool {
+    pending_prepares == 0 || pending_fetches < HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+}
+
 fn historical_residual_should_use_sequential_tail(block_count: usize) -> bool {
     (1..HISTORICAL_RESIDUAL_SEQUENTIAL_TAIL_BLOCKS).contains(&block_count)
 }
@@ -1183,6 +1190,12 @@ fn historical_sequence_gap_action_for_state(
     } else {
         HistoricalSequenceGapAction::None
     }
+}
+
+fn historical_prepare_work_blocked_by_missing_expected_fetch(
+    action: HistoricalSequenceGapAction,
+) -> bool {
+    action == HistoricalSequenceGapAction::RefillMissingExpectedFetch
 }
 
 fn historical_prepare_buffer_depth(available_memory_bytes: Option<u64>) -> usize {
@@ -3105,6 +3118,11 @@ impl SyncEngine {
 
     async fn spawn_lookahead_historical_prepare_tasks_without_refill(&mut self) -> Result<bool> {
         self.drain_historical_prepare_tasks().await?;
+        if historical_prepare_work_blocked_by_missing_expected_fetch(
+            self.historical_sequence_gap_action(),
+        ) {
+            return Ok(false);
+        }
 
         let mut progressed = false;
         let mut prepared_sequences = Vec::new();
@@ -3153,6 +3171,11 @@ impl SyncEngine {
         self.drain_historical_fetch_outcomes();
         self.drain_historical_header_fetch_outcomes().await?;
         self.drain_historical_prepare_tasks().await?;
+        if historical_prepare_work_blocked_by_missing_expected_fetch(
+            self.historical_sequence_gap_action(),
+        ) {
+            return Ok(false);
+        }
 
         let mut progressed = false;
         let prepare_buffer_depth =
@@ -4077,6 +4100,14 @@ impl SyncEngine {
             }
 
             if self
+                .refill_missing_expected_historical_fetch(child_header)
+                .await?
+            {
+                wait_started = Instant::now();
+                continue;
+            }
+
+            if self
                 .spawn_lookahead_historical_prepare_tasks_without_refill()
                 .await?
             {
@@ -4086,14 +4117,6 @@ impl SyncEngine {
                     HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
                 )
                 .await?;
-                continue;
-            }
-
-            if self
-                .refill_missing_expected_historical_fetch(child_header)
-                .await?
-            {
-                wait_started = Instant::now();
                 continue;
             }
 
@@ -5016,9 +5039,22 @@ impl SyncEngine {
         if should_reset_fetch_pipeline {
             self.reset_historical_fetch_pipeline();
         }
+        let refilled_missing_expected_fetch =
+            if let Some(expected_child) = self.historical_fetch_expected_child.clone() {
+                self.refill_missing_expected_historical_fetch(&expected_child)
+                    .await?
+            } else {
+                false
+            };
         let refill_started = std::time::Instant::now();
-        let refilled_fetch_pipeline =
-            pre_write_refilled_fetch_pipeline || self.prime_historical_backfill_pipeline().await?;
+        let should_block_on_post_write_refill = historical_post_write_refill_should_block(
+            self.pending_historical_prepare_count(),
+            self.pending_historical_fetch_count(),
+        );
+        let refilled_fetch_pipeline = pre_write_refilled_fetch_pipeline
+            || refilled_missing_expected_fetch
+            || (should_block_on_post_write_refill
+                && self.prime_historical_backfill_pipeline().await?);
         let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 
@@ -7371,6 +7407,19 @@ mod tests {
     }
 
     #[test]
+    fn historical_post_write_refill_yields_to_prepared_backlog() {
+        assert!(!historical_post_write_refill_should_block(
+            8,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        ));
+        assert!(historical_post_write_refill_should_block(0, 8));
+        assert!(historical_post_write_refill_should_block(
+            8,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT - 1
+        ));
+    }
+
+    #[test]
     fn historical_next_completed_fetch_sequence_picks_earliest_ready_fetch() {
         let mut completed = BTreeMap::new();
         completed.insert(7, ());
@@ -7465,6 +7514,19 @@ mod tests {
             }),
             HistoricalSequenceGapAction::RefillMissingExpectedFetch
         );
+    }
+
+    #[test]
+    fn historical_prepare_work_blocks_only_missing_expected_refill() {
+        assert!(historical_prepare_work_blocked_by_missing_expected_fetch(
+            HistoricalSequenceGapAction::RefillMissingExpectedFetch
+        ));
+        assert!(!historical_prepare_work_blocked_by_missing_expected_fetch(
+            HistoricalSequenceGapAction::None
+        ));
+        assert!(!historical_prepare_work_blocked_by_missing_expected_fetch(
+            HistoricalSequenceGapAction::Reset
+        ));
     }
 
     #[test]

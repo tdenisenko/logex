@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty. The latest fixes keep the critical historical fetch active and allow cheap ready fetch plans to queue ahead of slow header windows without increasing active receipt memory.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The latest fixes keep the critical historical fetch active, allow cheap ready fetch plans to queue ahead of slow header windows, prioritize missing expected fetches before lookahead prepare work, and avoid blocking ordered writes on expensive post-write refill when prepared batches are already queued.
 
 ## Completed Since Last Run
 
@@ -16,13 +16,17 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Confirmed the patch moved the remote floor off the pinned block and restored high instantaneous throughput; warmed samples still show bursty ordered progress.
 - Split cheap ready fetch plan buffering from the active/heavy historical fetch pipeline.
 - Measured the ready-plan change on the remote warmed run: average floor movement improved from `161` to `199` blocks/sec, low windows fell from `12` to `6`, and zero windows fell from `3` to `1`.
+- Prioritized missing expected fetch refill ahead of lookahead prepare work so later buffered work cannot delay the next block range needed to advance the verified floor.
+- Avoided blocking the ordered write loop on post-write pipeline refill when prepared historical batches are already queued.
+- Added proactive missing-expected refill immediately after ordered writes advance the historical cursor.
+- Measured the latest remote warmed run at `273` blocks/sec average with `1` low window and `0` zero windows after peers warmed to the low/mid 30s.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: downloads, prepare, and ordered writes still move in bursts; one-interval zero-progress windows remain even after the hard stall was fixed.
-   - Completion criteria: expected-sequence work is always prioritized, stale/non-advancing work cannot consume critical slots, and warmed remote samples show sustained floor movement without repeated low/zero windows.
+   - Reason: downloads, prepare, and ordered writes still move in bursts; active body/receipt downloads can still briefly drain under dense prepared backlogs.
+   - Completion criteria: active downloads stay near the chosen pipeline depth while memory is healthy, stale/non-advancing work cannot consume critical slots, and warmed remote samples show sustained floor movement without repeated low/zero windows.
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
@@ -50,6 +54,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: slow reverse-header planning windows were letting active body/receipt downloads run dry even when memory and bandwidth were available.
   - Tradeoff: the scheduler keeps more header/plan metadata in memory, while active receipt/body downloads remain capped by the pipeline depth.
 
+- Ordered writes no longer wait on non-critical post-write refill when prepared batches are ready.
+  - Why: a measured stall spent about 24 seconds in refill after a batch was already written, preventing the next verified prepared batch from advancing the floor.
+  - Tradeoff: refill may run slightly later when there is prepared backlog, so active download depth still needs a follow-up refill policy that keeps the network busier without increasing memory pressure.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -64,23 +72,27 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: added a separate ready-plan buffer so cheap queued plans can hide header latency.
   - Remaining: ordered prepare/write still causes shorter burstiness.
 
+- Challenge: expected-sequence holes were detected only after several prepared lookahead batches had accumulated.
+  - Resolution: moved missing-expected refill ahead of lookahead prepare work and added a proactive refill after ordered writes advance the cursor.
+  - Remaining: dense ranges can still drain active downloads while many prepared batches wait to be written.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
-- Current branch contains only the previously accepted scheduler commits plus the new stale-work critical-refill and ready-plan buffering fixes.
+- Current branch contains only accepted scheduler changes from this pass: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, and proactive expected refill.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: stale historical fetch critical refill; ready-plan buffering.
+- Commits made during this run: stale historical fetch critical refill; ready-plan buffering. The expected-fetch priority and non-blocking refill changes are pending commit.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
 
 ## Known Issues or Risks
 
-- Current samples are shorter than a full sync and still show bursty floor movement.
+- Current samples are shorter than a full sync and still show bursty floor movement in dense log ranges.
 - Peer count and routing mode affect comparability; record both for every benchmark.
 - The next larger scheduler change may require restructuring download, prepare, and ordered write coordination rather than tuning constants.
