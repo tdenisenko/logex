@@ -1091,8 +1091,11 @@ fn historical_fetch_refill_should_use_pipeline_child(
 fn historical_post_write_refill_should_block(
     pending_prepares: usize,
     pending_fetches: usize,
+    active_fetches: usize,
 ) -> bool {
-    pending_prepares == 0 || pending_fetches < HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+    pending_prepares == 0
+        || pending_fetches < HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+        || active_fetches < HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR
 }
 
 fn historical_residual_should_use_sequential_tail(block_count: usize) -> bool {
@@ -5047,14 +5050,24 @@ impl SyncEngine {
                 false
             };
         let refill_started = std::time::Instant::now();
+        let pending_prepares = self.pending_historical_prepare_count();
         let should_block_on_post_write_refill = historical_post_write_refill_should_block(
-            self.pending_historical_prepare_count(),
+            pending_prepares,
             self.pending_historical_fetch_count(),
+            self.active_historical_body_receipt_fetch_count(),
         );
+        let post_write_refill = if should_block_on_post_write_refill {
+            if pending_prepares > 0 {
+                self.refill_historical_fetch_pipeline_during_write().await?
+            } else {
+                self.prime_historical_backfill_pipeline().await?
+            }
+        } else {
+            false
+        };
         let refilled_fetch_pipeline = pre_write_refilled_fetch_pipeline
             || refilled_missing_expected_fetch
-            || (should_block_on_post_write_refill
-                && self.prime_historical_backfill_pipeline().await?);
+            || post_write_refill;
         let refill_elapsed = refill_started.elapsed();
         let queued_next_fetches = self.pending_historical_fetch_count();
 
@@ -7410,12 +7423,23 @@ mod tests {
     fn historical_post_write_refill_yields_to_prepared_backlog() {
         assert!(!historical_post_write_refill_should_block(
             8,
-            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+            HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR
         ));
-        assert!(historical_post_write_refill_should_block(0, 8));
+        assert!(historical_post_write_refill_should_block(
+            0,
+            8,
+            HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR
+        ));
         assert!(historical_post_write_refill_should_block(
             8,
-            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT - 1
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT - 1,
+            HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR
+        ));
+        assert!(historical_post_write_refill_should_block(
+            8,
+            HISTORICAL_CRITICAL_PATH_FETCH_REFILL_LIMIT,
+            HISTORICAL_WRITE_BACKPRESSURE_ACTIVE_FETCH_FLOOR - 1
         ));
     }
 

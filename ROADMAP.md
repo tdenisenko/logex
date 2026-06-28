@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The latest fixes keep the critical historical fetch active, allow cheap ready fetch plans to queue ahead of slow header windows, prioritize missing expected fetches before lookahead prepare work, and avoid blocking ordered writes on expensive post-write refill when prepared batches are already queued.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The latest fixes keep the critical historical fetch active, allow cheap ready fetch plans to queue ahead of slow header windows, prioritize missing expected fetches before lookahead prepare work, avoid blocking ordered writes on expensive post-write refill when prepared batches are already queued, and force a limited post-write refill when active body/receipt downloads fall below the write-path floor.
 
 ## Completed Since Last Run
 
@@ -20,13 +20,15 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Avoided blocking the ordered write loop on post-write pipeline refill when prepared historical batches are already queued.
 - Added proactive missing-expected refill immediately after ordered writes advance the historical cursor.
 - Measured the latest remote warmed run at `273` blocks/sec average with `1` low window and `0` zero windows after peers warmed to the low/mid 30s.
+- Added an active-download-aware post-write refill gate so prepared backlog can no longer hide an empty active body/receipt pipeline.
+- Measured the follow-up remote warmed run at `326` blocks/sec average with `0` low windows and `0` zero windows after peers warmed past 20 serving peers.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: downloads, prepare, and ordered writes still move in bursts; active body/receipt downloads can still briefly drain under dense prepared backlogs.
-   - Completion criteria: active downloads stay near the chosen pipeline depth while memory is healthy, stale/non-advancing work cannot consume critical slots, and warmed remote samples show sustained floor movement without repeated low/zero windows.
+   - Reason: downloads, prepare, and ordered writes still move in bursts; the latest active-refill gate stabilizes floor movement but active downloads can still hover near the lower write-path floor instead of the full pipeline depth.
+   - Completion criteria: active downloads stay near the chosen pipeline depth while memory is healthy, stale/non-advancing work cannot consume critical slots, and longer warmed remote samples keep sustained floor movement without repeated low/zero windows.
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
@@ -58,6 +60,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: a measured stall spent about 24 seconds in refill after a batch was already written, preventing the next verified prepared batch from advancing the floor.
   - Tradeoff: refill may run slightly later when there is prepared backlog, so active download depth still needs a follow-up refill policy that keeps the network busier without increasing memory pressure.
 
+- Post-write refill uses active body/receipt depth, not only buffered inventory.
+  - Why: ready/completed/prepared backlog can look healthy while active network downloads have drained.
+  - Tradeoff: the write loop may briefly block on a limited write-path refill when active downloads are below the floor, but it avoids multi-window floor stalls.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -76,17 +82,21 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: moved missing-expected refill ahead of lookahead prepare work and added a proactive refill after ordered writes advance the cursor.
   - Remaining: dense ranges can still drain active downloads while many prepared batches wait to be written.
 
+- Challenge: prepared backlog hid active body/receipt download starvation.
+  - Resolution: post-write refill now considers active body/receipt fetch count and forces a limited write-path refill when active downloads fall below the floor.
+  - Remaining: the next architectural pass should make refill planning more independent so active downloads target the full pipeline depth, not just the floor.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
-- Current branch contains only accepted scheduler changes from this pass: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, and proactive expected refill.
+- Current branch contains only accepted scheduler changes from this pass: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, and active-download-aware post-write refill.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: stale historical fetch critical refill; ready-plan buffering. The expected-fetch priority and non-blocking refill changes are pending commit.
+- Commits made during this run: stale historical fetch critical refill; ready-plan buffering; expected-fetch priority and non-blocking refill.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
