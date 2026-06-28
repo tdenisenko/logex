@@ -33,6 +33,7 @@ const PIPELINED_BODY_RECEIPT_BACKGROUND_DRAIN_GRACE: Duration = Duration::from_m
 const PIPELINED_BODY_RECEIPT_PREFIX_REDUNDANCY_MIN_PEERS: usize = 16;
 const PIPELINED_BODY_RECEIPT_LOW_PEER_PREFIX_REDUNDANCY_MIN_PEERS: usize = 8;
 const PIPELINED_BODY_RECEIPT_PREFIX_HEDGE_SPARE_ATTEMPTS: usize = 4;
+const PIPELINED_BODY_RECEIPT_LOOKAHEAD_PREFIX_CHUNK_LIMIT: usize = 8;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_MIN_PEERS: usize = 32;
 const PIPELINED_BODY_RECEIPT_FAST_POOL_SIZE: usize = 16;
 const PIPELINED_BODY_RECEIPT_IDLE_POOL_MIN_PEERS: usize = 4;
@@ -165,6 +166,13 @@ struct BodyReceiptLiveLaneSchedule {
     max_role_attempts: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BodyReceiptRequestPriority {
+    #[default]
+    Full,
+    Lookahead,
+}
+
 struct PlanLiveBodyReceiptChunk {
     range: std::ops::Range<usize>,
     candidates: BodyReceiptChunkLiveCandidates,
@@ -187,6 +195,7 @@ pub(crate) struct BodyReceiptRequestPlan {
     body_max_in_flight: usize,
     receipt_max_in_flight: usize,
     peer_rotation: usize,
+    priority: BodyReceiptRequestPriority,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
     accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
 }
@@ -939,6 +948,7 @@ impl PeerManager {
             body_max_in_flight,
             receipt_max_in_flight,
             peer_rotation: self.request_cursor,
+            priority: BodyReceiptRequestPriority::Full,
             peers,
             accounting_tx: None,
         }))
@@ -1260,6 +1270,16 @@ impl BodyReceiptRequestPlan {
         self
     }
 
+    pub(crate) fn with_lookahead_priority(mut self) -> Self {
+        self.priority = BodyReceiptRequestPriority::Lookahead;
+        self
+    }
+
+    pub(crate) fn with_full_priority(mut self) -> Self {
+        self.priority = BodyReceiptRequestPriority::Full;
+        self
+    }
+
     pub(crate) async fn execute(self) -> BodyReceiptRequestOutcome {
         self.execute_paired().await
     }
@@ -1275,9 +1295,11 @@ impl BodyReceiptRequestPlan {
                         .map(|range| (chunk_index, range))
                 });
         let min_return_blocks = body_receipt_plan_progress_target(self.return_blocks);
-        let max_scheduled_chunks =
-            body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
-                .min(self.max_in_flight);
+        let max_scheduled_chunks = body_receipt_priority_prefix_chunk_limit(
+            self.priority,
+            body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks),
+        )
+        .min(self.max_in_flight);
         let mut peer_state = BodyReceiptPlanPeerState::default();
         let mut reservations = BodyReceiptRequestReservations::default();
         for _ in 0..max_scheduled_chunks {
@@ -1336,9 +1358,11 @@ impl BodyReceiptRequestPlan {
             let mut retry_counts = HashMap::<usize, usize>::new();
             let mut active_chunks = HashMap::<usize, PlanLiveBodyReceiptChunk>::new();
             let mut peer_state = BodyReceiptPlanPeerState::default();
-            let max_prefix_chunks =
-                body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks)
-                    .min(self.max_in_flight);
+            let max_prefix_chunks = body_receipt_priority_prefix_chunk_limit(
+                self.priority,
+                body_receipt_scheduled_chunk_limit(&self.ranges, min_return_blocks),
+            )
+            .min(self.max_in_flight);
             let max_background_chunks = body_receipt_background_chunk_limit(
                 &self.ranges,
                 min_return_blocks,
@@ -5888,6 +5912,19 @@ fn body_receipt_scheduled_chunk_limit(
     prefix_chunks.clamp(1, ranges.len())
 }
 
+fn body_receipt_priority_prefix_chunk_limit(
+    priority: BodyReceiptRequestPriority,
+    prefix_chunk_limit: usize,
+) -> usize {
+    match priority {
+        BodyReceiptRequestPriority::Full => prefix_chunk_limit,
+        BodyReceiptRequestPriority::Lookahead if prefix_chunk_limit == 0 => 0,
+        BodyReceiptRequestPriority::Lookahead => prefix_chunk_limit
+            .min(PIPELINED_BODY_RECEIPT_LOOKAHEAD_PREFIX_CHUNK_LIMIT)
+            .max(1),
+    }
+}
+
 fn body_receipt_background_chunk_limit(
     ranges: &[std::ops::Range<usize>],
     min_return_blocks: usize,
@@ -6543,6 +6580,7 @@ mod tests {
             body_max_in_flight: 0,
             receipt_max_in_flight: 0,
             peer_rotation: 0,
+            priority: BodyReceiptRequestPriority::Full,
             peers: HashMap::new(),
             accounting_tx: None,
         };
@@ -6611,6 +6649,26 @@ mod tests {
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 32), 1);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 96), 3);
         assert_eq!(body_receipt_scheduled_chunk_limit(&ranges, 4096), 6);
+    }
+
+    #[test]
+    fn body_receipt_priority_prefix_limit_caps_only_lookahead() {
+        assert_eq!(
+            body_receipt_priority_prefix_chunk_limit(BodyReceiptRequestPriority::Full, 20),
+            20
+        );
+        assert_eq!(
+            body_receipt_priority_prefix_chunk_limit(BodyReceiptRequestPriority::Lookahead, 20),
+            PIPELINED_BODY_RECEIPT_LOOKAHEAD_PREFIX_CHUNK_LIMIT
+        );
+        assert_eq!(
+            body_receipt_priority_prefix_chunk_limit(BodyReceiptRequestPriority::Lookahead, 4),
+            4
+        );
+        assert_eq!(
+            body_receipt_priority_prefix_chunk_limit(BodyReceiptRequestPriority::Lookahead, 0),
+            0
+        );
     }
 
     #[test]
@@ -6890,6 +6948,7 @@ mod tests {
             body_max_in_flight: 2,
             receipt_max_in_flight: 2,
             peer_rotation: 0,
+            priority: BodyReceiptRequestPriority::Full,
             peers: HashMap::new(),
             accounting_tx: None,
         };
@@ -6936,6 +6995,7 @@ mod tests {
             body_max_in_flight: 4,
             receipt_max_in_flight: 4,
             peer_rotation: 0,
+            priority: BodyReceiptRequestPriority::Full,
             peers: HashMap::new(),
             accounting_tx: None,
         };
@@ -6982,6 +7042,7 @@ mod tests {
             body_max_in_flight: 8,
             receipt_max_in_flight: 8,
             peer_rotation: 0,
+            priority: BodyReceiptRequestPriority::Full,
             peers: HashMap::new(),
             accounting_tx: None,
         };
@@ -7244,6 +7305,7 @@ mod tests {
             body_max_in_flight: 1,
             receipt_max_in_flight: 1,
             peer_rotation: 0,
+            priority: BodyReceiptRequestPriority::Full,
             peers: HashMap::new(),
             accounting_tx: None,
         };

@@ -3692,6 +3692,11 @@ impl SyncEngine {
     ) {
         let generation = self.historical_fetch_generation;
         let attempt = self.next_historical_fetch_attempt();
+        plan.body_receipt_plan = if sequence == self.historical_fetch_expected_sequence {
+            plan.body_receipt_plan.with_full_priority()
+        } else {
+            plan.body_receipt_plan.with_lookahead_priority()
+        };
         self.peers
             .refresh_bodies_and_receipts_request_plan(&mut plan.body_receipt_plan);
         let reservations = plan.body_receipt_plan.reservations();

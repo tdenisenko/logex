@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited post-write refill when active body/receipt downloads fall below the write-path floor, discards same-sequence work planned against stale expected child headers, and lets write-path refills fill the adaptive active pipeline. Recent local salvage/refill tweaks failed to beat the accepted baseline, so the next meaningful performance work should be a global live body/receipt request scheduler rather than more constants-only tuning.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited post-write refill when active body/receipt downloads fall below the write-path floor, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, and now gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget. This improves measured average floor movement on warmed remote samples, but single-window stalls remain, so the next meaningful performance work is still a global live body/receipt request scheduler rather than more constants-only tuning.
 
 ## Completed Since Last Run
 
@@ -33,6 +33,8 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Rejected a lookahead-promotion experiment for missing expected historical fetches: it measured `126.2` blocks/sec with `8` low windows and `2` zero windows, below the accepted baseline.
 - Rejected a partial-prefix salvage skip experiment: it measured `107.9` blocks/sec with `7` low windows and `1` zero window, and changed burst shape without improving floor movement.
 - Restored and rebuilt the accepted baseline on the Mac mini tmux session after each rejected experiment.
+- Added priority-aware body/receipt fetch budgeting: the expected historical sequence keeps full live prefix scheduling, while lookahead sequences use a capped prefix lane so they cannot consume all body request slots.
+- Measured priority budgeting on two warmed remote samples through `pi-remote`: `172.1` blocks/sec with `3` low windows and `1` zero window, then `156.4` blocks/sec with `5` low windows and `3` zero windows. This beat the immediate post-jump baseline average but did not eliminate ordered bursts.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
@@ -87,6 +89,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: duplicating the head-of-line fetch earlier increased zero-progress windows under high serving-peer counts.
   - Alternative considered: keep the 2 second hedge; rejected in favor of the previous 4 second head-of-line delay.
 
+- Historical body/receipt fetch plans now carry scheduling priority.
+  - Why: lookahead fetches were able to saturate body request slots while the expected sequence was the only work that could advance the verified floor.
+  - Tradeoff: lookahead work may complete more slowly, but expected-sequence latency and average floor movement improve in warmed samples.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -117,19 +123,24 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: active attempts now store their planned child header and the cursor-advance path discards mismatched expected-sequence queued, completed, and active work.
   - Remaining: peer-tail body/receipt responses can still block the ordered floor even when active depth is healthy.
 
+- Challenge: lookahead fetches competed with expected fetches for the same body request slots.
+  - Resolution: added priority-aware body/receipt plan budgeting so expected work keeps full live prefix capacity and lookahead work is capped.
+  - Remaining: ordered floor movement still has single-window stalls, so a true global live request scheduler remains open.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
 - Current branch contains only accepted scheduler changes: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, active-download-aware post-write refill, expected-child mismatch cleanup, and adaptive write-path active refill.
 - Reverted rejected completed-buffer overflow, eight-lane active-target, and shorter expected-hedge experiments before committing.
 - Reverted rejected lookahead-promotion and partial-prefix salvage skip experiments locally and remotely.
+- Inspected the priority-budget diff for stale experiment leftovers; no obsolete code remained beyond rejected experiment reverts.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
