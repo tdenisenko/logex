@@ -59,6 +59,8 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Restored the accepted baseline locally and on the Mac mini tmux session after both rejected experiments; the remote client is running on the accepted build with data dir `/Volumes/SSD 4TB/LogEx`.
 - Rejected a planned-prefix residual carry-forward experiment: the cold sample was smooth (`266.4` blocks/sec, `0` low/`0` zero), but the warmed sample fell below baseline and hit `2` low windows before it was stopped.
 - Restored the accepted baseline locally and on the Mac mini tmux session after the residual carry-forward experiment.
+- Rejected an async residual body/receipt carry-forward experiment: it validated locally but measured only `123.2` blocks/sec with `11` low windows and `0` zero windows after peers reached 20+ connected, far below the accepted baseline.
+- Restored the accepted baseline locally and on the Mac mini tmux session after the async residual experiment.
 
 ## Remaining TODOs
 
@@ -206,6 +208,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: reverted the residual carry-forward experiment locally and remotely after the warmed sample regressed below the accepted baseline.
   - Remaining: preserving lookahead validity needs a true global chunk scheduler, not synchronous residual-gap filling after each partial prefix.
 
+- Challenge: draining/refilling the historical pipeline while async residual body/receipt work ran still reduced warmed throughput.
+  - Resolution: rejected and reverted the async residual experiment after a `123.2` blocks/sec sample with `11` low windows.
+  - Remaining: the next production-grade scheduler step should be a global chunk-level scheduler or a full-run proof that the current accepted scheduler is the practical baseline.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -222,6 +228,7 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Inspected the salvage-gate diff for obsolete experiment leftovers; no rejected progress-target code remains.
 - Reverted the rejected 2 second full-priority partial-prefix flush and wider dense active-pipeline experiments locally and remotely; no code from either experiment remains.
 - Reverted the rejected residual carry-forward experiment locally and remotely; the obsolete contiguous-progress helper removal was also reverted with the experiment.
+- Reverted the rejected async residual body/receipt carry-forward experiment locally and remotely; no code from that candidate remains.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
