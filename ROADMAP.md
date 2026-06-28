@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The latest fixes keep the critical historical fetch active, allow cheap ready fetch plans to queue ahead of slow header windows, prioritize missing expected fetches before lookahead prepare work, avoid blocking ordered writes on expensive post-write refill when prepared batches are already queued, and force a limited post-write refill when active body/receipt downloads fall below the write-path floor.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, and forces a limited post-write refill when active body/receipt downloads fall below the write-path floor. Two follow-up live-download experiments were rejected because they did not improve the accepted baseline.
 
 ## Completed Since Last Run
 
@@ -22,13 +22,16 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Measured the latest remote warmed run at `273` blocks/sec average with `1` low window and `0` zero windows after peers warmed to the low/mid 30s.
 - Added an active-download-aware post-write refill gate so prepared backlog can no longer hide an empty active body/receipt pipeline.
 - Measured the follow-up remote warmed run at `326` blocks/sec average with `0` low windows and `0` zero windows after peers warmed past 20 serving peers.
+- Re-ran remote validation through `pi-remote` after direct network access failed outside the home network.
+- Rejected a completed-buffer overflow experiment: it measured `279` blocks/sec with `3` low windows and `1` zero window.
+- Rejected an eight-lane active-target experiment: it measured `326` blocks/sec with `1` low window and `1` zero window versus the accepted baseline at `324` blocks/sec with `0` low windows and `0` zero windows on the same route.
 - Validated locally with focused scheduler, sequence-gap, historical fetch tests, and `cargo check` for touched crates.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: downloads, prepare, and ordered writes still move in bursts; the latest active-refill gate stabilizes floor movement but active downloads can still hover near the lower write-path floor instead of the full pipeline depth.
-   - Completion criteria: active downloads stay near the chosen pipeline depth while memory is healthy, stale/non-advancing work cannot consume critical slots, and longer warmed remote samples keep sustained floor movement without repeated low/zero windows.
+   - Reason: downloads, prepare, and ordered writes still move in bursts; simple active-depth and buffer-width changes did not beat the accepted scheduler baseline.
+   - Completion criteria: either prove the current scheduler is the practical baseline under the available network, or replace the plan-level fetch model with a global live chunk scheduler that improves longer warmed remote samples without increasing low/zero-progress windows.
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
@@ -64,6 +67,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: ready/completed/prepared backlog can look healthy while active network downloads have drained.
   - Tradeoff: the write loop may briefly block on a limited write-path refill when active downloads are below the floor, but it avoids multi-window floor stalls.
 
+- Rejected active-depth-only tuning as a production strategy.
+  - Why: both a completed-buffer overflow gate and an eight-lane active target failed to improve the accepted warmed baseline without adding low/zero windows.
+  - Alternative considered: keep the constants-only changes; rejected because the improvement was not meaningful and stability regressed.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -84,19 +91,24 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 
 - Challenge: prepared backlog hid active body/receipt download starvation.
   - Resolution: post-write refill now considers active body/receipt fetch count and forces a limited write-path refill when active downloads fall below the floor.
-  - Remaining: the next architectural pass should make refill planning more independent so active downloads target the full pipeline depth, not just the floor.
+  - Remaining: any next architectural pass should be a global live chunk scheduler or a full-run benchmark proving the current scheduler is bounded by network/runtime conditions.
+
+- Challenge: active-depth experiments looked promising in spot metrics but failed warmed samples.
+  - Resolution: reverted both rejected experiments locally and remotely, restored the accepted baseline, and left the Mac mini client running on the baseline build.
+  - Remaining: compare future changes only against the accepted baseline and keep only changes that improve longer samples.
 
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
 - Current branch contains only accepted scheduler changes from this pass: stale-work critical refill, ready-plan buffering, expected-fetch priority, non-blocking post-write refill, proactive expected refill, and active-download-aware post-write refill.
+- Reverted rejected completed-buffer overflow and eight-lane active-target experiments before committing.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: stale historical fetch critical refill; ready-plan buffering; expected-fetch priority and non-blocking refill.
+- Commits made during this run: accepted scheduler fixes were already committed and pushed; this update records rejected experiments and the current decision point.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
@@ -105,4 +117,4 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 
 - Current samples are shorter than a full sync and still show bursty floor movement in dense log ranges.
 - Peer count and routing mode affect comparability; record both for every benchmark.
-- The next larger scheduler change may require restructuring download, prepare, and ordered write coordination rather than tuning constants.
+- A global live chunk scheduler would be a material architecture change; do not start it without accepting the larger refactor risk or first proving the current scheduler is the practical baseline with a full-run benchmark.
