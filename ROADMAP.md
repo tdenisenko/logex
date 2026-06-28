@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest rerun through `pi-remote` measured `306.6` blocks/sec with `2` low windows and `0` zero windows while bulk traffic stayed on the local route.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement must be proven over a longer/full run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest warmed rerun through `pi-remote` measured `348.3` blocks/sec with `1` low window and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
 
 ## Completed Since Last Run
 
@@ -61,12 +61,13 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Restored the accepted baseline locally and on the Mac mini tmux session after the residual carry-forward experiment.
 - Rejected an async residual body/receipt carry-forward experiment: it validated locally but measured only `123.2` blocks/sec with `11` low windows and `0` zero windows after peers reached 20+ connected, far below the accepted baseline.
 - Restored the accepted baseline locally and on the Mac mini tmux session after the async residual experiment.
+- Re-ran the restored accepted baseline through `pi-remote`: the warmed sample measured `348.3` blocks/sec with `1` low window and `0` zero windows, with physical RX repeatedly near the 300 Mbps network ceiling.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
-   - Reason: bounded early redundancy and the monotonic cursor fix improved warmed samples, but ordered progress can still pause under peer-tail latency.
-   - Completion criteria: either prove the current scheduler is the practical baseline under the available network, or replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer warmed remote samples without increasing low/zero-progress windows.
+   - Reason: the restored accepted build now produces stable warmed samples near the available network ceiling, but a short sample is not enough to close the scheduler task.
+   - Completion criteria: either prove the current scheduler is the practical baseline with a longer/full run under the available network, or replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer warmed remote samples without increasing low/zero-progress windows.
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
@@ -137,6 +138,11 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Body/receipt prefix salvage runs only when no acceptable contiguous prefix exists.
   - Why: the completion path can safely accept a verified contiguous prefix; spending up to the salvage timeout after that point creates head-of-line latency without increasing validity.
   - Tradeoff: the scheduler may return smaller batches instead of trying to repair more of the prefix immediately, but the next ordered fetch covers the remaining range and avoids long idle windows.
+
+- Do not start the global live chunk scheduler unless long-run evidence justifies the architecture risk.
+  - Why: the restored accepted baseline produced a warmed `348.3` blocks/sec sample with only `1` low window and no zero windows while the physical link was repeatedly near the 300 Mbps ceiling.
+  - Alternative considered: immediately rewrite plan-level body/receipt scheduling into a global chunk scheduler.
+  - Tradeoff: delaying the rewrite avoids destabilizing a strong baseline, but the full-run benchmark must still prove the scheduler remains stable outside short warmed samples.
 
 ## Challenges and Resolutions
 
@@ -212,6 +218,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: rejected and reverted the async residual experiment after a `123.2` blocks/sec sample with `11` low windows.
   - Remaining: the next production-grade scheduler step should be a global chunk-level scheduler or a full-run proof that the current accepted scheduler is the practical baseline.
 
+- Challenge: the rejected async residual sample made the current branch look worse than it was.
+  - Resolution: restored the accepted build and reran a warmed baseline through `pi-remote`; it recovered to `348.3` blocks/sec with `1` low window and `0` zero windows.
+  - Remaining: use the active run as the production baseline proof before taking on a risky global scheduler rewrite.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -229,6 +239,7 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Reverted the rejected 2 second full-priority partial-prefix flush and wider dense active-pipeline experiments locally and remotely; no code from either experiment remains.
 - Reverted the rejected residual carry-forward experiment locally and remotely; the obsolete contiguous-progress helper removal was also reverted with the experiment.
 - Reverted the rejected async residual body/receipt carry-forward experiment locally and remotely; no code from that candidate remains.
+- Inspected the accepted scheduler after the warmed baseline; no new dead code was introduced because the async residual candidate was fully reverted.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
