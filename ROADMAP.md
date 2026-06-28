@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
 
-Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, and preserves one missing execution-client-family probe when truncating the body/receipt candidate pool. The latest remote sample through `pi-remote` measured `297.3` blocks/sec with `2` low windows and `1` zero window; it confirmed bulk traffic used the local 300 Mbps route and the remaining stall happened with prepared work queued, so the live scheduler is still the next bottleneck.
+Historical sync can still reach high instantaneous throughput, but ordered floor movement remains bursty in dense log ranges. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The latest remote sample through `pi-remote` measured `354.8` blocks/sec with `2` low windows and `0` zero windows; it confirmed bulk traffic used the local route and removed the zero-progress stall seen in the prior warmed sample.
 
 ## Completed Since Last Run
 
@@ -49,6 +49,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Re-ran the remote benchmark through `pi-remote` after a network-unreachable sample; the current route is valid and bulk download traffic is local, not through the WireGuard dashboard tunnel.
 - Preserved a missing execution-client-family probe when the historical body/receipt candidate pool is truncated, so connected Nethermind peers do not remain permanently outside the request pool when the fastest/proven prefix is Geth-heavy.
 - Measured the peer-family probe build at `297.3` blocks/sec with `2` low windows and `1` zero window; the sample showed Nethermind peers entering the serving set and improved the previous warmed post-cursor sample (`235.7`, `4`, `2`), but did not eliminate the prepared-backlog zero window.
+- Rejected a 256-block live progress-target experiment: it measured `173.1` blocks/sec with `5` low windows and `1` zero window, below the accepted checkpoint.
+- Identified body/receipt prefix salvage as an avoidable long tail: pre-change role logs showed salvage running despite an already acceptable contiguous prefix, with plans taking up to about `21s`.
+- Added an accepted-prefix gate before salvage so live body/receipt plans return usable contiguous progress immediately instead of spending the salvage timeout on an optional prefix repair.
+- Measured the salvage-gate build through `pi-remote`: `354.8` blocks/sec, `2` low windows, and `0` zero windows on the existing run. Candidate-window role logs showed salvage on only `2/417` plans and `7` plans over `10s`.
 
 ## Remaining TODOs
 
@@ -122,6 +126,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Why: sorting by proven request performance can make the top candidate pool Geth-heavy and prevent connected Nethermind peers from ever becoming serving peers.
   - Tradeoff: the pool may temporarily exceed the fast-pool size by a small number of client-family probes, but the active pipeline and per-peer request limits still bound memory and network work.
 
+- Body/receipt prefix salvage runs only when no acceptable contiguous prefix exists.
+  - Why: the completion path can safely accept a verified contiguous prefix; spending up to the salvage timeout after that point creates head-of-line latency without increasing validity.
+  - Tradeoff: the scheduler may return smaller batches instead of trying to repair more of the prefix immediately, but the next ordered fetch covers the remaining range and avoids long idle windows.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -176,6 +184,14 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: preserved one missing client-family probe after candidate sorting and truncation.
   - Remaining: peer diversity improved, but a prepared-backlog zero window still occurred, so the next improvement must target ordered scheduler flow rather than discovery.
 
+- Challenge: a 256-block live progress target reduced per-plan target size but lowered overall floor movement.
+  - Resolution: reverted locally and remotely after the benchmark regressed to `173.1` blocks/sec.
+  - Remaining: use targeted tail-latency fixes rather than lowering the whole progress target.
+
+- Challenge: body/receipt salvage could run even after the live plan had enough contiguous verified progress to complete.
+  - Resolution: added an accepted-prefix gate before salvage and kept the candidate after a `354.8` blocks/sec, zero-window benchmark.
+  - Remaining: some low windows remain when prepared backlog grows, so longer-run validation is still required.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -188,13 +204,15 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Inspected the new redundancy path for rejected experiment leftovers; no stale dense-prefix code remains.
 - Fixed clippy-only issues in the scheduler and body/receipt tests; no functional dead code was removed in this pass.
 - Inspected the peer-family probe change for experimental leftovers; it is limited to candidate truncation and focused tests.
+- Reverted the rejected 256-block progress-target experiment locally and remotely before keeping the salvage-gate change.
+- Inspected the salvage-gate diff for obsolete experiment leftovers; no rejected progress-target code remains.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.

@@ -1692,14 +1692,18 @@ impl BodyReceiptRequestPlan {
             }
         }
 
-        let prefix_salvaged_chunks = self
-            .salvage_live_body_receipt_prefix(
-                &mut chunks,
-                &mut failures,
-                &mut stats,
-                min_return_blocks,
-            )
-            .await;
+        let prefix_salvaged_chunks =
+            if body_receipt_has_accepted_contiguous_prefix(self.return_blocks, &chunks) {
+                0
+            } else {
+                self.salvage_live_body_receipt_prefix(
+                    &mut chunks,
+                    &mut failures,
+                    &mut stats,
+                    min_return_blocks,
+                )
+                .await
+            };
 
         let mut body_requests = 0usize;
         let mut receipt_requests = 0usize;
@@ -5983,6 +5987,15 @@ fn body_receipt_completion_return_blocks(
     planned_return_blocks.min(return_blocks).min(total_hashes)
 }
 
+fn body_receipt_has_accepted_contiguous_prefix<T>(
+    return_blocks: usize,
+    chunks: &BTreeMap<usize, Vec<T>>,
+) -> bool {
+    let contiguous_blocks = contiguous_chunk_blocks(chunks).min(return_blocks);
+    contiguous_blocks > 0
+        && contiguous_blocks >= body_receipt_min_accepted_prefix(contiguous_blocks)
+}
+
 fn body_receipt_completed_plan_return_blocks<T>(
     chunks: &BTreeMap<usize, Vec<T>>,
     return_blocks: usize,
@@ -6616,6 +6629,21 @@ mod tests {
             body_receipt_completed_plan_return_blocks(&chunks, 2048),
             768
         );
+    }
+
+    #[test]
+    fn body_receipt_accepted_prefix_gate_skips_salvage_when_progress_is_usable() {
+        let mut chunks = BTreeMap::new();
+        assert!(!body_receipt_has_accepted_contiguous_prefix(512, &chunks));
+
+        chunks.insert(128, vec![1u8; 128]);
+        assert!(!body_receipt_has_accepted_contiguous_prefix(512, &chunks));
+
+        chunks.insert(0, vec![0u8; 32]);
+        assert!(body_receipt_has_accepted_contiguous_prefix(512, &chunks));
+
+        let chunks = BTreeMap::from([(0usize, vec![0u8; 16])]);
+        assert!(body_receipt_has_accepted_contiguous_prefix(16, &chunks));
     }
 
     #[test]
