@@ -1152,6 +1152,13 @@ fn historical_fetch_position_after_ordered_write(
     }
 }
 
+fn historical_next_fetch_sequence_after_expected_advance(
+    next_sequence: u64,
+    expected_sequence: u64,
+) -> u64 {
+    next_sequence.max(expected_sequence)
+}
+
 fn historical_next_completed_fetch_sequence<T>(completed: &BTreeMap<u64, T>) -> Option<u64> {
     completed.keys().next().copied()
 }
@@ -2944,11 +2951,10 @@ impl SyncEngine {
             .historical_header_fetch_handle
             .as_ref()
             .is_some_and(|fetch| fetch.sequence < expected_sequence)
+            && let Some(fetch) = self.historical_header_fetch_handle.take()
         {
-            if let Some(fetch) = self.historical_header_fetch_handle.take() {
-                fetch.handle.abort();
-                aborted = aborted.saturating_add(1);
-            }
+            fetch.handle.abort();
+            aborted = aborted.saturating_add(1);
         }
 
         let stale_ready = self
@@ -4436,6 +4442,10 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence =
             self.historical_fetch_expected_sequence.saturating_add(1);
         self.historical_fetch_expected_child = next_child_header;
+        self.historical_fetch_next_sequence = historical_next_fetch_sequence_after_expected_advance(
+            self.historical_fetch_next_sequence,
+            self.historical_fetch_expected_sequence,
+        );
         self.discard_mismatched_expected_historical_fetch_work();
         self.refresh_historical_fetch_head_of_line_timer();
     }
@@ -4461,6 +4471,11 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence = advanced_sequence;
         self.historical_fetch_expected_child = advanced_child;
         if advanced_sequence != expected_sequence {
+            self.historical_fetch_next_sequence =
+                historical_next_fetch_sequence_after_expected_advance(
+                    self.historical_fetch_next_sequence,
+                    self.historical_fetch_expected_sequence,
+                );
             self.discard_mismatched_expected_historical_fetch_work();
         }
         self.refresh_historical_fetch_head_of_line_timer();
@@ -4484,6 +4499,11 @@ impl SyncEngine {
         self.historical_fetch_expected_sequence = advanced_sequence;
         self.historical_fetch_expected_child = advanced_child;
         if advanced_sequence != expected_sequence {
+            self.historical_fetch_next_sequence =
+                historical_next_fetch_sequence_after_expected_advance(
+                    self.historical_fetch_next_sequence,
+                    self.historical_fetch_expected_sequence,
+                );
             self.discard_mismatched_expected_historical_fetch_work();
         }
         self.refresh_historical_fetch_head_of_line_timer();
@@ -7825,6 +7845,18 @@ mod tests {
         assert_eq!(
             child.map(|header| header.number()),
             Some(current_child.number())
+        );
+    }
+
+    #[test]
+    fn next_fetch_sequence_never_lags_advanced_expected_sequence() {
+        assert_eq!(
+            historical_next_fetch_sequence_after_expected_advance(52, 901),
+            901
+        );
+        assert_eq!(
+            historical_next_fetch_sequence_after_expected_advance(904, 901),
+            904
         );
     }
 

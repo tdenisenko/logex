@@ -6002,9 +6002,9 @@ fn body_receipt_priority_prefix_chunk_limit(
     match priority {
         BodyReceiptRequestPriority::Full => prefix_chunk_limit,
         BodyReceiptRequestPriority::Lookahead if prefix_chunk_limit == 0 => 0,
-        BodyReceiptRequestPriority::Lookahead => prefix_chunk_limit
-            .min(PIPELINED_BODY_RECEIPT_LOOKAHEAD_PREFIX_CHUNK_LIMIT)
-            .max(1),
+        BodyReceiptRequestPriority::Lookahead => {
+            prefix_chunk_limit.clamp(1, PIPELINED_BODY_RECEIPT_LOOKAHEAD_PREFIX_CHUNK_LIMIT)
+        }
     }
 }
 
@@ -7469,7 +7469,7 @@ mod tests {
         let receipt_peers = (0..10)
             .map(|index| PeerId::repeat_byte((index + 41) as u8))
             .collect::<Vec<_>>();
-        let ranges = vec![0..32];
+        let ranges = std::iter::once(0..32).collect::<Vec<_>>();
         let plan = BodyReceiptRequestPlan {
             hashes: vec![B256::ZERO; 32],
             range_indices_by_start: HashMap::from([(0usize, 0usize)]),
