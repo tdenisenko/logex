@@ -4,9 +4,9 @@
 
 LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active remote run uses `/Users/gremlinmaster/logex-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, and tmux session `logex`.
+Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active fresh baseline run uses `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, monitor tmux session `logex-baseline-monitor`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`.
 
-Historical sync can still reach high instantaneous throughput, but the production baseline still needs a fresh pivot-to-genesis run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest 30 minute rerun through `pi-remote` measured `361.1` blocks/sec over `644,617` verified blocks with `2` low windows and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
+Historical sync can still reach high instantaneous throughput, but the production baseline is now being measured from a fresh pivot-to-genesis run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest 30 minute rerun through `pi-remote` measured `361.1` blocks/sec over `644,617` verified blocks with `2` low windows and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
 
 ## Completed Since Last Run
 
@@ -63,6 +63,10 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Restored the accepted baseline locally and on the Mac mini tmux session after the async residual experiment.
 - Re-ran the restored accepted baseline through `pi-remote`: the warmed sample measured `348.3` blocks/sec with `1` low window and `0` zero windows, with physical RX repeatedly near the 300 Mbps network ceiling.
 - Ran a longer 30 minute restored-baseline sample through `pi-remote`: `644,617` blocks over `1,785s`, `361.1` blocks/sec average, `2` low windows, and `0` zero windows while connected peers ranged roughly from the low 40s to low 80s.
+- Started the destructive fresh baseline after explicit approval to reset the active data dir.
+- Used `BASELINE_RESET_MODE=discard-incomplete` so the existing full-sync backup stayed intact while only the incomplete active `/Volumes/SSD 4TB/LogEx` contents were removed.
+- Built the remote release binary, restarted LogEx in tmux, restored the preserved peer cache, and started the baseline monitor at `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`.
+- Verified the fresh run status endpoint, tmux sessions, active data dir, and preserved full-sync backup.
 
 ## Remaining TODOs
 
@@ -72,7 +76,7 @@ Historical sync can still reach high instantaneous throughput, but the productio
 
 2. Establish a production baseline from a fresh dense-range run.
    - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
-   - Completion criteria: run `local-ops/start-fresh-baseline-run.sh` with the explicit confirmation flag after approval to reset the remote data dir, then record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, and failures for the fresh pivot-to-genesis run.
+   - Completion criteria: let `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644` reach genesis, then record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, and failures for the fresh pivot-to-genesis run.
 
 3. Continue peer and bandwidth utilization work only from measured bottlenecks.
    - Reason: recent constants-only experiments produced mixed results or regressions.
@@ -144,6 +148,11 @@ Historical sync can still reach high instantaneous throughput, but the productio
   - Why: the restored accepted baseline produced a warmed `348.3` blocks/sec sample and a 30 minute `361.1` blocks/sec sample with only `2` low windows and no zero windows while the physical link was repeatedly near the 300 Mbps ceiling.
   - Alternative considered: immediately rewrite plan-level body/receipt scheduling into a global chunk scheduler.
   - Tradeoff: delaying the rewrite avoids destabilizing a strong baseline, but the full-run benchmark must still prove the scheduler remains stable outside short warmed samples.
+
+- Fresh baseline resets can discard incomplete active data without touching existing full-sync backups.
+  - Why: after a partially synced experiment, replacing a known-good full backup with incomplete data would make recovery harder.
+  - Alternative considered: always move the active data dir into a full-sync backup slot.
+  - Tradeoff: `discard-incomplete` is destructive for the active run, so it requires the explicit confirmation flag and should only be used when a separate full backup already exists.
 
 ## Challenges and Resolutions
 
@@ -225,7 +234,11 @@ Historical sync can still reach high instantaneous throughput, but the productio
 
 - Challenge: the active run is useful for stability but is not a fresh pivot-to-genesis baseline.
   - Resolution: collected a 30 minute stability sample and identified the existing guarded fresh-baseline script.
-  - Remaining: resetting the remote data dir for the true production baseline requires explicit approval because it is destructive.
+  - Remaining: explicit reset approval was granted and the fresh run is now active; final production baseline metrics remain pending until genesis.
+
+- Challenge: the default fresh-baseline path refuses to reset when the active data dir is not fully synced.
+  - Resolution: used the guarded `discard-incomplete` mode so the known full-sync backup was preserved and only the incomplete active data was deleted.
+  - Remaining: monitor the active fresh run to completion and compare against the 4 hour target.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -246,18 +259,22 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Reverted the rejected async residual body/receipt carry-forward experiment locally and remotely; no code from that candidate remains.
 - Inspected the accepted scheduler after the warmed baseline; no new dead code was introduced because the async residual candidate was fully reverted.
 - Inspected `local-ops/start-fresh-baseline-run.sh`; it remains the guarded path for the required fresh baseline and was not run because it deletes/moves the remote data directory.
+- Rechecked the guarded fresh-baseline reset path before running it; no obsolete production code was removed in this pass.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
 
 ## Known Issues or Risks
+
+- The fresh baseline run is still in early peer warm-up; initial logs/sec and ETA are not representative yet.
+- The production baseline is not complete until the active run reaches genesis and the monitor summary is reviewed.
 
 - Current samples are shorter than a fresh full sync; the 30 minute sample had only `2` low windows and `0` zero windows, but production readiness still depends on a full pivot-to-genesis report.
 - Peer count and routing mode affect comparability; record both for every benchmark.
