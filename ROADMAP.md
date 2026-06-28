@@ -57,6 +57,8 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Rejected a full-priority 2 second partial-prefix flush experiment after it produced a zero-progress window and stayed around `190` blocks/sec before the sample was stopped.
 - Rejected a wider dense active-pipeline experiment after it produced a zero-progress window and stayed around `179` blocks/sec before the sample was stopped.
 - Restored the accepted baseline locally and on the Mac mini tmux session after both rejected experiments; the remote client is running on the accepted build with data dir `/Volumes/SSD 4TB/LogEx`.
+- Rejected a planned-prefix residual carry-forward experiment: the cold sample was smooth (`266.4` blocks/sec, `0` low/`0` zero), but the warmed sample fell below baseline and hit `2` low windows before it was stopped.
+- Restored the accepted baseline locally and on the Mac mini tmux session after the residual carry-forward experiment.
 
 ## Remaining TODOs
 
@@ -200,6 +202,10 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
   - Resolution: reverted the 2 second full-priority partial-prefix flush and wider dense active-pipeline experiments locally and remotely.
   - Remaining: the next serious scheduler change should be a measured architectural change to global live chunk scheduling, not another constants-only tuning pass.
 
+- Challenge: carrying the original planned prefix and residual chunks forward smoothed cold progress but reduced warmed throughput.
+  - Resolution: reverted the residual carry-forward experiment locally and remotely after the warmed sample regressed below the accepted baseline.
+  - Remaining: preserving lookahead validity needs a true global chunk scheduler, not synchronous residual-gap filling after each partial prefix.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -215,13 +221,14 @@ Historical sync can still reach high instantaneous throughput, but ordered floor
 - Reverted the rejected 256-block progress-target experiment locally and remotely before keeping the salvage-gate change.
 - Inspected the salvage-gate diff for obsolete experiment leftovers; no rejected progress-target code remains.
 - Reverted the rejected 2 second full-priority partial-prefix flush and wider dense active-pipeline experiments locally and remotely; no code from either experiment remains.
+- Reverted the rejected residual carry-forward experiment locally and remotely; the obsolete contiguous-progress helper removal was also reverted with the experiment.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
