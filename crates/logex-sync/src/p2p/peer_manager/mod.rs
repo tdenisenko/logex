@@ -12,6 +12,7 @@ use eyre::Result;
 use logex_types::LOGEX_CLIENT_VERSION;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
+use reth_discv5::discv5::ListenConfig;
 use reth_dns_discovery::{
     DnsDiscoveryConfig, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
 };
@@ -56,7 +57,7 @@ use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
     is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
     peer_receipts_are_quarantined, rotate_request_candidates, seed_productive_peers,
-    should_retry_disconnected_peer,
+    should_retry_disconnected_peer, upsert_known_peer,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -205,6 +206,8 @@ pub struct PeerManagerConfig {
     pub our_head: Head,
     pub known_peers: Vec<NodeRecord>,
     pub known_peers_path: PathBuf,
+    pub execution_bootnodes: Vec<String>,
+    pub execution_discv5_port: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -227,13 +230,34 @@ impl PeerManager {
             our_head,
             known_peers,
             known_peers_path,
+            execution_bootnodes,
+            execution_discv5_port,
         } = config;
         let dns_discovery = mainnet_dns_discovery_config(bind_ip);
         let advertised_nat_resolver = resolve_startup_nat(nat_resolver.clone()).await;
-        let known_peers = known_peers
+        let mut known_peers = known_peers
             .into_iter()
             .filter(|node| node_matches_bind_ip(bind_ip, node))
             .collect::<Vec<_>>();
+        let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes)?;
+        let mut filtered_execution_bootnodes = Vec::new();
+        let mut skipped_execution_bootnodes = 0usize;
+        for node in execution_bootnodes {
+            if node_matches_bind_ip(bind_ip, &node) {
+                upsert_known_peer(&mut known_peers, node);
+                filtered_execution_bootnodes.push(node);
+            } else {
+                skipped_execution_bootnodes += 1;
+            }
+        }
+        if !filtered_execution_bootnodes.is_empty() || skipped_execution_bootnodes > 0 {
+            tracing::info!(
+                accepted = filtered_execution_bootnodes.len(),
+                skipped = skipped_execution_bootnodes,
+                bind_ip = %bind_ip,
+                "loaded configured execution bootnodes"
+            );
+        }
         let productive = seed_productive_peers(&known_peers);
         let serve_cache = Arc::new(ServeCacheProvider::new());
         let (max_outbound, max_inbound) = peer_connection_limits(max_peers);
@@ -300,6 +324,9 @@ impl PeerManager {
         if !dns_ipv6_boot_nodes.is_empty() {
             discovery.add_boot_nodes(dns_ipv6_boot_nodes.iter().copied());
         }
+        if !filtered_execution_bootnodes.is_empty() {
+            discovery.add_boot_nodes(filtered_execution_bootnodes.iter().copied());
+        }
 
         let mut builder = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
             .set_head(network_head)
@@ -313,6 +340,30 @@ impl PeerManager {
         if bind_ip.is_ipv4() {
             builder = builder.mainnet_boot_nodes();
         } else {
+            if let IpAddr::V6(ip) = bind_ip {
+                let discv5_listen = ListenConfig::Ipv6 {
+                    ip,
+                    port: execution_discv5_port,
+                };
+                let discv5_boot_nodes = dns_ipv6_boot_nodes
+                    .iter()
+                    .chain(filtered_execution_bootnodes.iter())
+                    .copied()
+                    .collect::<Vec<_>>();
+                builder = builder.discovery_v5(
+                    reth_discv5::Config::builder(listener_addr)
+                        .discv5_config(
+                            reth_discv5::discv5::ConfigBuilder::new(discv5_listen).build(),
+                        )
+                        .add_unsigned_boot_nodes(discv5_boot_nodes.iter().copied()),
+                );
+                tracing::info!(
+                    bind_ip = %bind_ip,
+                    udp_port = execution_discv5_port,
+                    bootnodes = discv5_boot_nodes.len(),
+                    "enabled execution discv5 discovery for IPv6 p2p bind"
+                );
+            }
             builder = builder.disable_dns_discovery();
             tracing::info!(
                 bind_ip = %bind_ip,
@@ -548,6 +599,21 @@ fn peer_connection_limits(max_peers: usize) -> (usize, usize) {
     (max_outbound, max_inbound)
 }
 
+fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<Vec<NodeRecord>> {
+    let mut nodes = Vec::new();
+    for raw in raw_bootnodes {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let node = raw
+            .parse::<NodeRecord>()
+            .map_err(|error| eyre::eyre!("invalid execution bootnode {raw:?}: {error}"))?;
+        nodes.push(node);
+    }
+    Ok(nodes)
+}
+
 fn node_matches_bind_ip(bind_ip: IpAddr, node: &NodeRecord) -> bool {
     node.tcp_addr().ip().is_ipv4() == bind_ip.is_ipv4()
 }
@@ -755,6 +821,25 @@ mod tests {
 
         assert!(record.tcp_addr().ip().is_ipv6());
         assert_eq!(record.udp_port, 30303);
+    }
+
+    #[test]
+    fn parse_execution_bootnodes_accepts_ipv6_enode() {
+        let nodes = parse_execution_bootnodes(&["enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151".to_owned()])
+            .expect("valid IPv6 enode should parse");
+
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].tcp_addr().ip().is_ipv6());
+        assert_eq!(nodes[0].tcp_port, 52150);
+        assert_eq!(nodes[0].udp_port, 52151);
+    }
+
+    #[test]
+    fn parse_execution_bootnodes_rejects_invalid_enode() {
+        let error = parse_execution_bootnodes(&["not-an-enode".to_owned()])
+            .expect_err("invalid enode should fail");
+
+        assert!(error.to_string().contains("invalid execution bootnode"));
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub struct RunSyncOptions {
     pub max_peers: usize,
     pub nat: String,
     pub p2p_bind_ip: Option<IpAddr>,
+    pub execution_bootnodes: Vec<String>,
+    pub execution_discv5_port: u16,
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
@@ -84,6 +86,8 @@ pub async fn run_sync(options: RunSyncOptions) {
         max_peers,
         nat,
         p2p_bind_ip,
+        execution_bootnodes,
+        execution_discv5_port,
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
@@ -345,6 +349,8 @@ pub async fn run_sync(options: RunSyncOptions) {
         our_head,
         known_peers,
         known_peers_path: known_peers_file.clone(),
+        execution_bootnodes,
+        execution_discv5_port,
     })
     .await
     {

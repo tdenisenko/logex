@@ -43,8 +43,8 @@ pub struct Cli {
     /// Path to an optional TOML config file.
     ///
     /// Supported keys: data_dir, log_level, partition_target_rows, checkpoint,
-    /// checkpoint_sync_url, nat, p2p_bind_ip, http_host, grpc_host, allow_public_grpc,
-    /// dashboard_enabled, dashboard_password.
+    /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
+    /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -185,6 +185,24 @@ Security:
         #[arg(long, value_name = "IP")]
         p2p_bind_ip: Option<IpAddr>,
 
+        /// Execution-layer enode bootnode to seed discovery and direct dials.
+        ///
+        /// May be repeated or comma-separated. IPv6 enodes must use the standard
+        /// bracketed form, for example enode://<pubkey>@[2001:db8::1]:30303?discport=30303.
+        #[arg(
+            long = "execution-bootnode",
+            value_name = "ENODE",
+            value_delimiter = ','
+        )]
+        execution_bootnodes: Vec<String>,
+
+        /// Execution-layer discovery v5 UDP port.
+        ///
+        /// Used for IPv6 execution peer discovery in addition to discv4. The
+        /// default matches Reth's execution discv5 default.
+        #[arg(long = "execution-discv5-port", default_value = "9200")]
+        execution_discv5_port: u16,
+
         /// Consensus-layer discovery port (UDP discv5).
         #[arg(long, default_value = "9000")]
         cl_discovery_port: u16,
@@ -324,6 +342,10 @@ pub struct Config {
     #[serde(default)]
     pub p2p_bind_ip: Option<IpAddr>,
     #[serde(default)]
+    pub execution_bootnodes: Option<Vec<String>>,
+    #[serde(default)]
+    pub execution_discv5_port: Option<u16>,
+    #[serde(default)]
     pub http_host: Option<IpAddr>,
     #[serde(default)]
     pub grpc_host: Option<IpAddr>,
@@ -407,6 +429,38 @@ mod tests {
         };
 
         assert_eq!(p2p_bind_ip, Some("::".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn sync_accepts_execution_bootnodes() {
+        let bootnode = "enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151";
+        let cli = Cli::try_parse_from(["logex", "sync", "--execution-bootnode", bootnode]).unwrap();
+
+        let Command::Sync {
+            execution_bootnodes,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(execution_bootnodes, vec![bootnode.to_owned()]);
+    }
+
+    #[test]
+    fn sync_accepts_execution_discv5_port() {
+        let cli =
+            Cli::try_parse_from(["logex", "sync", "--execution-discv5-port", "9201"]).unwrap();
+
+        let Command::Sync {
+            execution_discv5_port,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(execution_discv5_port, 9201);
     }
 
     #[test]

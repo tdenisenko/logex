@@ -5203,6 +5203,7 @@ dependencies = [
  "reth-consensus-common",
  "reth-db-models",
  "reth-discv4",
+ "reth-discv5",
  "reth-dns-discovery",
  "reth-eth-wire",
  "reth-ethereum-consensus",
