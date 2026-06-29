@@ -43,7 +43,7 @@ pub struct Cli {
     /// Path to an optional TOML config file.
     ///
     /// Supported keys: data_dir, log_level, partition_target_rows, checkpoint,
-    /// checkpoint_sync_url, nat, http_host, grpc_host, allow_public_grpc,
+    /// checkpoint_sync_url, nat, p2p_bind_ip, http_host, grpc_host, allow_public_grpc,
     /// dashboard_enabled, dashboard_password.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -177,6 +177,13 @@ Security:
         /// deterministic choice.
         #[arg(long, default_value = "any")]
         nat: String,
+
+        /// Local IP address used by execution and consensus P2P listeners.
+        ///
+        /// By default, LogEx binds IPv4 unless --nat resolves to an IPv6
+        /// address. Use "::" with --nat extip:<ipv6> to force IPv6-only P2P.
+        #[arg(long, value_name = "IP")]
+        p2p_bind_ip: Option<IpAddr>,
 
         /// Consensus-layer discovery port (UDP discv5).
         #[arg(long, default_value = "9000")]
@@ -315,6 +322,8 @@ pub struct Config {
     #[serde(default)]
     pub nat: Option<String>,
     #[serde(default)]
+    pub p2p_bind_ip: Option<IpAddr>,
+    #[serde(default)]
     pub http_host: Option<IpAddr>,
     #[serde(default)]
     pub grpc_host: Option<IpAddr>,
@@ -390,6 +399,17 @@ mod tests {
     }
 
     #[test]
+    fn sync_accepts_explicit_ipv6_p2p_bind_ip() {
+        let cli = Cli::try_parse_from(["logex", "sync", "--p2p-bind-ip", "::"]).unwrap();
+
+        let Command::Sync { p2p_bind_ip, .. } = cli.command else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(p2p_bind_ip, Some("::".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
     fn sync_accepts_disable_historical_sync_flag() {
         let cli = Cli::try_parse_from(["logex", "sync", "--disable-historical-sync"]).unwrap();
 
@@ -418,6 +438,7 @@ mod tests {
         assert!(help.contains("Public gRPC requires --allow-public-grpc"));
         assert!(help.contains("--dashboard-password <PASSWORD>"));
         assert!(help.contains("--allow-public-grpc"));
+        assert!(help.contains("--p2p-bind-ip <IP>"));
         assert!(help.contains("--disable-historical-sync"));
         assert!(help.contains("only follows verified consensus anchors forward"));
     }

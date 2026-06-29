@@ -26,6 +26,7 @@ impl PeerManager {
             .await;
         self.network_events = Box::pin(tokio_stream::empty());
         self.discovery_events = Box::pin(tokio_stream::empty());
+        self.dns_discovery_updates = None;
 
         if let Some(task) = self.network_task.take() {
             debug!(
@@ -37,6 +38,10 @@ impl PeerManager {
 
         if let Some(task) = self.eth_request_task.take() {
             abort_and_wait(task, "eth request handler task").await;
+        }
+
+        if let Some(task) = self.dns_discovery_task.take() {
+            abort_and_wait(task, "execution DNS discovery task").await;
         }
     }
 
@@ -88,6 +93,7 @@ impl PeerManager {
         while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
             self.handle_discovery_event(event);
         }
+        self.drain_dns_discovery_updates_now();
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
@@ -121,6 +127,7 @@ impl PeerManager {
             .copied()
             .filter(|node| {
                 !is_bootstrap_node(node.id)
+                    && node_matches_bind_ip(self.bind_ip, node)
                     && node.tcp_port > 0
                     && !self.peers.contains_key(&node.id)
                     && !self.recently_saturated(node.id, now)
@@ -163,30 +170,84 @@ impl PeerManager {
     }
 
     pub(super) async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
+        if self.drain_dns_discovery_updates_now() > 0 {
+            return true;
+        }
+
         let delay = tokio::time::sleep(max_wait);
         tokio::pin!(delay);
 
-        tokio::select! {
-            maybe_event = self.network_events.next() => {
-                if let Some(event) = maybe_event {
-                    self.handle_network_event(event);
-                    true
-                } else {
-                    warn!("network event stream closed");
-                    false
+        if let Some(dns_updates) = self.dns_discovery_updates.as_mut() {
+            tokio::select! {
+                maybe_update = dns_updates.next() => {
+                    if let Some(update) = maybe_update {
+                        self.handle_dns_discovery_update(update);
+                        true
+                    } else {
+                        self.dns_discovery_updates = None;
+                        warn!("execution DNS discovery update stream closed");
+                        false
+                    }
                 }
-            }
-            maybe_event = self.discovery_events.next() => {
-                if let Some(event) = maybe_event {
-                    self.handle_discovery_event(event);
-                    true
-                } else {
-                    warn!("discovery event stream closed");
-                    false
+                maybe_event = self.network_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_network_event(event);
+                        true
+                    } else {
+                        warn!("network event stream closed");
+                        false
+                    }
                 }
+                maybe_event = self.discovery_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_discovery_event(event);
+                        true
+                    } else {
+                        warn!("discovery event stream closed");
+                        false
+                    }
+                }
+                _ = &mut delay => false,
             }
-            _ = &mut delay => false,
+        } else {
+            tokio::select! {
+                maybe_event = self.network_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_network_event(event);
+                        true
+                    } else {
+                        warn!("network event stream closed");
+                        false
+                    }
+                }
+                maybe_event = self.discovery_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_discovery_event(event);
+                        true
+                    } else {
+                        warn!("discovery event stream closed");
+                        false
+                    }
+                }
+                _ = &mut delay => false,
+            }
         }
+    }
+
+    fn drain_dns_discovery_updates_now(&mut self) -> usize {
+        let mut count = 0usize;
+        loop {
+            let Some(update) = self
+                .dns_discovery_updates
+                .as_mut()
+                .and_then(|updates| updates.next().now_or_never().flatten())
+            else {
+                break;
+            };
+            self.handle_dns_discovery_update(update);
+            count = count.saturating_add(1);
+        }
+        count
     }
 
     pub(super) fn handle_network_event(
@@ -254,6 +315,7 @@ impl PeerManager {
                 );
                 trace!(
                     peer = %peer_id,
+                    addr = %node.tcp_addr(),
                     ?fork_id,
                     "queued execution peer discovered for compatible or unverified fork id"
                 );
@@ -276,6 +338,45 @@ impl PeerManager {
                 self.remember_pending(node);
             }
         }
+    }
+
+    pub(super) fn handle_dns_discovery_update(&mut self, update: DnsNodeRecordUpdate) {
+        if let Some(fork_id) = update.fork_id
+            && !self.is_compatible_fork_id(fork_id)
+        {
+            self.session_metrics.fork_id_rejected_candidates = self
+                .session_metrics
+                .fork_id_rejected_candidates
+                .saturating_add(1);
+            return;
+        }
+        if update.fork_id.is_none() {
+            self.session_metrics.missing_fork_id_candidates = self
+                .session_metrics
+                .missing_fork_id_candidates
+                .saturating_add(1);
+        }
+
+        let Some(node) = dns_node_record_for_bind_ip(self.bind_ip, &update) else {
+            trace!(
+                peer = %update.node_record.id,
+                bind_ip = %self.bind_ip,
+                node_addr = %update.node_record.tcp_addr(),
+                has_ip4 = update.enr.ip4().is_some(),
+                has_tcp4 = update.enr.tcp4().is_some(),
+                has_ip6 = update.enr.ip6().is_some(),
+                has_tcp6 = update.enr.tcp6().is_some(),
+                "ignoring DNS execution peer without a dialable endpoint for configured p2p address family"
+            );
+            return;
+        };
+        trace!(
+            peer = %node.id,
+            fork_id = ?update.fork_id,
+            addr = %node.tcp_addr(),
+            "queued execution peer discovered from family-aware DNS"
+        );
+        self.remember_pending(node);
     }
 
     pub(super) fn insert_peer(
@@ -378,7 +479,22 @@ impl PeerManager {
     pub(super) fn remember_pending(&mut self, node: NodeRecord) {
         let now = Instant::now();
         self.prune_saturated_peers(now);
-        if is_bootstrap_node(node.id) || node.tcp_port == 0 || self.peers.contains_key(&node.id) {
+        if is_bootstrap_node(node.id) {
+            return;
+        }
+        if node.tcp_port == 0 {
+            return;
+        }
+        if !node_matches_bind_ip(self.bind_ip, &node) {
+            trace!(
+                peer = %node.id,
+                addr = %node.tcp_addr(),
+                bind_ip = %self.bind_ip,
+                "ignoring execution peer outside configured p2p address family"
+            );
+            return;
+        }
+        if self.peers.contains_key(&node.id) {
             return;
         }
         if self.recently_saturated(node.id, now) {
@@ -737,6 +853,7 @@ fn productive_peer_priority(productive: &VecDeque<NodeRecord>, peer_id: PeerId) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn dial_candidates_prefer_recent_productive_peers() {

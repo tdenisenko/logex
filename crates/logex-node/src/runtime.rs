@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::U256;
 use logex_cl::{
-    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC,
-    spawn_consensus_network,
+    AnchorCoverage, ConsensusNetworkConfig, ConsensusStateError, ConsensusStore,
+    MAINNET_CONSENSUS_CHAIN_SPEC, spawn_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
@@ -22,7 +22,7 @@ use logex_sync::p2p::{
         persist_known_peers,
     },
 };
-use logex_types::SyncStatus;
+use logex_types::{ChainAnchors, ExecutionAnchor, SyncStatus};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
@@ -61,6 +61,7 @@ pub struct RunSyncOptions {
     pub p2p_port: u16,
     pub max_peers: usize,
     pub nat: String,
+    pub p2p_bind_ip: Option<IpAddr>,
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
@@ -82,6 +83,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         p2p_port,
         max_peers,
         nat,
+        p2p_bind_ip,
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
@@ -96,6 +98,18 @@ pub async fn run_sync(options: RunSyncOptions) {
             std::process::exit(1);
         }
     };
+    let nat = resolve_startup_nat(nat).await;
+    let p2p_external_ip = nat.clone().as_external_ip(p2p_port);
+    let p2p_bind_ip = p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&nat, p2p_port));
+    let p2p_external_ip_label = p2p_external_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unresolved".to_owned());
+    tracing::info!(
+        bind_ip = %p2p_bind_ip,
+        external_ip = %p2p_external_ip_label,
+        nat = %nat,
+        "resolved p2p address selection"
+    );
 
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
@@ -264,6 +278,8 @@ pub async fn run_sync(options: RunSyncOptions) {
             ConsensusNetworkConfig {
                 data_dir: data_dir.clone(),
                 checkpoint: consensus.checkpoint(),
+                bind_ip: p2p_bind_ip,
+                external_ip: p2p_external_ip,
                 discovery_port: cl_discovery_port,
                 p2p_port: cl_p2p_port,
                 max_peers: cl_max_peers,
@@ -323,6 +339,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         secret_key,
         listener_port: p2p_port,
         discovery_port,
+        bind_ip: p2p_bind_ip,
         max_peers,
         nat_resolver: nat,
         our_head,
@@ -425,6 +442,34 @@ pub async fn run_sync(options: RunSyncOptions) {
         log_task_exit("consensus network", handle).await;
     }
     tracing::info!("shutting down");
+}
+
+async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
+    if matches!(
+        nat_resolver,
+        NatResolver::ExternalIp(_) | NatResolver::ExternalAddr(_) | NatResolver::None
+    ) {
+        return nat_resolver;
+    }
+
+    match nat_resolver.clone().external_addr().await {
+        Some(ip) => {
+            tracing::info!(
+                nat = %nat_resolver,
+                external_ip = %ip,
+                "resolved EL external IP before starting p2p"
+            );
+            NatResolver::ExternalIp(ip)
+        }
+        None => nat_resolver,
+    }
+}
+
+fn default_p2p_bind_ip(nat_resolver: &NatResolver, p2p_port: u16) -> IpAddr {
+    match nat_resolver.clone().as_external_ip(p2p_port) {
+        Some(IpAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
 }
 
 fn initial_sync_status(
@@ -573,13 +618,13 @@ fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&Consensu
             consensus
                 .and_then(|consensus| consensus.anchor_coverage().ceiling)
                 .map(consensus_anchor_network_head)
-                .or_else(|| consensus.map(consensus_checkpoint_network_head))
+                .or_else(|| consensus.map(consensus_network_head))
                 .unwrap_or_else(genesis_network_head)
         }
         None => consensus
             .and_then(|consensus| consensus.anchor_coverage().ceiling)
             .map(consensus_anchor_network_head)
-            .or_else(|| consensus.map(consensus_checkpoint_network_head))
+            .or_else(|| consensus.map(consensus_network_head))
             .unwrap_or_else(genesis_network_head),
     }
 }
@@ -594,13 +639,33 @@ fn consensus_anchor_network_head(anchor: logex_types::ExecutionAnchor) -> Head {
     )
 }
 
-fn consensus_checkpoint_network_head(consensus: &ConsensusStore) -> Head {
+fn consensus_network_head(consensus: &ConsensusStore) -> Head {
+    if let Some(anchor) =
+        consensus_execution_head_anchor(consensus.chain_anchors(), consensus.anchor_coverage())
+    {
+        return consensus_anchor_network_head(anchor);
+    }
+
     let timestamp = consensus
         .checkpoint()
         .beacon_slot
         .map(consensus_slot_timestamp)
         .unwrap_or_else(current_unix_timestamp);
     network_head(0, MAINNET.genesis_hash(), timestamp)
+}
+
+fn consensus_execution_head_anchor(
+    anchors: ChainAnchors,
+    coverage: AnchorCoverage,
+) -> Option<ExecutionAnchor> {
+    [
+        anchors.optimistic_head,
+        anchors.finalized_head,
+        coverage.ceiling,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|anchor| anchor.block_number)
 }
 
 fn consensus_slot_timestamp(slot: u64) -> u64 {
@@ -889,6 +954,16 @@ mod tests {
         }
     }
 
+    fn execution_anchor(block_number: u64, beacon_slot: u64) -> logex_types::ExecutionAnchor {
+        logex_types::ExecutionAnchor {
+            beacon_root: B256::repeat_byte((block_number % 251) as u8),
+            beacon_slot,
+            block_number,
+            block_hash: B256::repeat_byte((block_number % 253) as u8),
+            receipts_root: B256::repeat_byte((block_number % 241) as u8),
+        }
+    }
+
     #[test]
     fn fresh_data_directory_requires_checkpoint_before_sync() {
         let temp = tempfile::tempdir().unwrap();
@@ -989,6 +1064,30 @@ mod tests {
         };
 
         assert!(local_execution_progress_staleness(Some(sync_head), &consensus).is_none());
+    }
+
+    #[test]
+    fn startup_network_head_uses_light_client_head_when_coverage_is_empty() {
+        let finalized = execution_anchor(25_424_100, 14_660_000);
+        let optimistic = execution_anchor(25_424_288, 14_660_188);
+        let anchors = ChainAnchors {
+            indexed_head: None,
+            finalized_head: Some(finalized),
+            optimistic_head: Some(optimistic),
+        };
+        let coverage = AnchorCoverage {
+            floor: None,
+            ceiling: None,
+            count: 0,
+            gap_count: 0,
+        };
+
+        let head = consensus_execution_head_anchor(anchors, coverage).unwrap();
+
+        assert_eq!(head, optimistic);
+        let network_head = consensus_anchor_network_head(head);
+        assert_eq!(network_head.number, optimistic.block_number);
+        assert_eq!(network_head.hash, optimistic.block_hash);
     }
 
     #[test]

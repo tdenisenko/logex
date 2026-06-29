@@ -4,12 +4,22 @@
 
 LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The completed baseline run used `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`; the `logex-baseline-monitor` tmux session exited normally after writing `summary.json`.
+Active branch: `fix/ipv6-p2p-sync`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The completed historical baseline used `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`; the `logex-baseline-monitor` tmux session exited normally after writing `summary.json`.
 
 Historical sync has completed the active post-fix pivot-to-genesis baseline. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The post-fix run reached genesis without repeated liveness stalls, kept peers healthy, and showed median physical RX near the 300 Mbps link ceiling; another clean wall-clock benchmark is not required unless a new post-fix health problem appears.
 
+IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: the remote test reached dozens of active CL sessions, status-capable peers, and hundreds of discovered/dialable IPv6 CL peers. EL now starts with IPv6 listener/discovery addresses and no IPv4 sockets when `--p2p-bind-ip` is IPv6, but a pure IPv6 EL sync has not been proven: the mainnet EL DNS tree produced only a small IPv6 candidate set and every sampled candidate refused or timed out before a usable session. This appears to be public mainnet EL IPv6 peer scarcity/staleness rather than an OS socket leak, but it remains a blocker for claiming optimal IPv6-only EL historical sync.
+
 ## Completed Since Last Run
 
+- Added explicit P2P bind-family support through `--p2p-bind-ip` and config key `p2p_bind_ip`.
+- Propagated IPv4/IPv6 bind and external addresses into both EL and CL P2P configuration.
+- Updated CL ENR/listener/dial filtering so IPv6 mode advertises `ip6`/`tcp6`/`udp6`/`quic6` and dials only IPv6 multiaddrs.
+- Updated EL P2P startup so IPv6 mode binds/listens on IPv6, filters known peers by address family, disables Reth's IPv4-oriented discovery paths, and uses a family-aware DNS discovery feed.
+- Added focused tests for IPv6 CLI parsing, CL ENR/dial filtering, EL DNS candidate conversion, DNS crawl sizing, and consensus-head startup readiness.
+- Deployed and tested the branch on IPv6-only remote runtime constraints: no `logexv6` IPv4 sockets were observed and no fresh IPv4 EL dial attempts remained after disabling Reth default DNS discovery.
+- Confirmed CL P2P works over IPv6 on the droplet; EL receives IPv6 DNS candidates but did not establish a mainnet execution session during the observed windows.
+- Verified relevant local checks: `cargo fmt --all -- --check`, focused `logex-sync` P2P tests, `logex-cl --lib`, targeted `logex-node` startup tests, and `cargo clippy -p logex-sync -- -D warnings`.
 - Reproduced the zero-progress stall through the Pi jump host: the floor stayed pinned while peers and active downloads remained present.
 - Added critical-path repair for missing expected historical fetches without resetting buffered lookahead.
 - Aborted stale historical fetch work below the expected sequence so obsolete attempts release request reservations.
@@ -82,7 +92,15 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
 
 ## Remaining TODOs
 
-1. Conclude the historical sync performance PR.
+1. Prove or scope IPv6-only EL sync.
+   - Reason: CL works over IPv6 and EL is now socket/family-clean, but mainnet EL IPv6 peer availability was too poor to establish serving execution sessions in the DigitalOcean test.
+   - Completion criteria: either demonstrate EL sync progress with only IPv6 sockets on the droplet, or document the limitation and make startup/fallback behavior explicit so LogEx does not silently choose IPv6-only EL when it cannot reach enough execution peers.
+
+2. Add automatic public address-family selection.
+   - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, or only outbound connectivity.
+   - Completion criteria: LogEx prefers a confirmed public IPv4 path, falls back to confirmed public IPv6, and otherwise runs outbound/known-peer mode with clear status warnings and no misleading “publicly reachable” advertising.
+
+3. Conclude the historical sync performance PR.
    - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
    - Completion criteria: rerun PR #97 GitHub Actions after quota is available, confirm checks pass, and merge when checks allow.
 
@@ -167,6 +185,26 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
   - Why: post-fix samples show the client can drive the physical link near the available 300 Mbps download limit, so another fresh run would mainly remeasure infrastructure capacity.
   - Alternative considered: reset and rerun from scratch to obtain an uncontaminated wall-clock number.
   - Tradeoff: the contaminated run is not a clean benchmark, but it remains sufficient to validate liveness if it reaches genesis without repeated post-fix stalls.
+
+- IPv6-only mode disables Reth's default EL discovery and uses a family-aware DNS feed.
+  - Why: Reth's default DNS ENR conversion prefers IPv4 fields, which caused IPv4 dial attempts even when LogEx was explicitly bound to IPv6.
+  - Alternative considered: leave Reth discovery enabled and rely on OS firewall rejects; rejected because IPv6-only mode must not waste time on IPv4 candidates.
+  - Tradeoff: pure IPv6 EL discovery currently depends on a small public DNS candidate set until a better EL IPv6 peer source is implemented or the wider network improves.
+
+- Build caches should be generated outside Git.
+  - Why: `sccache` and `cargo-chef` can reduce rebuild times, but cache artifacts are host/toolchain-specific and too large for the repository.
+  - Alternatives considered: committing prebuilt artifacts; rejected because they are not portable across macOS/Linux and would bloat the repo.
+  - Tradeoff: developers need a one-time cache setup command, but source control stays clean.
+  - Suggested local cache setup:
+    ```sh
+    cargo install sccache cargo-chef
+    export RUSTC_WRAPPER=sccache
+    sccache --start-server
+    cargo chef prepare --recipe-path recipe.json
+    cargo chef cook --release --recipe-path recipe.json
+    cargo build --release -p logex-node --bin logex
+    sccache --show-stats
+    ```
 
 ## Challenges and Resolutions
 
@@ -262,6 +300,14 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
   - Resolution: updated the heartbeat instructions to monitor post-fix liveness and health until genesis, then remove itself and clear or revise the todo if no apparent problems remain.
   - Remaining: resolved; genesis was reached and the automation is being removed.
 
+- Challenge: Reth still attempted IPv4 EL dials in an IPv6-only run after discv4 was disabled.
+  - Resolution: inspected Reth `NetworkConfigBuilder` and found default DNS discovery is enabled by default; IPv6 mode now disables Reth DNS as well and uses LogEx's family-aware DNS stream.
+  - Remaining: resolved for socket/family correctness; remote logs after the fix showed zero fresh IPv4 attempts and no `logexv6` IPv4 sockets.
+
+- Challenge: pure IPv6 EL mainnet sync did not start on the DigitalOcean droplet.
+  - Resolution: verified IPv6 listeners, removed an accidental IPv6 INPUT firewall reject, confirmed CL peers over IPv6, and observed EL DNS candidates being dialed over IPv6 only.
+  - Remaining: unresolved; every sampled EL IPv6 endpoint refused or timed out, so either a better IPv6 EL candidate source is needed or product behavior must explicitly fall back/warn.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -285,19 +331,23 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
 - Inspected background storage maintenance after the stall and removed its ability to run compaction planning concurrently with incomplete historical sync.
 - Rechecked the roadmap after baseline completion and removed obsolete fresh-run TODO criteria.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
+- Inspected the IPv6 branch for experimental leftovers; the remaining code is scoped to explicit bind-family support, family-aware discovery filtering, consensus-head startup readiness, and focused tests.
 
 ## Git Workflow
 
-- Current branch: `perf/fresh-historical-baseline`.
-- New branch created this run: no, continuing the active performance branch.
+- Current branch: `fix/ipv6-p2p-sync`.
+- New branch created this run: yes, forked from the current post-performance work for IPv6 P2P validation.
 - Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`; `docs: update baseline monitor criteria`; `docs: record completed historical baseline`; `docs: note historical sync PR CI blocker`.
-- Pull request status: PR #97 is open and ready for final CI once GitHub Actions quota is available.
+- Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
-- Blockers: GitHub Actions quota is unavailable; PR checks fail immediately with no runner steps or logs. Local CI-equivalent checks pass.
+- Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
 
 ## Known Issues or Risks
 
 - The completed run is not a clean wall-clock benchmark because it includes the known pre-fix two-hour stall and restart, but post-fix liveness is validated.
 - PR #97 cannot be merged until GitHub Actions quota is restored and the hosted checks can run.
+- Pure IPv6 EL sync may be impractical on current public mainnet peer availability without a better IPv6 execution peer source; do not claim production-ready IPv6 EL historical sync until this is proven or clearly scoped.
+- Auto address-family selection is not implemented yet; users still need explicit `--nat`/`--p2p-bind-ip` choices for deterministic public IPv6 testing.
+- Optional build-cache setup is documented in `ROADMAP.md`; generated `sccache`/`cargo-chef` artifacts should stay outside Git and be rebuilt per target/toolchain.
 - Peer count and routing mode affect comparability; record both for any future benchmark.
 - A global live chunk scheduler would be a material architecture change; do not start it unless a future post-fix run shows repeated low/zero-progress windows that cannot be explained by network, disk, or density changes.

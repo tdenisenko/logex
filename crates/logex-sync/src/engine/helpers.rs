@@ -1,7 +1,7 @@
 use super::*;
 use alloy_primitives::U256;
-use logex_cl::MAINNET_CONSENSUS_CHAIN_SPEC;
-use logex_types::ExecutionAnchor;
+use logex_cl::{AnchorCoverage, MAINNET_CONSENSUS_CHAIN_SPEC};
+use logex_types::{ChainAnchors, ExecutionAnchor};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use std::future::Future;
 
@@ -102,16 +102,22 @@ impl SyncEngine {
     }
 
     pub(super) fn set_peer_head_from_consensus(&mut self) -> bool {
-        let Some(anchor) = self
-            .consensus
-            .as_ref()
-            .and_then(|consensus| consensus.anchor_coverage().ceiling)
-        else {
+        let Some(anchor) = self.consensus.as_ref().and_then(|consensus| {
+            consensus_execution_head_anchor(consensus.chain_anchors(), consensus.anchor_coverage())
+        }) else {
             return false;
         };
 
         self.peers.set_head(consensus_anchor_head(anchor));
         true
+    }
+
+    pub(super) fn consensus_required_block_for_peer_readiness(&self) -> Option<u64> {
+        let consensus = self.consensus.as_ref()?;
+        consensus_required_block_for_peer_readiness(
+            consensus.chain_anchors(),
+            consensus.anchor_coverage(),
+        )
     }
 
     pub(super) fn sync_cursor(&self) -> (u64, u64) {
@@ -353,6 +359,32 @@ pub(super) fn consensus_anchor_head(anchor: ExecutionAnchor) -> Head {
     )
 }
 
+fn consensus_execution_head_anchor(
+    anchors: ChainAnchors,
+    coverage: AnchorCoverage,
+) -> Option<ExecutionAnchor> {
+    [
+        anchors.optimistic_head,
+        anchors.finalized_head,
+        coverage.ceiling,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|anchor| anchor.block_number)
+}
+
+fn consensus_required_block_for_peer_readiness(
+    anchors: ChainAnchors,
+    coverage: AnchorCoverage,
+) -> Option<u64> {
+    coverage
+        .floor
+        .map(|anchor| anchor.block_number)
+        .or_else(|| {
+            consensus_execution_head_anchor(anchors, coverage).map(|anchor| anchor.block_number)
+        })
+}
+
 pub(super) fn execution_head(number: u64, hash: B256, timestamp: u64) -> Head {
     Head {
         number,
@@ -376,6 +408,70 @@ pub(super) fn execution_head(number: u64, hash: B256, timestamp: u64) -> Head {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::B256;
+
+    fn anchor(block_number: u64, beacon_slot: u64) -> ExecutionAnchor {
+        ExecutionAnchor {
+            beacon_root: B256::repeat_byte((block_number % 251) as u8),
+            beacon_slot,
+            block_number,
+            block_hash: B256::repeat_byte((block_number % 253) as u8),
+            receipts_root: B256::repeat_byte((block_number % 241) as u8),
+        }
+    }
+
+    #[test]
+    fn consensus_head_prefers_highest_light_client_anchor_when_coverage_is_empty() {
+        let finalized = anchor(25_424_100, 14_660_000);
+        let optimistic = anchor(25_424_288, 14_660_188);
+        let anchors = ChainAnchors {
+            indexed_head: None,
+            finalized_head: Some(finalized),
+            optimistic_head: Some(optimistic),
+        };
+        let coverage = AnchorCoverage {
+            floor: None,
+            ceiling: None,
+            count: 0,
+            gap_count: 0,
+        };
+
+        assert_eq!(
+            consensus_execution_head_anchor(anchors.clone(), coverage),
+            Some(optimistic)
+        );
+        assert_eq!(
+            consensus_required_block_for_peer_readiness(anchors, coverage),
+            Some(optimistic.block_number)
+        );
+    }
+
+    #[test]
+    fn consensus_required_block_uses_materialized_floor_when_available() {
+        let floor = anchor(25_424_000, 14_660_000);
+        let ceiling = anchor(25_424_020, 14_660_020);
+        let optimistic = anchor(25_424_200, 14_660_200);
+        let anchors = ChainAnchors {
+            indexed_head: None,
+            finalized_head: Some(ceiling),
+            optimistic_head: Some(optimistic),
+        };
+        let coverage = AnchorCoverage {
+            floor: Some(floor),
+            ceiling: Some(ceiling),
+            count: 21,
+            gap_count: 0,
+        };
+
+        assert_eq!(
+            consensus_execution_head_anchor(anchors.clone(), coverage),
+            Some(optimistic)
+        );
+        assert_eq!(
+            consensus_required_block_for_peer_readiness(anchors, coverage),
+            Some(floor.block_number)
+        );
+    }
 
     #[test]
     fn historical_completion_requires_known_target_and_confirmed_empty_responses() {
