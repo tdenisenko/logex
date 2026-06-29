@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`. When outside the home network, Mac mini oper
 
 Historical sync has completed the active post-fix pivot-to-genesis baseline. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The post-fix run reached genesis without repeated liveness stalls, kept peers healthy, and showed median physical RX near the 300 Mbps link ceiling; another clean wall-clock benchmark is not required unless a new post-fix health problem appears.
 
-IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: the remote test reached dozens of active CL sessions, status-capable peers, and thousands of discovered/dialable IPv6 CL peers while the `logexv6` runtime user had IPv4 egress rejected. EL now starts with IPv6 listener/discovery addresses and no IPv4 sockets when `--p2p-bind-ip` is IPv6, and it seeds Reth discv4/discv5 from LogEx's family-aware IPv6 DNS feed. A controlled two-node proof established an Eth70 EL session over IPv6 only using `--execution-bootnode` and distinct discv5 ports, with no IPv4 sockets or IPv4 egress allowed for the runtime user. Default `--nat any` now selects a locally owned public IPv4 address first, then a locally owned public IPv6 address, and otherwise runs outbound-only without advertising a public address. Public mainnet IPv6 EL historical sync is still not proven: the observed public IPv6 EL candidates refused or timed out before providing a serving execution session. This appears to be public mainnet EL IPv6 peer scarcity/staleness rather than an OS socket leak, but it remains a blocker for claiming optimal IPv6-only EL historical sync. The temporary droplet clients are stopped after bounded proof windows.
+IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: the bounded public run reached 40-79 active CL sessions while the `logexv6` runtime user had IPv4 egress rejected and no IPv4 LogEx sockets. EL IPv6 transport is correct in controlled conditions: a two-node LogEx proof established an Eth70 session over IPv6 only using `--execution-bootnode`. Public mainnet EL historical sync is still not proven because public IPv6 execution candidates are not usable enough: the latest bounded run accepted 24 DNS IPv6 EL candidates, rejected 353 IPv4-only DNS candidates for the selected family, submitted 24 dials, and all 24 expired without any accepted EL session. Default `--nat any` now selects locally owned public IPv4 first, locally owned public IPv6 second, and outbound-only otherwise. The temporary droplet clients are stopped after bounded proof windows.
 
 ## Completed Since Last Run
 
@@ -28,6 +28,8 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Implemented default automatic P2P address-family selection for `--nat any`: locally owned public IPv4 is preferred, locally owned public IPv6 is the fallback, and hosts without a public local address use outbound-only mode instead of advertising an API-discovered NAT address they do not own.
 - Verified the selector on the IPv6 droplet: default startup selected `auto-public-ipv4` with external IP `152.42.222.119`; forced IPv6 bind plus default `--nat any` selected `auto-public-ipv6` and advertised `[2400:6180:0:d2:0:2:fa9c:1000]`.
 - Exposed P2P address selection in `/status` through `p2p_address_mode`, `p2p_bind_ip`, `p2p_external_ip`, and `p2p_warnings`, then verified the IPv6 droplet status response reported `auto-public-ipv6` with the droplet IPv6 address.
+- Added execution peer-discovery counters to `/status` so IPv6-only runs show cumulative DNS candidates, family rejections, submitted dials, and expired submitted dials after live pending queues drain.
+- Ran a 15 minute bounded public IPv6-only sample using IPv6-reachable checkpoint source `https://ethereum-beacon-api.publicnode.com`; CL stayed healthy over IPv6, no IPv4 LogEx sockets appeared, but EL did not establish a public mainnet session.
 - Verified relevant local checks: `cargo fmt --all -- --check`, focused `logex-sync` P2P tests, `logex-cl --lib`, targeted `logex-node` startup tests, and `cargo clippy -p logex-sync -- -D warnings`.
 - Reproduced the zero-progress stall through the Pi jump host: the floor stayed pinned while peers and active downloads remained present.
 - Added critical-path repair for missing expected historical fetches without resetting buffered lookahead.
@@ -102,8 +104,8 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 ## Remaining TODOs
 
 1. Prove or explicitly scope public IPv6-only EL sync.
-   - Reason: CL works over IPv6 and EL transport/discovery is now socket/family-clean, but public mainnet EL IPv6 peer availability was too poor to establish serving execution sessions in the DigitalOcean test.
-   - Completion criteria: either demonstrate EL historical progress with only IPv6 sockets against reliable public IPv6 execution peers, or document the limitation and make startup/fallback behavior explicit so LogEx does not silently choose IPv6-only EL when it cannot reach enough execution peers.
+   - Reason: CL works over IPv6 and EL transport/discovery is socket/family-clean, but public mainnet EL IPv6 peer availability was too poor to establish serving execution sessions in bounded DigitalOcean tests.
+   - Completion criteria: either demonstrate EL historical progress with only IPv6 sockets against reliable public IPv6 execution peers, or document/productize a fallback so LogEx does not silently choose IPv6-only EL when it cannot reach enough execution peers.
 
 2. Complete dual-stack address-family support.
    - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, both usable families, or only outbound connectivity.
@@ -204,6 +206,10 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Why: public IPv6 EL peer availability is sparse, and deterministic IPv6 tests need a reliable enode seed plus separate UDP ports when multiple LogEx instances run on one host.
   - Alternative considered: leave IPv6 validation dependent only on public DNS/discovery; rejected because public candidate refusal/timeouts cannot distinguish transport bugs from network scarcity.
   - Tradeoff: this adds two advanced P2P knobs, but defaults remain unchanged for normal users.
+
+- Public IPv6 validation uses an explicit IPv6-capable checkpoint source for tests.
+  - Why: the default checkpoint endpoint did not resolve over IPv6 from the test droplet, while `https://ethereum-beacon-api.publicnode.com` serves finalized headers over IPv6.
+  - Tradeoff: this is a test override, not a default trust-source change.
 
 - Default `--nat any` uses local route-owned public address detection.
   - Why: a public IP API can return the router/ISP address for private or CGNAT hosts, which is not proof that LogEx can advertise that address for inbound peer retention.
@@ -324,8 +330,8 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Remaining: resolved for socket/family correctness; remote logs after the fix showed zero fresh IPv4 attempts and no `logexv6` IPv4 sockets.
 
 - Challenge: pure IPv6 EL mainnet sync did not start on the DigitalOcean droplet.
-  - Resolution: verified IPv6 listeners, removed an accidental IPv6 INPUT firewall reject, confirmed CL peers over IPv6, seeded EL discv4/discv5 from family-aware IPv6 DNS bootnodes, fixed stale submitted-dial pruning, added explicit execution bootnodes, and proved a controlled LogEx-to-LogEx Eth70 session over IPv6 only.
-  - Remaining: unresolved for public historical sync; every sampled public EL IPv6 endpoint refused or timed out, so either a better IPv6 EL candidate source is needed or product behavior must explicitly fall back/warn.
+  - Resolution: verified IPv6 listeners, removed an accidental IPv6 INPUT firewall reject, confirmed CL peers over IPv6, seeded EL discv4/discv5 from family-aware IPv6 DNS bootnodes, fixed stale submitted-dial pruning, added explicit execution bootnodes, exposed dial/discovery counters, and proved a controlled LogEx-to-LogEx Eth70 session over IPv6 only.
+  - Remaining: unresolved for public historical sync; bounded public samples produced no accepted EL session from IPv6 DNS/discovery candidates, so either a better IPv6 EL candidate source is needed or product behavior must explicitly fall back/warn.
 
 - Challenge: default NAT discovery could misclassify CGNAT/private IPv4 as publicly reachable.
   - Resolution: default `--nat any` now checks locally owned default-route IPv4/IPv6 addresses and filters private, shared, documentation, link-local, multicast, and reserved ranges before advertising an external address.
@@ -357,12 +363,13 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Inspected the IPv6 branch for experimental leftovers; the remaining code is scoped to explicit bind-family support, family-aware discovery filtering, consensus-head startup readiness, and focused tests.
 - Rechecked the IPv6 branch after the controlled proof; the remaining code is scoped to family-aware DNS/discv4/discv5 seeding, explicit execution bootnodes, configurable execution discv5 ports, and stale submitted-dial pruning.
 - Rechecked the automatic address-selection diff; the remaining code is scoped to startup selection helpers, public address classifiers, focused tests, and CLI help text.
+- Rechecked the latest IPv6 diagnostics diff; it is limited to cumulative execution-network counters and status fixture coverage.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`.
+- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; pending commit for IPv6 execution discovery diagnostics.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
@@ -372,6 +379,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - The completed run is not a clean wall-clock benchmark because it includes the known pre-fix two-hour stall and restart, but post-fix liveness is validated.
 - PR #97 cannot be merged until GitHub Actions quota is restored and the hosted checks can run.
 - Pure IPv6 EL sync may be impractical on current public mainnet peer availability without a better IPv6 execution peer source; do not claim production-ready IPv6 EL historical sync until this is proven or clearly scoped.
+- The default checkpoint-sync endpoint did not resolve over IPv6 from the DigitalOcean test; strict IPv6-only tests currently need an explicit IPv6-capable Beacon API URL.
 - Automatic single-family selection is implemented for public IPv4, public IPv6 fallback, and outbound-only fallback. True simultaneous IPv4+IPv6 operation is not implemented yet.
 - Optional build-cache setup is documented in `ROADMAP.md`; generated `sccache`/`cargo-chef` artifacts should stay outside Git and be rebuilt per target/toolchain.
 - Peer count and routing mode affect comparability; record both for any future benchmark.

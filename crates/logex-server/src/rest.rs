@@ -1198,6 +1198,11 @@ mod tests {
                     nonserving_disconnects: 3,
                     missing_fork_id_candidates: 4,
                     fork_id_rejected_candidates: 6,
+                    discovered_candidates: 7,
+                    dns_discovered_candidates: 8,
+                    dns_family_rejected_candidates: 9,
+                    submitted_dials_total: 10,
+                    submitted_dial_expirations: 11,
                     queued_candidates: 9,
                     pending_dials: 3,
                     productive_peers: 7,
@@ -1421,6 +1426,17 @@ mod tests {
         assert_eq!(
             status["execution_network"]["fork_id_rejected_candidates"],
             6
+        );
+        assert_eq!(status["execution_network"]["discovered_candidates"], 7);
+        assert_eq!(status["execution_network"]["dns_discovered_candidates"], 8);
+        assert_eq!(
+            status["execution_network"]["dns_family_rejected_candidates"],
+            9
+        );
+        assert_eq!(status["execution_network"]["submitted_dials_total"], 10);
+        assert_eq!(
+            status["execution_network"]["submitted_dial_expirations"],
+            11
         );
         assert_eq!(status["execution_network"]["connected_geth_peers"], 2);
         assert_eq!(status["execution_network"]["connected_nethermind_peers"], 3);

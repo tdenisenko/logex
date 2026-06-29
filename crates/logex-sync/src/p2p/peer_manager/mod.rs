@@ -35,7 +35,7 @@ use secp256k1::SecretKey;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant as TokioInstant};
 use tokio_stream::{Stream, StreamExt};
-use tracing::info;
+use tracing::{info, trace};
 
 use crate::p2p::serve_cache::ServeCacheProvider;
 use crate::primitives::LogexNetworkPrimitives;
@@ -157,6 +157,11 @@ struct ExecutionPeerSessionMetrics {
     nonserving_disconnects: u64,
     missing_fork_id_candidates: u64,
     fork_id_rejected_candidates: u64,
+    discovered_candidates: u64,
+    dns_discovered_candidates: u64,
+    dns_family_rejected_candidates: u64,
+    submitted_dials_total: u64,
+    submitted_dial_expirations: u64,
 }
 
 #[derive(Default)]
@@ -530,9 +535,22 @@ impl PeerManager {
     }
 
     fn prune_submitted_dials(&mut self, now: Instant) {
+        let before = self.pending_dials.len();
         self.pending_dials.retain(|_, last_submitted| {
             now.duration_since(*last_submitted) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
         });
+        let expired = before.saturating_sub(self.pending_dials.len());
+        if expired > 0 {
+            self.session_metrics.submitted_dial_expirations = self
+                .session_metrics
+                .submitted_dial_expirations
+                .saturating_add(expired as u64);
+            trace!(
+                expired_dials = expired,
+                pending_dials = self.pending_dials.len(),
+                "expired submitted execution peer dials"
+            );
+        }
     }
 }
 

@@ -185,6 +185,17 @@ pub struct ExecutionNetworkStatus {
     pub missing_fork_id_candidates: u64,
     /// Discovered candidates ignored because their ENR fork ID was incompatible.
     pub fork_id_rejected_candidates: u64,
+    /// Non-DNS execution discovery candidates accepted for dialing.
+    pub discovered_candidates: u64,
+    /// DNS execution discovery candidates accepted for dialing.
+    pub dns_discovered_candidates: u64,
+    /// DNS execution discovery candidates ignored because they lacked a dialable address
+    /// for the selected P2P address family.
+    pub dns_family_rejected_candidates: u64,
+    /// Execution peer dials submitted to the underlying network scheduler since startup.
+    pub submitted_dials_total: u64,
+    /// Submitted dials that aged out without becoming an accepted or closed session event.
+    pub submitted_dial_expirations: u64,
     /// Pending execution peer candidates that have not been submitted to the dialer yet.
     pub queued_candidates: usize,
     /// Execution peers currently submitted to the dialer but not yet connected or failed.

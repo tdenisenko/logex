@@ -151,6 +151,10 @@ impl PeerManager {
                 Some(node.udp_addr()),
             );
         }
+        self.session_metrics.submitted_dials_total = self
+            .session_metrics
+            .submitted_dials_total
+            .saturating_add(candidates.len() as u64);
 
         trace!(
             submitted_peers = candidates.len(),
@@ -314,6 +318,8 @@ impl PeerManager {
                     addr.udp().map(|socket| socket.port()),
                     peer_id,
                 );
+                self.session_metrics.discovered_candidates =
+                    self.session_metrics.discovered_candidates.saturating_add(1);
                 trace!(
                     peer = %peer_id,
                     addr = %node.tcp_addr(),
@@ -336,6 +342,8 @@ impl PeerManager {
                     );
                     return;
                 }
+                self.session_metrics.discovered_candidates =
+                    self.session_metrics.discovered_candidates.saturating_add(1);
                 self.remember_pending(node);
             }
         }
@@ -359,6 +367,10 @@ impl PeerManager {
         }
 
         let Some(node) = dns_node_record_for_bind_ip(self.bind_ip, &update) else {
+            self.session_metrics.dns_family_rejected_candidates = self
+                .session_metrics
+                .dns_family_rejected_candidates
+                .saturating_add(1);
             trace!(
                 peer = %update.node_record.id,
                 bind_ip = %self.bind_ip,
@@ -371,6 +383,10 @@ impl PeerManager {
             );
             return;
         };
+        self.session_metrics.dns_discovered_candidates = self
+            .session_metrics
+            .dns_discovered_candidates
+            .saturating_add(1);
         trace!(
             peer = %node.id,
             fork_id = ?update.fork_id,
