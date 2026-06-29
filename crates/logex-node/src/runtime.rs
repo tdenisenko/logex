@@ -79,9 +79,38 @@ struct P2pAddressSelection {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct LocalPublicAddressCandidates {
+struct LocalP2pAddressCandidates {
     ipv4: Option<Ipv4Addr>,
     ipv6: Option<Ipv6Addr>,
+}
+
+impl LocalP2pAddressCandidates {
+    fn public_ipv4(self) -> Option<Ipv4Addr> {
+        self.ipv4.filter(|ip| is_public_ipv4(*ip))
+    }
+
+    fn public_ipv6(self) -> Option<Ipv6Addr> {
+        self.ipv6.filter(|ip| is_public_ipv6(*ip))
+    }
+
+    fn route_dial_families(self) -> DialAddressFamilies {
+        match (self.ipv4, self.ipv6) {
+            (Some(_), Some(_)) => DialAddressFamilies::BOTH,
+            (Some(_), None) => DialAddressFamilies::IPV4,
+            (None, Some(_)) => DialAddressFamilies::IPV6,
+            (None, None) => DialAddressFamilies::IPV4,
+        }
+    }
+
+    fn outbound_only_bind_ip(self) -> IpAddr {
+        if self.ipv4.is_some() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else if self.ipv6.is_some() {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -509,7 +538,7 @@ async fn select_p2p_address(
         .parse::<NatResolver>()
         .map_err(|error| error.to_string())?;
     if parsed == NatResolver::Any {
-        let candidates = detect_local_public_addresses();
+        let candidates = detect_local_p2p_addresses();
         return Ok(choose_auto_p2p_address(candidates, p2p_bind_ip));
     }
 
@@ -555,19 +584,26 @@ fn default_p2p_bind_ip(nat_resolver: &NatResolver, p2p_port: u16) -> IpAddr {
 }
 
 fn choose_auto_p2p_address(
-    candidates: LocalPublicAddressCandidates,
+    candidates: LocalP2pAddressCandidates,
     p2p_bind_ip: Option<IpAddr>,
 ) -> P2pAddressSelection {
     let mut warnings = Vec::new();
-    if p2p_bind_ip.is_none() && candidates.ipv4.is_some() && candidates.ipv6.is_some() {
+    let public_ipv4 = candidates.public_ipv4();
+    let public_ipv6 = candidates.public_ipv6();
+    if p2p_bind_ip.is_none() && public_ipv4.is_some() && public_ipv6.is_some() {
         warnings.push(
             "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
+                .to_owned(),
+        );
+    } else if p2p_bind_ip.is_none() && public_ipv6.is_some() && candidates.ipv4.is_some() {
+        warnings.push(
+            "public IPv6 and outbound IPv4 were detected; IPv6 is advertised while IPv4 outbound candidates are also accepted"
                 .to_owned(),
         );
     }
 
     let selection = match p2p_bind_ip {
-        Some(bind_ip @ IpAddr::V4(_)) => candidates.ipv4.map(|ip| {
+        Some(bind_ip @ IpAddr::V4(_)) => public_ipv4.map(|ip| {
             (
                 NatResolver::ExternalIp(IpAddr::V4(ip)),
                 bind_ip,
@@ -576,7 +612,7 @@ fn choose_auto_p2p_address(
                 P2pAddressSelectionMode::AutoPublicIpv4,
             )
         }),
-        Some(bind_ip @ IpAddr::V6(_)) => candidates.ipv6.map(|ip| {
+        Some(bind_ip @ IpAddr::V6(_)) => public_ipv6.map(|ip| {
             (
                 NatResolver::ExternalIp(IpAddr::V6(ip)),
                 bind_ip,
@@ -585,13 +621,12 @@ fn choose_auto_p2p_address(
                 P2pAddressSelectionMode::AutoPublicIpv6,
             )
         }),
-        None => candidates
-            .ipv4
+        None => public_ipv4
             .map(|ip| {
                 (
                     NatResolver::ExternalIp(IpAddr::V4(ip)),
                     IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                    if candidates.ipv6.is_some() {
+                    if public_ipv6.is_some() || candidates.ipv6.is_some() {
                         DialAddressFamilies::BOTH
                     } else {
                         DialAddressFamilies::IPV4
@@ -601,11 +636,15 @@ fn choose_auto_p2p_address(
                 )
             })
             .or_else(|| {
-                candidates.ipv6.map(|ip| {
+                public_ipv6.map(|ip| {
                     (
                         NatResolver::ExternalIp(IpAddr::V6(ip)),
                         IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                        DialAddressFamilies::IPV6,
+                        if candidates.ipv4.is_some() {
+                            DialAddressFamilies::BOTH
+                        } else {
+                            DialAddressFamilies::IPV6
+                        },
                         Some(IpAddr::V6(ip)),
                         P2pAddressSelectionMode::AutoPublicIpv6,
                     )
@@ -618,11 +657,13 @@ fn choose_auto_p2p_address(
             "no locally owned public IPv4 or IPv6 address was detected; using outbound-only P2P without advertising a public address"
                 .to_owned(),
         );
-        let bind_ip = p2p_bind_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let bind_ip = p2p_bind_ip.unwrap_or_else(|| candidates.outbound_only_bind_ip());
         (
             NatResolver::None,
             bind_ip,
-            DialAddressFamilies::for_bind_ip(bind_ip),
+            p2p_bind_ip
+                .map(DialAddressFamilies::for_bind_ip)
+                .unwrap_or_else(|| candidates.route_dial_families()),
             None,
             P2pAddressSelectionMode::AutoOutboundOnly,
         )
@@ -638,10 +679,10 @@ fn choose_auto_p2p_address(
     }
 }
 
-fn detect_local_public_addresses() -> LocalPublicAddressCandidates {
-    LocalPublicAddressCandidates {
-        ipv4: default_route_ipv4().filter(|ip| is_public_ipv4(*ip)),
-        ipv6: default_route_ipv6().filter(|ip| is_public_ipv6(*ip)),
+fn detect_local_p2p_addresses() -> LocalP2pAddressCandidates {
+    LocalP2pAddressCandidates {
+        ipv4: default_route_ipv4(),
+        ipv6: default_route_ipv6(),
     }
 }
 
@@ -1232,7 +1273,7 @@ mod tests {
     #[test]
     fn auto_p2p_selection_prefers_public_ipv4() {
         let selection = choose_auto_p2p_address(
-            LocalPublicAddressCandidates {
+            LocalP2pAddressCandidates {
                 ipv4: Some(Ipv4Addr::new(203, 0, 114, 10)),
                 ipv6: Some("2604:a880:400:d0::1".parse().unwrap()),
             },
@@ -1258,7 +1299,7 @@ mod tests {
     fn auto_p2p_selection_falls_back_to_public_ipv6() {
         let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
         let selection = choose_auto_p2p_address(
-            LocalPublicAddressCandidates {
+            LocalP2pAddressCandidates {
                 ipv4: None,
                 ipv6: Some(public_ipv6),
             },
@@ -1276,10 +1317,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_p2p_selection_advertises_public_ipv6_and_dials_outbound_ipv4() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound IPv4"));
+    }
+
+    #[test]
     fn ipv6_only_selection_warns_without_execution_bootnodes() {
         let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
         let mut selection = choose_auto_p2p_address(
-            LocalPublicAddressCandidates {
+            LocalP2pAddressCandidates {
                 ipv4: None,
                 ipv6: Some(public_ipv6),
             },
@@ -1297,7 +1361,7 @@ mod tests {
     fn ipv6_only_selection_does_not_warn_with_execution_bootnodes() {
         let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
         let mut selection = choose_auto_p2p_address(
-            LocalPublicAddressCandidates {
+            LocalP2pAddressCandidates {
                 ipv4: None,
                 ipv6: Some(public_ipv6),
             },
@@ -1319,7 +1383,7 @@ mod tests {
         let bind_ip = "2001:db8::1234".parse::<IpAddr>().unwrap();
 
         let selection = choose_auto_p2p_address(
-            LocalPublicAddressCandidates {
+            LocalP2pAddressCandidates {
                 ipv4: Some(public_ipv4),
                 ipv6: Some(public_ipv6),
             },
@@ -1337,12 +1401,31 @@ mod tests {
 
     #[test]
     fn auto_p2p_selection_uses_outbound_only_without_public_address() {
-        let selection = choose_auto_p2p_address(LocalPublicAddressCandidates::default(), None);
+        let selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
 
         assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
         assert_eq!(selection.nat, NatResolver::None);
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.external_ip, None);
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound-only"));
+    }
+
+    #[test]
+    fn auto_p2p_selection_outbound_only_keeps_both_routed_families() {
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some("fd00::24".parse().unwrap()),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
         assert_eq!(selection.external_ip, None);
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound-only"));
