@@ -73,6 +73,7 @@ struct P2pAddressSelection {
     nat: NatResolver,
     bind_ip: IpAddr,
     dial_families: DialAddressFamilies,
+    advertised_families: DialAddressFamilies,
     external_ip: Option<IpAddr>,
     mode: P2pAddressSelectionMode,
     warnings: Vec<String>,
@@ -549,6 +550,9 @@ async fn select_p2p_address(
         nat: resolved,
         bind_ip,
         dial_families: DialAddressFamilies::for_bind_ip(bind_ip),
+        advertised_families: external_ip
+            .map(DialAddressFamilies::for_bind_ip)
+            .unwrap_or(DialAddressFamilies::for_bind_ip(bind_ip)),
         external_ip,
         mode: P2pAddressSelectionMode::Explicit,
         warnings: Vec::new(),
@@ -673,6 +677,9 @@ fn choose_auto_p2p_address(
         nat,
         bind_ip,
         dial_families,
+        advertised_families: external_ip
+            .map(DialAddressFamilies::for_bind_ip)
+            .unwrap_or_else(|| DialAddressFamilies::for_bind_ip(bind_ip)),
         external_ip,
         mode,
         warnings,
@@ -753,7 +760,14 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
     status.p2p_address_mode = Some(selection.mode.as_str().to_owned());
     status.p2p_bind_ip = Some(selection.bind_ip.to_string());
+    status.p2p_listen_families =
+        dial_family_labels(DialAddressFamilies::for_bind_ip(selection.bind_ip));
     status.p2p_dial_families = dial_family_labels(selection.dial_families);
+    status.p2p_advertised_families = if selection.external_ip.is_some() {
+        dial_family_labels(selection.advertised_families)
+    } else {
+        Vec::new()
+    };
     status.p2p_external_ip = selection.external_ip.map(|ip| ip.to_string());
     status.p2p_warnings = selection.warnings.clone();
 }
@@ -1287,6 +1301,7 @@ mod tests {
         );
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
         assert_eq!(
             selection.external_ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
@@ -1313,6 +1328,7 @@ mod tests {
         );
         assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
     }
 
@@ -1334,6 +1350,7 @@ mod tests {
         );
         assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound IPv4"));
@@ -1407,6 +1424,7 @@ mod tests {
         assert_eq!(selection.nat, NatResolver::None);
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
         assert_eq!(selection.external_ip, None);
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound-only"));
@@ -1426,6 +1444,7 @@ mod tests {
         assert_eq!(selection.nat, NatResolver::None);
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
         assert_eq!(selection.external_ip, None);
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound-only"));
