@@ -6,7 +6,7 @@ LogEx starts from a recent CL checkpoint, tracks the live execution head, revers
 
 Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active fresh baseline run uses `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, monitor tmux session `logex-baseline-monitor`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`.
 
-Historical sync can still reach high instantaneous throughput, but the production baseline is now being measured from a fresh pivot-to-genesis run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, and skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest 30 minute rerun through `pi-remote` measured `361.1` blocks/sec over `644,617` verified blocks with `2` low windows and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
+Historical sync can still reach high instantaneous throughput, but the production baseline is now being measured from a fresh pivot-to-genesis run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest 30 minute rerun through `pi-remote` measured `361.1` blocks/sec over `644,617` verified blocks with `2` low windows and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
 
 ## Completed Since Last Run
 
@@ -67,6 +67,10 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Used `BASELINE_RESET_MODE=discard-incomplete` so the existing full-sync backup stayed intact while only the incomplete active `/Volumes/SSD 4TB/LogEx` contents were removed.
 - Built the remote release binary, restarted LogEx in tmux, restored the preserved peer cache, and started the baseline monitor at `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`.
 - Verified the fresh run status endpoint, tmux sessions, active data dir, and preserved full-sync backup.
+- Investigated the fresh-run two-hour zero-progress stall at block `11377745`.
+- Confirmed the stall was a liveness bug: an ordered historical batch waited about `7,445,409ms` before it could commit while background storage maintenance scanned segment metadata under the storage read lock.
+- Deferred background compaction planning while historical sync is incomplete; historical write batches still use their synchronous compacted write path.
+- Deployed the fix to the Mac mini, restarted LogEx in tmux, and confirmed the historical floor advanced past the stalled range after restart.
 
 ## Remaining TODOs
 
@@ -154,6 +158,11 @@ Historical sync can still reach high instantaneous throughput, but the productio
   - Alternative considered: always move the active data dir into a full-sync backup slot.
   - Tradeoff: `discard-incomplete` is destructive for the active run, so it requires the explicit confirmation flag and should only be used when a separate full backup already exists.
 
+- Background compaction is deferred until historical sync reaches genesis.
+  - Why: dense historical ingest already writes compacted segments synchronously, while background compaction planning can scan thousands of segment manifests and starve the ordered historical writer behind the storage lock.
+  - Alternative considered: keep background compaction active during historical sync and tune scan frequency; rejected because the observed stall held the verified floor for about two hours.
+  - Tradeoff: any opportunistic background maintenance waits until historical sync completes, but the critical sync path remains live and compressed.
+
 ## Challenges and Resolutions
 
 - Challenge: direct Mac mini access failed outside the home network.
@@ -240,6 +249,10 @@ Historical sync can still reach high instantaneous throughput, but the productio
   - Resolution: used the guarded `discard-incomplete` mode so the known full-sync backup was preserved and only the incomplete active data was deleted.
   - Remaining: monitor the active fresh run to completion and compare against the 4 hour target.
 
+- Challenge: the fresh run appeared alive but made no historical progress for nearly two hours.
+  - Resolution: sampled the running process and matched the stall to background compaction/profile-rewrite planning scanning storage metadata while the ordered historical writer waited; background compaction is now skipped while historical sync is incomplete.
+  - Remaining: continue the fresh baseline to confirm no repeated multi-window zero-progress stalls occur.
+
 ## Dead Code and Obsolescence Cleanup
 
 - Reverted rejected chunk-size and partial-flush timing experiments before this pass.
@@ -260,13 +273,14 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Inspected the accepted scheduler after the warmed baseline; no new dead code was introduced because the async residual candidate was fully reverted.
 - Inspected `local-ops/start-fresh-baseline-run.sh`; it remains the guarded path for the required fresh baseline and was not run because it deletes/moves the remote data directory.
 - Rechecked the guarded fresh-baseline reset path before running it; no obsolete production code was removed in this pass.
+- Inspected background storage maintenance after the stall and removed its ability to run compaction planning concurrently with incomplete historical sync.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`.
 - Pull request status: not created yet; branch remains in performance validation.
 - Merge status: not merged.
 - Blockers: none known.
