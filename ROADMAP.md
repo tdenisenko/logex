@@ -71,16 +71,17 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Confirmed the stall was a liveness bug: an ordered historical batch waited about `7,445,409ms` before it could commit while background storage maintenance scanned segment metadata under the storage read lock.
 - Deferred background compaction planning while historical sync is incomplete; historical write batches still use their synchronous compacted write path.
 - Deployed the fix to the Mac mini, restarted LogEx in tmux, and confirmed the historical floor advanced past the stalled range after restart.
+- Updated the baseline monitor automation to watch for post-fix stalls and health issues until genesis, then clean up the remaining todo and delete itself if the run completes cleanly.
 
 ## Remaining TODOs
 
 1. Complete the live historical request scheduler.
    - Reason: the restored accepted build produces stable warmed and 30 minute samples near the available network ceiling, but this still needs confirmation in the fresh full-run baseline.
-   - Completion criteria: close this when the fresh pivot-to-genesis baseline completes without repeated low/zero-progress windows; otherwise replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer samples without weakening validation.
+   - Completion criteria: close this when the active run reaches genesis without repeated post-fix low/zero-progress windows; otherwise replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer samples without weakening validation.
 
-2. Establish a production baseline from a fresh dense-range run.
-   - Reason: short samples prove regressions or fixes, but the PR needs end-to-end sync time against the 4 hour target.
-   - Completion criteria: let `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644` reach genesis, then record wall-clock sync time, logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, and failures for the fresh pivot-to-genesis run.
+2. Confirm post-fix full-run health.
+   - Reason: the known two-hour stall contaminated wall-clock runtime, but the run is still useful for proving that historical sync remains live after the liveness fix.
+   - Completion criteria: let `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644` reach genesis, then record post-fix logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, and failures. Do not require another clean fresh run unless a repeated post-fix stall or health problem appears.
 
 3. Continue peer and bandwidth utilization work only from measured bottlenecks.
    - Reason: recent constants-only experiments produced mixed results or regressions.
@@ -162,6 +163,11 @@ Historical sync can still reach high instantaneous throughput, but the productio
   - Why: dense historical ingest already writes compacted segments synchronously, while background compaction planning can scan thousands of segment manifests and starve the ordered historical writer behind the storage lock.
   - Alternative considered: keep background compaction active during historical sync and tune scan frequency; rejected because the observed stall held the verified floor for about two hours.
   - Tradeoff: any opportunistic background maintenance waits until historical sync completes, but the critical sync path remains live and compressed.
+
+- End-to-end wall-clock sync time is not a blocker for this PR when the run is network-bound.
+  - Why: post-fix samples show the client can drive the physical link near the available 300 Mbps download limit, so another fresh run would mainly remeasure infrastructure capacity.
+  - Alternative considered: reset and rerun from scratch to obtain an uncontaminated wall-clock number.
+  - Tradeoff: the contaminated run is not a clean benchmark, but it remains sufficient to validate liveness if it reaches genesis without repeated post-fix stalls.
 
 ## Challenges and Resolutions
 
@@ -252,6 +258,10 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Challenge: the fresh run appeared alive but made no historical progress for nearly two hours.
   - Resolution: sampled the running process and matched the stall to background compaction/profile-rewrite planning scanning storage metadata while the ordered historical writer waited; background compaction is now skipped while historical sync is incomplete.
   - Remaining: continue the fresh baseline to confirm no repeated multi-window zero-progress stalls occur.
+
+- Challenge: the baseline monitor was still framed around a clean wall-clock benchmark after the stall fix.
+  - Resolution: updated the heartbeat instructions to monitor post-fix liveness and health until genesis, then remove itself and clear or revise the todo if no apparent problems remain.
+  - Remaining: none until genesis is reached.
 
 ## Dead Code and Obsolescence Cleanup
 
