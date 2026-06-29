@@ -172,16 +172,19 @@ Security:
 
         /// Execution-layer NAT/external address resolver advertised to peers.
         ///
-        /// Accepted values include: any, none, publicip, netif, extip:<ip>,
-        /// extaddr:<domain>. On public servers, extip:<ip> is usually the most
-        /// deterministic choice.
+        /// The default "any" auto-selects a locally owned public IPv4 address,
+        /// then a locally owned public IPv6 address, and otherwise runs
+        /// outbound-only without advertising a public address. Accepted explicit
+        /// values include: none, publicip, netif, extip:<ip>, extaddr:<domain>.
+        /// On public servers, extip:<ip> is usually the most deterministic
+        /// choice.
         #[arg(long, default_value = "any")]
         nat: String,
 
         /// Local IP address used by execution and consensus P2P listeners.
         ///
-        /// By default, LogEx binds IPv4 unless --nat resolves to an IPv6
-        /// address. Use "::" with --nat extip:<ipv6> to force IPv6-only P2P.
+        /// By default, LogEx uses automatic address-family selection. Use "::"
+        /// with --nat extip:<ipv6> to force IPv6-only P2P.
         #[arg(long, value_name = "IP")]
         p2p_bind_ip: Option<IpAddr>,
 

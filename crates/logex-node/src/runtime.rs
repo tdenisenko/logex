@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -37,11 +37,49 @@ const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
 const MAINNET_SECONDS_PER_SLOT: u64 = 12;
 const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
+const IPV4_ROUTE_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
+const IPV6_ROUTE_PROBE: (Ipv6Addr, u16) = (
+    Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+    80,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoricalSyncMode {
     Enabled,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum P2pAddressSelectionMode {
+    Explicit,
+    AutoPublicIpv4,
+    AutoPublicIpv6,
+    AutoOutboundOnly,
+}
+
+impl P2pAddressSelectionMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::AutoPublicIpv4 => "auto-public-ipv4",
+            Self::AutoPublicIpv6 => "auto-public-ipv6",
+            Self::AutoOutboundOnly => "auto-outbound-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct P2pAddressSelection {
+    nat: NatResolver,
+    bind_ip: IpAddr,
+    external_ip: Option<IpAddr>,
+    mode: P2pAddressSelectionMode,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalPublicAddressCandidates {
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -95,16 +133,16 @@ pub async fn run_sync(options: RunSyncOptions) {
         dashboard_password,
         disable_historical_sync,
     } = options;
-    let nat = match nat.parse::<NatResolver>() {
-        Ok(nat) => nat,
+    let p2p_address = match select_p2p_address(&nat, p2p_bind_ip, p2p_port).await {
+        Ok(selection) => selection,
         Err(error) => {
             tracing::error!(%error, "invalid EL NAT resolver");
             std::process::exit(1);
         }
     };
-    let nat = resolve_startup_nat(nat).await;
-    let p2p_external_ip = nat.clone().as_external_ip(p2p_port);
-    let p2p_bind_ip = p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&nat, p2p_port));
+    let nat = p2p_address.nat;
+    let p2p_external_ip = p2p_address.external_ip;
+    let p2p_bind_ip = p2p_address.bind_ip;
     let p2p_external_ip_label = p2p_external_ip
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unresolved".to_owned());
@@ -112,8 +150,14 @@ pub async fn run_sync(options: RunSyncOptions) {
         bind_ip = %p2p_bind_ip,
         external_ip = %p2p_external_ip_label,
         nat = %nat,
+        mode = p2p_address.mode.as_str(),
         "resolved p2p address selection"
     );
+    if p2p_address.mode == P2pAddressSelectionMode::AutoOutboundOnly {
+        tracing::warn!(
+            "no locally owned public IPv4 or IPv6 address was detected; LogEx will use outbound execution and consensus peer connections without advertising a public address"
+        );
+    }
 
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
@@ -450,6 +494,30 @@ pub async fn run_sync(options: RunSyncOptions) {
     tracing::info!("shutting down");
 }
 
+async fn select_p2p_address(
+    nat: &str,
+    p2p_bind_ip: Option<IpAddr>,
+    p2p_port: u16,
+) -> Result<P2pAddressSelection, String> {
+    let parsed = nat
+        .parse::<NatResolver>()
+        .map_err(|error| error.to_string())?;
+    if parsed == NatResolver::Any {
+        let candidates = detect_local_public_addresses();
+        return Ok(choose_auto_p2p_address(candidates, p2p_bind_ip));
+    }
+
+    let resolved = resolve_startup_nat(parsed).await;
+    let external_ip = resolved.clone().as_external_ip(p2p_port);
+    let bind_ip = p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&resolved, p2p_port));
+    Ok(P2pAddressSelection {
+        nat: resolved,
+        bind_ip,
+        external_ip,
+        mode: P2pAddressSelectionMode::Explicit,
+    })
+}
+
 async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
     if matches!(
         nat_resolver,
@@ -475,6 +543,138 @@ fn default_p2p_bind_ip(nat_resolver: &NatResolver, p2p_port: u16) -> IpAddr {
     match nat_resolver.clone().as_external_ip(p2p_port) {
         Some(IpAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+fn choose_auto_p2p_address(
+    candidates: LocalPublicAddressCandidates,
+    p2p_bind_ip: Option<IpAddr>,
+) -> P2pAddressSelection {
+    let selection = match p2p_bind_ip {
+        Some(bind_ip @ IpAddr::V4(_)) => candidates.ipv4.map(|ip| {
+            (
+                NatResolver::ExternalIp(IpAddr::V4(ip)),
+                bind_ip,
+                Some(IpAddr::V4(ip)),
+                P2pAddressSelectionMode::AutoPublicIpv4,
+            )
+        }),
+        Some(bind_ip @ IpAddr::V6(_)) => candidates.ipv6.map(|ip| {
+            (
+                NatResolver::ExternalIp(IpAddr::V6(ip)),
+                bind_ip,
+                Some(IpAddr::V6(ip)),
+                P2pAddressSelectionMode::AutoPublicIpv6,
+            )
+        }),
+        None => candidates
+            .ipv4
+            .map(|ip| {
+                (
+                    NatResolver::ExternalIp(IpAddr::V4(ip)),
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    Some(IpAddr::V4(ip)),
+                    P2pAddressSelectionMode::AutoPublicIpv4,
+                )
+            })
+            .or_else(|| {
+                candidates.ipv6.map(|ip| {
+                    (
+                        NatResolver::ExternalIp(IpAddr::V6(ip)),
+                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        Some(IpAddr::V6(ip)),
+                        P2pAddressSelectionMode::AutoPublicIpv6,
+                    )
+                })
+            }),
+    };
+
+    let (nat, bind_ip, external_ip, mode) = selection.unwrap_or_else(|| {
+        let bind_ip = p2p_bind_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        (
+            NatResolver::None,
+            bind_ip,
+            None,
+            P2pAddressSelectionMode::AutoOutboundOnly,
+        )
+    });
+
+    P2pAddressSelection {
+        nat,
+        bind_ip,
+        external_ip,
+        mode,
+    }
+}
+
+fn detect_local_public_addresses() -> LocalPublicAddressCandidates {
+    LocalPublicAddressCandidates {
+        ipv4: default_route_ipv4().filter(|ip| is_public_ipv4(*ip)),
+        ipv6: default_route_ipv6().filter(|ip| is_public_ipv6(*ip)),
+    }
+}
+
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(IPV4_ROUTE_PROBE).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }
+}
+
+fn default_route_ipv6() -> Option<Ipv6Addr> {
+    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(IPV6_ROUTE_PROBE).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(_) => None,
+        IpAddr::V6(ip) => Some(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+    {
+        return false;
+    }
+
+    match octets {
+        [0, _, _, _] => false,
+        [100, second, _, _] if (64..=127).contains(&second) => false,
+        [192, 0, 0, _] => false,
+        [192, 0, 2, _] => false,
+        [198, second, _, _] if second == 18 || second == 19 => false,
+        [198, 51, 100, _] => false,
+        [203, 0, 113, _] => false,
+        [first, _, _, _] if first >= 240 => false,
+        _ => true,
+    }
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return false;
+    }
+
+    match segments {
+        [0xfe80..=0xfebf, ..] => false,
+        [0xfc00..=0xfdff, ..] => false,
+        [0xfec0..=0xfeff, ..] => false,
+        [0x2001, 0x0db8, ..] => false,
+        [0x2001, 0x0002, ..] => false,
+        [0x2001, second, ..] if (0x0020..=0x002f).contains(&second) => false,
+        [0x2002, ..] => false,
+        [0x0064, 0xff9b, 0, 0, 0, 0, ..] => false,
+        [0, 0, 0, 0, 0, 0xffff, ..] => false,
+        [0, 0, 0, 0, 0, 0, ..] => false,
+        _ => true,
     }
 }
 
@@ -968,6 +1168,120 @@ mod tests {
             block_hash: B256::repeat_byte((block_number % 253) as u8),
             receipts_root: B256::repeat_byte((block_number % 241) as u8),
         }
+    }
+
+    #[test]
+    fn auto_p2p_selection_prefers_public_ipv4() {
+        let selection = choose_auto_p2p_address(
+            LocalPublicAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(203, 0, 114, 10)),
+                ipv6: Some("2604:a880:400:d0::1".parse().unwrap()),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            selection.external_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
+        );
+    }
+
+    #[test]
+    fn auto_p2p_selection_falls_back_to_public_ipv6() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let selection = choose_auto_p2p_address(
+            LocalPublicAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+    }
+
+    #[test]
+    fn auto_p2p_selection_respects_explicit_ipv6_bind_family() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let bind_ip = "2001:db8::1234".parse::<IpAddr>().unwrap();
+
+        let selection = choose_auto_p2p_address(
+            LocalPublicAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            Some(bind_ip),
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(selection.bind_ip, bind_ip);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+    }
+
+    #[test]
+    fn auto_p2p_selection_uses_outbound_only_without_public_address() {
+        let selection = choose_auto_p2p_address(LocalPublicAddressCandidates::default(), None);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.external_ip, None);
+    }
+
+    #[test]
+    fn public_ipv4_filter_rejects_private_shared_and_documentation_ranges() {
+        for ip in [
+            Ipv4Addr::new(10, 1, 2, 3),
+            Ipv4Addr::new(172, 20, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(100, 64, 1, 1),
+            Ipv4Addr::new(100, 127, 255, 254),
+            Ipv4Addr::new(192, 0, 2, 1),
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(203, 0, 113, 1),
+            Ipv4Addr::new(198, 18, 0, 1),
+            Ipv4Addr::new(224, 0, 0, 1),
+        ] {
+            assert!(!is_public_ipv4(ip), "{ip} should not be public");
+        }
+
+        assert!(is_public_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(is_public_ipv4(Ipv4Addr::new(203, 0, 114, 1)));
+    }
+
+    #[test]
+    fn public_ipv6_filter_rejects_non_public_ranges() {
+        for ip in [
+            Ipv6Addr::LOCALHOST,
+            "fe80::1".parse().unwrap(),
+            "fc00::1".parse().unwrap(),
+            "fd00::1".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+            "2001:2::1".parse().unwrap(),
+            "2001:20::1".parse().unwrap(),
+            "2002::1".parse().unwrap(),
+            "64:ff9b::1".parse().unwrap(),
+        ] {
+            assert!(!is_public_ipv6(ip), "{ip} should not be public");
+        }
+
+        assert!(is_public_ipv6("2604:a880:400:d0::1".parse().unwrap()));
     }
 
     #[test]
