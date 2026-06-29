@@ -4,9 +4,9 @@
 
 LogEx starts from a recent CL checkpoint, tracks the live execution head, reverse-syncs EL history toward genesis, stores compressed verified logs, and serves dashboard, SQL query, JSON-RPC, gRPC, and live ERC20 transfer subscription APIs.
 
-Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The active fresh baseline run uses `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, monitor tmux session `logex-baseline-monitor`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`.
+Active branch: `perf/fresh-historical-baseline`. When outside the home network, Mac mini operations must use `ssh -J pi-remote gremlinmaster@192.168.50.44`. The completed baseline run used `/Users/gremlinmaster/logex-fresh-baseline-src`, data dir `/Volumes/SSD 4TB/LogEx`, HTTP port `18683`, tmux session `logex`, and run dir `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644`; the `logex-baseline-monitor` tmux session exited normally after writing `summary.json`.
 
-Historical sync can still reach high instantaneous throughput, but the production baseline is now being measured from a fresh pivot-to-genesis run. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The best remote sample for the current accepted build measured `354.8` blocks/sec with `2` low windows and `0` zero windows; the latest 30 minute rerun through `pi-remote` measured `361.1` blocks/sec over `644,617` verified blocks with `2` low windows and `0` zero windows while physical download repeatedly sat near the 300 Mbps link ceiling and WireGuard dashboard traffic stayed near idle.
+Historical sync has completed the active post-fix pivot-to-genesis baseline. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The post-fix run reached genesis without repeated liveness stalls, kept peers healthy, and showed median physical RX near the 300 Mbps link ceiling; another clean wall-clock benchmark is not required unless a new post-fix health problem appears.
 
 ## Completed Since Last Run
 
@@ -72,20 +72,16 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Deferred background compaction planning while historical sync is incomplete; historical write batches still use their synchronous compacted write path.
 - Deployed the fix to the Mac mini, restarted LogEx in tmux, and confirmed the historical floor advanced past the stalled range after restart.
 - Updated the baseline monitor automation to watch for post-fix stalls and health issues until genesis, then clean up the remaining todo and delete itself if the run completes cleanly.
+- Completed the active post-fix historical baseline to genesis: `summary.json` marked completion with `last_floor = 0` and `937` samples.
+- Verified live head tracking after completion with two `/status` samples one minute apart; the live head advanced from block `25423032` to `25423037`.
+- Reviewed recent service and monitor logs after completion; only normal discovery warnings were present and no monitor errors were found.
+- Recorded post-fix health metrics: `p50` historical rate `139,605` logs/sec and `1,332` blocks/sec, `p90` physical RX `305 Mbps`, connected peers `p50` `97`/`p90` `103`, serving peers `p50` `30`, peak RSS `6.8 GB`, minimum disk free `476.6 GB`, `32` low windows, and `10` zero windows.
 
 ## Remaining TODOs
 
-1. Complete the live historical request scheduler.
-   - Reason: the restored accepted build produces stable warmed and 30 minute samples near the available network ceiling, but this still needs confirmation in the fresh full-run baseline.
-   - Completion criteria: close this when the active run reaches genesis without repeated post-fix low/zero-progress windows; otherwise replace the plan-level fetch model with a global live chunk scheduler that fairly allocates body/receipt lanes across expected and lookahead work and improves longer samples without weakening validation.
-
-2. Confirm post-fix full-run health.
-   - Reason: the known two-hour stall contaminated wall-clock runtime, but the run is still useful for proving that historical sync remains live after the liveness fix.
-   - Completion criteria: let `/Users/gremlinmaster/logex-baseline-runs/fresh-baseline-20260628-142644` reach genesis, then record post-fix logs/sec, blocks/sec, peer counts, bandwidth, CPU, memory, disk, low/zero-progress windows, routing mode, and failures. Do not require another clean fresh run unless a repeated post-fix stall or health problem appears.
-
-3. Continue peer and bandwidth utilization work only from measured bottlenecks.
-   - Reason: recent constants-only experiments produced mixed results or regressions.
-   - Completion criteria: keep only changes that improve longer remote samples without increasing low/zero-progress windows or weakening validation.
+1. Conclude the historical sync performance PR.
+   - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
+   - Completion criteria: confirm CI status, update the PR summary if needed, and merge when checks allow.
 
 ## Design Decisions
 
@@ -249,19 +245,19 @@ Historical sync can still reach high instantaneous throughput, but the productio
 
 - Challenge: the active run is useful for stability but is not a fresh pivot-to-genesis baseline.
   - Resolution: collected a 30 minute stability sample and identified the existing guarded fresh-baseline script.
-  - Remaining: explicit reset approval was granted and the fresh run is now active; final production baseline metrics remain pending until genesis.
+  - Remaining: resolved; the post-fix baseline reached genesis and live head tracking continued afterward.
 
 - Challenge: the default fresh-baseline path refuses to reset when the active data dir is not fully synced.
   - Resolution: used the guarded `discard-incomplete` mode so the known full-sync backup was preserved and only the incomplete active data was deleted.
-  - Remaining: monitor the active fresh run to completion and compare against the 4 hour target.
+  - Remaining: resolved; the run reached genesis and another clean wall-clock benchmark is not required while network capacity is the practical bottleneck.
 
 - Challenge: the fresh run appeared alive but made no historical progress for nearly two hours.
   - Resolution: sampled the running process and matched the stall to background compaction/profile-rewrite planning scanning storage metadata while the ordered historical writer waited; background compaction is now skipped while historical sync is incomplete.
-  - Remaining: continue the fresh baseline to confirm no repeated multi-window zero-progress stalls occur.
+  - Remaining: resolved; the post-fix run reached genesis without a repeated liveness stall.
 
 - Challenge: the baseline monitor was still framed around a clean wall-clock benchmark after the stall fix.
   - Resolution: updated the heartbeat instructions to monitor post-fix liveness and health until genesis, then remove itself and clear or revise the todo if no apparent problems remain.
-  - Remaining: none until genesis is reached.
+  - Remaining: resolved; genesis was reached and the automation is being removed.
 
 ## Dead Code and Obsolescence Cleanup
 
@@ -284,22 +280,20 @@ Historical sync can still reach high instantaneous throughput, but the productio
 - Inspected `local-ops/start-fresh-baseline-run.sh`; it remains the guarded path for the required fresh baseline and was not run because it deletes/moves the remote data directory.
 - Rechecked the guarded fresh-baseline reset path before running it; no obsolete production code was removed in this pass.
 - Inspected background storage maintenance after the stall and removed its ability to run compaction planning concurrently with incomplete historical sync.
+- Rechecked the roadmap after baseline completion and removed obsolete fresh-run TODO criteria.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 
 ## Git Workflow
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`.
-- Pull request status: not created yet; branch remains in performance validation.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`; `docs: update baseline monitor criteria`; `docs: record completed historical baseline`.
+- Pull request status: branch appears ready for final PR review/CI because the post-fix baseline completed to genesis without repeated stalls.
 - Merge status: not merged.
 - Blockers: none known.
 
 ## Known Issues or Risks
 
-- The fresh baseline run is still in early peer warm-up; initial logs/sec and ETA are not representative yet.
-- The production baseline is not complete until the active run reaches genesis and the monitor summary is reviewed.
-
-- Current samples are shorter than a fresh full sync; the 30 minute sample had only `2` low windows and `0` zero windows, but production readiness still depends on a full pivot-to-genesis report.
-- Peer count and routing mode affect comparability; record both for every benchmark.
-- A global live chunk scheduler would be a material architecture change; do not start it unless the fresh full-run benchmark shows repeated low/zero-progress windows that the accepted scheduler cannot explain by network, disk, or density changes.
+- The completed run is not a clean wall-clock benchmark because it includes the known pre-fix two-hour stall and restart, but post-fix liveness is validated.
+- Peer count and routing mode affect comparability; record both for any future benchmark.
+- A global live chunk scheduler would be a material architecture change; do not start it unless a future post-fix run shows repeated low/zero-progress windows that cannot be explained by network, disk, or density changes.
