@@ -74,6 +74,7 @@ struct P2pAddressSelection {
     bind_ip: IpAddr,
     external_ip: Option<IpAddr>,
     mode: P2pAddressSelectionMode,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -140,7 +141,7 @@ pub async fn run_sync(options: RunSyncOptions) {
             std::process::exit(1);
         }
     };
-    let nat = p2p_address.nat;
+    let nat = p2p_address.nat.clone();
     let p2p_external_ip = p2p_address.external_ip;
     let p2p_bind_ip = p2p_address.bind_ip;
     let p2p_external_ip_label = p2p_external_ip
@@ -153,10 +154,8 @@ pub async fn run_sync(options: RunSyncOptions) {
         mode = p2p_address.mode.as_str(),
         "resolved p2p address selection"
     );
-    if p2p_address.mode == P2pAddressSelectionMode::AutoOutboundOnly {
-        tracing::warn!(
-            "no locally owned public IPv4 or IPv6 address was detected; LogEx will use outbound execution and consensus peer connections without advertising a public address"
-        );
+    for warning in &p2p_address.warnings {
+        tracing::warn!(warning, "p2p address selection warning");
     }
 
     let data_dir = pm_config.data_dir.clone();
@@ -273,17 +272,19 @@ pub async fn run_sync(options: RunSyncOptions) {
     let storage_anchors = storage.chain_anchors();
     let historical_floor = storage.historical_floor();
     let historical_anchor = storage.historical_anchor();
+    let mut sync_status = initial_sync_status(
+        resume_block,
+        &storage_anchors,
+        historical_floor,
+        historical_anchor,
+        historical_sync_disabled,
+        consensus.as_deref(),
+    );
+    apply_p2p_address_status(&mut sync_status, &p2p_address);
     let state = Arc::new(AppState::new(
         storage,
         Some(SubscriptionManager::new()),
-        initial_sync_status(
-            resume_block,
-            &storage_anchors,
-            historical_floor,
-            historical_anchor,
-            historical_sync_disabled,
-            consensus.as_deref(),
-        ),
+        sync_status,
     ));
 
     let known_peers = match load_known_peers(&known_peers_file) {
@@ -515,6 +516,7 @@ async fn select_p2p_address(
         bind_ip,
         external_ip,
         mode: P2pAddressSelectionMode::Explicit,
+        warnings: Vec::new(),
     })
 }
 
@@ -550,6 +552,14 @@ fn choose_auto_p2p_address(
     candidates: LocalPublicAddressCandidates,
     p2p_bind_ip: Option<IpAddr>,
 ) -> P2pAddressSelection {
+    let mut warnings = Vec::new();
+    if p2p_bind_ip.is_none() && candidates.ipv4.is_some() && candidates.ipv6.is_some() {
+        warnings.push(
+            "public IPv4 and IPv6 were both detected; current single-stack mode selects IPv4"
+                .to_owned(),
+        );
+    }
+
     let selection = match p2p_bind_ip {
         Some(bind_ip @ IpAddr::V4(_)) => candidates.ipv4.map(|ip| {
             (
@@ -590,6 +600,10 @@ fn choose_auto_p2p_address(
     };
 
     let (nat, bind_ip, external_ip, mode) = selection.unwrap_or_else(|| {
+        warnings.push(
+            "no locally owned public IPv4 or IPv6 address was detected; using outbound-only P2P without advertising a public address"
+                .to_owned(),
+        );
         let bind_ip = p2p_bind_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         (
             NatResolver::None,
@@ -604,6 +618,7 @@ fn choose_auto_p2p_address(
         bind_ip,
         external_ip,
         mode,
+        warnings,
     }
 }
 
@@ -676,6 +691,13 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         [0, 0, 0, 0, 0, 0, ..] => false,
         _ => true,
     }
+}
+
+fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
+    status.p2p_address_mode = Some(selection.mode.as_str().to_owned());
+    status.p2p_bind_ip = Some(selection.bind_ip.to_string());
+    status.p2p_external_ip = selection.external_ip.map(|ip| ip.to_string());
+    status.p2p_warnings = selection.warnings.clone();
 }
 
 fn initial_sync_status(
@@ -1190,6 +1212,8 @@ mod tests {
             selection.external_ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
         );
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("both detected"));
     }
 
     #[test]
@@ -1242,6 +1266,8 @@ mod tests {
         assert_eq!(selection.nat, NatResolver::None);
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(selection.external_ip, None);
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound-only"));
     }
 
     #[test]

@@ -322,6 +322,18 @@ pub struct SyncStatus {
     pub serving_peers: usize,
     /// Number of pending peer candidates waiting to be dialed.
     pub pending_peers: usize,
+    /// Startup P2P address selection mode, such as auto-public-ipv4 or auto-outbound-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_address_mode: Option<String>,
+    /// Local IP address used by EL and CL P2P listeners.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_bind_ip: Option<String>,
+    /// Public external IP advertised to peers, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_external_ip: Option<String>,
+    /// Startup P2P reachability warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_warnings: Vec<String>,
     /// The highest block number ingested so far.
     pub current_block: u64,
     /// The latest known block on the network.

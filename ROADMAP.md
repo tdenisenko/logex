@@ -27,6 +27,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Stopped the temporary IPv6 droplet clients and removed the temporary IPv4 reject rule after the proof window; no full sync is left running there.
 - Implemented default automatic P2P address-family selection for `--nat any`: locally owned public IPv4 is preferred, locally owned public IPv6 is the fallback, and hosts without a public local address use outbound-only mode instead of advertising an API-discovered NAT address they do not own.
 - Verified the selector on the IPv6 droplet: default startup selected `auto-public-ipv4` with external IP `152.42.222.119`; forced IPv6 bind plus default `--nat any` selected `auto-public-ipv6` and advertised `[2400:6180:0:d2:0:2:fa9c:1000]`.
+- Exposed P2P address selection in `/status` through `p2p_address_mode`, `p2p_bind_ip`, `p2p_external_ip`, and `p2p_warnings`, then verified the IPv6 droplet status response reported `auto-public-ipv6` with the droplet IPv6 address.
 - Verified relevant local checks: `cargo fmt --all -- --check`, focused `logex-sync` P2P tests, `logex-cl --lib`, targeted `logex-node` startup tests, and `cargo clippy -p logex-sync -- -D warnings`.
 - Reproduced the zero-progress stall through the Pi jump host: the floor stayed pinned while peers and active downloads remained present.
 - Added critical-path repair for missing expected historical fetches without resetting buffered lookahead.
@@ -106,7 +107,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 
 2. Complete dual-stack address-family support.
    - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, both usable families, or only outbound connectivity.
-   - Completion criteria: LogEx uses both IPv4 and IPv6 discovery/sync paths when both are usable, or a deliberate product decision documents single-family behavior; startup/status must clearly report the selected mode and avoid misleading public reachability claims.
+   - Completion criteria: LogEx uses both IPv4 and IPv6 discovery/sync paths when both are usable, or a deliberate product decision documents single-family behavior; startup/status already reports the selected mode and must continue avoiding misleading public reachability claims.
 
 3. Conclude the historical sync performance PR.
    - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
@@ -361,7 +362,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`.
+- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
