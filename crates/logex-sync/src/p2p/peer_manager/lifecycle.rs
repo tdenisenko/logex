@@ -377,8 +377,10 @@ impl PeerManager {
                 node_addr = %update.node_record.tcp_addr(),
                 has_ip4 = update.enr.ip4().is_some(),
                 has_tcp4 = update.enr.tcp4().is_some(),
+                has_udp4 = update.enr.udp4().is_some(),
                 has_ip6 = update.enr.ip6().is_some(),
                 has_tcp6 = update.enr.tcp6().is_some(),
+                has_udp6 = update.enr.udp6().is_some(),
                 ?self.dial_families,
                 "ignoring DNS execution peer without a dialable endpoint for configured outbound p2p address families"
             );

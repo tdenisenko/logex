@@ -740,7 +740,7 @@ fn dns_boot_node_for_bind_ip(
         return None;
     }
     let advertised_udp = if bind_ip.is_ipv6() {
-        update.enr.udp6().or_else(|| update.enr.udp4())
+        update.enr.udp6()
     } else {
         update.enr.udp4()
     };
@@ -756,8 +756,8 @@ fn dns_node_record_for_bind_ip(
     let peer_id = update.node_record.id;
     if bind_ip.is_ipv6() {
         let ip = update.enr.ip6().map(IpAddr::V6)?;
-        let tcp_port = update.enr.tcp6().or_else(|| update.enr.tcp4())?;
-        let udp_port = update.enr.udp6().or_else(|| update.enr.udp4());
+        let tcp_port = update.enr.tcp6()?;
+        let udp_port = update.enr.udp6();
         return Some(NodeRecord::new_with_ports(ip, tcp_port, udp_port, peer_id));
     }
 
@@ -902,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn dns_node_record_uses_shared_tcp_port_for_ipv6_when_tcp6_is_absent() {
+    fn dns_node_record_rejects_ipv6_when_tcp6_is_absent() {
         let enr: reth_network_peers::Enr<SecretKey> = "enr:-Ky4QFLajgAy-oJ6-qZAtBwJAAKJYSN1IvRz6idba7ab3U44YgtX3kwRE0yotbttzeRFCCSD8QuvjBJSzUiYNKbXAZgkg2V0aMfGhAfJRi6AgmlkgnY0gmlwhIjzWNuDaXA2kCoBBPgBcQDcAAAAAAAAAAKJc2VjcDI1NmsxoQLYYURYDijb3HRPx6MDWt3HGS-GtWwdhqudRJ4ye_9VF4N0Y3CCdyeDdWRwgncn"
             .parse()
             .unwrap();
@@ -920,11 +920,7 @@ mod tests {
             enr,
         };
 
-        let record = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update)
-            .expect("IPv6 ENRs may use the shared tcp field when tcp6 is absent");
-
-        assert!(record.tcp_addr().ip().is_ipv6());
-        assert_eq!(record.tcp_port, update.enr.tcp4().unwrap());
+        assert!(dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update).is_none());
     }
 
     #[test]
