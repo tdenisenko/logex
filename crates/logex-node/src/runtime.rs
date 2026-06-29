@@ -135,13 +135,14 @@ pub async fn run_sync(options: RunSyncOptions) {
         dashboard_password,
         disable_historical_sync,
     } = options;
-    let p2p_address = match select_p2p_address(&nat, p2p_bind_ip, p2p_port).await {
+    let mut p2p_address = match select_p2p_address(&nat, p2p_bind_ip, p2p_port).await {
         Ok(selection) => selection,
         Err(error) => {
             tracing::error!(%error, "invalid EL NAT resolver");
             std::process::exit(1);
         }
     };
+    add_runtime_p2p_warnings(&mut p2p_address, &execution_bootnodes);
     let nat = p2p_address.nat.clone();
     let p2p_external_ip = p2p_address.external_ip;
     let p2p_bind_ip = p2p_address.bind_ip;
@@ -716,6 +717,15 @@ fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelec
     status.p2p_warnings = selection.warnings.clone();
 }
 
+fn add_runtime_p2p_warnings(selection: &mut P2pAddressSelection, execution_bootnodes: &[String]) {
+    if selection.dial_families == DialAddressFamilies::IPV6 && execution_bootnodes.is_empty() {
+        selection.warnings.push(
+            "strict IPv6-only execution sync depends on public IPv6 EL peers; public discovery can be sparse, so configure --execution-bootnode with IPv6 enodes if EL peers stay at zero"
+                .to_owned(),
+        );
+    }
+}
+
 fn dial_family_labels(families: DialAddressFamilies) -> Vec<String> {
     let mut labels = Vec::with_capacity(2);
     if families.allows_ipv4() {
@@ -1263,6 +1273,43 @@ mod tests {
         assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
         assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+    }
+
+    #[test]
+    fn ipv6_only_selection_warns_without_execution_bootnodes() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut selection = choose_auto_p2p_address(
+            LocalPublicAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        add_runtime_p2p_warnings(&mut selection, &[]);
+
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("IPv6-only execution sync"));
+        assert!(selection.warnings[0].contains("--execution-bootnode"));
+    }
+
+    #[test]
+    fn ipv6_only_selection_does_not_warn_with_execution_bootnodes() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut selection = choose_auto_p2p_address(
+            LocalPublicAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        add_runtime_p2p_warnings(
+            &mut selection,
+            &["enode://abc@[2604:a880:400:d0::2]:30303".to_owned()],
+        );
+
+        assert!(selection.warnings.is_empty());
     }
 
     #[test]
