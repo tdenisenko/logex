@@ -76,12 +76,15 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
 - Verified live head tracking after completion with two `/status` samples one minute apart; the live head advanced from block `25423032` to `25423037`.
 - Reviewed recent service and monitor logs after completion; only normal discovery warnings were present and no monitor errors were found.
 - Recorded post-fix health metrics: `p50` historical rate `139,605` logs/sec and `1,332` blocks/sec, `p90` physical RX `305 Mbps`, connected peers `p50` `97`/`p90` `103`, serving peers `p50` `30`, peak RSS `6.8 GB`, minimum disk free `476.6 GB`, `32` low windows, and `10` zero windows.
+- Opened PR #97 (`Optimize historical execution sync scheduler`) for the completed historical sync performance branch.
+- Ran local CI-equivalent validation successfully: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`.
+- Confirmed GitHub Actions jobs for PR #97 currently fail before running any workflow steps because Actions quota is unavailable; merge is deferred until checks can be rerun.
 
 ## Remaining TODOs
 
 1. Conclude the historical sync performance PR.
    - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
-   - Completion criteria: confirm CI status, update the PR summary if needed, and merge when checks allow.
+   - Completion criteria: rerun PR #97 GitHub Actions after quota is available, confirm checks pass, and merge when checks allow.
 
 ## Design Decisions
 
@@ -287,13 +290,14 @@ Historical sync has completed the active post-fix pivot-to-genesis baseline. The
 
 - Current branch: `perf/fresh-historical-baseline`.
 - New branch created this run: no, continuing the active performance branch.
-- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`; `docs: update baseline monitor criteria`; `docs: record completed historical baseline`.
-- Pull request status: branch appears ready for final PR review/CI because the post-fix baseline completed to genesis without repeated stalls.
+- Commits made during this run: `docs: record rejected scheduler experiments`; `perf: prioritize expected historical fetches`; `perf: refill historical fetches during prepare waits`; `perf: hedge critical historical prefix chunks`; `perf: keep historical fetch cursor monotonic`; `perf: preserve client-family probes in body receipt pool`; `perf: skip salvage for accepted body receipt prefixes`; `docs: record rejected live scheduler experiments`; `docs: record rejected residual carry-forward experiment`; `docs: record rejected async residual experiment`; `docs: record warmed baseline benchmark`; `docs: record long baseline sample`; `docs: record fresh baseline reset`; `fix: defer compaction during historical sync`; `docs: update baseline monitor criteria`; `docs: record completed historical baseline`; `docs: note historical sync PR CI blocker`.
+- Pull request status: PR #97 is open and ready for final CI once GitHub Actions quota is available.
 - Merge status: not merged.
-- Blockers: none known.
+- Blockers: GitHub Actions quota is unavailable; PR checks fail immediately with no runner steps or logs. Local CI-equivalent checks pass.
 
 ## Known Issues or Risks
 
 - The completed run is not a clean wall-clock benchmark because it includes the known pre-fix two-hour stall and restart, but post-fix liveness is validated.
+- PR #97 cannot be merged until GitHub Actions quota is restored and the hosted checks can run.
 - Peer count and routing mode affect comparability; record both for any future benchmark.
 - A global live chunk scheduler would be a material architecture change; do not start it unless a future post-fix run shows repeated low/zero-progress windows that cannot be explained by network, disk, or density changes.
