@@ -116,6 +116,8 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Confirmed every extracted public IPv6 EL candidate had a closed or timed-out advertised TCP port, while CL addresses in the same log were reachable; this confirms the public EL candidate source is stale/unreachable rather than LogEx missing a local IPv6 socket path.
 - Updated automatic address selection so the advertised address family and outbound dial families are separate: automatic public IPv6 fallback still advertises IPv6, but accepts IPv4 outbound candidates when an IPv4 route exists; outbound-only mode likewise keeps both routed families available.
 - Rebuilt on the IPv6 droplet and verified default dual-public auto mode reports `auto-public-ipv4`, bind `0.0.0.0`, external IPv4 `152.42.222.119`, dial families `["ipv4","ipv6"]`, and reached CL plus EL peers in a one minute smoke run.
+- Added a derived `execution_network.bootstrap_warning` field to `/status` so unreachable or wrong-family execution bootstrap conditions are visible without interpreting raw counters.
+- Validated the warning on the IPv6 droplet in strict IPv6-only mode: CL reached 88 active sessions, `SOCKET4_COUNT=0`, all 22 submitted EL dials expired, and `/status` reported the new bootstrap warning. The temporary process, firewall rule, resolver override, and data dir were removed afterward.
 
 ## Remaining TODOs
 
@@ -373,6 +375,10 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Resolution: captured trace-level DNS candidate endpoints and probed their advertised TCP ports directly; every EL candidate timed out or refused TCP.
   - Remaining: strict public IPv6-only EL needs reliable IPv6 execution bootnodes or a different peer source before it can be claimed production-ready.
 
+- Challenge: the raw execution-network counters were enough for debugging but not clear enough for operators.
+  - Resolution: `/status` now adds a derived bootstrap warning when DNS candidates exist, all submitted dials expire, and no execution sessions are accepted, or when DNS returns only wrong-family candidates.
+  - Remaining: the warning is diagnostic; it does not by itself make public strict IPv6-only EL sync possible.
+
 - Challenge: the strict IPv6-only proof initially failed before P2P startup because the droplet resolver path used the local IPv4 systemd-resolved stub and the test firewall rejected IPv4 for the LogEx runtime user.
   - Resolution: reran the proof with a temporary IPv6 resolver file and restored the systemd-resolved symlink afterward.
   - Remaining: no production code change is required for this test-host artifact, but strict IPv6 deployments need working IPv6 DNS or an already resolved checkpoint source.
@@ -415,12 +421,13 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Rechecked the outbound dial-family diff; no rejected experiment code was present and changes are limited to family filtering, DNS candidate conversion, status exposure, and focused tests.
 - Rechecked the strict IPv6 warning diff; no obsolete code was introduced and temporary droplet proof data was removed after validation.
 - Rechecked the automatic routed-family diff; it is limited to startup selection helpers and focused tests. Temporary candidate-probe/default-smoke data was removed from the IPv6 droplet.
+- Rechecked the REST bootstrap-warning diff; it is limited to derived status serialization and focused tests. The strict IPv6 status-smoke artifacts were removed from the droplet.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; pending commit for routed-family auto dialing.
+- Commits made during this run: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; pending commit for execution bootstrap status warning.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.

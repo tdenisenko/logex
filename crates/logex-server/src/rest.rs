@@ -275,6 +275,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
     let verified_to_block = head_block.or(canonical_top_block);
+    let execution_network = rest_execution_network_status(sync.execution_network);
     Json(serde_json::json!({
         "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
@@ -347,13 +348,56 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "materialized_execution_anchor_gap_count": sync.materialized_execution_anchor_gap_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
-        "execution_network": sync.execution_network,
+        "execution_network": execution_network,
         "consensus_network": sync.consensus_network,
         "consensus_light_client": sync.consensus_light_client,
         "index_lag_blocks": index_lag_blocks,
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
     }))
+}
+
+fn rest_execution_network_status(
+    status: Option<logex_types::ExecutionNetworkStatus>,
+) -> Option<serde_json::Value> {
+    let status = status?;
+    let mut value =
+        serde_json::to_value(&status).expect("execution network status should serialize");
+    if let Some(warning) = execution_bootstrap_warning(&status)
+        && let serde_json::Value::Object(fields) = &mut value
+    {
+        fields.insert(
+            "bootstrap_warning".to_owned(),
+            serde_json::Value::String(warning.to_owned()),
+        );
+    }
+    Some(value)
+}
+
+fn execution_bootstrap_warning(
+    status: &logex_types::ExecutionNetworkStatus,
+) -> Option<&'static str> {
+    if status.accepted_sessions == 0
+        && status.dns_discovered_candidates > 0
+        && status.submitted_dials_total >= 8
+        && status.submitted_dial_expirations >= status.submitted_dials_total
+    {
+        return Some(
+            "execution discovery found DNS candidates, but all submitted dials expired before any session was accepted; the discovered endpoints may be unreachable from the selected P2P address family",
+        );
+    }
+
+    if status.accepted_sessions == 0
+        && status.dns_discovered_candidates == 0
+        && status.discovered_candidates == 0
+        && status.dns_family_rejected_candidates > 0
+    {
+        return Some(
+            "execution DNS discovery returned candidates, but none had a dialable endpoint for the selected P2P address family",
+        );
+    }
+
+    None
 }
 
 fn stored_log_range(storage: &PartitionManager) -> Option<(u64, u64)> {
@@ -479,6 +523,46 @@ mod tests {
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
+
+    #[test]
+    fn execution_bootstrap_warning_detects_expired_dns_candidates() {
+        let status = ExecutionNetworkStatus {
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("all submitted dials expired"));
+        assert!(warning.contains("selected P2P address family"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_after_accepted_session() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 1,
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_family_rejected_dns_candidates() {
+        let status = ExecutionNetworkStatus {
+            dns_family_rejected_candidates: 12,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("none had a dialable endpoint"));
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
