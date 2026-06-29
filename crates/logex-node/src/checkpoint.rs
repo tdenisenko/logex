@@ -7,6 +7,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const CHECKPOINT_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+const CHECKPOINT_SLOTS_PER_EPOCH: u64 = 32;
 pub const DEFAULT_CHECKPOINT_SYNC_URL: &str = "https://mainnet.checkpoint.sigp.io";
 pub const RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG: u64 = 256;
 
@@ -49,6 +50,12 @@ pub enum CheckpointSyncError {
     MissingRoot { url: String },
     #[error("checkpoint-sync endpoint returned non-numeric slot {slot:?} for {url}")]
     InvalidSlot { url: String, slot: String },
+    #[error("checkpoint-sync endpoint returned non-numeric epoch {epoch:?} for {url}")]
+    InvalidEpoch { url: String, epoch: String },
+    #[error(
+        "checkpoint-sync endpoint could not resolve finalized checkpoint from {base_url}: {failures}"
+    )]
+    FinalizedFallbacksFailed { base_url: String, failures: String },
     #[error(
         "checkpoint {slot}@{root} is stale relative to endpoint finalized slot {finalized_slot}; max freshness is {max_epochs} epochs"
     )]
@@ -149,6 +156,48 @@ struct BeaconRootResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct BeaconRootData {
     root: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconFinalityCheckpointsResponse {
+    data: BeaconFinalityCheckpointsData,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconFinalityCheckpointsData {
+    finalized: BeaconCheckpoint,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BeaconCheckpoint {
+    epoch: String,
+    root: String,
+}
+
+impl BeaconFinalityCheckpointsResponse {
+    fn finalized_header(self, url: &str) -> Result<BeaconHeader, CheckpointSyncError> {
+        let epoch = self.data.finalized.epoch.parse::<u64>().map_err(|_| {
+            CheckpointSyncError::InvalidEpoch {
+                url: url.to_owned(),
+                epoch: self.data.finalized.epoch,
+            }
+        })?;
+        let slot = epoch
+            .checked_mul(CHECKPOINT_SLOTS_PER_EPOCH)
+            .ok_or_else(|| CheckpointSyncError::InvalidEpoch {
+                url: url.to_owned(),
+                epoch: epoch.to_string(),
+            })?;
+        if self.data.finalized.root.is_empty() {
+            return Err(CheckpointSyncError::MissingRoot {
+                url: url.to_owned(),
+            });
+        }
+        Ok(BeaconHeader {
+            slot,
+            root: self.data.finalized.root,
+        })
+    }
 }
 
 pub async fn resolve_checkpoint(
@@ -500,12 +549,48 @@ impl CheckpointSyncEndpoint {
         client: &reqwest::Client,
         block_id: &str,
     ) -> Result<BeaconHeader, CheckpointSyncError> {
+        if block_id == "finalized" {
+            return self.fetch_finalized_header(client).await;
+        }
+
+        self.fetch_beacon_header(client, block_id).await
+    }
+
+    async fn fetch_finalized_header(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<BeaconHeader, CheckpointSyncError> {
+        let mut failures = Vec::new();
+
+        match self.fetch_beacon_header(client, "finalized").await {
+            Ok(header) => return Ok(header),
+            Err(error) => failures.push(error.to_string()),
+        }
+
+        match self.fetch_finalized_block(client).await {
+            Ok(header) => return Ok(header),
+            Err(error) => failures.push(error.to_string()),
+        }
+
+        match self.fetch_finality_checkpoint(client).await {
+            Ok(header) => return Ok(header),
+            Err(error) => failures.push(error.to_string()),
+        }
+
+        Err(CheckpointSyncError::FinalizedFallbacksFailed {
+            base_url: self.base_url.clone(),
+            failures: failures.join("; "),
+        })
+    }
+
+    async fn fetch_beacon_header(
+        &self,
+        client: &reqwest::Client,
+        block_id: &str,
+    ) -> Result<BeaconHeader, CheckpointSyncError> {
         let url = format!("{}/eth/v1/beacon/headers/{}", self.base_url, block_id);
         let response = get_checkpoint_response(client, &url).await?;
         if !response.status().is_success() {
-            if block_id == "finalized" && response.status() == reqwest::StatusCode::NOT_FOUND {
-                return self.fetch_finalized_block(client).await;
-            }
             return Err(CheckpointSyncError::HttpStatus {
                 url,
                 status: response.status(),
@@ -582,6 +667,31 @@ impl CheckpointSyncEndpoint {
         }
 
         Ok(BeaconHeader { slot, root })
+    }
+
+    async fn fetch_finality_checkpoint(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<BeaconHeader, CheckpointSyncError> {
+        let url = format!(
+            "{}/eth/v1/beacon/states/finalized/finality_checkpoints",
+            self.base_url
+        );
+        let response = get_checkpoint_response(client, &url).await?;
+        if !response.status().is_success() {
+            return Err(CheckpointSyncError::HttpStatus {
+                url,
+                status: response.status(),
+            });
+        }
+        response
+            .json::<BeaconFinalityCheckpointsResponse>()
+            .await
+            .map_err(|source| CheckpointSyncError::Decode {
+                url: url.clone(),
+                source,
+            })?
+            .finalized_header(&url)
     }
 }
 
@@ -914,6 +1024,49 @@ mod tests {
             root.data.root,
             "0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c"
         );
+    }
+
+    #[test]
+    fn parses_finality_checkpoints_response_as_checkpoint_header() {
+        let response: BeaconFinalityCheckpointsResponse = serde_json::from_str(
+            r#"{"data":{"previous_justified":{"epoch":"458183","root":"0x01"},"current_justified":{"epoch":"458184","root":"0x02"},"finalized":{"epoch":"458184","root":"0x61e8d54d6fff34c1f77a541b113581be3c394aa393ce4bb8480ae1ed27b3e60f"}}}"#,
+        )
+        .unwrap();
+
+        let header = response
+            .finalized_header(
+                "https://example.test/eth/v1/beacon/states/finalized/finality_checkpoints",
+            )
+            .unwrap();
+        assert_eq!(header.slot, 458_184 * 32);
+        assert_eq!(
+            header.root,
+            "0x61e8d54d6fff34c1f77a541b113581be3c394aa393ce4bb8480ae1ed27b3e60f"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_finality_checkpoint_epoch() {
+        let response: BeaconFinalityCheckpointsResponse = serde_json::from_str(
+            r#"{"data":{"finalized":{"epoch":"not-a-number","root":"0x61e8d54d6fff34c1f77a541b113581be3c394aa393ce4bb8480ae1ed27b3e60f"}}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            response.finalized_header("https://example.test/finality"),
+            Err(CheckpointSyncError::InvalidEpoch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_finality_checkpoint_root() {
+        let response: BeaconFinalityCheckpointsResponse =
+            serde_json::from_str(r#"{"data":{"finalized":{"epoch":"458184","root":""}}}"#).unwrap();
+
+        assert!(matches!(
+            response.finalized_header("https://example.test/finality"),
+            Err(CheckpointSyncError::MissingRoot { .. })
+        ));
     }
 
     fn source_header(endpoint: &str, slot: u64, root: &str) -> SourceBeaconHeader {
