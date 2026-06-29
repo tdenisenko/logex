@@ -12,7 +12,8 @@ use eyre::Result;
 use logex_types::LOGEX_CLIENT_VERSION;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
-use reth_discv5::discv5::ListenConfig;
+use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
+use reth_discv5::enr_to_discv4_id;
 use reth_dns_discovery::{
     DnsDiscoveryConfig, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
 };
@@ -294,8 +295,10 @@ impl PeerManager {
             .collect::<Vec<_>>();
         let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes)?;
         let mut filtered_execution_bootnodes = Vec::new();
+        let mut filtered_execution_bootnode_enrs = Vec::new();
         let mut skipped_execution_bootnodes = 0usize;
-        for node in execution_bootnodes {
+        let mut skipped_execution_bootnode_enrs = 0usize;
+        for node in execution_bootnodes.node_records {
             if node_matches_dial_families(dial_families, &node) {
                 upsert_known_peer(&mut known_peers, node);
                 filtered_execution_bootnodes.push(node);
@@ -303,10 +306,31 @@ impl PeerManager {
                 skipped_execution_bootnodes += 1;
             }
         }
-        if !filtered_execution_bootnodes.is_empty() || skipped_execution_bootnodes > 0 {
+        for enr in execution_bootnodes.signed_enrs {
+            let mut accepted = false;
+            if let Some(node) = signed_enr_node_record_for_dial_families(dial_families, &enr) {
+                upsert_known_peer(&mut known_peers, node);
+                filtered_execution_bootnodes.push(node);
+                accepted = true;
+            }
+            if signed_enr_matches_discovery_bind_ip(bind_ip, &enr) {
+                filtered_execution_bootnode_enrs.push(enr);
+                accepted = true;
+            }
+            if !accepted {
+                skipped_execution_bootnode_enrs += 1;
+            }
+        }
+        if !filtered_execution_bootnodes.is_empty()
+            || !filtered_execution_bootnode_enrs.is_empty()
+            || skipped_execution_bootnodes > 0
+            || skipped_execution_bootnode_enrs > 0
+        {
             tracing::info!(
-                accepted = filtered_execution_bootnodes.len(),
-                skipped = skipped_execution_bootnodes,
+                accepted_direct = filtered_execution_bootnodes.len(),
+                accepted_signed_discovery = filtered_execution_bootnode_enrs.len(),
+                skipped_enodes = skipped_execution_bootnodes,
+                skipped_enrs = skipped_execution_bootnode_enrs,
                 bind_ip = %bind_ip,
                 ?dial_families,
                 "loaded configured execution bootnodes"
@@ -411,17 +435,24 @@ impl PeerManager {
                     .filter(|node| node_matches_bind_ip(bind_ip, node))
                     .copied()
                     .collect::<Vec<_>>();
+                let signed_discv5_boot_nodes = filtered_execution_bootnode_enrs
+                    .iter()
+                    .filter(|enr| signed_enr_matches_discovery_bind_ip(bind_ip, enr))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 builder = builder.discovery_v5(
                     reth_discv5::Config::builder(listener_addr)
                         .discv5_config(
                             reth_discv5::discv5::ConfigBuilder::new(discv5_listen).build(),
                         )
-                        .add_unsigned_boot_nodes(discv5_boot_nodes.iter().copied()),
+                        .add_unsigned_boot_nodes(discv5_boot_nodes.iter().copied())
+                        .add_signed_boot_nodes(signed_discv5_boot_nodes.iter().cloned()),
                 );
                 tracing::info!(
                     bind_ip = %bind_ip,
                     udp_port = execution_discv5_port,
-                    bootnodes = discv5_boot_nodes.len(),
+                    unsigned_bootnodes = discv5_boot_nodes.len(),
+                    signed_bootnodes = signed_discv5_boot_nodes.len(),
                     "enabled execution discv5 discovery for IPv6 p2p bind"
                 );
             }
@@ -674,19 +705,34 @@ fn peer_connection_limits(max_peers: usize) -> (usize, usize) {
     (max_outbound, max_inbound)
 }
 
-fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<Vec<NodeRecord>> {
-    let mut nodes = Vec::new();
+#[derive(Debug, Default)]
+struct ParsedExecutionBootnodes {
+    node_records: Vec<NodeRecord>,
+    signed_enrs: Vec<Discv5Enr>,
+}
+
+fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<ParsedExecutionBootnodes> {
+    let mut bootnodes = ParsedExecutionBootnodes::default();
     for raw in raw_bootnodes {
         let raw = raw.trim();
         if raw.is_empty() {
             continue;
         }
-        let node = raw
-            .parse::<NodeRecord>()
-            .map_err(|error| eyre::eyre!("invalid execution bootnode {raw:?}: {error}"))?;
-        nodes.push(node);
+        if raw.starts_with("enr:") {
+            let enr = raw
+                .parse::<Discv5Enr>()
+                .map_err(|error| eyre::eyre!("invalid execution bootnode ENR {raw:?}: {error}"))?;
+            bootnodes.signed_enrs.push(enr);
+        } else {
+            let node = raw.parse::<NodeRecord>().map_err(|error| {
+                eyre::eyre!(
+                    "invalid execution bootnode {raw:?}: {error}; expected enode:// or enr:"
+                )
+            })?;
+            bootnodes.node_records.push(node);
+        }
     }
-    Ok(nodes)
+    Ok(bootnodes)
 }
 
 fn node_matches_bind_ip(bind_ip: IpAddr, node: &NodeRecord) -> bool {
@@ -695,6 +741,42 @@ fn node_matches_bind_ip(bind_ip: IpAddr, node: &NodeRecord) -> bool {
 
 fn node_matches_dial_families(families: DialAddressFamilies, node: &NodeRecord) -> bool {
     families.includes_ip(node.tcp_addr().ip())
+}
+
+fn signed_enr_node_record_for_dial_families(
+    families: DialAddressFamilies,
+    enr: &Discv5Enr,
+) -> Option<NodeRecord> {
+    let peer_id = enr_to_discv4_id(enr)?;
+    if families.ipv4
+        && let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4())
+    {
+        return Some(NodeRecord::new_with_ports(
+            IpAddr::V4(ip),
+            tcp_port,
+            enr.udp4(),
+            peer_id,
+        ));
+    }
+    if families.ipv6
+        && let (Some(ip), Some(tcp_port)) = (enr.ip6(), enr.tcp6())
+    {
+        return Some(NodeRecord::new_with_ports(
+            IpAddr::V6(ip),
+            tcp_port,
+            enr.udp6(),
+            peer_id,
+        ));
+    }
+    None
+}
+
+fn signed_enr_matches_discovery_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> bool {
+    if bind_ip.is_ipv6() {
+        enr.ip6().is_some() && enr.udp6().is_some()
+    } else {
+        enr.ip4().is_some() && enr.udp4().is_some()
+    }
 }
 
 async fn collect_initial_dns_boot_nodes(
@@ -1018,13 +1100,79 @@ mod tests {
 
     #[test]
     fn parse_execution_bootnodes_accepts_ipv6_enode() {
-        let nodes = parse_execution_bootnodes(&["enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151".to_owned()])
+        let bootnodes = parse_execution_bootnodes(&["enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151".to_owned()])
             .expect("valid IPv6 enode should parse");
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].tcp_addr().ip().is_ipv6());
-        assert_eq!(nodes[0].tcp_port, 52150);
-        assert_eq!(nodes[0].udp_port, 52151);
+        assert_eq!(bootnodes.node_records.len(), 1);
+        assert!(bootnodes.signed_enrs.is_empty());
+        assert!(bootnodes.node_records[0].tcp_addr().ip().is_ipv6());
+        assert_eq!(bootnodes.node_records[0].tcp_port, 52150);
+        assert_eq!(bootnodes.node_records[0].udp_port, 52151);
+    }
+
+    #[test]
+    fn parse_execution_bootnodes_accepts_signed_ipv6_enr() {
+        let key = reth_discv5::discv5::enr::CombinedKey::generate_secp256k1();
+        let ipv6 = "2001:db8:4::5".parse::<Ipv6Addr>().unwrap();
+        let enr = Discv5Enr::builder()
+            .ip6(ipv6)
+            .tcp6(52150)
+            .udp6(52151)
+            .build(&key)
+            .unwrap();
+
+        let bootnodes =
+            parse_execution_bootnodes(&[enr.to_string()]).expect("valid signed ENR should parse");
+
+        assert!(bootnodes.node_records.is_empty());
+        assert_eq!(bootnodes.signed_enrs.len(), 1);
+
+        let node = signed_enr_node_record_for_dial_families(
+            DialAddressFamilies::IPV6,
+            &bootnodes.signed_enrs[0],
+        )
+        .expect("IPv6 ENR should produce a direct IPv6 candidate");
+        assert_eq!(node.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(node.tcp_port, 52150);
+        assert_eq!(node.udp_port, 52151);
+        assert!(signed_enr_matches_discovery_bind_ip(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            &bootnodes.signed_enrs[0]
+        ));
+        assert!(!signed_enr_matches_discovery_bind_ip(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            &bootnodes.signed_enrs[0]
+        ));
+    }
+
+    #[test]
+    fn signed_enr_direct_candidate_respects_dial_family() {
+        let key = reth_discv5::discv5::enr::CombinedKey::generate_secp256k1();
+        let ipv4 = Ipv4Addr::new(198, 51, 100, 77);
+        let ipv6 = "2001:db8:4::77".parse::<Ipv6Addr>().unwrap();
+        let enr = Discv5Enr::builder()
+            .ip4(ipv4)
+            .tcp4(30303)
+            .udp4(30303)
+            .ip6(ipv6)
+            .tcp6(30304)
+            .udp6(30304)
+            .build(&key)
+            .unwrap();
+
+        let ipv4_node = signed_enr_node_record_for_dial_families(DialAddressFamilies::IPV4, &enr)
+            .expect("IPv4 family should use IPv4 ENR fields");
+        let ipv6_node = signed_enr_node_record_for_dial_families(DialAddressFamilies::IPV6, &enr)
+            .expect("IPv6 family should use IPv6 ENR fields");
+        let dual_node = signed_enr_node_record_for_dial_families(DialAddressFamilies::BOTH, &enr)
+            .expect("dual family should prefer IPv4 when available");
+
+        assert_eq!(ipv4_node.tcp_addr().ip(), IpAddr::V4(ipv4));
+        assert_eq!(ipv4_node.tcp_port, 30303);
+        assert_eq!(ipv6_node.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(ipv6_node.tcp_port, 30304);
+        assert_eq!(dual_node.tcp_addr().ip(), IpAddr::V4(ipv4));
+        assert_eq!(dual_node.tcp_port, 30303);
     }
 
     #[test]

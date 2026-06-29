@@ -330,6 +330,9 @@ log_level = "info"
 partition_target_rows = 1000000
 checkpoint_sync_url = "https://YOUR-CHECKPOINT-ENDPOINT"
 nat = "extip:203.0.113.10"
+p2p_bind_ip = "0.0.0.0"
+execution_bootnodes = []
+execution_discv5_port = 9200
 http_host = "127.0.0.1"
 grpc_host = "127.0.0.1"
 allow_public_grpc = false
@@ -347,6 +350,9 @@ Supported config keys:
 | `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |
+| `p2p_bind_ip` | IP string | EL/CL P2P bind family. Use `"::"` with an IPv6 `nat` address for strict IPv6-only P2P. |
+| `execution_bootnodes` | string array | Extra EL bootnodes as `enode://...` or signed `enr:...` records. |
+| `execution_discv5_port` | integer | EL discv5 UDP port used for IPv6 execution discovery. |
 | `http_host` | IP string | HTTP bind host. |
 | `grpc_host` | IP string | gRPC bind host. |
 | `allow_public_grpc` | boolean | Permit non-loopback gRPC binding. |

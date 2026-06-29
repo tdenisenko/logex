@@ -761,7 +761,7 @@ fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelec
 fn add_runtime_p2p_warnings(selection: &mut P2pAddressSelection, execution_bootnodes: &[String]) {
     if selection.dial_families == DialAddressFamilies::IPV6 && execution_bootnodes.is_empty() {
         selection.warnings.push(
-            "strict IPv6-only execution sync depends on public IPv6 EL peers; public discovery can be sparse, so configure --execution-bootnode with IPv6 enodes if EL peers stay at zero"
+            "strict IPv6-only execution sync depends on public IPv6 EL peers; public discovery can be sparse, so configure --execution-bootnode with IPv6 enode:// or enr: records if EL peers stay at zero"
                 .to_owned(),
         );
     }
