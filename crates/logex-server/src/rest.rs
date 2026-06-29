@@ -285,6 +285,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "pending_peers": sync.pending_peers,
         "p2p_address_mode": sync.p2p_address_mode,
         "p2p_bind_ip": sync.p2p_bind_ip,
+        "p2p_dial_families": sync.p2p_dial_families,
         "p2p_external_ip": sync.p2p_external_ip,
         "p2p_warnings": sync.p2p_warnings,
         "current_block": sync.current_block,
@@ -1125,9 +1126,10 @@ mod tests {
                 pending_peers: 12,
                 p2p_address_mode: Some("auto-public-ipv4".to_owned()),
                 p2p_bind_ip: Some("0.0.0.0".to_owned()),
+                p2p_dial_families: vec!["ipv4".to_owned(), "ipv6".to_owned()],
                 p2p_external_ip: Some("203.0.114.10".to_owned()),
                 p2p_warnings: vec![
-                    "public IPv4 and IPv6 were both detected; current single-stack mode selects IPv4"
+                    "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
                         .to_owned(),
                 ],
                 current_block: 250,
@@ -1407,10 +1409,12 @@ mod tests {
         assert_eq!(status["connected_peers"], 0);
         assert_eq!(status["p2p_address_mode"], "auto-public-ipv4");
         assert_eq!(status["p2p_bind_ip"], "0.0.0.0");
+        assert_eq!(status["p2p_dial_families"][0], "ipv4");
+        assert_eq!(status["p2p_dial_families"][1], "ipv6");
         assert_eq!(status["p2p_external_ip"], "203.0.114.10");
         assert_eq!(
             status["p2p_warnings"][0],
-            "public IPv4 and IPv6 were both detected; current single-stack mode selects IPv4"
+            "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
         );
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);

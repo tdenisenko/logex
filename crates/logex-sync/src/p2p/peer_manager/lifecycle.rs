@@ -128,7 +128,7 @@ impl PeerManager {
             .copied()
             .filter(|node| {
                 !is_bootstrap_node(node.id)
-                    && node_matches_bind_ip(self.bind_ip, node)
+                    && node_matches_dial_families(self.dial_families, node)
                     && node.tcp_port > 0
                     && !self.peers.contains_key(&node.id)
                     && !self.recently_saturated(node.id, now)
@@ -366,7 +366,7 @@ impl PeerManager {
                 .saturating_add(1);
         }
 
-        let Some(node) = dns_node_record_for_bind_ip(self.bind_ip, &update) else {
+        let Some(node) = dns_node_record_for_dial_families(self.dial_families, &update) else {
             self.session_metrics.dns_family_rejected_candidates = self
                 .session_metrics
                 .dns_family_rejected_candidates
@@ -379,7 +379,8 @@ impl PeerManager {
                 has_tcp4 = update.enr.tcp4().is_some(),
                 has_ip6 = update.enr.ip6().is_some(),
                 has_tcp6 = update.enr.tcp6().is_some(),
-                "ignoring DNS execution peer without a dialable endpoint for configured p2p address family"
+                ?self.dial_families,
+                "ignoring DNS execution peer without a dialable endpoint for configured outbound p2p address families"
             );
             return;
         };
@@ -502,12 +503,13 @@ impl PeerManager {
         if node.tcp_port == 0 {
             return;
         }
-        if !node_matches_bind_ip(self.bind_ip, &node) {
+        if !node_matches_dial_families(self.dial_families, &node) {
             trace!(
                 peer = %node.id,
                 addr = %node.tcp_addr(),
                 bind_ip = %self.bind_ip,
-                "ignoring execution peer outside configured p2p address family"
+                ?self.dial_families,
+                "ignoring execution peer outside configured outbound p2p address families"
             );
             return;
         }

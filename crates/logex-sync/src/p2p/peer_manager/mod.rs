@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -142,6 +142,7 @@ pub struct PeerManager {
     fork_filter: ForkFilter,
     local_head: Head,
     bind_ip: IpAddr,
+    dial_families: DialAddressFamilies,
     network_activated: bool,
     max_peers: usize,
     session_metrics: ExecutionPeerSessionMetrics,
@@ -206,6 +207,7 @@ pub struct PeerManagerConfig {
     pub listener_port: u16,
     pub discovery_port: u16,
     pub bind_ip: IpAddr,
+    pub dial_families: DialAddressFamilies,
     pub max_peers: usize,
     pub nat_resolver: NatResolver,
     pub our_head: Head,
@@ -213,6 +215,51 @@ pub struct PeerManagerConfig {
     pub known_peers_path: PathBuf,
     pub execution_bootnodes: Vec<String>,
     pub execution_discv5_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialAddressFamilies {
+    ipv4: bool,
+    ipv6: bool,
+}
+
+impl DialAddressFamilies {
+    pub const IPV4: Self = Self {
+        ipv4: true,
+        ipv6: false,
+    };
+    pub const IPV6: Self = Self {
+        ipv4: false,
+        ipv6: true,
+    };
+    pub const BOTH: Self = Self {
+        ipv4: true,
+        ipv6: true,
+    };
+
+    pub const fn for_bind_ip(bind_ip: IpAddr) -> Self {
+        if bind_ip.is_ipv4() {
+            Self::IPV4
+        } else {
+            Self::IPV6
+        }
+    }
+
+    const fn includes_ip(self, ip: IpAddr) -> bool {
+        (ip.is_ipv4() && self.ipv4) || (ip.is_ipv6() && self.ipv6)
+    }
+
+    pub const fn allows_ipv4(self) -> bool {
+        self.ipv4
+    }
+
+    pub const fn allows_ipv6(self) -> bool {
+        self.ipv6
+    }
+
+    const fn includes_ipv6(self) -> bool {
+        self.ipv6
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -230,6 +277,7 @@ impl PeerManager {
             listener_port,
             discovery_port,
             bind_ip,
+            dial_families,
             max_peers,
             nat_resolver,
             our_head,
@@ -242,13 +290,13 @@ impl PeerManager {
         let advertised_nat_resolver = resolve_startup_nat(nat_resolver.clone()).await;
         let mut known_peers = known_peers
             .into_iter()
-            .filter(|node| node_matches_bind_ip(bind_ip, node))
+            .filter(|node| node_matches_dial_families(dial_families, node))
             .collect::<Vec<_>>();
         let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes)?;
         let mut filtered_execution_bootnodes = Vec::new();
         let mut skipped_execution_bootnodes = 0usize;
         for node in execution_bootnodes {
-            if node_matches_bind_ip(bind_ip, &node) {
+            if node_matches_dial_families(dial_families, &node) {
                 upsert_known_peer(&mut known_peers, node);
                 filtered_execution_bootnodes.push(node);
             } else {
@@ -260,6 +308,7 @@ impl PeerManager {
                 accepted = filtered_execution_bootnodes.len(),
                 skipped = skipped_execution_bootnodes,
                 bind_ip = %bind_ip,
+                ?dial_families,
                 "loaded configured execution bootnodes"
             );
         }
@@ -295,7 +344,7 @@ impl PeerManager {
         let mut dns_discovery_task = None;
         let mut dns_discovery_updates = None;
         let mut dns_ipv6_boot_nodes = Vec::new();
-        if bind_ip.is_ipv6()
+        if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
         {
             match DnsResolver::from_system_conf() {
@@ -313,8 +362,9 @@ impl PeerManager {
                     tracing::info!(
                         dns_network,
                         bind_ip = %bind_ip,
+                        ?dial_families,
                         bootnodes = dns_ipv6_boot_nodes.len(),
-                        "started family-aware execution DNS discovery for IPv6 p2p bind"
+                        "started family-aware execution DNS discovery for outbound p2p candidates"
                     );
                 }
                 Err(error) => {
@@ -329,8 +379,13 @@ impl PeerManager {
         if !dns_ipv6_boot_nodes.is_empty() {
             discovery.add_boot_nodes(dns_ipv6_boot_nodes.iter().copied());
         }
-        if !filtered_execution_bootnodes.is_empty() {
-            discovery.add_boot_nodes(filtered_execution_bootnodes.iter().copied());
+        let discovery_execution_bootnodes = filtered_execution_bootnodes
+            .iter()
+            .copied()
+            .filter(|node| node_matches_bind_ip(bind_ip, node))
+            .collect::<Vec<_>>();
+        if !discovery_execution_bootnodes.is_empty() {
+            discovery.add_boot_nodes(discovery_execution_bootnodes.iter().copied());
         }
 
         let mut builder = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(secret_key)
@@ -353,6 +408,7 @@ impl PeerManager {
                 let discv5_boot_nodes = dns_ipv6_boot_nodes
                     .iter()
                     .chain(filtered_execution_bootnodes.iter())
+                    .filter(|node| node_matches_bind_ip(bind_ip, node))
                     .copied()
                     .collect::<Vec<_>>();
                 builder = builder.discovery_v5(
@@ -438,6 +494,7 @@ impl PeerManager {
             fork_filter,
             local_head: network_head,
             bind_ip,
+            dial_families,
             network_activated,
             max_peers,
             session_metrics: ExecutionPeerSessionMetrics::default(),
@@ -636,6 +693,10 @@ fn node_matches_bind_ip(bind_ip: IpAddr, node: &NodeRecord) -> bool {
     node.tcp_addr().ip().is_ipv4() == bind_ip.is_ipv4()
 }
 
+fn node_matches_dial_families(families: DialAddressFamilies, node: &NodeRecord) -> bool {
+    families.includes_ip(node.tcp_addr().ip())
+}
+
 async fn collect_initial_dns_boot_nodes(
     bind_ip: IpAddr,
     fork_filter: &ForkFilter,
@@ -706,6 +767,23 @@ fn dns_node_record_for_bind_ip(
     Some(NodeRecord::new_with_ports(ip, tcp_port, udp_port, peer_id))
 }
 
+fn dns_node_record_for_dial_families(
+    families: DialAddressFamilies,
+    update: &DnsNodeRecordUpdate,
+) -> Option<NodeRecord> {
+    if families.ipv4
+        && let Some(node) = dns_node_record_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), update)
+    {
+        return Some(node);
+    }
+    if families.ipv6
+        && let Some(node) = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), update)
+    {
+        return Some(node);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +827,47 @@ mod tests {
         assert!(!node_matches_bind_ip(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             &v4_node
+        ));
+    }
+
+    #[test]
+    fn node_family_filter_matches_configured_dial_families() {
+        let v4_node = NodeRecord::new_with_ports(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x01),
+        );
+        let v6_node = NodeRecord::new_with_ports(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x02),
+        );
+
+        assert!(node_matches_dial_families(
+            DialAddressFamilies::IPV4,
+            &v4_node
+        ));
+        assert!(!node_matches_dial_families(
+            DialAddressFamilies::IPV4,
+            &v6_node
+        ));
+        assert!(node_matches_dial_families(
+            DialAddressFamilies::IPV6,
+            &v6_node
+        ));
+        assert!(!node_matches_dial_families(
+            DialAddressFamilies::IPV6,
+            &v4_node
+        ));
+        assert!(node_matches_dial_families(
+            DialAddressFamilies::BOTH,
+            &v4_node
+        ));
+        assert!(node_matches_dial_families(
+            DialAddressFamilies::BOTH,
+            &v6_node
         ));
     }
 
@@ -806,6 +925,66 @@ mod tests {
 
         assert!(record.tcp_addr().ip().is_ipv6());
         assert_eq!(record.tcp_port, update.enr.tcp4().unwrap());
+    }
+
+    #[test]
+    fn dns_node_record_for_dual_dial_families_prefers_ipv4_when_available() {
+        let secret = SecretKey::from_byte_array(&[0x18; 32]).unwrap();
+        let ipv4 = Ipv4Addr::new(198, 51, 100, 12);
+        let ipv6 = "2001:db8::12".parse::<Ipv6Addr>().unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip4(ipv4)
+            .tcp4(30303)
+            .udp4(30303)
+            .ip6(ipv6)
+            .tcp6(30304)
+            .udp6(30304)
+            .build(&secret)
+            .unwrap();
+        let update = DnsNodeRecordUpdate {
+            node_record: NodeRecord::new_with_ports(
+                IpAddr::V4(ipv4),
+                30303,
+                Some(30303),
+                PeerId::repeat_byte(0x01),
+            ),
+            fork_id: None,
+            enr,
+        };
+
+        let record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &update)
+            .expect("dual-family ENR should produce a dialable endpoint");
+
+        assert_eq!(record.tcp_addr().ip(), IpAddr::V4(ipv4));
+        assert_eq!(record.tcp_port, 30303);
+    }
+
+    #[test]
+    fn dns_node_record_for_dual_dial_families_accepts_ipv6_only_record() {
+        let secret = SecretKey::from_byte_array(&[0x19; 32]).unwrap();
+        let ipv6 = "2001:db8::19".parse::<Ipv6Addr>().unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip6(ipv6)
+            .tcp6(30304)
+            .udp6(30304)
+            .build(&secret)
+            .unwrap();
+        let update = DnsNodeRecordUpdate {
+            node_record: NodeRecord::new_with_ports(
+                IpAddr::V6(ipv6),
+                30304,
+                Some(30304),
+                PeerId::repeat_byte(0x01),
+            ),
+            fork_id: None,
+            enr,
+        };
+
+        let record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &update)
+            .expect("dual-family dialing should keep IPv6-only ENRs");
+
+        assert_eq!(record.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(record.tcp_port, 30304);
     }
 
     #[test]

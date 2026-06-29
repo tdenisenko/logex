@@ -339,6 +339,9 @@ pub struct SyncStatus {
     /// Local IP address used by EL and CL P2P listeners.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p2p_bind_ip: Option<String>,
+    /// Outbound P2P address families accepted for direct peer dials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_dial_families: Vec<String>,
     /// Public external IP advertised to peers, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p2p_external_ip: Option<String>,

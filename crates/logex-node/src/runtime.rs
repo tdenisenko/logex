@@ -16,7 +16,7 @@ use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
 use logex_sync::p2p::{
-    peer_manager::{PeerManager, PeerManagerConfig},
+    peer_manager::{DialAddressFamilies, PeerManager, PeerManagerConfig},
     persistence::{
         discovery_secret_path, known_peers_path, load_known_peers, load_or_create_secret_key,
         persist_known_peers,
@@ -72,6 +72,7 @@ impl P2pAddressSelectionMode {
 struct P2pAddressSelection {
     nat: NatResolver,
     bind_ip: IpAddr,
+    dial_families: DialAddressFamilies,
     external_ip: Option<IpAddr>,
     mode: P2pAddressSelectionMode,
     warnings: Vec<String>,
@@ -144,11 +145,13 @@ pub async fn run_sync(options: RunSyncOptions) {
     let nat = p2p_address.nat.clone();
     let p2p_external_ip = p2p_address.external_ip;
     let p2p_bind_ip = p2p_address.bind_ip;
+    let p2p_dial_families = p2p_address.dial_families;
     let p2p_external_ip_label = p2p_external_ip
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unresolved".to_owned());
     tracing::info!(
         bind_ip = %p2p_bind_ip,
+        ?p2p_dial_families,
         external_ip = %p2p_external_ip_label,
         nat = %nat,
         mode = p2p_address.mode.as_str(),
@@ -389,6 +392,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         listener_port: p2p_port,
         discovery_port,
         bind_ip: p2p_bind_ip,
+        dial_families: p2p_dial_families,
         max_peers,
         nat_resolver: nat,
         our_head,
@@ -514,6 +518,7 @@ async fn select_p2p_address(
     Ok(P2pAddressSelection {
         nat: resolved,
         bind_ip,
+        dial_families: DialAddressFamilies::for_bind_ip(bind_ip),
         external_ip,
         mode: P2pAddressSelectionMode::Explicit,
         warnings: Vec::new(),
@@ -555,7 +560,7 @@ fn choose_auto_p2p_address(
     let mut warnings = Vec::new();
     if p2p_bind_ip.is_none() && candidates.ipv4.is_some() && candidates.ipv6.is_some() {
         warnings.push(
-            "public IPv4 and IPv6 were both detected; current single-stack mode selects IPv4"
+            "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
                 .to_owned(),
         );
     }
@@ -565,6 +570,7 @@ fn choose_auto_p2p_address(
             (
                 NatResolver::ExternalIp(IpAddr::V4(ip)),
                 bind_ip,
+                DialAddressFamilies::IPV4,
                 Some(IpAddr::V4(ip)),
                 P2pAddressSelectionMode::AutoPublicIpv4,
             )
@@ -573,6 +579,7 @@ fn choose_auto_p2p_address(
             (
                 NatResolver::ExternalIp(IpAddr::V6(ip)),
                 bind_ip,
+                DialAddressFamilies::IPV6,
                 Some(IpAddr::V6(ip)),
                 P2pAddressSelectionMode::AutoPublicIpv6,
             )
@@ -583,6 +590,11 @@ fn choose_auto_p2p_address(
                 (
                     NatResolver::ExternalIp(IpAddr::V4(ip)),
                     IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    if candidates.ipv6.is_some() {
+                        DialAddressFamilies::BOTH
+                    } else {
+                        DialAddressFamilies::IPV4
+                    },
                     Some(IpAddr::V4(ip)),
                     P2pAddressSelectionMode::AutoPublicIpv4,
                 )
@@ -592,6 +604,7 @@ fn choose_auto_p2p_address(
                     (
                         NatResolver::ExternalIp(IpAddr::V6(ip)),
                         IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        DialAddressFamilies::IPV6,
                         Some(IpAddr::V6(ip)),
                         P2pAddressSelectionMode::AutoPublicIpv6,
                     )
@@ -599,7 +612,7 @@ fn choose_auto_p2p_address(
             }),
     };
 
-    let (nat, bind_ip, external_ip, mode) = selection.unwrap_or_else(|| {
+    let (nat, bind_ip, dial_families, external_ip, mode) = selection.unwrap_or_else(|| {
         warnings.push(
             "no locally owned public IPv4 or IPv6 address was detected; using outbound-only P2P without advertising a public address"
                 .to_owned(),
@@ -608,6 +621,7 @@ fn choose_auto_p2p_address(
         (
             NatResolver::None,
             bind_ip,
+            DialAddressFamilies::for_bind_ip(bind_ip),
             None,
             P2pAddressSelectionMode::AutoOutboundOnly,
         )
@@ -616,6 +630,7 @@ fn choose_auto_p2p_address(
     P2pAddressSelection {
         nat,
         bind_ip,
+        dial_families,
         external_ip,
         mode,
         warnings,
@@ -696,8 +711,20 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
     status.p2p_address_mode = Some(selection.mode.as_str().to_owned());
     status.p2p_bind_ip = Some(selection.bind_ip.to_string());
+    status.p2p_dial_families = dial_family_labels(selection.dial_families);
     status.p2p_external_ip = selection.external_ip.map(|ip| ip.to_string());
     status.p2p_warnings = selection.warnings.clone();
+}
+
+fn dial_family_labels(families: DialAddressFamilies) -> Vec<String> {
+    let mut labels = Vec::with_capacity(2);
+    if families.allows_ipv4() {
+        labels.push("ipv4".to_owned());
+    }
+    if families.allows_ipv6() {
+        labels.push("ipv6".to_owned());
+    }
+    labels
 }
 
 fn initial_sync_status(
@@ -1208,6 +1235,7 @@ mod tests {
             NatResolver::ExternalIp(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
         );
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
         assert_eq!(
             selection.external_ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
@@ -1233,6 +1261,7 @@ mod tests {
             NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
         );
         assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
     }
 
@@ -1252,6 +1281,7 @@ mod tests {
 
         assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
         assert_eq!(selection.bind_ip, bind_ip);
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
         assert_eq!(
             selection.nat,
             NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
@@ -1265,6 +1295,7 @@ mod tests {
         assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
         assert_eq!(selection.nat, NatResolver::None);
         assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV4);
         assert_eq!(selection.external_ip, None);
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound-only"));
