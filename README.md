@@ -199,7 +199,6 @@ Local-only dashboard and APIs:
 
 ```bash
 ./target/release/logex \
-  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
   sync
 ```
 
@@ -216,7 +215,6 @@ Server run with an explicit data directory and public dashboard:
 ```bash
 ./target/release/logex \
   --data-dir /var/lib/logex/mainnet \
-  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
   sync \
   --http-host 0.0.0.0 \
   --http-port 18683 \
@@ -261,7 +259,7 @@ Global options:
 | `--partition-target-rows <N>` | `1000000` | Target log rows per storage segment before sealing and compaction. Larger values reduce segment count; smaller values seal sooner. |
 | `--config <PATH>` | none | Optional TOML config file. Supported keys are listed below. |
 | `--checkpoint <CHECKPOINT>` | none | Weak-subjectivity checkpoint root, `slot@root`, or descriptor file path. Required for a fresh data directory unless `--checkpoint-sync-url` resolves one. |
-| `--checkpoint-sync-url <URLS>` | none | Beacon/checkpoint endpoint used to fetch or validate a recent finalized checkpoint. Use comma-separated URLs to require multi-source agreement. |
+| `--checkpoint-sync-url <URLS>` | Built-in 2-of-3 mainnet quorum | Beacon/checkpoint endpoint used to fetch or validate a recent finalized checkpoint. Use comma-separated URLs to override the default sources and require multi-source agreement. |
 | `--help` | n/a | Print help for the root command or selected subcommand. |
 | `--version` | n/a | Print the LogEx binary version. |
 

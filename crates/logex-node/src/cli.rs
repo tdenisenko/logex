@@ -11,7 +11,7 @@ use serde::Deserialize;
     about = "Standalone Ethereum log-verification client and query server",
     long_about = "LogEx joins the Ethereum consensus-layer and execution-layer P2P networks, verifies receipt logs, stores them locally, and serves SQL, JSON-RPC, gRPC, WebSocket, and dashboard query APIs.",
     after_help = "Examples:
-  logex --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync
+  logex sync
   logex --data-dir /var/lib/logex/mainnet --config /etc/logex/config.toml sync --http-host 0.0.0.0 --dashboard-password '<password>'
   logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
   logex --data-dir /var/lib/logex/mainnet info"
@@ -58,8 +58,9 @@ pub struct Cli {
 
     /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
     ///
-    /// Defaults to https://mainnet.checkpoint.sigp.io for sync. Use
-    /// comma-separated URLs to require multi-source checkpoint agreement.
+    /// Defaults to a 2-of-3 mainnet checkpoint quorum for sync. Use
+    /// comma-separated URLs to override the default sources and require
+    /// multi-source checkpoint agreement.
     #[arg(long, global = true)]
     pub checkpoint_sync_url: Option<String>,
 
@@ -123,7 +124,7 @@ fn platform_app_dir_name() -> &'static str {
 pub enum Command {
     /// Start the node: sync blocks from the P2P network and serve queries.
     #[command(after_help = "Examples:
-  logex --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync
+  logex sync
   logex --data-dir /var/lib/logex/mainnet --checkpoint <slot@root> sync --http-port 18683
   logex --config /etc/logex/config.toml sync --http-host 0.0.0.0 --dashboard-password '<password>'
 

@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`. When outside the home network, Mac mini oper
 
 Historical sync has completed the active post-fix pivot-to-genesis baseline. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The post-fix run reached genesis without repeated liveness stalls, kept peers healthy, and showed median physical RX near the 300 Mbps link ceiling; another clean wall-clock benchmark is not required unless a new post-fix health problem appears.
 
-IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: bounded public runs reached 40-79 active CL sessions, and the latest strict IPv6-only proof using an IPv6-capable checkpoint endpoint kept 46-62 active CL sessions while an owner firewall blocked IPv4 egress. The socket-focused proof used `--grpc-host ::1`; `ss -4` showed zero LogEx sockets, while `ss -6` showed the EL/CL/dashboard/gRPC listeners and CL peer sessions. EL IPv6 transport is correct in controlled conditions: a two-node LogEx proof established an Eth70 session over IPv6 only using `--execution-bootnode`. Public mainnet EL historical sync is still not proven because public IPv6 execution candidates are not usable enough: the latest strict IPv6-only public run accepted 19 DNS IPv6 EL candidates, submitted 19 dials, and all 19 expired without any accepted EL session. A targeted candidate probe confirmed the accepted public IPv6 EL DNS candidates had closed or timed-out advertised TCP ports. A bounded official geth `v1.17.4` comparison on the same droplet also formed zero peers with IPv4 egress blocked; with `--netrestrict 2000::/3`, geth filtered every default execution bootstrap node as IPv4-only, and without netrestrict it kept trying IPv4 candidates but still reached zero peers. Default `--nat any` now selects locally owned public IPv4 first, locally owned public IPv6 second, and outbound-only otherwise. Automatic mode now separates the advertised public address from outbound dial families: dual-public hosts advertise IPv4 while accepting IPv4 and IPv6 outbound candidates, and public-IPv6/private-IPv4 hosts advertise IPv6 while still accepting IPv4 outbound candidates. Strict IPv6-only mode now reports a startup/status warning when no explicit IPv6 execution bootnodes are configured. Finalized checkpoint resolution now supports Beacon header, finalized block/root, and finalized state checkpoint endpoints, which makes more IPv6-capable checkpoint providers usable; the current default checkpoint URL still resolved IPv4-only from the droplet, so default checkpoint-source policy is still open. The temporary droplet clients are stopped after bounded proof windows.
+IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: bounded public runs reached 40-79 active CL sessions, and the latest strict IPv6-only proof using the built-in checkpoint quorum resolved a fresh checkpoint, received CL light-client bootstrap payloads, and kept zero IPv4 LogEx sockets while an owner firewall blocked IPv4 egress. The socket-focused proof used `--grpc-host ::1`; `ss -4` showed zero LogEx sockets, while `ss -6` showed the EL/CL/dashboard/gRPC listeners and CL peer sessions. EL IPv6 transport is correct in controlled conditions: a two-node LogEx proof established an Eth70 session over IPv6 only using `--execution-bootnode`. Public mainnet EL historical sync is still not proven because public IPv6 execution candidates are not usable enough: the latest strict IPv6-only public run accepted 23 DNS IPv6 EL candidates, submitted 23 dials, and all 23 expired without any accepted EL session. A targeted candidate probe confirmed the accepted public IPv6 EL DNS candidates had closed or timed-out advertised TCP ports. A bounded official geth `v1.17.4` comparison on the same droplet also formed zero peers with IPv4 egress blocked; with `--netrestrict 2000::/3`, geth filtered every default execution bootstrap node as IPv4-only, and without netrestrict it kept trying IPv4 candidates but still reached zero peers. Default `--nat any` now selects locally owned public IPv4 first, locally owned public IPv6 second, and outbound-only otherwise. Automatic mode now separates the advertised public address from outbound dial families: dual-public hosts advertise IPv4 while accepting IPv4 and IPv6 outbound candidates, and public-IPv6/private-IPv4 hosts advertise IPv6 while still accepting IPv4 outbound candidates. Strict IPv6-only mode now reports a startup/status warning when no explicit IPv6 execution bootnodes are configured. The default checkpoint source is now a 2-of-3 IPv6-capable mainnet quorum, and checkpoint resolution supports Beacon headers, block/root fallback for any block id, and finalized state checkpoint endpoints. The temporary droplet clients are stopped after bounded proof windows.
 
 ## Completed Since Last Run
 
@@ -124,6 +124,11 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Added finalized checkpoint fallback support for Beacon API providers that expose `/eth/v1/beacon/states/finalized/finality_checkpoints` instead of finalized header/block endpoints.
 - Rebuilt the updated binary on the IPv6 droplet and verified strict IPv6-only startup against `https://mainnet-checkpoint-sync.stakely.io`; CL reached 46-62 active IPv6 sessions, `ss -4` showed zero LogEx sockets, and EL still reported only expired public IPv6 execution dials.
 - Removed the leftover temporary strict IPv6 smoke-test data dir from the droplet after confirming no LogEx process, no owner firewall rule, and restored resolver state.
+- Generalized checkpoint block/root fallback so numeric slot quorum checks work against Beacon/checkpoint providers that do not expose `/eth/v1/beacon/headers/{slot}`.
+- Replaced the old IPv4-only default checkpoint endpoint with a built-in 2-of-3 IPv6-capable mainnet quorum using PublicNode, Stakely, and BeaconState.
+- Verified the new default on the IPv6 droplet without passing `--checkpoint-sync-url`: the client resolved checkpoint `14662080@0xcba8...`, started HTTP/gRPC/P2P on IPv6-only sockets, received CL bootstrap payloads, and kept `SOCKET4_COUNT=0` while IPv4 egress was rejected for the LogEx runtime user.
+- Updated CLI help and README checkpoint examples to reflect the built-in checkpoint quorum.
+- Removed the temporary strict IPv6 default-checkpoint smoke data dir and copied test binary from the droplet after the bounded proof.
 
 ## Remaining TODOs
 
@@ -131,15 +136,11 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
    - Reason: CL works over IPv6 and EL transport/discovery is socket/family-clean, but public mainnet EL IPv6 peer availability was too poor to establish serving execution sessions in bounded LogEx and official geth tests. LogEx now warns users when strict IPv6-only execution sync has no explicit IPv6 bootnodes.
    - Completion criteria: either demonstrate EL historical progress with only IPv6 sockets against reliable public IPv6 execution peers, or accept strict IPv6-only EL as an advanced/explicit-bootnode mode while default startup uses proven IPv4/dual-family paths when available.
 
-2. Decide checkpoint-source behavior for IPv6-only startup.
-   - Reason: LogEx can now consume multiple finalized checkpoint response shapes, including `finality_checkpoints`, but the current default checkpoint URL is still not IPv6-reachable from the test droplet.
-   - Completion criteria: choose and implement a default IPv6-capable checkpoint source/fallback policy, or keep the current trust source and make the startup error/help text explicitly tell IPv6-only users which flag must be supplied.
-
-3. Complete dual-stack address-family support.
+2. Complete dual-stack address-family support.
    - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, both usable families, or only outbound connectivity.
    - Completion criteria: LogEx uses both IPv4 and IPv6 discovery/sync paths when both are usable, or a deliberate product decision documents single-family behavior; current progress supports IPv4-advertised dual-public hosts accepting IPv6 outbound candidates, but true dual advertised identity/listeners still need either Reth dual-family support or a composite peer manager.
 
-4. Conclude the historical sync performance PR.
+3. Conclude the historical sync performance PR.
    - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
    - Completion criteria: rerun PR #97 GitHub Actions after quota is available, confirm checks pass, and merge when checks allow.
 
@@ -235,13 +236,14 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Alternative considered: leave IPv6 validation dependent only on public DNS/discovery; rejected because public candidate refusal/timeouts cannot distinguish transport bugs from network scarcity.
   - Tradeoff: this adds two advanced P2P knobs, but defaults remain unchanged for normal users.
 
-- Public IPv6 validation uses an explicit IPv6-capable checkpoint source for tests.
-  - Why: the default checkpoint endpoint did not resolve over IPv6 from the test droplet, while `https://ethereum-beacon-api.publicnode.com` serves finalized headers over IPv6.
-  - Tradeoff: this is a test override, not a default trust-source change.
+- Default checkpoint resolution uses an IPv6-capable 2-of-3 mainnet quorum.
+  - Why: the previous default endpoint was not IPv6-reachable from the droplet, while PublicNode, Stakely, and BeaconState were reachable over IPv6 and could agree on a concrete finalized slot after block/root fallback.
+  - Alternatives considered: keep the old single default and require IPv6 users to pass `--checkpoint-sync-url`; rejected because it makes default strict IPv6 startup fail before P2P.
+  - Tradeoff: startup depends on two of three third-party Beacon/checkpoint providers agreeing, which is stronger than one source but may make an offline source visible sooner.
 
-- Finalized checkpoint resolution uses ordered provider-shape fallbacks.
-  - Why: checkpoint-sync providers do not all expose the same Beacon API finalized response path; trying finalized headers, finalized blocks plus root, then finalized state finality checkpoints keeps strict IPv6 tests provider-compatible without silently changing the configured trust source.
-  - Tradeoff: startup may make up to three requests to the same configured endpoint before failing, but the failures are aggregated into a single actionable error.
+- Checkpoint resolution uses ordered provider-shape fallbacks for any block id.
+  - Why: checkpoint-sync providers do not all expose `/eth/v1/beacon/headers/{id}`; trying Beacon headers, Beacon blocks plus root, and finalized state checkpoints for the finalized alias keeps default quorum compatible across provider shapes.
+  - Tradeoff: startup may make multiple requests to the same configured endpoint before failing, but the failures are aggregated into a single actionable error.
 
 - Pure public IPv6-only EL sync is not production-ready without better peer sources.
   - Why: LogEx can establish controlled IPv6 Eth70 sessions and CL can maintain many IPv6 sessions, but both LogEx and official geth failed to form public mainnet execution peers when IPv4 egress was blocked on the same IPv6 droplet.
@@ -399,7 +401,11 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 
 - Challenge: an IPv6-capable checkpoint provider used for strict IPv6 testing did not expose the finalized header/block shape LogEx previously expected.
   - Resolution: added a finalized-state `finality_checkpoints` fallback and focused parser tests, then verified strict IPv6 startup against the provider on the droplet.
-  - Remaining: the default checkpoint endpoint is still IPv4-only from the droplet, so default source policy remains open.
+  - Remaining: resolved for startup; default checkpoint resolution now uses a 2-of-3 IPv6-capable quorum.
+
+- Challenge: multi-source checkpoint quorum failed against providers that support finalized checkpoints but not `/eth/v1/beacon/headers/{slot}`.
+  - Resolution: generalized the block/root fallback to any block id, added a local HTTP fallback test, and verified default strict IPv6 startup on the droplet without passing a checkpoint URL.
+  - Remaining: no checkpoint-source blocker remains for IPv6 startup.
 
 - Challenge: default NAT discovery could misclassify CGNAT/private IPv4 as publicly reachable.
   - Resolution: default `--nat any` now checks locally owned default-route IPv4/IPv6 addresses and filters private, shared, documentation, link-local, multicast, and reserved ranges before advertising an external address.
@@ -441,12 +447,13 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Rechecked the automatic routed-family diff; it is limited to startup selection helpers and focused tests. Temporary candidate-probe/default-smoke data was removed from the IPv6 droplet.
 - Rechecked the REST bootstrap-warning diff; it is limited to derived status serialization and focused tests. The strict IPv6 status-smoke artifacts were removed from the droplet.
 - Rechecked the checkpoint fallback diff; it is limited to finalized checkpoint response parsing and endpoint fallback order. The remaining temporary strict IPv6 smoke-test data dir was removed from the droplet.
+- Rechecked the default checkpoint quorum diff; it is limited to source defaults, block/root fallback for numeric slot checks, CLI/README wording, and focused tests. The temporary default-checkpoint smoke data and copied binary were removed from the droplet.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; pending commit for finalized checkpoint fallback.
+- Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; `fix: support finalized checkpoint fallback`; pending commit for default checkpoint quorum.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
@@ -456,7 +463,6 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - The completed run is not a clean wall-clock benchmark because it includes the known pre-fix two-hour stall and restart, but post-fix liveness is validated.
 - PR #97 cannot be merged until GitHub Actions quota is restored and the hosted checks can run.
 - Pure IPv6 EL sync may be impractical on current public mainnet peer availability without a better IPv6 execution peer source; do not claim production-ready IPv6 EL historical sync until this is proven or clearly scoped.
-- The default checkpoint-sync endpoint did not resolve over IPv6 from the DigitalOcean test; strict IPv6-only tests currently need an explicit IPv6-capable Beacon API URL, although the endpoint may now serve finalized data via headers, blocks, or finality-checkpoint responses.
 - Automatic single-family selection is implemented for public IPv4, public IPv6 fallback, and outbound-only fallback. True simultaneous IPv4+IPv6 operation is not implemented yet.
 - Optional build-cache setup is documented in `ROADMAP.md`; generated `sccache`/`cargo-chef` artifacts should stay outside Git and be rebuilt per target/toolchain.
 - Peer count and routing mode affect comparability; record both for any future benchmark.

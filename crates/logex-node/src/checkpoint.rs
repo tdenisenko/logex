@@ -8,7 +8,11 @@ use thiserror::Error;
 
 const CHECKPOINT_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_SLOTS_PER_EPOCH: u64 = 32;
-pub const DEFAULT_CHECKPOINT_SYNC_URL: &str = "https://mainnet.checkpoint.sigp.io";
+pub const DEFAULT_CHECKPOINT_SYNC_URL: &str = concat!(
+    "https://ethereum-beacon-api.publicnode.com,",
+    "https://mainnet-checkpoint-sync.stakely.io,",
+    "https://beaconstate.info",
+);
 pub const RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG: u64 = 256;
 
 #[derive(Debug, Error)]
@@ -53,9 +57,13 @@ pub enum CheckpointSyncError {
     #[error("checkpoint-sync endpoint returned non-numeric epoch {epoch:?} for {url}")]
     InvalidEpoch { url: String, epoch: String },
     #[error(
-        "checkpoint-sync endpoint could not resolve finalized checkpoint from {base_url}: {failures}"
+        "checkpoint-sync endpoint could not resolve block {block_id:?} from {base_url}: {failures}"
     )]
-    FinalizedFallbacksFailed { base_url: String, failures: String },
+    HeaderFallbacksFailed {
+        base_url: String,
+        block_id: String,
+        failures: String,
+    },
     #[error(
         "checkpoint {slot}@{root} is stale relative to endpoint finalized slot {finalized_slot}; max freshness is {max_epochs} epochs"
     )]
@@ -549,36 +557,28 @@ impl CheckpointSyncEndpoint {
         client: &reqwest::Client,
         block_id: &str,
     ) -> Result<BeaconHeader, CheckpointSyncError> {
-        if block_id == "finalized" {
-            return self.fetch_finalized_header(client).await;
-        }
-
-        self.fetch_beacon_header(client, block_id).await
-    }
-
-    async fn fetch_finalized_header(
-        &self,
-        client: &reqwest::Client,
-    ) -> Result<BeaconHeader, CheckpointSyncError> {
         let mut failures = Vec::new();
 
-        match self.fetch_beacon_header(client, "finalized").await {
+        match self.fetch_beacon_header(client, block_id).await {
             Ok(header) => return Ok(header),
             Err(error) => failures.push(error.to_string()),
         }
 
-        match self.fetch_finalized_block(client).await {
+        match self.fetch_beacon_block(client, block_id).await {
             Ok(header) => return Ok(header),
             Err(error) => failures.push(error.to_string()),
         }
 
-        match self.fetch_finality_checkpoint(client).await {
-            Ok(header) => return Ok(header),
-            Err(error) => failures.push(error.to_string()),
+        if block_id == "finalized" {
+            match self.fetch_finality_checkpoint(client).await {
+                Ok(header) => return Ok(header),
+                Err(error) => failures.push(error.to_string()),
+            }
         }
 
-        Err(CheckpointSyncError::FinalizedFallbacksFailed {
+        Err(CheckpointSyncError::HeaderFallbacksFailed {
             base_url: self.base_url.clone(),
+            block_id: block_id.to_owned(),
             failures: failures.join("; "),
         })
     }
@@ -615,11 +615,12 @@ impl CheckpointSyncEndpoint {
         })
     }
 
-    async fn fetch_finalized_block(
+    async fn fetch_beacon_block(
         &self,
         client: &reqwest::Client,
+        block_id: &str,
     ) -> Result<BeaconHeader, CheckpointSyncError> {
-        let block_url = format!("{}/eth/v2/beacon/blocks/finalized", self.base_url);
+        let block_url = format!("{}/eth/v2/beacon/blocks/{}", self.base_url, block_id);
         let response = get_checkpoint_response(client, &block_url).await?;
         if !response.status().is_success() {
             return Err(CheckpointSyncError::HttpStatus {
@@ -805,6 +806,9 @@ fn normalize_root(root: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn parses_inline_checkpoint_shapes() {
@@ -944,6 +948,14 @@ mod tests {
     }
 
     #[test]
+    fn default_checkpoint_source_uses_multi_source_quorum() {
+        let sources = CheckpointSyncSources::new(DEFAULT_CHECKPOINT_SYNC_URL).unwrap();
+
+        assert_eq!(sources.endpoints.len(), 3);
+        assert_eq!(sources.quorum_threshold(), 2);
+    }
+
+    #[test]
     fn checkpoint_source_quorum_selects_matching_candidate() {
         let selected = select_quorum_checkpoint(
             vec![
@@ -1026,6 +1038,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn fetch_header_falls_back_to_block_and_root_for_numeric_slot() {
+        let root = "0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c";
+        let base_url = spawn_checkpoint_test_server(vec![
+            ("/eth/v1/beacon/headers/14279808", 404, r#"{"message":"missing"}"#),
+            (
+                "/eth/v2/beacon/blocks/14279808",
+                200,
+                r#"{"data":{"message":{"slot":"14279808","body":{}}}}"#,
+            ),
+            (
+                "/eth/v1/beacon/blocks/14279808/root",
+                200,
+                r#"{"data":{"root":"0x925f664ef7716a6101e4713538688b30ef8661f225abcfb854f7e2221df1269c"}}"#,
+            ),
+        ])
+        .await;
+        let endpoint = CheckpointSyncEndpoint::new(&base_url).unwrap();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let header = endpoint.fetch_header(&client, "14279808").await.unwrap();
+
+        assert_eq!(header.slot, 14_279_808);
+        assert_eq!(header.root, root);
+    }
+
     #[test]
     fn parses_finality_checkpoints_response_as_checkpoint_header() {
         let response: BeaconFinalityCheckpointsResponse = serde_json::from_str(
@@ -1077,5 +1118,44 @@ mod tests {
                 root: root.to_owned(),
             },
         }
+    }
+
+    async fn spawn_checkpoint_test_server(
+        routes: Vec<(&'static str, u16, &'static str)>,
+    ) -> String {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = Arc::new(routes);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let routes = Arc::clone(&routes);
+                tokio::spawn(async move {
+                    let mut buffer = [0; 4096];
+                    let Ok(read) = socket.read(&mut buffer).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(route, _, _)| *route == path)
+                        .map(|(_, status, body)| (*status, *body))
+                        .unwrap_or((404, r#"{"message":"not found"}"#));
+                    let reason = if status == 200 { "OK" } else { "Not Found" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
     }
 }
