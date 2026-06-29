@@ -102,12 +102,13 @@ impl PeerManager {
     }
 
     pub(super) fn dial_pending_peers(&mut self, target: usize) {
+        let now = Instant::now();
+        self.prune_submitted_dials(now);
+
         if !self.network_activated || self.peers.len() >= target || self.pending.is_empty() {
             return;
         }
 
-        let now = Instant::now();
-        self.prune_submitted_dials(now);
         let dial_capacity = MAX_CONCURRENT_OUTBOUND_DIALS.saturating_sub(self.pending_dials.len());
         if dial_capacity == 0 {
             return;

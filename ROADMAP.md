@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`. When outside the home network, Mac mini oper
 
 Historical sync has completed the active post-fix pivot-to-genesis baseline. The accepted scheduler keeps the critical historical fetch active, buffers cheap ready fetch plans ahead of slow header windows, prioritizes missing expected fetches before lookahead prepare work, avoids blocking ordered writes on expensive post-write refill when prepared batches are already queued, forces a limited local-work refill while prepares or writes are waiting, discards same-sequence work planned against stale expected child headers, lets write-path refills fill the adaptive active pipeline, gives expected historical fetches full body/receipt lane budget while capping lookahead lane budget, adds bounded early redundancy for the first expected-prefix chunks, keeps the next fetch sequence cursor monotonic after ordered writes advance the expected cursor, preserves one missing execution-client-family probe when truncating the body/receipt candidate pool, skips expensive prefix salvage when the body/receipt live plan already has an acceptable contiguous prefix, and defers background compaction planning while historical sync is incomplete so maintenance scans cannot starve ordered historical writes. The post-fix run reached genesis without repeated liveness stalls, kept peers healthy, and showed median physical RX near the 300 Mbps link ceiling; another clean wall-clock benchmark is not required unless a new post-fix health problem appears.
 
-IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: the remote test reached dozens of active CL sessions, status-capable peers, and hundreds of discovered/dialable IPv6 CL peers. EL now starts with IPv6 listener/discovery addresses and no IPv4 sockets when `--p2p-bind-ip` is IPv6, but a pure IPv6 EL sync has not been proven: the mainnet EL DNS tree produced only a small IPv6 candidate set and every sampled candidate refused or timed out before a usable session. This appears to be public mainnet EL IPv6 peer scarcity/staleness rather than an OS socket leak, but it remains a blocker for claiming optimal IPv6-only EL historical sync.
+IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119` with LogEx bound to IPv6 address `2400:6180:0:d2:0:2:fa9c:1000`. CL discovery and libp2p work over IPv6: the remote test reached dozens of active CL sessions, status-capable peers, and thousands of discovered/dialable IPv6 CL peers while the `logexv6` runtime user had IPv4 egress rejected. EL now starts with IPv6 listener/discovery addresses and no IPv4 sockets when `--p2p-bind-ip` is IPv6, and it seeds Reth discv4 from LogEx's family-aware IPv6 DNS feed. A pure IPv6 EL sync has not been proven: the observed mainnet EL DNS feed queued 20 IPv6 execution candidates and every sampled candidate refused or timed out before a usable session. This appears to be public mainnet EL IPv6 peer scarcity/staleness rather than an OS socket leak, but it remains a blocker for claiming optimal IPv6-only EL historical sync. The temporary droplet client is stopped after the proof windows.
 
 ## Completed Since Last Run
 
@@ -19,6 +19,10 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Added focused tests for IPv6 CLI parsing, CL ENR/dial filtering, EL DNS candidate conversion, DNS crawl sizing, and consensus-head startup readiness.
 - Deployed and tested the branch on IPv6-only remote runtime constraints: no `logexv6` IPv4 sockets were observed and no fresh IPv4 EL dial attempts remained after disabling Reth default DNS discovery.
 - Confirmed CL P2P works over IPv6 on the droplet; EL receives IPv6 DNS candidates but did not establish a mainnet execution session during the observed windows.
+- Re-enabled Reth discv4 for IPv6 mode with a family-aware IPv6 DNS bootnode pre-seed, while keeping Reth's default DNS conversion disabled so IPv4 ENR fields are not dialed in IPv6-only mode.
+- Fixed stale EL submitted-dial accounting so expired failed dials are pruned even when the pending queue is empty.
+- Tested an execution discv5 experiment on the IPv6 droplet and removed it after it opened IPv6 UDP/9200 but still produced no EL sessions.
+- Stopped the temporary IPv6 droplet client after the bounded proof windows; no full sync is left running there.
 - Verified relevant local checks: `cargo fmt --all -- --check`, focused `logex-sync` P2P tests, `logex-cl --lib`, targeted `logex-node` startup tests, and `cargo clippy -p logex-sync -- -D warnings`.
 - Reproduced the zero-progress stall through the Pi jump host: the floor stayed pinned while peers and active downloads remained present.
 - Added critical-path repair for missing expected historical fetches without resetting buffered lookahead.
@@ -94,7 +98,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 
 1. Prove or scope IPv6-only EL sync.
    - Reason: CL works over IPv6 and EL is now socket/family-clean, but mainnet EL IPv6 peer availability was too poor to establish serving execution sessions in the DigitalOcean test.
-   - Completion criteria: either demonstrate EL sync progress with only IPv6 sockets on the droplet, or document the limitation and make startup/fallback behavior explicit so LogEx does not silently choose IPv6-only EL when it cannot reach enough execution peers.
+   - Completion criteria: either demonstrate EL sync progress with only IPv6 sockets on the droplet using a reliable IPv6 execution peer source, or document the limitation and make startup/fallback behavior explicit so LogEx does not silently choose IPv6-only EL when it cannot reach enough execution peers.
 
 2. Add automatic public address-family selection.
    - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, or only outbound connectivity.
@@ -186,9 +190,9 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Alternative considered: reset and rerun from scratch to obtain an uncontaminated wall-clock number.
   - Tradeoff: the contaminated run is not a clean benchmark, but it remains sufficient to validate liveness if it reaches genesis without repeated post-fix stalls.
 
-- IPv6-only mode disables Reth's default EL discovery and uses a family-aware DNS feed.
-  - Why: Reth's default DNS ENR conversion prefers IPv4 fields, which caused IPv4 dial attempts even when LogEx was explicitly bound to IPv6.
-  - Alternative considered: leave Reth discovery enabled and rely on OS firewall rejects; rejected because IPv6-only mode must not waste time on IPv4 candidates.
+- IPv6-only EL mode keeps Reth discv4 enabled but disables Reth's default DNS conversion.
+  - Why: Reth's default DNS ENR conversion prefers IPv4 fields, which caused IPv4 dial attempts even when LogEx was explicitly bound to IPv6. Seeding discv4 from LogEx's family-aware DNS conversion preserves UDP discovery without leaking IPv4 candidates.
+  - Alternative considered: disable discv4 entirely; rejected because it left EL with direct DNS dials only. Enabling execution discv5 was also tested and removed because it opened UDP/9200 but did not produce EL sessions.
   - Tradeoff: pure IPv6 EL discovery currently depends on a small public DNS candidate set until a better EL IPv6 peer source is implemented or the wider network improves.
 
 - Build caches should be generated outside Git.
@@ -305,7 +309,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
   - Remaining: resolved for socket/family correctness; remote logs after the fix showed zero fresh IPv4 attempts and no `logexv6` IPv4 sockets.
 
 - Challenge: pure IPv6 EL mainnet sync did not start on the DigitalOcean droplet.
-  - Resolution: verified IPv6 listeners, removed an accidental IPv6 INPUT firewall reject, confirmed CL peers over IPv6, and observed EL DNS candidates being dialed over IPv6 only.
+  - Resolution: verified IPv6 listeners, removed an accidental IPv6 INPUT firewall reject, confirmed CL peers over IPv6, seeded EL discv4 from family-aware IPv6 DNS bootnodes, fixed stale submitted-dial pruning, and observed EL DNS candidates being dialed over IPv6 only.
   - Remaining: unresolved; every sampled EL IPv6 endpoint refused or timed out, so either a better IPv6 EL candidate source is needed or product behavior must explicitly fall back/warn.
 
 ## Dead Code and Obsolescence Cleanup
@@ -332,6 +336,7 @@ IPv6 P2P validation is in progress on DigitalOcean droplet `root@152.42.222.119`
 - Rechecked the roadmap after baseline completion and removed obsolete fresh-run TODO criteria.
 - No production code was identified as safe to remove beyond stale experiment cleanup.
 - Inspected the IPv6 branch for experimental leftovers; the remaining code is scoped to explicit bind-family support, family-aware discovery filtering, consensus-head startup readiness, and focused tests.
+- Removed the rejected execution discv5 experiment after remote proof showed no EL session benefit; the remaining IPv6 changes are family-aware DNS/discv4 seeding and stale submitted-dial pruning.
 
 ## Git Workflow
 
