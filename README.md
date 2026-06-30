@@ -273,8 +273,11 @@ Global options:
 | `--grpc-port <PORT>` | `8578` | gRPC server port for `LogExService.Query`, `GetLogs`, `StreamLogs`, and `GetHeadBlock`. |
 | `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port. |
 | `--p2p-port <PORT>` | `30303` | Execution-layer TCP listener port for the eth protocol. |
+| `--p2p-bind-ip <IP>` | auto | Local bind address for EL and CL P2P listeners. Use `::` with `--nat extip:<ipv6>` for strict IPv6-only P2P testing. |
 | `--max-peers <N>` | `100` | Maximum EL peer sessions. Higher values help only if CPU, memory, bandwidth, and disk can keep up. |
-| `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
+| `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. `any` prefers a locally owned public IPv4, then public IPv6, then outbound-only mode. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
+| `--execution-bootnode <ENODE_OR_ENR>` | none | Extra EL bootnode seed. Repeat the flag or use comma-separated values. Useful for strict IPv6 when public EL IPv6 discovery is sparse. |
+| `--execution-discv5-port <PORT>` | `9200` | Execution-layer discv5 UDP discovery port, separate from discv4. |
 | `--cl-discovery-port <PORT>` | `9000` | Consensus-layer discv5 UDP discovery port. |
 | `--cl-p2p-port <PORT>` | `9000` | Consensus-layer libp2p TCP port advertised in the local ENR. |
 | `--cl-max-peers <N>` | `32` | Maximum dialable CL peers retained from discovery. |

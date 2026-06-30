@@ -737,24 +737,41 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
     if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
         return false;
     }
 
-    match segments {
-        [0xfe80..=0xfebf, ..] => false,
-        [0xfc00..=0xfdff, ..] => false,
-        [0xfec0..=0xfeff, ..] => false,
-        [0x2001, 0x0db8, ..] => false,
-        [0x2001, 0x0002, ..] => false,
-        [0x2001, second, ..] if (0x0020..=0x002f).contains(&second) => false,
-        [0x2002, ..] => false,
-        [0x0064, 0xff9b, 0, 0, 0, 0, ..] => false,
-        [0, 0, 0, 0, 0, 0xffff, ..] => false,
-        [0, 0, 0, 0, 0, 0, ..] => false,
-        _ => true,
+    if !ipv6_matches_prefix(ip, Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3) {
+        return false;
     }
+
+    for (prefix, bits) in [
+        (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32), // Teredo.
+        (Ipv6Addr::new(0x2001, 0x0002, 0, 0, 0, 0, 0, 0), 48), // Benchmarking.
+        (Ipv6Addr::new(0x2001, 0x0010, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv1.
+        (Ipv6Addr::new(0x2001, 0x0020, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv2.
+        (Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), 32), // Documentation.
+        (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16), // 6to4.
+        (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // Documentation.
+    ] {
+        if ipv6_matches_prefix(ip, prefix, bits) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn ipv6_matches_prefix(ip: Ipv6Addr, prefix: Ipv6Addr, prefix_len: u32) -> bool {
+    debug_assert!(prefix_len <= 128);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix_len)
+    };
+    let ip_bits = u128::from_be_bytes(ip.octets());
+    let prefix_bits = u128::from_be_bytes(prefix.octets());
+    (ip_bits & mask) == (prefix_bits & mask)
 }
 
 fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
@@ -1478,16 +1495,22 @@ mod tests {
             "fe80::1".parse().unwrap(),
             "fc00::1".parse().unwrap(),
             "fd00::1".parse().unwrap(),
+            "100::1".parse().unwrap(),
+            "64:ff9b::1".parse().unwrap(),
+            "2001::1".parse().unwrap(),
+            "2001:10::1".parse().unwrap(),
             "2001:db8::1".parse().unwrap(),
             "2001:2::1".parse().unwrap(),
             "2001:20::1".parse().unwrap(),
             "2002::1".parse().unwrap(),
-            "64:ff9b::1".parse().unwrap(),
+            "3fff::1".parse().unwrap(),
+            "8000::1".parse().unwrap(),
         ] {
             assert!(!is_public_ipv6(ip), "{ip} should not be public");
         }
 
         assert!(is_public_ipv6("2604:a880:400:d0::1".parse().unwrap()));
+        assert!(is_public_ipv6("2a00:1450:4001:80b::200e".parse().unwrap()));
     }
 
     #[test]
