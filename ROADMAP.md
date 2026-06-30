@@ -12,7 +12,7 @@ IPv6 validation is complete enough for this branch on temporary droplet `root@15
 
 Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
-Public mainnet EL peer availability over strict IPv6 is sparse, so performance is expected to be lower and startup may take longer than IPv4 or dual-stack mode. A corrected official `ethereum/discv4-dns-lists` snapshot audit found 594 IPv6 execution ENRs and only 14 open IPv6 TCP endpoints from the droplet, but the latest bounded proof showed runtime discovery can still find an accepting public IPv6 EL peer. LogEx keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are retained for signed IPv6 discovery when they carry `udp6`.
+Public mainnet EL peer availability over strict IPv6 is sparse, so performance is expected to be lower and startup may take longer than IPv4 or dual-stack mode. A corrected official `ethereum/discv4-dns-lists` snapshot audit found 594 IPv6 execution ENRs and only 14 open IPv6 TCP endpoints from the droplet, and the latest post-resolver bounded proofs submitted thousands of strict-IPv6 EL dials without an accepted serving session. Earlier bounded proof windows did show public IPv6 EL sessions are possible, but startup is not deterministic enough to claim IPv4-like performance from public discovery alone. LogEx keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are retained for signed IPv6 discovery when they carry `udp6`.
 
 Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not leave a full sync running on that droplet unless an active test requires it.
 
@@ -32,6 +32,9 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the family-aware execution DNS resolver with a local TXT-joining resolver after auditing Reth's resolver and confirming it only used the first TXT chunk from chunked EIP-1459 DNS records.
 - Added periodic DNS tree re-bootstrap for the family-aware execution DNS service so a transient empty root lookup does not leave strict IPv6 with zero DNS candidates for the whole run.
 - Re-ran strict IPv6 official-ENR smoke after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 75 active sessions and 3,281 dialable peers, EL accepted 144 IPv6 DNS execution candidates within four minutes, and the temporary droplet process/firewall/resolver cleanup was confirmed afterward.
+- Re-ran a 15-minute strict IPv6 official-ENR proof after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 88 active sessions and 2,316 dialable peers, EL accepted 143 IPv6 DNS candidates and submitted 4,030 EL dials, but no public EL session was accepted.
+- Re-ran a 10-minute strict IPv6 proof with the audited TCP-open IPv6 ENR set: LogEx opened zero IPv4 sockets and submitted 1,243 EL dials, but no public EL session was accepted in that window.
+- Re-tested enabling Reth discv4 under strict IPv6 after the DNS resolver fix: it opened zero IPv4 sockets and submitted 2,653 EL dials, but accepted no EL session, so the experiment was reverted.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 - Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
 
@@ -86,8 +89,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 ## Challenges and Resolutions
 
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
-  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and finally proved public strict IPv6 EL sync with an inbound public Reth peer discovered during a bounded run.
-  - Remaining: public IPv6 EL peer availability is sparse, so strict IPv6 performance should be treated as best-effort unless the operator supplies reliable IPv6 execution bootnodes.
+  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and proved public strict IPv6 EL sync can happen with a public Reth peer discovered during a bounded run.
+  - Remaining: current public IPv6 EL discovery is not deterministic; the latest post-fix official-ENR and TCP-open-ENR proofs submitted 4,030 and 1,243 strict-IPv6 EL dials respectively without any accepted EL session, so strict IPv6 performance parity remains unproven without reliable operator-provided IPv6 execution bootnodes or a stronger public IPv6 peer source.
 
 - Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
   - Resolution: selected the CL address independently so EL keeps public IPv4 while CL uses public IPv6 when both routes are available; the post-fix smoke reached live `Syncing`.
@@ -98,7 +101,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Remaining: no correctness blocker remains; sparse/slow public IPv6 EL discovery is still an operational caveat.
 
 - Challenge: enabling Reth discv4 on strict IPv6 execution bind was a plausible missing discovery path because Reth's discv4 codec supports IPv6 endpoints.
-  - Resolution: tested it in a bounded strict IPv6 public smoke on the droplet; it did not produce additional EL candidates or sessions, so the experiment was reverted.
+  - Resolution: tested it before and after the DNS resolver fix in bounded strict IPv6 public smokes on the droplet; the latest test submitted 2,653 EL dials and accepted no EL session, so the experiment was reverted.
   - Remaining: no discv4 change is carried forward.
 
 - Challenge: generic-port IPv6 signed ENRs are valid enough for direct dialing but not accepted by Reth discv5 as signed discovery bootnodes.
@@ -134,13 +137,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
 - Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
 - Replaced the direct Reth DNS resolver use in the family-aware execution path with a local wrapper that preserves chunked TXT records; the default family-agnostic Reth path was not reintroduced.
-- Reverted the strict IPv6 discv4 experiment after it failed to improve public EL discovery.
+- Reverted the strict IPv6 discv4 experiment again after the post-resolver smoke also failed to improve public EL discovery.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
@@ -148,7 +151,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 ## Known Issues or Risks
 
-- Pure IPv6 EL historical sync works, but public IPv6 execution peers are sparse; IPv4 or dual-stack mode will usually retain more peers and perform better.
+- Pure IPv6 EL transport works and can sync when an EL session is accepted, but public IPv6 execution peers are sparse and acceptance is not deterministic; IPv4 or dual-stack mode will usually retain more peers and perform better.
 - True simultaneous IPv4 and IPv6 inbound identity is not implemented yet.
 - Future benchmark comparisons must record routing mode, peer counts, and whether traffic is routed through the VPS, dashboard-only WireGuard, or local networking.
 - Do not leave long-running full syncs on temporary proof droplets unless the user explicitly asks for that test.
