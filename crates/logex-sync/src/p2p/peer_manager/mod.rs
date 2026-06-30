@@ -138,7 +138,7 @@ pub struct PeerManager {
     peer_order: VecDeque<PeerId>,
     request_cursor: usize,
     pending: HashMap<PeerId, NodeRecord>,
-    pending_dials: HashMap<PeerId, Instant>,
+    pending_dials: HashMap<PeerId, SubmittedDial>,
     saturated_peers: HashMap<PeerId, Instant>,
     receipt_quarantined_peers: HashMap<PeerId, Instant>,
     productive: VecDeque<NodeRecord>,
@@ -170,6 +170,12 @@ struct ExecutionPeerSessionMetrics {
     dns_family_rejected_candidates: u64,
     submitted_dials_total: u64,
     submitted_dial_expirations: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SubmittedDial {
+    node: NodeRecord,
+    submitted_at: Instant,
 }
 
 #[derive(Default)]
@@ -664,19 +670,30 @@ impl PeerManager {
     }
 
     fn recently_submitted(&self, peer_id: PeerId, now: Instant) -> bool {
-        self.pending_dials
-            .get(&peer_id)
-            .is_some_and(|last_submitted| {
-                now.duration_since(*last_submitted) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
-            })
+        self.pending_dials.get(&peer_id).is_some_and(|submitted| {
+            now.duration_since(submitted.submitted_at) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
+        })
     }
 
     fn prune_submitted_dials(&mut self, now: Instant) {
-        let before = self.pending_dials.len();
-        self.pending_dials.retain(|_, last_submitted| {
-            now.duration_since(*last_submitted) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
-        });
-        let expired = before.saturating_sub(self.pending_dials.len());
+        let expired_nodes = take_expired_submitted_dials(&mut self.pending_dials, now);
+        let expired = expired_nodes.len();
+        let mut requeued = 0usize;
+        for node in expired_nodes {
+            if self.peers.contains_key(&node.id)
+                || self.pending.contains_key(&node.id)
+                || self.recently_saturated(node.id, now)
+                || !node_matches_dial_families(self.dial_families, &node)
+                || node.tcp_port == 0
+            {
+                continue;
+            }
+            let before = self.pending.len();
+            self.remember_pending(node);
+            if self.pending.len() > before {
+                requeued = requeued.saturating_add(1);
+            }
+        }
         if expired > 0 {
             self.session_metrics.submitted_dial_expirations = self
                 .session_metrics
@@ -684,11 +701,29 @@ impl PeerManager {
                 .saturating_add(expired as u64);
             trace!(
                 expired_dials = expired,
+                requeued_dials = requeued,
                 pending_dials = self.pending_dials.len(),
+                pending_peers = self.pending.len(),
                 "expired submitted execution peer dials"
             );
         }
     }
+}
+
+fn take_expired_submitted_dials(
+    pending_dials: &mut HashMap<PeerId, SubmittedDial>,
+    now: Instant,
+) -> Vec<NodeRecord> {
+    let mut expired_nodes = Vec::new();
+    pending_dials.retain(|_, submitted| {
+        if now.duration_since(submitted.submitted_at) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL {
+            true
+        } else {
+            expired_nodes.push(submitted.node);
+            false
+        }
+    });
+    expired_nodes
 }
 
 fn mainnet_dns_discovery_config(bind_ip: IpAddr) -> Option<(String, DnsDiscoveryConfig)> {
@@ -1224,6 +1259,52 @@ mod tests {
             DialAddressFamilies::BOTH,
             &v6_node
         ));
+    }
+
+    #[test]
+    fn expired_submitted_dials_return_nodes_for_retry() {
+        let now = Instant::now();
+        let fresh_node = NodeRecord::new_with_ports(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x11),
+        );
+        let expired_node = NodeRecord::new_with_ports(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            30304,
+            Some(30304),
+            PeerId::repeat_byte(0x12),
+        );
+        let mut pending_dials = HashMap::from([
+            (
+                fresh_node.id,
+                SubmittedDial {
+                    node: fresh_node,
+                    submitted_at: now
+                        .checked_sub(SUBMITTED_DIAL_SUPPRESSION_INTERVAL / 2)
+                        .unwrap(),
+                },
+            ),
+            (
+                expired_node.id,
+                SubmittedDial {
+                    node: expired_node,
+                    submitted_at: now
+                        .checked_sub(SUBMITTED_DIAL_SUPPRESSION_INTERVAL + Duration::from_secs(1))
+                        .unwrap(),
+                },
+            ),
+        ]);
+
+        let expired = take_expired_submitted_dials(&mut pending_dials, now);
+
+        assert_eq!(
+            expired.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![expired_node.id]
+        );
+        assert!(pending_dials.contains_key(&fresh_node.id));
+        assert!(!pending_dials.contains_key(&expired_node.id));
     }
 
     #[test]

@@ -143,7 +143,13 @@ impl PeerManager {
 
         for node in &candidates {
             self.pending.remove(&node.id);
-            self.pending_dials.insert(node.id, now);
+            self.pending_dials.insert(
+                node.id,
+                SubmittedDial {
+                    node: *node,
+                    submitted_at: now,
+                },
+            );
             self.network.connect_peer_kind(
                 node.id,
                 PeerKind::Basic,
@@ -600,7 +606,13 @@ impl PeerManager {
             return;
         }
 
-        self.pending_dials.insert(peer.remote_record.id, now);
+        self.pending_dials.insert(
+            peer.remote_record.id,
+            SubmittedDial {
+                node: peer.remote_record,
+                submitted_at: now,
+            },
+        );
         self.remember_pending(peer.remote_record);
     }
 
