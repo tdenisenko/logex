@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::U256;
 use logex_cl::{
-    AnchorCoverage, ConsensusNetworkConfig, ConsensusStateError, ConsensusStore,
-    MAINNET_CONSENSUS_CHAIN_SPEC, spawn_consensus_network,
+    AnchorCoverage, ConsensusDialAddressFamilies, ConsensusNetworkConfig, ConsensusStateError,
+    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, spawn_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
@@ -362,6 +362,7 @@ pub async fn run_sync(options: RunSyncOptions) {
                 data_dir: data_dir.clone(),
                 checkpoint: consensus.checkpoint(),
                 bind_ip: p2p_bind_ip,
+                dial_families: consensus_dial_families(p2p_dial_families),
                 external_ip: p2p_external_ip,
                 discovery_port: cl_discovery_port,
                 p2p_port: cl_p2p_port,
@@ -807,6 +808,14 @@ fn dial_family_labels(families: DialAddressFamilies) -> Vec<String> {
         labels.push("ipv6".to_owned());
     }
     labels
+}
+
+fn consensus_dial_families(families: DialAddressFamilies) -> ConsensusDialAddressFamilies {
+    match (families.allows_ipv4(), families.allows_ipv6()) {
+        (true, true) => ConsensusDialAddressFamilies::BOTH,
+        (false, true) => ConsensusDialAddressFamilies::IPV6,
+        _ => ConsensusDialAddressFamilies::IPV4,
+    }
 }
 
 fn initial_sync_status(

@@ -29,7 +29,10 @@ pub use light_client::{
     LightClientDecodeError, LightClientVerificationError, decode_bootstrap, decode_finality_update,
     decode_optimistic_update,
 };
-pub use network::{ConsensusNetworkConfig, ConsensusNetworkError, spawn_consensus_network};
+pub use network::{
+    ConsensusDialAddressFamilies, ConsensusNetworkConfig, ConsensusNetworkError,
+    spawn_consensus_network,
+};
 use rpc::RawRpcResponse;
 
 const CONSENSUS_STATE_DIR: &str = "cl";

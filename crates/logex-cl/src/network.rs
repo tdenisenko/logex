@@ -90,10 +90,47 @@ pub struct ConsensusNetworkConfig {
     pub data_dir: PathBuf,
     pub checkpoint: WeakSubjectivityCheckpoint,
     pub bind_ip: IpAddr,
+    pub dial_families: ConsensusDialAddressFamilies,
     pub external_ip: Option<IpAddr>,
     pub discovery_port: u16,
     pub p2p_port: u16,
     pub max_peers: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsensusDialAddressFamilies {
+    ipv4: bool,
+    ipv6: bool,
+}
+
+impl ConsensusDialAddressFamilies {
+    pub const IPV4: Self = Self {
+        ipv4: true,
+        ipv6: false,
+    };
+    pub const IPV6: Self = Self {
+        ipv4: false,
+        ipv6: true,
+    };
+    pub const BOTH: Self = Self {
+        ipv4: true,
+        ipv6: true,
+    };
+
+    pub const fn for_bind_ip(bind_ip: IpAddr) -> Self {
+        if bind_ip.is_ipv4() {
+            Self::IPV4
+        } else {
+            Self::IPV6
+        }
+    }
+
+    const fn includes(self, class: DialAddressClass) -> bool {
+        match class {
+            DialAddressClass::Tcp4 | DialAddressClass::Quic4 => self.ipv4,
+            DialAddressClass::Tcp6 | DialAddressClass::Quic6 => self.ipv6,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -3095,7 +3132,7 @@ impl ConsensusNetwork {
             .map(|(peer, addrs)| (*peer, addrs.clone()))
             .collect::<Vec<_>>();
         for (_, addrs) in &mut dialable {
-            retain_dial_addresses_for_bind_ip(self.config.bind_ip, addrs);
+            retain_dial_addresses_for_families(self.config.dial_families, addrs);
         }
         dialable.retain(|(peer, addrs)| {
             !addrs.is_empty() && self.peer_is_dialable(*peer, bootstrap_needed, now)
@@ -3990,7 +4027,7 @@ impl ConsensusNetwork {
         mut addrs: Vec<Multiaddr>,
         bootstrap_needed: bool,
     ) -> Vec<Multiaddr> {
-        retain_dial_addresses_for_bind_ip(self.config.bind_ip, &mut addrs);
+        retain_dial_addresses_for_families(self.config.dial_families, &mut addrs);
         addrs.sort_by(|left, right| {
             self.dial_address_priority(peer, right, bootstrap_needed)
                 .cmp(&self.dial_address_priority(peer, left, bootstrap_needed))
@@ -5026,21 +5063,15 @@ fn dial_address_class(addr: &Multiaddr) -> Option<DialAddressClass> {
     }
 }
 
-fn retain_dial_addresses_for_bind_ip(bind_ip: IpAddr, addrs: &mut Vec<Multiaddr>) {
-    addrs.retain(|addr| dial_address_matches_bind_ip(bind_ip, addr));
+fn retain_dial_addresses_for_families(
+    families: ConsensusDialAddressFamilies,
+    addrs: &mut Vec<Multiaddr>,
+) {
+    addrs.retain(|addr| dial_address_matches_families(families, addr));
 }
 
-fn dial_address_matches_bind_ip(bind_ip: IpAddr, addr: &Multiaddr) -> bool {
-    matches!(
-        (bind_ip, dial_address_class(addr)),
-        (
-            IpAddr::V4(_),
-            Some(DialAddressClass::Tcp4 | DialAddressClass::Quic4)
-        ) | (
-            IpAddr::V6(_),
-            Some(DialAddressClass::Tcp6 | DialAddressClass::Quic6)
-        )
-    )
+fn dial_address_matches_families(families: ConsensusDialAddressFamilies, addr: &Multiaddr) -> bool {
+    dial_address_class(addr).is_some_and(|class| families.includes(class))
 }
 
 fn sync_committee_period_for_slot(slot: u64) -> u64 {
@@ -5328,7 +5359,7 @@ mod tests {
     }
 
     #[test]
-    fn dial_address_family_filter_matches_bind_ip_family() {
+    fn dial_address_family_filter_matches_configured_families() {
         let peer_id = PeerId::random();
         let tcp4 = multiaddr_from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
         let quic4 = multiaddr_from_ip_quic(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
@@ -5353,19 +5384,34 @@ mod tests {
             mapped_tcp.clone(),
             mapped_quic.clone(),
         ];
-        retain_dial_addresses_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), &mut ipv4_addrs);
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::IPV4, &mut ipv4_addrs);
         assert_eq!(ipv4_addrs, vec![tcp4.clone(), quic4.clone()]);
 
         let mut ipv6_addrs = vec![
-            tcp4,
-            quic4,
+            tcp4.clone(),
+            quic4.clone(),
             tcp6.clone(),
             quic6.clone(),
-            mapped_tcp,
-            mapped_quic,
+            mapped_tcp.clone(),
+            mapped_quic.clone(),
         ];
-        retain_dial_addresses_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &mut ipv6_addrs);
-        assert_eq!(ipv6_addrs, vec![tcp6, quic6]);
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::IPV6, &mut ipv6_addrs);
+        assert_eq!(ipv6_addrs, vec![tcp6.clone(), quic6.clone()]);
+
+        let mut dual_addrs = vec![tcp4, quic4, tcp6, quic6, mapped_tcp, mapped_quic];
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::BOTH, &mut dual_addrs);
+        assert_eq!(
+            dual_addrs
+                .iter()
+                .filter_map(dial_address_class)
+                .collect::<Vec<_>>(),
+            vec![
+                DialAddressClass::Tcp4,
+                DialAddressClass::Quic4,
+                DialAddressClass::Tcp6,
+                DialAddressClass::Quic6
+            ]
+        );
     }
 
     #[test]
