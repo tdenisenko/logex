@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`.
 
 Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac mini and no longer shows the two-hour liveness stall that previously blocked ordered writes. The accepted scheduler keeps expected historical work active, limits background maintenance while history is incomplete, and was bounded by the available network during the last validated run.
 
-IPv6 validation is complete enough for this branch on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. EL IPv6 transport works in both controlled two-node proofs and public mainnet: the latest bounded strict-IPv6 proof reached `Syncing`, accepted two serving public Reth EL peers over IPv6, tracked CL over IPv6, and moved historical sync backward by 30,215 blocks during a 15-minute proof while opening zero LogEx IPv4 sockets.
+IPv6 validation is complete enough for this branch on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. EL IPv6 transport works in both controlled two-node proofs and public mainnet: bounded strict-IPv6 proofs reached `Syncing`, accepted serving public Reth EL peers over IPv6, tracked CL over IPv6, and moved historical sync backward while opening zero LogEx IPv4 sockets. The latest resolver fix joins chunked EIP-1459 DNS TXT records and periodically re-syncs the DNS tree, increasing accepted strict-IPv6 DNS execution candidates from 41 in the earlier 15-minute proof to 144 within a 4-minute official-ENR proof.
 
 Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
@@ -29,6 +29,9 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Re-ran a focused strict IPv6 proof against all 14 TCP-open ENRs: LogEx submitted 419 IPv6 dials, opened zero IPv4 sockets, and still established no EL session.
 - Re-ran a bounded strict IPv6 proof with Reth session tracing: LogEx reached `Syncing`, accepted one serving public Reth EL peer over IPv6, CL reached 379 dialable peers, historical sync moved from block 25,432,012 to 25,431,716, and zero LogEx IPv4 sockets were opened.
 - Re-ran the strict IPv6 proof with the full audited IPv6 ENR set: LogEx reached `Syncing`, kept listen/advertise/dial families strictly IPv6, accepted two serving public Reth EL peers, submitted 582 IPv6 EL dials, rejected 88 same-source IPv4 DNS candidates, reached 624 CL dialable peers, and moved historical sync backward by 30,215 blocks over 30 samples.
+- Replaced the family-aware execution DNS resolver with a local TXT-joining resolver after auditing Reth's resolver and confirming it only used the first TXT chunk from chunked EIP-1459 DNS records.
+- Added periodic DNS tree re-bootstrap for the family-aware execution DNS service so a transient empty root lookup does not leave strict IPv6 with zero DNS candidates for the whole run.
+- Re-ran strict IPv6 official-ENR smoke after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 75 active sessions and 3,281 dialable peers, EL accepted 144 IPv6 DNS execution candidates within four minutes, and the temporary droplet process/firewall/resolver cleanup was confirmed afterward.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 - Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
 
@@ -68,6 +71,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Why: an IPv6 ENR with `udp6` but no `tcp6` cannot be dialed directly, but it can still seed signed discv5 and expand discovery.
   - Tradeoff: such records must remain optional direct candidates, so logging and tests now handle DNS updates without a `NodeRecord`.
 
+- Family-aware execution DNS discovery uses a TXT-joining resolver and periodic tree re-bootstrap.
+  - Why: mainnet EIP-1459 branch records are often split into multiple DNS TXT chunks, and using only the first chunk silently drops most IPv6 candidates; a transient empty root lookup also should not permanently disable DNS discovery for the run.
+  - Tradeoff: this keeps one small resolver wrapper in LogEx instead of relying directly on Reth's default resolver behavior.
+
 - Consensus bootnodes and cached peers are filtered by dial family before discovery seeding.
   - Why: strict IPv6 mode should not seed IPv4-only ENRs or retain cached peers without a compatible dial address.
   - Tradeoff: status `bootnode_count` now means compatible seeded bootnodes, not total built-in bootnode records.
@@ -102,6 +109,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Resolution: replaced the direct-record-only DNS update with a local update type that preserves peer id, optional direct record, fork id, and ENR.
   - Remaining: no code issue remains in that path; public strict IPv6 EL still lacks accepting peers.
 
+- Challenge: strict IPv6 DNS discovery undercounted public execution ENRs and sometimes stayed at zero candidates for a whole proof run.
+  - Resolution: audited live EIP-1459 records and Reth's DNS resolver, added a TXT-joining resolver for family-aware execution DNS, and periodically re-synced the DNS tree after startup. The next official-ENR proof reached 144 accepted IPv6 candidates in four minutes with zero IPv4 sockets.
+  - Remaining: public IPv6 EL serving peers are still sparse, so candidate count is improved but peer acceptance remains lower than IPv4.
+
 - Challenge: strict IPv6 CL runs still saw family-incompatible bootnode/discovery paths.
   - Resolution: CL bootnodes and cached peers are now retained only when they have addresses compatible with the configured dial families.
   - Remaining: no code issue remains in the observed CL path; EL public IPv6 peer availability is still the blocker.
@@ -122,13 +133,14 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the obsolete family-agnostic CL bootnode/cache seeding path with dial-family-aware helpers.
 - Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
 - Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
+- Replaced the direct Reth DNS resolver use in the family-aware execution path with a local wrapper that preserves chunked TXT records; the default family-agnostic Reth path was not reintroduced.
 - Reverted the strict IPv6 discv4 experiment after it failed to improve public EL discovery.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.

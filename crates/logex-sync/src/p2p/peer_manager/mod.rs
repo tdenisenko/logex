@@ -15,7 +15,10 @@ use reth_discv4::{Discv4Config, NatResolver};
 use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
 use reth_discv5::enr::EnrCombinedKeyWrapper;
 use reth_discv5::enr_to_discv4_id;
-use reth_dns_discovery::{DnsDiscoveryConfig, DnsDiscoveryEvent, DnsDiscoveryService, DnsResolver};
+use reth_dns_discovery::{
+    DnsDiscoveryConfig, DnsDiscoveryEvent, DnsDiscoveryHandle, DnsDiscoveryService, Resolver,
+    resolver::{ResolveError, TokioResolver},
+};
 use reth_eth_wire::{
     BlockBodies, BlockHeaders, BlockRangeUpdate, DisconnectReason, EthVersion, GetBlockBodies,
     GetBlockHeaders, GetReceipts, GetReceipts70, HelloMessage, NetworkPrimitives, Receipts,
@@ -74,6 +77,7 @@ const DNS_DISCOVERY_CACHE_LIMIT: u32 = 8_192;
 const DNS_DISCOVERY_EVENT_BUFFER: usize = 8_192;
 const DNS_DISCOVERY_IPV6_BOOTNODE_TARGET: usize = 128;
 const DNS_DISCOVERY_IPV6_BOOTNODE_WAIT: Duration = Duration::from_secs(15);
+const DNS_DISCOVERY_REBOOTSTRAP_INTERVAL: Duration = Duration::from_secs(30);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(500);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
@@ -381,10 +385,11 @@ impl PeerManager {
         if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
         {
-            match DnsResolver::from_system_conf() {
+            match JoiningDnsResolver::from_system_conf() {
                 Ok(resolver) => {
                     let mut service =
                         DnsDiscoveryService::new(Arc::new(resolver), dns_discovery_config.clone());
+                    let handle = service.handle();
                     service.bootstrap();
                     let mut events = Box::pin(service) as DnsDiscoveryEvents;
                     dns_initial_boot_nodes = collect_initial_dns_boot_nodes(
@@ -394,7 +399,8 @@ impl PeerManager {
                         &mut events,
                     )
                     .await;
-                    let (events, task) = spawn_dns_discovery_poller(events);
+                    let (events, task) =
+                        spawn_dns_discovery_poller(events, handle, dns_network.clone());
                     dns_discovery_events = Some(events);
                     dns_discovery_task = Some(task);
                     tracing::info!(
@@ -758,6 +764,43 @@ fn mainnet_dns_discovery_config(bind_ip: IpAddr) -> Option<(String, DnsDiscovery
     ))
 }
 
+#[derive(Clone, Debug)]
+struct JoiningDnsResolver(TokioResolver);
+
+impl JoiningDnsResolver {
+    fn from_system_conf() -> Result<Self, ResolveError> {
+        TokioResolver::builder_tokio().map(|builder| Self(builder.build()))
+    }
+}
+
+impl Resolver for JoiningDnsResolver {
+    async fn lookup_txt(&self, query: &str) -> Option<String> {
+        let fqn = if query.ends_with('.') {
+            query.to_owned()
+        } else {
+            format!("{query}.")
+        };
+        match self.0.txt_lookup(fqn).await {
+            Ok(lookup) => {
+                let txt = lookup.into_iter().next()?;
+                join_txt_chunks(txt.iter().map(AsRef::as_ref))
+            }
+            Err(error) => {
+                trace!(target: "disc::dns", %error, ?query, "dns lookup failed");
+                None
+            }
+        }
+    }
+}
+
+fn join_txt_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Option<String> {
+    let mut entry = String::new();
+    for chunk in chunks {
+        entry.push_str(std::str::from_utf8(chunk).ok()?);
+    }
+    (!entry.is_empty()).then_some(entry)
+}
+
 async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
     if matches!(
         nat_resolver,
@@ -1009,15 +1052,43 @@ async fn collect_initial_dns_boot_nodes(
 
 fn spawn_dns_discovery_poller(
     mut events: DnsDiscoveryEvents,
+    handle: DnsDiscoveryHandle,
+    dns_network: String,
 ) -> (DnsDiscoveryEvents, JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel(DNS_DISCOVERY_EVENT_BUFFER);
     let task = tokio::spawn(async move {
         let mut forwarded = 0u64;
-        while let Some(event) = events.next().await {
-            if sender.send(event).await.is_err() {
-                break;
+        let mut rebootstrap = time::interval_at(
+            TokioInstant::now() + DNS_DISCOVERY_REBOOTSTRAP_INTERVAL,
+            DNS_DISCOVERY_REBOOTSTRAP_INTERVAL,
+        );
+        loop {
+            tokio::select! {
+                maybe_event = events.next() => {
+                    let Some(event) = maybe_event else {
+                        break;
+                    };
+                    if sender.send(event).await.is_err() {
+                        break;
+                    }
+                    forwarded = forwarded.saturating_add(1);
+                }
+                _ = rebootstrap.tick() => {
+                    if let Err(error) = handle.sync_tree(&dns_network) {
+                        trace!(
+                            %error,
+                            dns_network,
+                            "failed to re-bootstrap execution DNS discovery"
+                        );
+                    } else {
+                        trace!(
+                            dns_network,
+                            forwarded,
+                            "re-bootstrap execution DNS discovery tree"
+                        );
+                    }
+                }
             }
-            forwarded = forwarded.saturating_add(1);
         }
         trace!(
             forwarded,
@@ -1973,6 +2044,20 @@ mod tests {
         assert!(
             ipv6_config.max_requests_per_sec > ipv4_config.max_requests_per_sec,
             "IPv6 startup needs to skip through mostly IPv4-only mainnet ENRs quickly"
+        );
+    }
+
+    #[test]
+    fn dns_resolver_joins_chunked_txt_records() {
+        let joined = join_txt_chunks([
+            b"enrtree-branch:AAAAAAAAAAAAAAAAAAAAAAAAAA,".as_slice(),
+            b"BBBBBBBBBBBBBBBBBBBBBBBBBB".as_slice(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            joined,
+            "enrtree-branch:AAAAAAAAAAAAAAAAAAAAAAAAAA,BBBBBBBBBBBBBBBBBBBBBBBBBB"
         );
     }
 }
