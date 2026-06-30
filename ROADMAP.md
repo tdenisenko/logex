@@ -126,8 +126,9 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; pending commit for the latest strict IPv6 proof note.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`.
 - Pull request status: not created yet; strict IPv6 proof is complete, but hosted checks are still blocked by the previously noted GitHub Actions quota.
+- Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
 - Blockers: GitHub Actions quota has previously blocked hosted validation.
 
