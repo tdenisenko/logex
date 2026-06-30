@@ -545,25 +545,14 @@ async fn select_p2p_address(
     }
 
     let resolved = resolve_startup_nat(parsed).await;
-    let external_ip = resolved.clone().as_external_ip(p2p_port);
     let mut warnings = Vec::new();
-    let bind_ip = narrow_unspecified_ipv6_bind(
-        p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&resolved, p2p_port)),
-        external_ip,
-        default_route_ipv6(),
+    Ok(choose_explicit_p2p_address(
+        resolved,
+        p2p_bind_ip,
+        p2p_port,
+        detect_local_p2p_addresses(),
         &mut warnings,
-    );
-    Ok(P2pAddressSelection {
-        nat: resolved,
-        bind_ip,
-        dial_families: DialAddressFamilies::for_bind_ip(bind_ip),
-        advertised_families: external_ip
-            .map(DialAddressFamilies::for_bind_ip)
-            .unwrap_or(DialAddressFamilies::for_bind_ip(bind_ip)),
-        external_ip,
-        mode: P2pAddressSelectionMode::Explicit,
-        warnings,
-    })
+    ))
 }
 
 async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
@@ -591,6 +580,54 @@ fn default_p2p_bind_ip(nat_resolver: &NatResolver, p2p_port: u16) -> IpAddr {
     match nat_resolver.clone().as_external_ip(p2p_port) {
         Some(IpAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+fn choose_explicit_p2p_address(
+    nat: NatResolver,
+    p2p_bind_ip: Option<IpAddr>,
+    p2p_port: u16,
+    candidates: LocalP2pAddressCandidates,
+    warnings: &mut Vec<String>,
+) -> P2pAddressSelection {
+    let external_ip = nat.clone().as_external_ip(p2p_port);
+    let bind_ip = narrow_unspecified_ipv6_bind(
+        p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&nat, p2p_port)),
+        external_ip,
+        candidates.ipv6,
+        warnings,
+    );
+    let advertised_families = external_ip
+        .map(DialAddressFamilies::for_bind_ip)
+        .unwrap_or(DialAddressFamilies::for_bind_ip(bind_ip));
+    let dial_families = p2p_bind_ip
+        .map(DialAddressFamilies::for_bind_ip)
+        .unwrap_or_else(|| {
+            combine_dial_families(advertised_families, candidates.route_dial_families())
+        });
+
+    P2pAddressSelection {
+        nat,
+        bind_ip,
+        dial_families,
+        advertised_families,
+        external_ip,
+        mode: P2pAddressSelectionMode::Explicit,
+        warnings: warnings.clone(),
+    }
+}
+
+fn combine_dial_families(
+    first: DialAddressFamilies,
+    second: DialAddressFamilies,
+) -> DialAddressFamilies {
+    match (
+        first.allows_ipv4() || second.allows_ipv4(),
+        first.allows_ipv6() || second.allows_ipv6(),
+    ) {
+        (true, true) => DialAddressFamilies::BOTH,
+        (false, true) => DialAddressFamilies::IPV6,
+        _ => DialAddressFamilies::IPV4,
     }
 }
 
@@ -1520,6 +1557,72 @@ mod tests {
             selection.nat,
             NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
         );
+    }
+
+    #[test]
+    fn explicit_ipv6_nat_without_bind_keeps_outbound_ipv4_route() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            None,
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_ipv6_bind_remains_strict_ipv6() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            Some(IpAddr::V6(public_ipv6)),
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_nat_none_keeps_all_routed_outbound_families() {
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::None,
+            None,
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some("fd00::24".parse().unwrap()),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.external_ip, None);
     }
 
     #[test]
