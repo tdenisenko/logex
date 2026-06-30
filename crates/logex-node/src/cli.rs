@@ -504,6 +504,8 @@ mod tests {
         assert!(help.contains("--dashboard-password <PASSWORD>"));
         assert!(help.contains("--allow-public-grpc"));
         assert!(help.contains("--p2p-bind-ip <IP>"));
+        assert!(help.contains("IPv6 enodes must"));
+        assert!(help.contains("--execution-bootnode <ENODE_OR_ENR>"));
         assert!(help.contains("--disable-historical-sync"));
         assert!(help.contains("only follows verified consensus anchors forward"));
     }

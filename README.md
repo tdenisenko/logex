@@ -239,6 +239,36 @@ When `--http-host 0.0.0.0` is used, open the dashboard at
 `logex`. Prefer firewalling, SSH tunneling, or TLS termination for public
 servers.
 
+## P2P Address Selection And IPv6
+
+By default, `--nat any` chooses the safest reachable P2P mode automatically:
+
+1. If a locally owned public IPv4 address is available, EL advertises IPv4.
+2. If no public IPv4 is available but a locally owned public IPv6 address is
+   available, EL advertises IPv6.
+3. If no public address is available, LogEx runs outbound-only and relies on
+   discovery plus persisted known peers learned during previous runs.
+
+When both IPv4 and IPv6 routes exist, LogEx may still dial outbound peers over
+both families even though EL advertises only one public family. CL can advertise
+IPv6 while EL advertises IPv4 because the beacon network generally has better
+IPv6 reachability than the execution network.
+
+Strict IPv6-only mode is available when the host has public IPv6 reachability:
+
+```bash
+./target/release/logex \
+  sync \
+  --p2p-bind-ip :: \
+  --nat extip:YOUR_PUBLIC_IPV6 \
+  --execution-bootnode 'enode://PUBKEY@[2001:db8::1]:30303?discport=30303'
+```
+
+In strict IPv6 mode LogEx binds, advertises, and dials only IPv6 for EL and CL.
+Public EL IPv6 discovery is currently much sparser than IPv4, so reliable IPv6
+execution bootnodes or a warmed `known-peers.json` cache are recommended for
+production. Once an IPv6 EL peer proves useful, LogEx persists it for restart.
+
 ## CLI Reference
 
 Use `--help` at any level:

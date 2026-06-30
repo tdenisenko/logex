@@ -913,7 +913,7 @@ fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelec
 fn add_runtime_p2p_warnings(selection: &mut P2pAddressSelection, execution_bootnodes: &[String]) {
     if selection.dial_families == DialAddressFamilies::IPV6 && execution_bootnodes.is_empty() {
         selection.warnings.push(
-            "strict IPv6-only execution sync depends on public IPv6 EL peers; public discovery can be sparse, so configure --execution-bootnode with IPv6 enode:// or enr: records if EL peers stay at zero"
+            "strict IPv6-only execution sync depends on public IPv6 EL peers; public DNS discovery can be sparse, so configure --execution-bootnode with IPv6 enode:// or enr: records if EL peers stay at zero. Proven serving peers are cached for restart."
                 .to_owned(),
         );
     }
@@ -1564,6 +1564,7 @@ mod tests {
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("IPv6-only execution sync"));
         assert!(selection.warnings[0].contains("--execution-bootnode"));
+        assert!(selection.warnings[0].contains("cached for restart"));
     }
 
     #[test]
