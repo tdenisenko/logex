@@ -185,7 +185,9 @@ Security:
         /// Local IP address used by execution and consensus P2P listeners.
         ///
         /// By default, LogEx uses automatic address-family selection. Use "::"
-        /// with --nat extip:<ipv6> to force IPv6-only P2P.
+        /// with --nat extip:<ipv6> to select IPv6; LogEx narrows the listener
+        /// to the concrete local public IPv6 address when it can verify that
+        /// address locally.
         #[arg(long, value_name = "IP")]
         p2p_bind_ip: Option<IpAddr>,
 

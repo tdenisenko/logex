@@ -546,7 +546,13 @@ async fn select_p2p_address(
 
     let resolved = resolve_startup_nat(parsed).await;
     let external_ip = resolved.clone().as_external_ip(p2p_port);
-    let bind_ip = p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&resolved, p2p_port));
+    let mut warnings = Vec::new();
+    let bind_ip = narrow_unspecified_ipv6_bind(
+        p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&resolved, p2p_port)),
+        external_ip,
+        default_route_ipv6(),
+        &mut warnings,
+    );
     Ok(P2pAddressSelection {
         nat: resolved,
         bind_ip,
@@ -556,7 +562,7 @@ async fn select_p2p_address(
             .unwrap_or(DialAddressFamilies::for_bind_ip(bind_ip)),
         external_ip,
         mode: P2pAddressSelectionMode::Explicit,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -618,6 +624,12 @@ fn choose_auto_p2p_address(
             )
         }),
         Some(bind_ip @ IpAddr::V6(_)) => public_ipv6.map(|ip| {
+            let bind_ip = narrow_unspecified_ipv6_bind(
+                bind_ip,
+                Some(IpAddr::V6(ip)),
+                candidates.ipv6,
+                &mut warnings,
+            );
             (
                 NatResolver::ExternalIp(IpAddr::V6(ip)),
                 bind_ip,
@@ -642,9 +654,15 @@ fn choose_auto_p2p_address(
             })
             .or_else(|| {
                 public_ipv6.map(|ip| {
+                    let bind_ip = narrow_unspecified_ipv6_bind(
+                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        Some(IpAddr::V6(ip)),
+                        candidates.ipv6,
+                        &mut warnings,
+                    );
                     (
                         NatResolver::ExternalIp(IpAddr::V6(ip)),
-                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        bind_ip,
                         if candidates.ipv4.is_some() {
                             DialAddressFamilies::BOTH
                         } else {
@@ -773,6 +791,33 @@ fn ipv6_matches_prefix(ip: Ipv6Addr, prefix: Ipv6Addr, prefix_len: u32) -> bool 
     let ip_bits = u128::from_be_bytes(ip.octets());
     let prefix_bits = u128::from_be_bytes(prefix.octets());
     (ip_bits & mask) == (prefix_bits & mask)
+}
+
+fn narrow_unspecified_ipv6_bind(
+    bind_ip: IpAddr,
+    external_ip: Option<IpAddr>,
+    local_ipv6: Option<Ipv6Addr>,
+    warnings: &mut Vec<String>,
+) -> IpAddr {
+    let IpAddr::V6(bind_ipv6) = bind_ip else {
+        return bind_ip;
+    };
+    if !bind_ipv6.is_unspecified() {
+        return bind_ip;
+    }
+
+    let Some(IpAddr::V6(external_ipv6)) = external_ip else {
+        return bind_ip;
+    };
+    if local_ipv6 == Some(external_ipv6) {
+        return IpAddr::V6(external_ipv6);
+    }
+
+    warnings.push(
+        "IPv6 wildcard P2P bind may be dual-stack on some operating systems; bind a concrete local IPv6 address to ensure OS-level IPv6-only listeners"
+            .to_owned(),
+    );
+    bind_ip
 }
 
 fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
@@ -1352,7 +1397,7 @@ mod tests {
             selection.nat,
             NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
         );
-        assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
         assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
@@ -1374,7 +1419,7 @@ mod tests {
             selection.nat,
             NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
         );
-        assert_eq!(selection.bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
         assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
         assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
         assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
@@ -1417,6 +1462,41 @@ mod tests {
         );
 
         assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn auto_p2p_selection_narrows_unspecified_ipv6_bind_to_public_ipv6() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+    }
+
+    #[test]
+    fn ipv6_wildcard_bind_warns_when_external_ipv6_is_not_local() {
+        let mut warnings = Vec::new();
+        let bind_ip = narrow_unspecified_ipv6_bind(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            Some(IpAddr::V6("2604:a880:400:d0::1".parse().unwrap())),
+            Some("2604:a880:400:d0::2".parse().unwrap()),
+            &mut warnings,
+        );
+
+        assert_eq!(bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("dual-stack"));
     }
 
     #[test]
