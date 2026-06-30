@@ -379,6 +379,8 @@ fn rest_execution_network_status(
 fn execution_bootstrap_warning(
     status: &logex_types::ExecutionNetworkStatus,
 ) -> Option<&'static str> {
+    const SERVING_PROOF_FAILURE_THRESHOLD: u64 = 4;
+
     let pending_dials = u64::try_from(status.pending_dials).unwrap_or(u64::MAX);
     let repeated_expirations = status.submitted_dial_expirations >= 8
         && (status.submitted_dial_expirations >= status.submitted_dials_total
@@ -408,6 +410,19 @@ fn execution_bootstrap_warning(
     {
         return Some(
             "execution DNS discovery returned candidates, but none had a dialable endpoint for the selected P2P address family",
+        );
+    }
+
+    let request_failures = status
+        .historical_scheduler_body_failures
+        .saturating_add(status.historical_scheduler_receipt_failures);
+    if status.accepted_sessions > 0
+        && status.body_proven_peers == 0
+        && status.receipt_proven_peers == 0
+        && request_failures >= SERVING_PROOF_FAILURE_THRESHOLD
+    {
+        return Some(
+            "execution peer sessions are accepted, but no connected peer has served historical block bodies or receipts yet; connected peers may be non-serving, pruned beyond the requested range, or unsuitable for the selected P2P address family",
         );
     }
 
@@ -576,6 +591,49 @@ mod tests {
             dns_discovered_candidates: 12,
             submitted_dials_total: 12,
             submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_accepted_nonserving_sessions() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 3,
+            body_proven_peers: 0,
+            receipt_proven_peers: 0,
+            historical_scheduler_body_failures: 2,
+            historical_scheduler_receipt_failures: 2,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("sessions are accepted"));
+        assert!(warning.contains("served historical block bodies or receipts"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_after_serving_proof() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 3,
+            body_proven_peers: 1,
+            receipt_proven_peers: 1,
+            historical_scheduler_body_failures: 4,
+            historical_scheduler_receipt_failures: 4,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_before_historical_requests() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 1,
+            body_proven_peers: 0,
+            receipt_proven_peers: 0,
             ..Default::default()
         };
 

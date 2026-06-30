@@ -16,6 +16,7 @@ Follow-up source audit checked LogEx's peer-manager path against local Reth, get
 
 ## Completed Since Last Run
 
+- Tightened execution bootstrap diagnostics so `/status.execution_network.bootstrap_warning` stays actionable after an accepted Eth session if historical body/receipt requests repeatedly fail and no connected peer has proven it can serve both bodies and receipts.
 - Audited the current IPv6 branch against local Reth, geth, and Nethermind source. No missed small configuration path was found for public strict-IPv6 EL sync; the remaining gap is reliable public IPv6 execution peers or a larger dual-network-manager design for true dual inbound identity.
 - Reran a short strict public IPv6-only proof on the current Linux binary with IPv4 egress rejected for `logexv6`: 4 samples showed zero IPv4 LogEx sockets, strict IPv6 listen/advertise/dial status, CL reached 71 active sessions and 2,400 dialable peers, and public EL remained blocked by 45 expired IPv6 DNS dials with a visible bootstrap warning.
 - Reran the controlled two-node strict IPv6 EL proof on the same binary: seed and client both used IPv6 bind/dial families, established execution sessions over the explicit IPv6 enode, logged 5 Eth70 mentions, and showed zero IPv4-mapped addresses.
@@ -335,6 +336,11 @@ Follow-up source audit checked LogEx's peer-manager path against local Reth, get
   - Alternatives considered: fail startup in strict IPv6-only mode without bootnodes; rejected because CL and controlled EL IPv6 are valid and advanced users may have their own IPv6 peers.
   - Tradeoff: startup remains permissive, but `/status` and logs make the public EL bootstrap risk visible.
 
+- Execution bootstrap health distinguishes accepted sessions from proven historical serving.
+  - Why: an IPv6 execution peer can complete Eth handshake but still be pruned, non-serving, or unsuitable for the requested range; historical sync needs block bodies and receipts, not just a connected session.
+  - Alternatives considered: silence bootstrap warnings after the first accepted session; rejected because it overstates progress for strict IPv6 proofs and explicit bootnodes that accept connections but do not serve useful data.
+  - Tradeoff: the warning waits for repeated body/receipt failures before firing, so clean startup and disabled historical sync are not mislabeled.
+
 - Strict IPv6 wildcard selection narrows to a concrete local public IPv6 address when possible.
   - Why: on Linux, binding Reth's execution listener to `::` can create dual-stack wildcard sockets even when LogEx's address-family policy is IPv6-only. Binding to the verified local public IPv6 address keeps EL and CL P2P listeners IPv6-only at the OS socket layer.
   - Alternatives considered: patch Reth's listener internals to set `IPV6_V6ONLY`, or require operators to pass the concrete IPv6 address manually. Narrowing during address selection is smaller, keeps the dependency unchanged, and preserves the existing `--p2p-bind-ip :: --nat extip:<ipv6>` workflow when the address is local.
@@ -652,13 +658,14 @@ Follow-up source audit checked LogEx's peer-manager path against local Reth, get
 - Rechecked the configured execution bootnode parser against geth static-node behavior and the existing Reth `NodeRecord` parser; no obsolete code was removed because IP-literal enodes, DNS-name enodes, and signed ENRs now cover distinct supported input forms.
 - Rechecked the latest droplet proof cleanup after testing the hostname-enode path; no production code was changed in that proof pass, and no repository cleanup was required beyond updating this roadmap.
 - Rechecked the IPv6 discovery/address-family paths after auditing Reth/geth/Nethermind source; no obsolete production code was removed because the remaining branch changes map to distinct strict-IPv6, dual-outbound, bootnode, DNS, and status behaviors.
+- Rechecked REST bootstrap-warning behavior; no obsolete status fields were removed because the existing execution-network counters now feed both dial-expiry and accepted-but-non-serving diagnostics.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
 - Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; `fix: support finalized checkpoint fallback`; `fix: use ipv6-capable checkpoint quorum`; `fix: require ipv6 execution dns endpoints`; `docs: record controlled ipv6 proof`; `fix: support signed execution bootnode enrs`; `fix: seed ipv6 execution discovery from dns enrs`; `fix: report p2p listen and advertised families`; `fix: reject ipv4-mapped consensus dial addresses`; `fix: tighten public ipv6 address detection`; `docs: record strict ipv6 proof`; `fix: apply dual p2p families to consensus dials`; `fix: seed dual-family ipv6 dns direct candidates`; `fix: bind strict ipv6 to concrete local address`; `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`; `fix: supplement dual-family dns dials`; `docs: record current ipv6 proof`.
-- Commits made this run: `docs: record final ipv6 proof status`; `fix: resolve hostname execution bootnodes`; `docs: record latest ipv6 proof`; `docs: record ipv6 discovery audit`.
+- Commits made this run: `docs: record final ipv6 proof status`; `fix: resolve hostname execution bootnodes`; `docs: record latest ipv6 proof`; `docs: record ipv6 discovery audit`; `fix: warn on nonserving execution sessions`.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
