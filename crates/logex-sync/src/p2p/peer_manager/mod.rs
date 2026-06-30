@@ -770,12 +770,12 @@ fn signed_enr_node_record_for_dial_families(
         ));
     }
     if families.ipv6
-        && let (Some(ip), Some(tcp_port)) = (enr.ip6(), enr.tcp6())
+        && let (Some(ip), Some(tcp_port)) = (enr.ip6(), signed_ipv6_tcp_port(enr))
     {
         return Some(NodeRecord::new_with_ports(
             IpAddr::V6(ip),
             tcp_port,
-            enr.udp6(),
+            signed_ipv6_udp_port(enr),
             peer_id,
         ));
     }
@@ -842,7 +842,7 @@ fn dns_boot_node_for_bind_ip(
         return None;
     }
     let advertised_udp = if bind_ip.is_ipv6() {
-        update.enr.udp6()
+        dns_ipv6_udp_port(&update.enr)
     } else {
         update.enr.udp4()
     };
@@ -880,8 +880,8 @@ fn dns_node_record_for_bind_ip(
     let peer_id = update.node_record.id;
     if bind_ip.is_ipv6() {
         let ip = update.enr.ip6().map(IpAddr::V6)?;
-        let tcp_port = update.enr.tcp6()?;
-        let udp_port = update.enr.udp6();
+        let tcp_port = dns_ipv6_tcp_port(&update.enr)?;
+        let udp_port = dns_ipv6_udp_port(&update.enr);
         return Some(NodeRecord::new_with_ports(ip, tcp_port, udp_port, peer_id));
     }
 
@@ -906,6 +906,22 @@ fn dns_node_record_for_dial_families(
         return Some(node);
     }
     None
+}
+
+fn signed_ipv6_tcp_port(enr: &Discv5Enr) -> Option<u16> {
+    enr.tcp6().or_else(|| enr.tcp4())
+}
+
+fn signed_ipv6_udp_port(enr: &Discv5Enr) -> Option<u16> {
+    enr.udp6().or_else(|| enr.udp4())
+}
+
+fn dns_ipv6_tcp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
+    enr.tcp6().or_else(|| enr.tcp4())
+}
+
+fn dns_ipv6_udp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
+    enr.udp6().or_else(|| enr.udp4())
 }
 
 #[cfg(test)]
@@ -1026,13 +1042,17 @@ mod tests {
     }
 
     #[test]
-    fn dns_node_record_rejects_ipv6_when_tcp6_is_absent() {
+    fn dns_node_record_uses_generic_tcp_udp_for_ipv6_when_specific_ports_are_absent() {
         let enr: reth_network_peers::Enr<SecretKey> = "enr:-Ky4QFLajgAy-oJ6-qZAtBwJAAKJYSN1IvRz6idba7ab3U44YgtX3kwRE0yotbttzeRFCCSD8QuvjBJSzUiYNKbXAZgkg2V0aMfGhAfJRi6AgmlkgnY0gmlwhIjzWNuDaXA2kCoBBPgBcQDcAAAAAAAAAAKJc2VjcDI1NmsxoQLYYURYDijb3HRPx6MDWt3HGS-GtWwdhqudRJ4ye_9VF4N0Y3CCdyeDdWRwgncn"
             .parse()
             .unwrap();
         assert!(enr.ip6().is_some());
         assert!(enr.tcp6().is_none());
         assert!(enr.tcp4().is_some());
+        assert!(enr.udp6().is_none());
+        assert!(enr.udp4().is_some());
+        let expected_tcp = enr.tcp4().unwrap();
+        let expected_udp = enr.udp4().unwrap();
         let update = DnsNodeRecordUpdate {
             node_record: NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -1044,7 +1064,12 @@ mod tests {
             enr,
         };
 
-        assert!(dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update).is_none());
+        let record = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update)
+            .expect("IPv6 ENR should use generic TCP/UDP ports as EIP-778 fallback");
+
+        assert!(record.tcp_addr().ip().is_ipv6());
+        assert_eq!(record.tcp_port, expected_tcp);
+        assert_eq!(record.udp_port, expected_udp);
     }
 
     #[test]
@@ -1184,6 +1209,29 @@ mod tests {
         assert!(!signed_enr_matches_discovery_bind_ip(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             &bootnodes.signed_enrs[0]
+        ));
+    }
+
+    #[test]
+    fn signed_enr_direct_candidate_uses_generic_ports_for_ipv6_fallback() {
+        let key = reth_discv5::discv5::enr::CombinedKey::generate_secp256k1();
+        let ipv6 = "2001:db8:4::66".parse::<Ipv6Addr>().unwrap();
+        let enr = Discv5Enr::builder()
+            .ip6(ipv6)
+            .tcp4(30303)
+            .udp4(30304)
+            .build(&key)
+            .unwrap();
+
+        let node = signed_enr_node_record_for_dial_families(DialAddressFamilies::IPV6, &enr)
+            .expect("IPv6 family should use generic TCP/UDP fallback ports");
+
+        assert_eq!(node.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(node.tcp_port, 30303);
+        assert_eq!(node.udp_port, 30304);
+        assert!(!signed_enr_matches_discovery_bind_ip(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            &enr
         ));
     }
 
