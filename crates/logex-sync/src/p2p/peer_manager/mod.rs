@@ -34,8 +34,10 @@ use reth_network::{
 };
 use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes, pk2id};
 use secp256k1::SecretKey;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant as TokioInstant};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{info, trace};
 
@@ -70,6 +72,7 @@ const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DNS_DISCOVERY_IPV4_REQUESTS_PER_SEC: usize = 16;
 const DNS_DISCOVERY_IPV6_REQUESTS_PER_SEC: usize = 64;
 const DNS_DISCOVERY_CACHE_LIMIT: u32 = 8_192;
+const DNS_DISCOVERY_EVENT_BUFFER: usize = 8_192;
 const DNS_DISCOVERY_IPV6_BOOTNODE_TARGET: usize = 128;
 const DNS_DISCOVERY_IPV6_BOOTNODE_WAIT: Duration = Duration::from_secs(15);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(500);
@@ -126,6 +129,7 @@ pub struct PeerManager {
     network: NetworkHandle<LogexNetworkPrimitives>,
     network_task: Option<JoinHandle<()>>,
     eth_request_task: Option<JoinHandle<()>>,
+    dns_discovery_task: Option<JoinHandle<()>>,
     network_events: NetworkEvents,
     discovery_events: DiscoveryEvents,
     dns_discovery_events: Option<DnsDiscoveryEvents>,
@@ -367,6 +371,7 @@ impl PeerManager {
         let fork_filter = MAINNET.fork_filter(network_head);
 
         let mut dns_discovery_events = None;
+        let mut dns_discovery_task = None;
         let mut dns_initial_boot_nodes = DnsInitialBootNodes::default();
         if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
@@ -384,7 +389,9 @@ impl PeerManager {
                         &mut events,
                     )
                     .await;
+                    let (events, task) = spawn_dns_discovery_poller(events);
                     dns_discovery_events = Some(events);
+                    dns_discovery_task = Some(task);
                     tracing::info!(
                         dns_network,
                         bind_ip = %bind_ip,
@@ -520,6 +527,7 @@ impl PeerManager {
             network: handle,
             network_task: Some(network_task),
             eth_request_task: Some(eth_request_task),
+            dns_discovery_task,
             network_events,
             discovery_events,
             dns_discovery_events,
@@ -878,6 +886,27 @@ async fn collect_initial_dns_boot_nodes(
         }
     }
     bootnodes
+}
+
+fn spawn_dns_discovery_poller(
+    mut events: DnsDiscoveryEvents,
+) -> (DnsDiscoveryEvents, JoinHandle<()>) {
+    let (sender, receiver) = mpsc::channel(DNS_DISCOVERY_EVENT_BUFFER);
+    let task = tokio::spawn(async move {
+        let mut forwarded = 0u64;
+        while let Some(event) = events.next().await {
+            if sender.send(event).await.is_err() {
+                break;
+            }
+            forwarded = forwarded.saturating_add(1);
+        }
+        trace!(
+            forwarded,
+            "execution DNS discovery background poller stopped"
+        );
+    });
+
+    (Box::pin(ReceiverStream::new(receiver)), task)
 }
 
 fn dns_node_record_update_from_event(event: DnsDiscoveryEvent) -> Option<DnsNodeRecordUpdate> {

@@ -28,6 +28,10 @@ impl PeerManager {
         self.discovery_events = Box::pin(tokio_stream::empty());
         self.dns_discovery_events = None;
 
+        if let Some(task) = self.dns_discovery_task.take() {
+            abort_and_wait(task, "execution DNS discovery task").await;
+        }
+
         if let Some(task) = self.network_task.take() {
             debug!(
                 ?NETWORK_SHUTDOWN_DRAIN_TIMEOUT,
