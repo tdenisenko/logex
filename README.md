@@ -252,7 +252,9 @@ By default, `--nat any` chooses the safest reachable P2P mode automatically:
 When both IPv4 and IPv6 routes exist, LogEx may still dial outbound peers over
 both families even though EL advertises only one public family. CL can advertise
 IPv6 while EL advertises IPv4 because the beacon network generally has better
-IPv6 reachability than the execution network.
+IPv6 reachability than the execution network. In the current release, dual-stack
+means dual-family outbound dialing plus the safest advertised family per layer;
+it does not create two simultaneous advertised EL inbound identities.
 
 Strict IPv6-only mode is available when the host has public IPv6 reachability:
 

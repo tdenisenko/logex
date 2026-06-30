@@ -678,12 +678,12 @@ fn choose_auto_p2p_address(
     let public_ipv6 = candidates.public_ipv6();
     if p2p_bind_ip.is_none() && public_ipv4.is_some() && public_ipv6.is_some() {
         warnings.push(
-            "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
                 .to_owned(),
         );
     } else if p2p_bind_ip.is_none() && public_ipv6.is_some() && candidates.ipv4.is_some() {
         warnings.push(
-            "public IPv6 and outbound IPv4 were detected; IPv6 is advertised while IPv4 outbound candidates are also accepted"
+            "public IPv6 and outbound IPv4 were detected; execution advertises IPv6 and dials both routed families where possible"
                 .to_owned(),
         );
     }

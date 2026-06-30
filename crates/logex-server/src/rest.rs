@@ -1345,7 +1345,7 @@ mod tests {
                 p2p_advertised_families: vec!["ipv4".to_owned()],
                 p2p_external_ip: Some("203.0.114.10".to_owned()),
                 p2p_warnings: vec![
-                    "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
+                    "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
                         .to_owned(),
                 ],
                 current_block: 250,
@@ -1635,7 +1635,7 @@ mod tests {
         assert_eq!(status["p2p_external_ip"], "203.0.114.10");
         assert_eq!(
             status["p2p_warnings"][0],
-            "public IPv4 and IPv6 were both detected; IPv4 is advertised while IPv6 outbound candidates are also accepted"
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
         );
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
