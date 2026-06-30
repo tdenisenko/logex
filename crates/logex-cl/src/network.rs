@@ -5009,6 +5009,7 @@ fn dial_address_class(addr: &Multiaddr) -> Option<DialAddressClass> {
     for protocol in addr.iter() {
         match protocol {
             Protocol::Ip4(_) => ip_version = Some(4u8),
+            Protocol::Ip6(ip) if ip.to_ipv4_mapped().is_some() => ip_version = Some(0u8),
             Protocol::Ip6(_) => ip_version = Some(6u8),
             Protocol::Tcp(_) => transport = Some("tcp"),
             Protocol::QuicV1 => transport = Some("quic"),
@@ -5316,6 +5317,14 @@ mod tests {
             )),
             Some(DialAddressClass::Tcp6)
         );
+        assert_eq!(
+            dial_address_class(&multiaddr_from_ip(
+                IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+                9000,
+                peer_id
+            )),
+            None
+        );
     }
 
     #[test]
@@ -5325,12 +5334,36 @@ mod tests {
         let quic4 = multiaddr_from_ip_quic(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
         let tcp6 = multiaddr_from_ip(IpAddr::V6(Ipv6Addr::LOCALHOST), 9000, peer_id);
         let quic6 = multiaddr_from_ip_quic(IpAddr::V6(Ipv6Addr::LOCALHOST), 9000, peer_id);
+        let mapped_tcp = multiaddr_from_ip(
+            IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+            9000,
+            peer_id,
+        );
+        let mapped_quic = multiaddr_from_ip_quic(
+            IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+            9000,
+            peer_id,
+        );
 
-        let mut ipv4_addrs = vec![tcp4.clone(), quic4.clone(), tcp6.clone(), quic6.clone()];
+        let mut ipv4_addrs = vec![
+            tcp4.clone(),
+            quic4.clone(),
+            tcp6.clone(),
+            quic6.clone(),
+            mapped_tcp.clone(),
+            mapped_quic.clone(),
+        ];
         retain_dial_addresses_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), &mut ipv4_addrs);
         assert_eq!(ipv4_addrs, vec![tcp4.clone(), quic4.clone()]);
 
-        let mut ipv6_addrs = vec![tcp4, quic4, tcp6.clone(), quic6.clone()];
+        let mut ipv6_addrs = vec![
+            tcp4,
+            quic4,
+            tcp6.clone(),
+            quic6.clone(),
+            mapped_tcp,
+            mapped_quic,
+        ];
         retain_dial_addresses_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &mut ipv6_addrs);
         assert_eq!(ipv6_addrs, vec![tcp6, quic6]);
     }
