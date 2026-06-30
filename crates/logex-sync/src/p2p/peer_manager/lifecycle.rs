@@ -384,10 +384,11 @@ impl PeerManager {
                 .session_metrics
                 .dns_family_rejected_candidates
                 .saturating_add(1);
+            let node_addr = update.node_record.as_ref().map(|node| node.tcp_addr());
             trace!(
-                peer = %update.node_record.id,
+                peer = %update.peer_id,
                 bind_ip = %self.bind_ip,
-                node_addr = %update.node_record.tcp_addr(),
+                node_addr = ?node_addr,
                 has_ip4 = update.enr.ip4().is_some(),
                 has_tcp4 = update.enr.tcp4().is_some(),
                 has_udp4 = update.enr.udp4().is_some(),

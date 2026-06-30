@@ -15,9 +15,7 @@ use reth_discv4::{Discv4Config, NatResolver};
 use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
 use reth_discv5::enr::EnrCombinedKeyWrapper;
 use reth_discv5::enr_to_discv4_id;
-use reth_dns_discovery::{
-    DnsDiscoveryConfig, DnsDiscoveryEvent, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
-};
+use reth_dns_discovery::{DnsDiscoveryConfig, DnsDiscoveryEvent, DnsDiscoveryService, DnsResolver};
 use reth_eth_wire::{
     BlockBodies, BlockHeaders, BlockRangeUpdate, DisconnectReason, EthVersion, GetBlockBodies,
     GetBlockHeaders, GetReceipts, GetReceipts70, HelloMessage, NetworkPrimitives, Receipts,
@@ -804,6 +802,14 @@ struct DnsInitialBootNodes {
     signed_enrs: Vec<Discv5Enr>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct DnsNodeRecordUpdate {
+    peer_id: PeerId,
+    node_record: Option<NodeRecord>,
+    fork_id: Option<ForkId>,
+    enr: reth_network_peers::Enr<SecretKey>,
+}
+
 async fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<ParsedExecutionBootnodes> {
     let mut bootnodes = ParsedExecutionBootnodes::default();
     for raw in raw_bootnodes {
@@ -1025,19 +1031,7 @@ fn spawn_dns_discovery_poller(
 fn dns_node_record_update_from_event(event: DnsDiscoveryEvent) -> Option<DnsNodeRecordUpdate> {
     let DnsDiscoveryEvent::Enr(enr) = event;
     let peer_id = pk2id(&enr.public_key());
-    let address = enr
-        .ip4()
-        .map(IpAddr::V4)
-        .or_else(|| enr.ip6().map(IpAddr::V6))?;
-    let tcp_port = enr
-        .tcp4()
-        .or_else(|| enr.tcp6())
-        .or_else(|| dns_ipv6_tcp_port(&enr))?;
-    let udp_port = enr
-        .udp4()
-        .or_else(|| enr.udp6())
-        .or_else(|| dns_ipv6_udp_port(&enr));
-    let node_record = NodeRecord::new_with_ports(address, tcp_port, udp_port, peer_id);
+    let node_record = default_dns_node_record(&enr, peer_id);
     let fork_id = enr
         .get_decodable::<EnrForkIdEntry>(b"eth")
         .transpose()
@@ -1045,11 +1039,39 @@ fn dns_node_record_update_from_event(event: DnsDiscoveryEvent) -> Option<DnsNode
         .flatten()
         .map(Into::into);
 
+    if node_record.is_none() && enr.ip4().is_none() && enr.ip6().is_none() {
+        return None;
+    }
+
     Some(DnsNodeRecordUpdate {
+        peer_id,
         node_record,
         fork_id,
         enr,
     })
+}
+
+fn default_dns_node_record(
+    enr: &reth_network_peers::Enr<SecretKey>,
+    peer_id: PeerId,
+) -> Option<NodeRecord> {
+    if let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4()) {
+        return Some(NodeRecord::new_with_ports(
+            IpAddr::V4(ip),
+            tcp_port,
+            enr.udp4(),
+            peer_id,
+        ));
+    }
+
+    let ip = enr.ip6()?;
+    let tcp_port = dns_ipv6_tcp_port(enr)?;
+    Some(NodeRecord::new_with_ports(
+        IpAddr::V6(ip),
+        tcp_port,
+        dns_ipv6_udp_port(enr),
+        peer_id,
+    ))
 }
 
 fn dns_boot_node_for_bind_ip(
@@ -1127,18 +1149,27 @@ fn dns_node_record_for_bind_ip(
     bind_ip: IpAddr,
     update: &DnsNodeRecordUpdate,
 ) -> Option<NodeRecord> {
-    let peer_id = update.node_record.id;
     if bind_ip.is_ipv6() {
         let ip = update.enr.ip6().map(IpAddr::V6)?;
         let tcp_port = dns_ipv6_tcp_port(&update.enr)?;
         let udp_port = dns_ipv6_udp_port(&update.enr);
-        return Some(NodeRecord::new_with_ports(ip, tcp_port, udp_port, peer_id));
+        return Some(NodeRecord::new_with_ports(
+            ip,
+            tcp_port,
+            udp_port,
+            update.peer_id,
+        ));
     }
 
     let ip = update.enr.ip4().map(IpAddr::V4)?;
     let tcp_port = update.enr.tcp4()?;
     let udp_port = update.enr.udp4();
-    Some(NodeRecord::new_with_ports(ip, tcp_port, udp_port, peer_id))
+    Some(NodeRecord::new_with_ports(
+        ip,
+        tcp_port,
+        udp_port,
+        update.peer_id,
+    ))
 }
 
 fn dns_node_record_for_dial_families(
@@ -1178,6 +1209,19 @@ fn dns_ipv6_udp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn dns_update(
+        enr: reth_network_peers::Enr<SecretKey>,
+        node_record: NodeRecord,
+        fork_id: Option<ForkId>,
+    ) -> DnsNodeRecordUpdate {
+        DnsNodeRecordUpdate {
+            peer_id: node_record.id,
+            node_record: Some(node_record),
+            fork_id,
+            enr,
+        }
+    }
 
     #[test]
     fn peer_connection_limits_treat_config_as_total_capacity() {
@@ -1318,16 +1362,16 @@ mod tests {
             .unwrap();
         let expected_tcp = enr.tcp6().expect("fixture advertises an IPv6 TCP port");
         let expected_udp = enr.udp6();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
 
         let record = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update)
             .expect("fixture contains IPv6 TCP endpoint fields");
@@ -1349,16 +1393,16 @@ mod tests {
         assert!(enr.udp4().is_some());
         let expected_tcp = enr.tcp4().unwrap();
         let expected_udp = enr.udp4().unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
 
         let record = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &update)
             .expect("IPv6 ENR should use generic TCP/UDP ports as EIP-778 fallback");
@@ -1393,6 +1437,45 @@ mod tests {
     }
 
     #[test]
+    fn dns_event_conversion_preserves_ipv6_udp_only_enr_for_signed_discovery() {
+        let secret = SecretKey::from_byte_array(&[0x36; 32]).unwrap();
+        let ipv6 = "2001:db8:36::1".parse::<Ipv6Addr>().unwrap();
+        let fork_id = MAINNET.latest_fork_id();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip6(ipv6)
+            .udp6(30303)
+            .add_value(b"eth", &EnrForkIdEntry::from(fork_id))
+            .build(&secret)
+            .unwrap();
+
+        let update = dns_node_record_update_from_event(DnsDiscoveryEvent::Enr(enr))
+            .expect("IPv6 UDP-only ENR should survive DNS conversion");
+        let fork_filter = MAINNET.fork_filter(Head {
+            number: 25_000_000,
+            timestamp: 1_760_000_000,
+            ..Default::default()
+        });
+
+        assert!(update.node_record.is_none());
+        assert_eq!(update.fork_id, Some(fork_id));
+        assert!(dns_node_record_for_dial_families(DialAddressFamilies::IPV6, &update).is_none());
+        assert!(
+            dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
+                .is_none()
+        );
+        let signed = dns_signed_boot_node_for_bind_ip(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            &fork_filter,
+            &update,
+        )
+        .expect("IPv6 UDP-only ENR should seed signed discv5");
+
+        assert_eq!(signed.ip6(), Some(ipv6));
+        assert_eq!(signed.udp6(), Some(30303));
+        assert_eq!(signed.tcp6(), None);
+    }
+
+    #[test]
     fn dns_node_record_for_dual_dial_families_prefers_ipv4_when_available() {
         let secret = SecretKey::from_byte_array(&[0x18; 32]).unwrap();
         let ipv4 = Ipv4Addr::new(198, 51, 100, 12);
@@ -1406,16 +1489,16 @@ mod tests {
             .udp6(30304)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(ipv4),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
 
         let record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &update)
             .expect("dual-family ENR should produce a dialable endpoint");
@@ -1438,16 +1521,16 @@ mod tests {
             .udp6(30304)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(ipv4),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1480,16 +1563,16 @@ mod tests {
             .udp6(30304)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(ipv4),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1518,16 +1601,16 @@ mod tests {
             .udp6(30304)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V6(ipv6),
                 30304,
                 Some(30304),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
 
         let record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &update)
             .expect("dual-family dialing should keep IPv6-only ENRs");
@@ -1545,16 +1628,16 @@ mod tests {
             .udp6(30303)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1710,16 +1793,16 @@ mod tests {
             .tcp6(30303)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 None,
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1752,16 +1835,16 @@ mod tests {
             .udp6(30303)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1794,16 +1877,16 @@ mod tests {
             .udp4(30303)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V6(ipv6),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: None,
-            enr,
-        };
+            None,
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
@@ -1835,19 +1918,19 @@ mod tests {
             .udp6(30303)
             .build(&secret)
             .unwrap();
-        let update = DnsNodeRecordUpdate {
-            node_record: NodeRecord::new_with_ports(
+        let update = dns_update(
+            enr,
+            NodeRecord::new_with_ports(
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 30303,
                 Some(30303),
                 PeerId::repeat_byte(0x01),
             ),
-            fork_id: Some(ForkId {
+            Some(ForkId {
                 hash: reth_ethereum_forks::ForkHash([0xff; 4]),
                 next: 0,
             }),
-            enr,
-        };
+        );
         let fork_filter = MAINNET.fork_filter(Head {
             number: 25_000_000,
             timestamp: 1_760_000_000,
