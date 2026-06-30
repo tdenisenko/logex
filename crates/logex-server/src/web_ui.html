@@ -1187,6 +1187,7 @@
           <div class="debug-item"><span class="k">P2P address families</span><span class="v" id="debugP2pAddressFamilies">--</span></div>
           <div class="debug-item"><span class="k">P2P warning</span><span class="v" id="debugP2pWarning">--</span></div>
           <div class="debug-item"><span class="k">Execution bootstrap warning</span><span class="v" id="debugExecutionBootstrapWarning">--</span></div>
+          <div class="debug-item"><span class="k">Execution bootnodes</span><span class="v" id="debugExecutionBootnodes">--</span></div>
           <div class="debug-item"><span class="k">Body request peers</span><span class="v" id="debugBodyRequestPeers">--</span></div>
           <div class="debug-item"><span class="k">Receipt request peers</span><span class="v" id="debugReceiptRequestPeers">--</span></div>
           <div class="debug-item"><span class="k">Peer request pressure</span><span class="v" id="debugPeerRequestPressure">--</span></div>
@@ -3239,6 +3240,10 @@ function updateStatus(data) {
     ' / advertised ' + familyList(data.p2p_advertised_families));
   setText('debugP2pWarning', warningList(data.p2p_warnings));
   setText('debugExecutionBootstrapWarning', executionNetwork.bootstrap_warning || '--');
+  setText('debugExecutionBootnodes',
+    fmt(numberOrNull(executionNetwork.configured_bootnode_direct_candidates)) + ' direct / ' +
+    fmt(numberOrNull(executionNetwork.configured_bootnode_discovery_enrs)) + ' discovery / ' +
+    fmt(numberOrNull(executionNetwork.configured_bootnode_family_rejections)) + ' rejected');
   setText('debugBodyRequestPeers',
     fmt(numberOrNull(executionNetwork.body_request_ready_peers)) + ' ready / ' +
     fmt(numberOrNull(executionNetwork.body_request_paused_peers)) + ' paused / ' +

@@ -404,6 +404,16 @@ fn execution_bootstrap_warning(
     }
 
     if status.accepted_sessions == 0
+        && status.configured_bootnode_direct_candidates == 0
+        && status.configured_bootnode_discovery_enrs == 0
+        && status.configured_bootnode_family_rejections > 0
+    {
+        return Some(
+            "configured execution bootnodes were provided, but none matched the selected P2P address family; use IPv6 enode:// or enr: records for strict IPv6 runs and IPv4 records for strict IPv4 runs",
+        );
+    }
+
+    if status.accepted_sessions == 0
         && status.dns_discovered_candidates == 0
         && status.discovered_candidates == 0
         && status.dns_family_rejected_candidates > 0
@@ -669,6 +679,19 @@ mod tests {
         let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
 
         assert!(warning.contains("none had a dialable endpoint"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_family_rejected_configured_bootnodes() {
+        let status = ExecutionNetworkStatus {
+            configured_bootnode_family_rejections: 2,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("configured execution bootnodes"));
+        assert!(warning.contains("selected P2P address family"));
     }
 
     fn make_test_rows() -> Vec<LogRow> {
@@ -1396,6 +1419,9 @@ mod tests {
                     discovered_candidates: 7,
                     dns_discovered_candidates: 8,
                     dns_family_rejected_candidates: 9,
+                    configured_bootnode_direct_candidates: 10,
+                    configured_bootnode_discovery_enrs: 11,
+                    configured_bootnode_family_rejections: 12,
                     submitted_dials_total: 10,
                     submitted_dial_expirations: 11,
                     queued_candidates: 9,
@@ -1631,6 +1657,18 @@ mod tests {
         assert_eq!(
             status["execution_network"]["dns_family_rejected_candidates"],
             9
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_direct_candidates"],
+            10
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_discovery_enrs"],
+            11
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_family_rejections"],
+            12
         );
         assert_eq!(status["execution_network"]["submitted_dials_total"], 10);
         assert_eq!(

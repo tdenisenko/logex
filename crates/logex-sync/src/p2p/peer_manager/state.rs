@@ -214,6 +214,15 @@ impl PeerManager {
             discovered_candidates: self.session_metrics.discovered_candidates,
             dns_discovered_candidates: self.session_metrics.dns_discovered_candidates,
             dns_family_rejected_candidates: self.session_metrics.dns_family_rejected_candidates,
+            configured_bootnode_direct_candidates: self
+                .session_metrics
+                .configured_bootnode_direct_candidates,
+            configured_bootnode_discovery_enrs: self
+                .session_metrics
+                .configured_bootnode_discovery_enrs,
+            configured_bootnode_family_rejections: self
+                .session_metrics
+                .configured_bootnode_family_rejections,
             submitted_dials_total: self.session_metrics.submitted_dials_total,
             submitted_dial_expirations: self.session_metrics.submitted_dial_expirations,
             queued_candidates: self.pending.len(),

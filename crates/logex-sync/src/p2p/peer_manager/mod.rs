@@ -170,6 +170,9 @@ struct ExecutionPeerSessionMetrics {
     discovered_candidates: u64,
     dns_discovered_candidates: u64,
     dns_family_rejected_candidates: u64,
+    configured_bootnode_direct_candidates: usize,
+    configured_bootnode_discovery_enrs: usize,
+    configured_bootnode_family_rejections: usize,
     submitted_dials_total: u64,
     submitted_dial_expirations: u64,
 }
@@ -560,7 +563,13 @@ impl PeerManager {
             dial_families,
             network_activated,
             max_peers,
-            session_metrics: ExecutionPeerSessionMetrics::default(),
+            session_metrics: ExecutionPeerSessionMetrics {
+                configured_bootnode_direct_candidates: filtered_execution_bootnodes.len(),
+                configured_bootnode_discovery_enrs: filtered_execution_bootnode_enrs.len(),
+                configured_bootnode_family_rejections: skipped_execution_bootnodes
+                    .saturating_add(skipped_execution_bootnode_enrs),
+                ..Default::default()
+            },
             body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
         };
 

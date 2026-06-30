@@ -46,6 +46,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Added runtime tests for outbound-only known-peer fallback warnings.
 - Re-ran the strict public IPv6 proof with the Stakely checkpoint endpoint and owner-level IPv4 egress blocked: LogEx listened, advertised, and dialed only IPv6; CL peaked at 52 active sessions and 3,037 dialable peers; EL submitted 890 IPv6 dials but accepted no public serving session.
 - Fixed the controlled IPv6 proof harness after it reused the default execution discovery UDP port, then re-ran it successfully: seed and client established execution sessions over IPv6, logged `eth/70`, and opened zero IPv4 sockets.
+- Added execution bootnode accounting to `/status` and the advanced dashboard so strict IPv6 operators can distinguish usable configured bootnodes from records rejected by the selected address family.
+- Added a bootstrap warning for the case where configured execution bootnodes were provided but none match the active P2P family.
 
 ## Remaining TODOs
 
@@ -83,6 +85,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Why: public IPv6 EL discovery is sparse, so operators need a deterministic way to provide known IPv6 peers.
   - Tradeoff: signed discv5 ENRs still require same-family UDP fields because Reth discv5 rejects IPv6 signed ENRs with only generic UDP, while direct and unsigned candidates may use geth/Nethermind-compatible generic TCP/UDP fallback.
 
+- Configured execution bootnodes are surfaced with accepted and family-rejected counts.
+  - Why: strict IPv6 should not silently suppress the no-bootnode warning just because IPv4-only or otherwise incompatible records were supplied.
+  - Tradeoff: this adds diagnostic fields to status/dashboard without changing peer selection behavior.
+
 - DNS discovery events are retained even when they do not have a direct TCP endpoint.
   - Why: an IPv6 ENR with `udp6` but no `tcp6` cannot be dialed directly, but it can still seed signed discv5 and expand discovery.
   - Tradeoff: such records must remain optional direct candidates, so logging and tests now handle DNS updates without a `NodeRecord`.
@@ -113,6 +119,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
   - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and kept explicit IPv6 startup warnings visible in status/dashboard.
   - Remaining: current public IPv6 EL discovery is not deterministic; the latest post-fix official-ENR, TCP-open-ENR, and Stakely-checkpoint proofs submitted thousands of strict-IPv6 EL dials without any accepted EL serving session, and geth 1.17.4 also formed zero peers in IPv6-only comparison runs on the same droplet. Strict IPv6 historical-sync performance parity remains unproven without reliable operator-provided IPv6 execution bootnodes or a stronger public IPv6 peer source.
+
+- Challenge: strict IPv6 with incompatible configured bootnodes was hard to diagnose.
+  - Resolution: added execution bootnode counters for accepted direct candidates, accepted signed discovery ENRs, and family rejections, plus a bootstrap warning when all configured bootnodes are rejected by the active family.
+  - Remaining: this improves operator feedback but does not solve public IPv6 EL peer scarcity.
 
 - Challenge: the controlled two-node IPv6 EL proof initially failed after both nodes reused the default execution discovery UDP port.
   - Resolution: gave the seed and client distinct execution discovery ports, reran the proof, and confirmed both nodes established IPv6 execution sessions with `eth/70` log mentions and zero IPv4 sockets.
@@ -174,6 +184,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the direct Reth DNS resolver use in the family-aware execution path with a local wrapper that preserves chunked TXT records; the default family-agnostic Reth path was not reintroduced.
 - Reverted the strict IPv6 discv4 experiment again after the post-resolver smoke also failed to improve public EL discovery.
 - Surfaced existing P2P and execution bootstrap warnings in the dashboard advanced metrics instead of leaving them available only through raw `/status`.
+- Added configured execution bootnode counters to the existing execution network status path; no obsolete dashboard fields were removed.
 - Audited Reth's execution network, listener, node record, and discv5 dual-stack paths; no safe dead code removal followed from that audit.
 - Inspected the outbound-only known-peer fallback path and kept the existing dial-family filtering; no obsolete code was identified there.
 
@@ -181,7 +192,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.

@@ -192,6 +192,13 @@ pub struct ExecutionNetworkStatus {
     /// DNS execution discovery candidates ignored because they lacked a dialable address
     /// for the selected P2P address family.
     pub dns_family_rejected_candidates: u64,
+    /// Configured execution bootnodes accepted as direct RLPx dial candidates.
+    pub configured_bootnode_direct_candidates: usize,
+    /// Configured execution bootnodes accepted as signed discovery ENRs.
+    pub configured_bootnode_discovery_enrs: usize,
+    /// Configured execution bootnodes ignored because they did not match the selected
+    /// P2P address family.
+    pub configured_bootnode_family_rejections: usize,
     /// Execution peer dials submitted to the underlying network scheduler since startup.
     pub submitted_dials_total: u64,
     /// Submitted dials that aged out without becoming an accepted or closed session event.
