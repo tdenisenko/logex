@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`.
 
 Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac mini and no longer shows the two-hour liveness stall that previously blocked ordered writes. The accepted scheduler keeps expected historical work active, limits background maintenance while history is incomplete, and was bounded by the available network during the last validated run.
 
-IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works: bounded proofs used IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user; samples reached healthy CL session counts with zero LogEx IPv4 sockets. EL IPv6 transport also works: controlled two-node proofs established Eth70 execution sessions over an explicit IPv6 `enode://` bootnode while IPv4 egress was blocked. Public strict IPv6 EL discovery starts cleanly and submits IPv6 candidates, but public serving-peer acceptance is still not proven.
+IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works: bounded proofs used IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user; samples reached healthy CL session counts with zero LogEx IPv4 sockets. EL IPv6 transport also works: controlled two-node proofs established Eth70 execution sessions over an explicit IPv6 `enode://` bootnode while IPv4 egress was blocked. Public strict IPv6 EL discovery starts cleanly and submits IPv6 candidates, but public serving-peer acceptance is still not proven because the reachable public IPv6 execution peers observed from the droplet did not accept sessions.
 
 Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
@@ -21,11 +21,12 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Preserved DNS ENRs that have an IP address but no direct TCP endpoint so IPv6 `udp6` records can still seed signed discv5 discovery.
 - Added a regression test for IPv6 UDP-only DNS ENR conversion and updated DNS peer-manager fixtures for optional direct node records.
 - Rebuilt and tested the latest branch on the temporary IPv6 droplet with owner-level IPv4 egress blocked for the LogEx runtime user.
-- Re-ran strict public IPv6 smoke: CL peaked at 89 active sessions and 3,070 dialable peers with zero IPv4 sockets, while EL submitted 248 IPv6 candidate dials and still accepted no public serving peer.
+- Re-ran strict public IPv6 smoke: CL peaked at 91 active sessions and 2,618 dialable peers with zero IPv4 sockets, while EL submitted 205 IPv6 candidate dials and still accepted no public serving peer.
 - Re-ran controlled two-node IPv6 EL proof: seed and client established execution sessions over IPv6, reported `eth/70` log mentions, and opened zero IPv4 sockets.
 - Re-ran explicit public IPv6 bootnode proof against the only TCP-open endpoint found by the scan: the bootnode loaded and was submitted, but no EL session or historical progress was established.
 - Verified the local code with `cargo fmt --all -- --check`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager::tests::dns_event_conversion_preserves_ipv6_udp_only_enr_for_signed_discovery -- --nocapture`, `cargo check -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests: no LogEx process, owner IPv4 reject rule, or resolver override remained.
+- Audited local Reth dependency sources for execution bootnode and DNS discovery behavior; the static mainnet execution bootnodes are IPv4-only, so the DNS tree and explicitly configured IPv6 bootnodes remain the relevant public IPv6 EL sources.
 
 ## Remaining TODOs
 
@@ -78,7 +79,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 ## Challenges and Resolutions
 
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
-  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, and tried the only TCP-open public IPv6 EL endpoint as an explicit bootnode.
+  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and tried the only TCP-open public IPv6 EL endpoint as an explicit bootnode.
   - Remaining: public strict IPv6 historical EL sync is still unproven.
 
 - Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
