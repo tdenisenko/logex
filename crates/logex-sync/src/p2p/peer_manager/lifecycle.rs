@@ -444,9 +444,14 @@ impl PeerManager {
         let record =
             advertised_record.unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
         self.pending_dials.remove(&info.peer_id);
-
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
+        let should_remember_reachable = is_restart_seed_peer(
+            remote_record_is_dialable,
+            latest_block,
+            receipt_quarantined_until.is_some(),
+            record.id,
+        );
         let body_request_limit = inherited_peer_request_limit(
             self.peers.values().map(|peer| peer.body_request_limit),
             PeerRequestKind::Bodies,
@@ -482,6 +487,8 @@ impl PeerManager {
         self.peers.insert(info.peer_id, peer);
         self.session_metrics.accepted_sessions =
             self.session_metrics.accepted_sessions.saturating_add(1);
+        let known_changed =
+            should_remember_reachable && upsert_known_peer(&mut self.known_peers, record);
         self.peer_order.retain(|peer_id| *peer_id != info.peer_id);
         if was_productive {
             self.peer_order.push_front(info.peer_id);
@@ -489,6 +496,9 @@ impl PeerManager {
             self.peer_order.push_back(info.peer_id);
         }
         self.rebalance_request_cursor();
+        if known_changed {
+            self.persist_known_peer_cache();
+        }
 
         debug!(
             peer = %info.peer_id,
@@ -603,7 +613,7 @@ impl PeerManager {
         self.network.remove_peer(peer_id, PeerKind::Basic);
         let known_changed = self.forget_peer(peer_id);
         if known_changed {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
     }
 
@@ -679,7 +689,7 @@ impl PeerManager {
         }
 
         if self.remove_productive_peer(peer_id) {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
     }
 

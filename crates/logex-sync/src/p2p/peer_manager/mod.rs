@@ -57,9 +57,9 @@ pub(crate) use self::requests::{
 };
 use self::state::{
     advertised_status_range, disconnect_note, inherited_peer_request_limit, is_bootstrap_node,
-    is_saturated_remote_rejection, is_stale_nonserving_peer, normalize_network_head,
-    peer_receipts_are_quarantined, rotate_request_candidates, seed_productive_peers,
-    should_retry_disconnected_peer, upsert_known_peer,
+    is_restart_seed_peer, is_saturated_remote_rejection, is_stale_nonserving_peer,
+    normalize_network_head, peer_receipts_are_quarantined, rotate_request_candidates,
+    seed_productive_peers, should_retry_disconnected_peer, upsert_known_peer,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
