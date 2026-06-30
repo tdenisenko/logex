@@ -38,6 +38,9 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Installed geth 1.17.4 on the temporary droplet and ran two bounded IPv6-only comparison windows with IPv4 egress blocked for the geth user. Geth formed zero EL peers with default mainnet bootnodes and also zero EL peers with the audited IPv6 ENRs converted to `enode://` bootnodes.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 - Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
+- Added advanced dashboard diagnostics for P2P address mode, listen/dial/advertised address families, startup P2P warnings, and execution bootstrap warnings.
+- Added REST coverage to ensure execution bootstrap warnings are serialized in `/status`.
+- Reconfirmed the temporary IPv6 droplet is clean after bounded tests: no long-running LogEx/geth process and no P2P/dashboard listeners left active.
 
 ## Remaining TODOs
 
@@ -140,12 +143,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
 - Replaced the direct Reth DNS resolver use in the family-aware execution path with a local wrapper that preserves chunked TXT records; the default family-agnostic Reth path was not reintroduced.
 - Reverted the strict IPv6 discv4 experiment again after the post-resolver smoke also failed to improve public EL discovery.
+- Surfaced existing P2P and execution bootstrap warnings in the dashboard advanced metrics instead of leaving them available only through raw `/status`.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.

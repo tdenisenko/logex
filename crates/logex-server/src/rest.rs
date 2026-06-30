@@ -569,6 +569,25 @@ mod tests {
     }
 
     #[test]
+    fn rest_execution_network_status_includes_bootstrap_warning() {
+        let status = ExecutionNetworkStatus {
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        let value = rest_execution_network_status(Some(status)).expect("status should serialize");
+
+        assert!(
+            value["bootstrap_warning"]
+                .as_str()
+                .expect("bootstrap warning should serialize")
+                .contains("repeated dials expire")
+        );
+    }
+
+    #[test]
     fn execution_bootstrap_warning_detects_retried_explicit_candidates() {
         let status = ExecutionNetworkStatus {
             known_peers: 2,

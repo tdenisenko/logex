@@ -1183,6 +1183,10 @@
           <div class="debug-item"><span class="k">Execution peers connected</span><span class="v" id="debugConnectedPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peers serving</span><span class="v" id="debugServingPeers">--</span></div>
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
+          <div class="debug-item"><span class="k">P2P address mode</span><span class="v" id="debugP2pAddressMode">--</span></div>
+          <div class="debug-item"><span class="k">P2P address families</span><span class="v" id="debugP2pAddressFamilies">--</span></div>
+          <div class="debug-item"><span class="k">P2P warning</span><span class="v" id="debugP2pWarning">--</span></div>
+          <div class="debug-item"><span class="k">Execution bootstrap warning</span><span class="v" id="debugExecutionBootstrapWarning">--</span></div>
           <div class="debug-item"><span class="k">Body request peers</span><span class="v" id="debugBodyRequestPeers">--</span></div>
           <div class="debug-item"><span class="k">Receipt request peers</span><span class="v" id="debugReceiptRequestPeers">--</span></div>
           <div class="debug-item"><span class="k">Peer request pressure</span><span class="v" id="debugPeerRequestPressure">--</span></div>
@@ -1665,6 +1669,16 @@ function fmtBytes(value) {
     index += 1;
   }
   return fmtDecimal(number, number >= 10 || index === 0 ? 0 : 1) + ' ' + units[index];
+}
+
+function familyList(value) {
+  if (!Array.isArray(value) || value.length === 0) return '--';
+  return value.join(', ');
+}
+
+function warningList(value) {
+  if (!Array.isArray(value) || value.length === 0) return '--';
+  return value.join(' / ');
 }
 
 function fmtMillis(value) {
@@ -3218,6 +3232,13 @@ function updateStatus(data) {
   setText('debugConnectedPeers', fmt(connectedPeers));
   setText('debugServingPeers', fmt(servingPeers));
   setText('debugPeerCandidates', fmt(numberOrNull(executionNetwork.queued_candidates) == null ? pendingPeers : executionNetwork.queued_candidates));
+  setText('debugP2pAddressMode', data.p2p_address_mode || '--');
+  setText('debugP2pAddressFamilies',
+    'listen ' + familyList(data.p2p_listen_families) +
+    ' / dial ' + familyList(data.p2p_dial_families) +
+    ' / advertised ' + familyList(data.p2p_advertised_families));
+  setText('debugP2pWarning', warningList(data.p2p_warnings));
+  setText('debugExecutionBootstrapWarning', executionNetwork.bootstrap_warning || '--');
   setText('debugBodyRequestPeers',
     fmt(numberOrNull(executionNetwork.body_request_ready_peers)) + ' ready / ' +
     fmt(numberOrNull(executionNetwork.body_request_paused_peers)) + ' paused / ' +
