@@ -475,13 +475,13 @@ impl PeerManager {
                     "enabled execution discv5 discovery for IPv6 p2p bind"
                 );
             }
-            builder = builder.disable_dns_discovery();
+            builder = builder.disable_discv4_discovery().disable_dns_discovery();
             tracing::info!(
                 bind_ip = %bind_ip,
                 direct_bootnodes = dns_initial_boot_nodes.direct_node_records.len(),
                 discovery_bootnodes = dns_initial_boot_nodes.discovery_node_records.len(),
                 signed_bootnodes = dns_initial_boot_nodes.signed_enrs.len(),
-                "enabled Reth discv4 with family-aware IPv6 DNS bootnodes and disabled Reth DNS conversion"
+                "enabled execution discv5 with family-aware IPv6 DNS bootnodes and disabled Reth discv4/DNS conversion"
             );
         }
         if bind_ip.is_ipv4()
