@@ -12,8 +12,11 @@ IPv6 P2P validation is materially complete for socket and address-family behavio
 
 Latest bounded droplet proof on commit `1bdea68a` rebuilt the Linux binary and reran strict IPv6 with IPv4 egress rejected for `logexv6`. Public mode stayed socket-clean (`socket4_count = 0`, no IPv4-mapped log lines), CL reached 81 active sessions and 1,553 dialable peers, and public EL again expired 45 IPv6 execution dials with zero accepted sessions. A controlled hostname-bootnode proof then used `enode://...@logex-seed-v6:30304?discport=9201`; the client loaded one configured direct bootnode, both nodes reached `connected_peers = 1` over IPv6, the logs showed Eth70 sessions, and cleanup restored `/etc/resolv.conf`, removed the owner firewall rule, and left no LogEx/geth process or proof listener running. This proves hostname bootnode resolution and IPv6 EL transport on the latest code, but still does not prove public strict-IPv6 historical EL sync.
 
+Follow-up source audit checked LogEx's peer-manager path against local Reth, geth, and Nethermind source. Reth's DNS discovery stream continuously walks the DNS tree, LogEx drains it through a managed poller, and strict IPv6 selects IPv6 ENR endpoint fields more deliberately than geth's default preferred-endpoint choice. Reth still exposes one execution listener, one local node record, one local ENR, and one external IP resolver per network manager, so true simultaneous IPv4 plus IPv6 advertised inbound identity is a larger peer-manager/Reth-integration task rather than a missed flag.
+
 ## Completed Since Last Run
 
+- Audited the current IPv6 branch against local Reth, geth, and Nethermind source. No missed small configuration path was found for public strict-IPv6 EL sync; the remaining gap is reliable public IPv6 execution peers or a larger dual-network-manager design for true dual inbound identity.
 - Reran a short strict public IPv6-only proof on the current Linux binary with IPv4 egress rejected for `logexv6`: 4 samples showed zero IPv4 LogEx sockets, strict IPv6 listen/advertise/dial status, CL reached 71 active sessions and 2,400 dialable peers, and public EL remained blocked by 45 expired IPv6 DNS dials with a visible bootstrap warning.
 - Reran the controlled two-node strict IPv6 EL proof on the same binary: seed and client both used IPv6 bind/dial families, established execution sessions over the explicit IPv6 enode, logged 5 Eth70 mentions, and showed zero IPv4-mapped addresses.
 - Confirmed the temporary IPv6 proof runs stopped cleanly afterward: no LogEx/geth process, no P2P/dashboard listener, and no owner IPv4 reject rule remained on the droplet.
@@ -372,6 +375,11 @@ Latest bounded droplet proof on commit `1bdea68a` rebuilt the Linux binary and r
   - Alternatives considered: switch default dual-public hosts to IPv6-only or attempt a full two-peer-manager dual-stack rewrite immediately.
   - Tradeoff: this is not a full dual advertised identity, but it improves EL and CL dual-stack outbound reachability without destabilizing the proven IPv4 sync path.
 
+- True dual advertised execution identity is not treated as complete until Reth can advertise both families or LogEx owns a composite network manager.
+  - Why: the inspected Reth network builder produces one listener, one local node record, one local ENR, and one external IP resolver for the execution network manager.
+  - Alternatives considered: label current dual outbound dialing as full dual-stack support; rejected because inbound peer retention and discovery identity remain single-family.
+  - Tradeoff: current automatic mode is production-safe for sync reachability, but the roadmap keeps full dual inbound identity explicit instead of overclaiming it.
+
 - Public-IPv6/private-IPv4 automatic mode advertises IPv6 but keeps IPv4 outbound dials enabled.
   - Why: many home users do not have public IPv4, but still have outbound IPv4; strict public IPv6 EL discovery is currently too sparse to be the only execution peer source.
   - Alternatives considered: force strict IPv6-only whenever public IPv4 is unavailable; rejected because it strands EL sync on unreachable public IPv6 DNS candidates.
@@ -643,13 +651,14 @@ Latest bounded droplet proof on commit `1bdea68a` rebuilt the Linux binary and r
 - Rechecked the latest strict IPv6 public and controlled EL proof cleanup; no LogEx process, copied runtime binary, temporary proof data dir, or owner IPv4 reject rule remains on the droplet, and systemd-resolved is back to its default stub resolver.
 - Rechecked the configured execution bootnode parser against geth static-node behavior and the existing Reth `NodeRecord` parser; no obsolete code was removed because IP-literal enodes, DNS-name enodes, and signed ENRs now cover distinct supported input forms.
 - Rechecked the latest droplet proof cleanup after testing the hostname-enode path; no production code was changed in that proof pass, and no repository cleanup was required beyond updating this roadmap.
+- Rechecked the IPv6 discovery/address-family paths after auditing Reth/geth/Nethermind source; no obsolete production code was removed because the remaining branch changes map to distinct strict-IPv6, dual-outbound, bootnode, DNS, and status behaviors.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
 - Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; `fix: support finalized checkpoint fallback`; `fix: use ipv6-capable checkpoint quorum`; `fix: require ipv6 execution dns endpoints`; `docs: record controlled ipv6 proof`; `fix: support signed execution bootnode enrs`; `fix: seed ipv6 execution discovery from dns enrs`; `fix: report p2p listen and advertised families`; `fix: reject ipv4-mapped consensus dial addresses`; `fix: tighten public ipv6 address detection`; `docs: record strict ipv6 proof`; `fix: apply dual p2p families to consensus dials`; `fix: seed dual-family ipv6 dns direct candidates`; `fix: bind strict ipv6 to concrete local address`; `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`; `fix: supplement dual-family dns dials`; `docs: record current ipv6 proof`.
-- Commits made this run: `docs: record final ipv6 proof status`; `fix: resolve hostname execution bootnodes`; `docs: record latest ipv6 proof`.
+- Commits made this run: `docs: record final ipv6 proof status`; `fix: resolve hostname execution bootnodes`; `docs: record latest ipv6 proof`; `docs: record ipv6 discovery audit`.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.
