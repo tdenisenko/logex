@@ -869,7 +869,8 @@ async fn collect_initial_dns_boot_nodes(
         let Some(update) = dns_node_record_update_from_event(event) else {
             continue;
         };
-        if let Some(node) = dns_initial_ipv6_direct_boot_node(fork_filter, &update)
+        if let Some(node) =
+            dns_initial_direct_boot_node(bind_ip, dial_families, fork_filter, &update)
             && seen_direct_node_records.insert(node.id)
         {
             bootnodes.direct_node_records.push(node);
@@ -959,7 +960,9 @@ fn dns_boot_node_for_bind_ip(
     Some(node)
 }
 
-fn dns_initial_ipv6_direct_boot_node(
+fn dns_initial_direct_boot_node(
+    bind_ip: IpAddr,
+    dial_families: DialAddressFamilies,
     fork_filter: &ForkFilter,
     update: &DnsNodeRecordUpdate,
 ) -> Option<NodeRecord> {
@@ -969,7 +972,21 @@ fn dns_initial_ipv6_direct_boot_node(
         return None;
     }
 
-    dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), update)
+    if bind_ip.is_ipv4()
+        && dial_families.includes_ipv6()
+        && let Some(node) = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), update)
+    {
+        return Some(node);
+    }
+
+    if bind_ip.is_ipv6()
+        && dial_families.allows_ipv4()
+        && let Some(node) = dns_node_record_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), update)
+    {
+        return Some(node);
+    }
+
+    dns_node_record_for_dial_families(dial_families, update)
 }
 
 fn dns_signed_boot_node_for_bind_ip(
@@ -1250,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_dns_direct_boot_node_prefers_ipv6_for_dual_family_startup() {
+    fn initial_dns_direct_boot_node_supplements_ipv4_bind_with_ipv6() {
         let secret = SecretKey::from_byte_array(&[0x1a; 32]).unwrap();
         let ipv4 = Ipv4Addr::new(198, 51, 100, 22);
         let ipv6 = "2001:db8::22".parse::<Ipv6Addr>().unwrap();
@@ -1279,11 +1296,58 @@ mod tests {
             ..Default::default()
         });
 
-        let record = dns_initial_ipv6_direct_boot_node(&fork_filter, &update)
-            .expect("initial dual-family DNS bootnode collection should keep IPv6 candidates");
+        let record = dns_initial_direct_boot_node(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            DialAddressFamilies::BOTH,
+            &fork_filter,
+            &update,
+        )
+        .expect("initial dual-family DNS bootnode collection should supplement IPv4 with IPv6");
 
         assert_eq!(record.tcp_addr().ip(), IpAddr::V6(ipv6));
         assert_eq!(record.tcp_port, 30304);
+    }
+
+    #[test]
+    fn initial_dns_direct_boot_node_supplements_ipv6_bind_with_ipv4() {
+        let secret = SecretKey::from_byte_array(&[0x1b; 32]).unwrap();
+        let ipv4 = Ipv4Addr::new(198, 51, 100, 23);
+        let ipv6 = "2001:db8::23".parse::<Ipv6Addr>().unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip4(ipv4)
+            .tcp4(30303)
+            .udp4(30303)
+            .ip6(ipv6)
+            .tcp6(30304)
+            .udp6(30304)
+            .build(&secret)
+            .unwrap();
+        let update = DnsNodeRecordUpdate {
+            node_record: NodeRecord::new_with_ports(
+                IpAddr::V4(ipv4),
+                30303,
+                Some(30303),
+                PeerId::repeat_byte(0x01),
+            ),
+            fork_id: None,
+            enr,
+        };
+        let fork_filter = MAINNET.fork_filter(Head {
+            number: 25_000_000,
+            timestamp: 1_760_000_000,
+            ..Default::default()
+        });
+
+        let record = dns_initial_direct_boot_node(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            DialAddressFamilies::BOTH,
+            &fork_filter,
+            &update,
+        )
+        .expect("initial dual-family DNS bootnode collection should supplement IPv6 with IPv4");
+
+        assert_eq!(record.tcp_addr().ip(), IpAddr::V4(ipv4));
+        assert_eq!(record.tcp_port, 30303);
     }
 
     #[test]
@@ -1484,8 +1548,13 @@ mod tests {
                 .is_none()
         );
 
-        let direct = dns_initial_ipv6_direct_boot_node(&fork_filter, &update)
-            .expect("IPv6 DNS ENRs with TCP should still be direct RLPx candidates");
+        let direct = dns_initial_direct_boot_node(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            DialAddressFamilies::IPV6,
+            &fork_filter,
+            &update,
+        )
+        .expect("IPv6 DNS ENRs with TCP should still be direct RLPx candidates");
         assert_eq!(direct.tcp_addr().ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(direct.tcp_port, 30303);
         assert_eq!(direct.udp_port, 30303);

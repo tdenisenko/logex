@@ -178,6 +178,7 @@ IPv6 P2P validation is materially complete for socket and address-family behavio
 - Ran a 20 minute bounded strict IPv6-only proof with `--max-peers 160`: CL rose from 71 to 82 active IPv6 sessions and 2,333 to 3,708 dialable peers, `ss -4` showed no LogEx sockets, EL stayed pinned at 45 DNS candidates and 45 expired dials with zero accepted sessions, and all temporary droplet artifacts were removed.
 - Ran a fresh official geth `v1.17.4` strict-IPv6 comparison on the same droplet with IPv4 egress rejected for the runtime user; geth advertised the droplet IPv6 but stayed at zero peers for all six 30-second samples, and the temporary tooling/data were removed afterward.
 - Cleaned up stale strict-IPv6 discv4 wording in CLI help, README option docs, test text, and the roadmap so operator-facing docs now match the current discv5/direct-RLPx strict IPv6 implementation.
+- Fixed initial execution DNS direct-candidate selection for dual-family startup: IPv4-bound auto mode now supplements with IPv6 direct candidates, and IPv6-bound auto mode now supplements with IPv4 direct candidates when outbound IPv4 routing exists.
 
 ## Remaining TODOs
 
@@ -187,7 +188,7 @@ IPv6 P2P validation is materially complete for socket and address-family behavio
 
 2. Complete dual-stack address-family support.
    - Reason: home users should not have to know whether they have public IPv4, CGNAT IPv4, usable IPv6, both usable families, or only outbound connectivity.
-   - Completion criteria: LogEx uses both IPv4 and IPv6 discovery/sync paths when both are usable, or a deliberate product decision documents single-family behavior; current progress supports IPv4-advertised dual-public hosts accepting IPv6 outbound candidates in both EL and CL and queues IPv6 DNS direct RLPx bootnodes during EL startup, but true dual advertised identity/listeners still need either Reth dual-family support or a composite peer manager.
+   - Completion criteria: LogEx uses both IPv4 and IPv6 discovery/sync paths when both are usable, or a deliberate product decision documents single-family behavior; current progress supports IPv4-advertised dual-public hosts accepting IPv6 outbound candidates and public-IPv6/private-IPv4 hosts accepting IPv4 outbound candidates in both EL and CL, but true dual advertised identity/listeners still need either Reth dual-family support or a composite peer manager.
 
 3. Conclude the historical sync performance PR.
    - Reason: the active post-fix baseline reached genesis without repeated liveness stalls and remained bounded by the available network rather than a confirmed code bottleneck.
@@ -333,6 +334,11 @@ IPv6 P2P validation is materially complete for socket and address-family behavio
   - Why: strict IPv6 public EL candidate discovery must not depend on when the sync loop happens to call peer refill during no-peer backoff.
   - Alternatives considered: increase refill wait budgets; rejected because it couples discovery progress to sync retry timing and can slow startup on sparse networks.
   - Tradeoff: one extra managed task and bounded channel are kept while the peer manager is alive; shutdown aborts the task with the other network tasks.
+
+- Initial DNS direct candidates supplement the bound family in dual-family auto mode.
+  - Why: a public-IPv6/private-IPv4 host advertises IPv6 and disables discv4 for socket cleanliness, but it may still have working IPv4 outbound routing. In that case, initial EL DNS direct dials must include IPv4 candidates instead of depending only on sparse public IPv6 execution peers.
+  - Alternatives considered: always prefer IPv6 direct candidates when IPv6 is allowed; rejected because it strands public-IPv6/private-IPv4 hosts on the sparse public IPv6 EL peer set even though outbound IPv4 could make sync viable.
+  - Tradeoff: LogEx still advertises one public/listener family, but uses the other routed family for direct outbound candidates when it improves reachability.
 
 - Strict IPv6 execution binds use discv5 plus direct dials, not discv4.
   - Why: Reth discv4 can open an IPv4 UDP socket even when LogEx's P2P policy is strict IPv6; direct RLPx candidates from DNS/enodes and Reth discv5 cover the IPv6 paths without that socket.
@@ -612,13 +618,14 @@ IPv6 P2P validation is materially complete for socket and address-family behavio
 - Rechecked the 20 minute strict IPv6 proof cleanup; no LogEx process, copied runtime binary, proof data dir, proof script, owner firewall rule, resolver override, or local temporary proof runner remains after validation.
 - Rechecked the geth comparison cleanup; no geth process, temporary datadir, IPC file, owner firewall rule, or downloaded alltools directory remains on the droplet.
 - Rechecked docs and tests for obsolete strict-IPv6 discv4 references; removed the superseded roadmap decision and updated help/readme/test wording where it implied current strict IPv6 mode still uses discv4.
+- Rechecked initial DNS direct-candidate selection for dual-family startup; replaced the IPv6-only helper with a bound-family-aware helper and added focused tests for IPv4-bound plus IPv6-direct and IPv6-bound plus IPv4-direct behavior.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; `fix: support finalized checkpoint fallback`; `fix: use ipv6-capable checkpoint quorum`; `fix: require ipv6 execution dns endpoints`; `docs: record controlled ipv6 proof`; `fix: support signed execution bootnode enrs`; `fix: seed ipv6 execution discovery from dns enrs`; `fix: report p2p listen and advertised families`; `fix: reject ipv4-mapped consensus dial addresses`; `fix: tighten public ipv6 address detection`; `docs: record strict ipv6 proof`; `fix: apply dual p2p families to consensus dials`; `fix: seed dual-family ipv6 dns direct candidates`; `fix: bind strict ipv6 to concrete local address`; `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`.
-- Commits made this run: `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`.
+- Commits made during this branch so far: `fix: add execution ipv6 bootnode support`; `fix: auto-select usable p2p address family`; `fix: expose p2p address selection status`; `fix: expose execution discovery diagnostics`; `docs: record ipv6 execution peer comparison`; `fix: support dual-family outbound peer dials`; `fix: warn on strict ipv6 execution bootstrap`; `fix: keep routed p2p families in auto mode`; `fix: report execution bootstrap warnings`; `docs: record strict ipv6 proof results`; `fix: support finalized checkpoint fallback`; `fix: use ipv6-capable checkpoint quorum`; `fix: require ipv6 execution dns endpoints`; `docs: record controlled ipv6 proof`; `fix: support signed execution bootnode enrs`; `fix: seed ipv6 execution discovery from dns enrs`; `fix: report p2p listen and advertised families`; `fix: reject ipv4-mapped consensus dial addresses`; `fix: tighten public ipv6 address detection`; `docs: record strict ipv6 proof`; `fix: apply dual p2p families to consensus dials`; `fix: seed dual-family ipv6 dns direct candidates`; `fix: bind strict ipv6 to concrete local address`; `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`; `fix: supplement dual-family dns dials`.
+- Commits made this run: `fix: retain reachable peers for restart fallback`; `fix: poll execution dns discovery continuously`; `fix: disable discv4 for ipv6 execution binds`; `docs: record long ipv6 public proof`; `docs: record geth ipv6 peer comparison`; `docs: align ipv6 discovery guidance`; `fix: supplement dual-family dns dials`.
 - Pull request status: no IPv6 PR yet; the task is not complete because EL IPv6 sync is not proven.
 - Merge status: not merged.
 - Blockers: pure IPv6 EL mainnet peer availability is unresolved; GitHub Actions quota is unavailable for hosted validation.

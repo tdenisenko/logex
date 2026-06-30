@@ -474,6 +474,9 @@ WHERE topic0 = event'Transfer(address,address,uint256)'
 
 - Keep `30303/tcp`, `30303/udp`, `9000/tcp`, and `9000/udp` reachable when
   running a public node. Better reachability improves peer retention.
+- With `--nat any`, LogEx advertises one reachable public family. If public
+  IPv6 is the advertised family but IPv4 outbound routing exists, EL direct
+  dials can still use IPv4 DNS candidates while CL/EL listeners stay on IPv6.
 - Use a recent checkpoint. If a checkpoint or persisted consensus snapshot is
   outside the weak-subjectivity freshness window, LogEx requires a fresh data
   directory and a recent checkpoint.
