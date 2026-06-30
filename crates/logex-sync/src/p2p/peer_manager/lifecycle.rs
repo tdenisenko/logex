@@ -450,11 +450,12 @@ impl PeerManager {
             return;
         }
 
-        let advertised_record = self.pending.remove(&info.peer_id);
-        let remote_record_is_dialable = advertised_record.is_some();
-        let record =
-            advertised_record.unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
-        self.pending_dials.remove(&info.peer_id);
+        let (record, remote_record_is_dialable) = session_node_record(
+            self.pending.remove(&info.peer_id),
+            self.pending_dials.remove(&info.peer_id),
+            info.remote_addr,
+            info.peer_id,
+        );
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
         let should_remember_reachable = is_restart_seed_peer(
@@ -500,6 +501,12 @@ impl PeerManager {
             self.session_metrics.accepted_sessions.saturating_add(1);
         let known_changed =
             should_remember_reachable && upsert_known_peer(&mut self.known_peers, record);
+        let should_persist_reachable = should_persist_reachable_peer(
+            should_remember_reachable,
+            known_changed,
+            &self.persisted_known_peers,
+            record.id,
+        );
         self.peer_order.retain(|peer_id| *peer_id != info.peer_id);
         if was_productive {
             self.peer_order.push_front(info.peer_id);
@@ -507,7 +514,7 @@ impl PeerManager {
             self.peer_order.push_back(info.peer_id);
         }
         self.rebalance_request_cursor();
-        if known_changed {
+        if should_persist_reachable {
             self.persist_known_peer_cache();
         }
 
@@ -901,10 +908,33 @@ fn productive_peer_priority(productive: &VecDeque<NodeRecord>, peer_id: PeerId) 
         .unwrap_or(usize::MAX)
 }
 
+fn session_node_record(
+    pending_record: Option<NodeRecord>,
+    submitted_dial: Option<SubmittedDial>,
+    remote_addr: std::net::SocketAddr,
+    peer_id: PeerId,
+) -> (NodeRecord, bool) {
+    if let Some(node) = pending_record.or_else(|| submitted_dial.map(|dial| dial.node)) {
+        return (node, true);
+    }
+
+    (NodeRecord::new(remote_addr, peer_id), false)
+}
+
+fn should_persist_reachable_peer(
+    should_remember_reachable: bool,
+    known_changed: bool,
+    persisted_known_peers: &[NodeRecord],
+    peer_id: PeerId,
+) -> bool {
+    should_remember_reachable
+        && (known_changed || !persisted_known_peers.iter().any(|peer| peer.id == peer_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
     fn dial_candidates_prefer_recent_productive_peers() {
@@ -998,5 +1028,80 @@ mod tests {
         );
 
         assert_eq!(selected.len(), 6);
+    }
+
+    #[test]
+    fn session_node_record_uses_pending_record_as_dialable() {
+        let node = NodeRecord::new_with_ports(
+            Ipv6Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x31),
+        );
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(Some(node), None, remote_addr, node.id);
+
+        assert_eq!(record, node);
+        assert!(dialable);
+    }
+
+    #[test]
+    fn session_node_record_uses_submitted_dial_as_dialable() {
+        let node = NodeRecord::new_with_ports(
+            Ipv6Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x32),
+        );
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(
+            None,
+            Some(SubmittedDial {
+                node,
+                submitted_at: Instant::now(),
+            }),
+            remote_addr,
+            node.id,
+        );
+
+        assert_eq!(record, node);
+        assert!(dialable);
+    }
+
+    #[test]
+    fn session_node_record_falls_back_to_remote_addr_as_not_dialable() {
+        let peer_id = PeerId::repeat_byte(0x33);
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(None, None, remote_addr, peer_id);
+
+        assert_eq!(record, NodeRecord::new(remote_addr, peer_id));
+        assert!(!dialable);
+    }
+
+    #[test]
+    fn reachable_peer_persistence_triggers_when_configured_peer_was_not_on_disk() {
+        let peer_id = PeerId::repeat_byte(0x34);
+
+        assert!(should_persist_reachable_peer(true, false, &[], peer_id));
+    }
+
+    #[test]
+    fn reachable_peer_persistence_skips_when_peer_was_already_on_disk() {
+        let peer = NodeRecord::new_with_ports(
+            Ipv4Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x35),
+        );
+
+        assert!(!should_persist_reachable_peer(
+            true,
+            false,
+            &[peer],
+            peer.id,
+        ));
     }
 }

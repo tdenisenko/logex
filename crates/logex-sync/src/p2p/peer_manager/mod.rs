@@ -310,6 +310,8 @@ impl PeerManager {
             .into_iter()
             .filter(|node| node_matches_dial_families(dial_families, node))
             .collect::<Vec<_>>();
+        let persisted_known_peers = known_peers.clone();
+        let productive = seed_productive_peers(&known_peers);
         let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes).await?;
         let mut filtered_execution_bootnodes = Vec::new();
         let mut filtered_execution_bootnode_enrs = Vec::new();
@@ -353,7 +355,6 @@ impl PeerManager {
                 "loaded configured execution bootnodes"
             );
         }
-        let productive = seed_productive_peers(&known_peers);
         let serve_cache = Arc::new(ServeCacheProvider::new());
         let (max_outbound, max_inbound) = peer_connection_limits(max_peers);
         let max_concurrent_dials = max_outbound
@@ -555,7 +556,7 @@ impl PeerManager {
             productive,
             known_peers,
             known_peers_path,
-            persisted_known_peers: Vec::new(),
+            persisted_known_peers,
             serve_cache,
             fork_filter,
             local_head: network_head,
@@ -585,8 +586,6 @@ impl PeerManager {
             );
             manager.fill_open_peer_slots();
         }
-        manager.persisted_known_peers = manager.known_peers();
-
         info!(
             peer_id = %manager.network.peer_id(),
             enode = %local_record,
