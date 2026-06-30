@@ -379,13 +379,25 @@ fn rest_execution_network_status(
 fn execution_bootstrap_warning(
     status: &logex_types::ExecutionNetworkStatus,
 ) -> Option<&'static str> {
+    let pending_dials = u64::try_from(status.pending_dials).unwrap_or(u64::MAX);
+    let repeated_expirations = status.submitted_dial_expirations >= 8
+        && (status.submitted_dial_expirations >= status.submitted_dials_total
+            || status
+                .submitted_dial_expirations
+                .saturating_add(pending_dials)
+                >= status.submitted_dials_total
+            || status.submitted_dial_expirations.saturating_mul(4)
+                >= status.submitted_dials_total.saturating_mul(3));
+
     if status.accepted_sessions == 0
-        && status.dns_discovered_candidates > 0
         && status.submitted_dials_total >= 8
-        && status.submitted_dial_expirations >= status.submitted_dials_total
+        && repeated_expirations
+        && (status.dns_discovered_candidates > 0
+            || status.discovered_candidates > 0
+            || status.known_peers > 0)
     {
         return Some(
-            "execution discovery found DNS candidates, but all submitted dials expired before any session was accepted; the discovered endpoints may be unreachable from the selected P2P address family",
+            "execution peer candidates are being submitted, but repeated dials expire before any session is accepted; configured bootnodes or discovered endpoints may be unreachable from the selected P2P address family",
         );
     }
 
@@ -537,8 +549,24 @@ mod tests {
 
         let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
 
-        assert!(warning.contains("all submitted dials expired"));
+        assert!(warning.contains("repeated dials expire"));
         assert!(warning.contains("selected P2P address family"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_retried_explicit_candidates() {
+        let status = ExecutionNetworkStatus {
+            known_peers: 2,
+            pending_dials: 2,
+            submitted_dials_total: 85,
+            submitted_dial_expirations: 83,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("configured bootnodes"));
+        assert!(warning.contains("repeated dials expire"));
     }
 
     #[test]
