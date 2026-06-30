@@ -1255,6 +1255,18 @@ fn dns_node_record_for_dial_families(
     families: DialAddressFamilies,
     update: &DnsNodeRecordUpdate,
 ) -> Option<NodeRecord> {
+    if families.ipv4 && families.ipv6 {
+        let ipv4_node = dns_node_record_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), update);
+        let ipv6_node = dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), update);
+        return match (ipv4_node, ipv6_node) {
+            (Some(_), Some(ipv6_node)) if dual_endpoint_prefers_ipv6(update.peer_id) => {
+                Some(ipv6_node)
+            }
+            (Some(ipv4_node), _) => Some(ipv4_node),
+            (None, Some(ipv6_node)) => Some(ipv6_node),
+            (None, None) => None,
+        };
+    }
     if families.ipv4
         && let Some(node) = dns_node_record_for_bind_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), update)
     {
@@ -1266,6 +1278,10 @@ fn dns_node_record_for_dial_families(
         return Some(node);
     }
     None
+}
+
+fn dual_endpoint_prefers_ipv6(peer_id: PeerId) -> bool {
+    peer_id.as_slice().last().is_some_and(|byte| byte & 1 == 1)
 }
 
 fn signed_ipv6_tcp_port(enr: &Discv5Enr) -> Option<u16> {
@@ -1555,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn dns_node_record_for_dual_dial_families_prefers_ipv4_when_available() {
+    fn dns_node_record_for_dual_dial_families_spreads_dual_endpoint_records() {
         let secret = SecretKey::from_byte_array(&[0x18; 32]).unwrap();
         let ipv4 = Ipv4Addr::new(198, 51, 100, 12);
         let ipv6 = "2001:db8::12".parse::<Ipv6Addr>().unwrap();
@@ -1568,22 +1584,43 @@ mod tests {
             .udp6(30304)
             .build(&secret)
             .unwrap();
-        let update = dns_update(
+        let even_update = dns_update(
+            enr.clone(),
+            NodeRecord::new_with_ports(
+                IpAddr::V4(ipv4),
+                30303,
+                Some(30303),
+                PeerId::repeat_byte(0x02),
+            ),
+            None,
+        );
+        let odd_update = dns_update(
             enr,
             NodeRecord::new_with_ports(
                 IpAddr::V4(ipv4),
                 30303,
                 Some(30303),
-                PeerId::repeat_byte(0x01),
+                PeerId::repeat_byte(0x03),
             ),
             None,
         );
 
-        let record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &update)
+        let even_record =
+            dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &even_update)
+                .expect("dual-family ENR should produce a dialable endpoint");
+        let odd_record = dns_node_record_for_dial_families(DialAddressFamilies::BOTH, &odd_update)
             .expect("dual-family ENR should produce a dialable endpoint");
 
-        assert_eq!(record.tcp_addr().ip(), IpAddr::V4(ipv4));
-        assert_eq!(record.tcp_port, 30303);
+        assert_eq!(even_record.tcp_addr().ip(), IpAddr::V4(ipv4));
+        assert_eq!(even_record.tcp_port, 30303);
+        assert_eq!(odd_record.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(odd_record.tcp_port, 30304);
+    }
+
+    #[test]
+    fn dual_endpoint_family_split_uses_stable_peer_id_byte() {
+        assert!(!dual_endpoint_prefers_ipv6(PeerId::repeat_byte(0x02)));
+        assert!(dual_endpoint_prefers_ipv6(PeerId::repeat_byte(0x03)));
     }
 
     #[test]

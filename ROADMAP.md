@@ -73,6 +73,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Reconfirmed cleanup after the latest bounded IPv6 tests: no LogEx process, LogEx socket, owner IPv4 reject rule, or temporary input reject rule remained active on the droplet.
 - Rechecked the temporary IPv6 droplet after the latest branch update: no LogEx process, P2P/dashboard listener, or temporary LogEx data directory remained under `/root`.
 - Clarified runtime, `/status` fixture, and README dual-stack wording so automatic mode is described as one advertised execution family plus dual-family outbound dialing, not true simultaneous EL IPv4+IPv6 inbound.
+- Changed dual-family DNS direct candidate selection so ENRs with both IPv4 and IPv6 endpoints are spread deterministically across both families instead of always collapsing to IPv4 after the initial seed set.
 
 ## Remaining TODOs
 
@@ -117,6 +118,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Family-aware execution DNS discovery uses a TXT-joining resolver and periodic tree re-bootstrap.
   - Why: mainnet EIP-1459 branch records are often split into multiple DNS TXT chunks, and using only the first chunk silently drops most IPv6 candidates; a transient empty root lookup also should not permanently disable DNS discovery for the run.
   - Tradeoff: this keeps one small resolver wrapper in LogEx instead of relying directly on Reth's default resolver behavior.
+
+- Dual-family DNS direct dialing spreads dual-endpoint ENRs across IPv4 and IPv6.
+  - Why: automatic dual-stack mode should exercise both outbound families when both routes are usable; always selecting the IPv4 endpoint from a dual-endpoint ENR underused IPv6 after the initial DNS seed collection.
+  - Tradeoff: each Reth execution peer id still maps to one pending direct dial at a time, so this is deterministic spreading across peers rather than simultaneous IPv4 and IPv6 dials to the same peer.
 
 - Consensus bootnodes and cached peers are filtered by dial family before discovery seeding.
   - Why: strict IPv6 mode should not seed IPv4-only ENRs or retain cached peers without a compatible dial address.
@@ -214,12 +219,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Added configured execution bootnode counters to the existing execution network status path; no obsolete dashboard fields were removed.
 - Audited Reth's execution network, listener, node record, and discv5 dual-stack paths; no safe dead code removal followed from that audit.
 - Inspected the outbound-only known-peer fallback path and kept the existing dial-family filtering; no obsolete code was identified there.
+- Inspected the dual-family DNS candidate path and replaced the obsolete IPv4-first assumption for dual-endpoint ENRs with deterministic family spreading.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
