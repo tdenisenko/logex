@@ -196,9 +196,10 @@ Security:
 
         /// Execution-layer bootnode to seed discovery and direct dials.
         ///
-        /// Accepts enode:// records or signed enr: records. May be repeated or
-        /// comma-separated. IPv6 enodes must use the standard bracketed form,
-        /// for example enode://<pubkey>@[2001:db8::1]:30303?discport=30303.
+        /// Accepts enode:// records with IP literals or DNS names, or signed
+        /// enr: records. May be repeated or comma-separated. IPv6 enodes must
+        /// use the standard bracketed form, for example
+        /// enode://<pubkey>@[2001:db8::1]:30303?discport=30303.
         #[arg(
             long = "execution-bootnode",
             value_name = "ENODE_OR_ENR",

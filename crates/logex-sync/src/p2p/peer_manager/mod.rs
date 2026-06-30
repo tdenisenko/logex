@@ -34,6 +34,7 @@ use reth_network::{
 };
 use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes, pk2id};
 use secp256k1::SecretKey;
+use tokio::net::lookup_host;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant as TokioInstant};
@@ -298,7 +299,7 @@ impl PeerManager {
             .into_iter()
             .filter(|node| node_matches_dial_families(dial_families, node))
             .collect::<Vec<_>>();
-        let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes)?;
+        let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes).await?;
         let mut filtered_execution_bootnodes = Vec::new();
         let mut filtered_execution_bootnode_enrs = Vec::new();
         let mut skipped_execution_bootnodes = 0usize;
@@ -768,7 +769,7 @@ struct DnsInitialBootNodes {
     signed_enrs: Vec<Discv5Enr>,
 }
 
-fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<ParsedExecutionBootnodes> {
+async fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<ParsedExecutionBootnodes> {
     let mut bootnodes = ParsedExecutionBootnodes::default();
     for raw in raw_bootnodes {
         let raw = raw.trim();
@@ -781,15 +782,91 @@ fn parse_execution_bootnodes(raw_bootnodes: &[String]) -> Result<ParsedExecution
                 .map_err(|error| eyre::eyre!("invalid execution bootnode ENR {raw:?}: {error}"))?;
             bootnodes.signed_enrs.push(enr);
         } else {
-            let node = raw.parse::<NodeRecord>().map_err(|error| {
-                eyre::eyre!(
-                    "invalid execution bootnode {raw:?}: {error}; expected enode:// or enr:"
-                )
-            })?;
-            bootnodes.node_records.push(node);
+            match raw.parse::<NodeRecord>() {
+                Ok(node) => bootnodes.node_records.push(node),
+                Err(parse_error) => {
+                    let nodes = resolve_hostname_execution_bootnode(raw).await.map_err(|error| {
+                        eyre::eyre!(
+                            "invalid execution bootnode {raw:?}: {parse_error}; hostname resolution also failed: {error}; expected enode://<public-key>@<ip-or-host>:<tcp-port> or enr:"
+                        )
+                    })?;
+                    bootnodes.node_records.extend(nodes);
+                }
+            }
         }
     }
     Ok(bootnodes)
+}
+
+async fn resolve_hostname_execution_bootnode(raw: &str) -> Result<Vec<NodeRecord>> {
+    let Some(rest) = raw.strip_prefix("enode://") else {
+        eyre::bail!("missing enode:// prefix");
+    };
+    let Some((id, endpoint)) = rest.split_once('@') else {
+        eyre::bail!("missing @ separator");
+    };
+    let peer_id = id
+        .parse::<PeerId>()
+        .map_err(|error| eyre::eyre!("invalid public key: {error}"))?;
+    let (host_port, query) = endpoint.split_once('?').unwrap_or((endpoint, ""));
+    let (host, tcp_port) = parse_enode_host_port(host_port)?;
+    if host.parse::<IpAddr>().is_ok() {
+        eyre::bail!("IP-literal enode should have been parsed directly");
+    }
+    let udp_port = parse_enode_discport(query)?.unwrap_or(tcp_port);
+    let mut nodes = Vec::new();
+    for address in lookup_host((host.as_str(), tcp_port)).await? {
+        let ip = address.ip();
+        if nodes
+            .iter()
+            .any(|node: &NodeRecord| node.tcp_addr().ip() == ip)
+        {
+            continue;
+        }
+        nodes.push(NodeRecord::new_with_ports(
+            ip,
+            tcp_port,
+            Some(udp_port),
+            peer_id,
+        ));
+    }
+    if nodes.is_empty() {
+        eyre::bail!("hostname resolved no addresses");
+    }
+    Ok(nodes)
+}
+
+fn parse_enode_host_port(host_port: &str) -> Result<(String, u16)> {
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let Some((host, port)) = rest.split_once("]:") else {
+            eyre::bail!("invalid bracketed host/port");
+        };
+        return Ok((host.to_owned(), parse_enode_port(port)?));
+    }
+    let Some((host, port)) = host_port.rsplit_once(':') else {
+        eyre::bail!("missing TCP port");
+    };
+    if host.is_empty() {
+        eyre::bail!("missing host");
+    }
+    Ok((host.to_owned(), parse_enode_port(port)?))
+}
+
+fn parse_enode_port(port: &str) -> Result<u16> {
+    port.parse::<u16>()
+        .map_err(|error| eyre::eyre!("invalid port {port:?}: {error}"))
+}
+
+fn parse_enode_discport(query: &str) -> Result<Option<u16>> {
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "discport" {
+            return parse_enode_port(value).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 fn node_matches_bind_ip(bind_ip: IpAddr, node: &NodeRecord) -> bool {
@@ -1411,9 +1488,10 @@ mod tests {
         assert_eq!(record.udp_port, 30303);
     }
 
-    #[test]
-    fn parse_execution_bootnodes_accepts_ipv6_enode() {
+    #[tokio::test]
+    async fn parse_execution_bootnodes_accepts_ipv6_enode() {
         let bootnodes = parse_execution_bootnodes(&["enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151".to_owned()])
+            .await
             .expect("valid IPv6 enode should parse");
 
         assert_eq!(bootnodes.node_records.len(), 1);
@@ -1423,8 +1501,30 @@ mod tests {
         assert_eq!(bootnodes.node_records[0].udp_port, 52151);
     }
 
-    #[test]
-    fn parse_execution_bootnodes_accepts_signed_ipv6_enr() {
+    #[tokio::test]
+    async fn parse_execution_bootnodes_accepts_hostname_enode() {
+        let bootnodes = parse_execution_bootnodes(&["enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@localhost:52150?discport=52151".to_owned()])
+            .await
+            .expect("hostname enode should resolve");
+
+        assert!(!bootnodes.node_records.is_empty());
+        assert!(bootnodes.signed_enrs.is_empty());
+        assert!(
+            bootnodes
+                .node_records
+                .iter()
+                .all(|node| node.tcp_addr().ip().is_loopback())
+        );
+        assert!(
+            bootnodes
+                .node_records
+                .iter()
+                .all(|node| node.tcp_port == 52150 && node.udp_port == 52151)
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_execution_bootnodes_accepts_signed_ipv6_enr() {
         let key = reth_discv5::discv5::enr::CombinedKey::generate_secp256k1();
         let ipv6 = "2001:db8:4::5".parse::<Ipv6Addr>().unwrap();
         let enr = Discv5Enr::builder()
@@ -1434,8 +1534,9 @@ mod tests {
             .build(&key)
             .unwrap();
 
-        let bootnodes =
-            parse_execution_bootnodes(&[enr.to_string()]).expect("valid signed ENR should parse");
+        let bootnodes = parse_execution_bootnodes(&[enr.to_string()])
+            .await
+            .expect("valid signed ENR should parse");
 
         assert!(bootnodes.node_records.is_empty());
         assert_eq!(bootnodes.signed_enrs.len(), 1);
@@ -1511,9 +1612,10 @@ mod tests {
         assert_eq!(dual_node.tcp_port, 30303);
     }
 
-    #[test]
-    fn parse_execution_bootnodes_rejects_invalid_enode() {
+    #[tokio::test]
+    async fn parse_execution_bootnodes_rejects_invalid_enode() {
         let error = parse_execution_bootnodes(&["not-an-enode".to_owned()])
+            .await
             .expect_err("invalid enode should fail");
 
         assert!(error.to_string().contains("invalid execution bootnode"));

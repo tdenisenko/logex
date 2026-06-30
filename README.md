@@ -276,7 +276,7 @@ Global options:
 | `--p2p-bind-ip <IP>` | auto | Local bind address for EL and CL P2P listeners. Use `::` with `--nat extip:<ipv6>` to select IPv6; LogEx narrows the listener to the concrete local public IPv6 address when it can verify that address locally. |
 | `--max-peers <N>` | `100` | Maximum EL peer sessions. Higher values help only if CPU, memory, bandwidth, and disk can keep up. |
 | `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. `any` prefers a locally owned public IPv4, then public IPv6, then outbound-only mode. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
-| `--execution-bootnode <ENODE_OR_ENR>` | none | Extra EL bootnode seed. Repeat the flag or use comma-separated values. Useful for strict IPv6 when public EL IPv6 discovery is sparse. |
+| `--execution-bootnode <ENODE_OR_ENR>` | none | Extra EL bootnode seed. Accepts signed `enr:` records and `enode://` records with IP literals or DNS names. Repeat the flag or use comma-separated values. Useful for strict IPv6 when public EL IPv6 discovery is sparse. |
 | `--execution-discv5-port <PORT>` | `9200` | Execution-layer discv5 UDP discovery port used by strict IPv6 execution binds. |
 | `--cl-discovery-port <PORT>` | `9000` | Consensus-layer discv5 UDP discovery port. |
 | `--cl-p2p-port <PORT>` | `9000` | Consensus-layer libp2p TCP port advertised in the local ENR. |
@@ -354,7 +354,7 @@ Supported config keys:
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |
 | `p2p_bind_ip` | IP string | EL/CL P2P bind family. Use `"::"` with an IPv6 `nat` address to select IPv6; LogEx narrows to the concrete local public IPv6 address when it can verify that address locally. |
-| `execution_bootnodes` | string array | Extra EL bootnodes as `enode://...` or signed `enr:...` records. |
+| `execution_bootnodes` | string array | Extra EL bootnodes as `enode://...` records with IP literals or DNS names, or signed `enr:...` records. |
 | `execution_discv5_port` | integer | EL discv5 UDP port used for IPv6 execution discovery. |
 | `http_host` | IP string | HTTP bind host. |
 | `grpc_host` | IP string | gRPC bind host. |
