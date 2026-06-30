@@ -35,6 +35,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Re-ran a 15-minute strict IPv6 official-ENR proof after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 88 active sessions and 2,316 dialable peers, EL accepted 143 IPv6 DNS candidates and submitted 4,030 EL dials, but no public EL session was accepted.
 - Re-ran a 10-minute strict IPv6 proof with the audited TCP-open IPv6 ENR set: LogEx opened zero IPv4 sockets and submitted 1,243 EL dials, but no public EL session was accepted in that window.
 - Re-tested enabling Reth discv4 under strict IPv6 after the DNS resolver fix: it opened zero IPv4 sockets and submitted 2,653 EL dials, but accepted no EL session, so the experiment was reverted.
+- Installed geth 1.17.4 on the temporary droplet and ran two bounded IPv6-only comparison windows with IPv4 egress blocked for the geth user. Geth formed zero EL peers with default mainnet bootnodes and also zero EL peers with the audited IPv6 ENRs converted to `enode://` bootnodes.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 - Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
 
@@ -90,7 +91,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
   - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and proved public strict IPv6 EL sync can happen with a public Reth peer discovered during a bounded run.
-  - Remaining: current public IPv6 EL discovery is not deterministic; the latest post-fix official-ENR and TCP-open-ENR proofs submitted 4,030 and 1,243 strict-IPv6 EL dials respectively without any accepted EL session, so strict IPv6 performance parity remains unproven without reliable operator-provided IPv6 execution bootnodes or a stronger public IPv6 peer source.
+  - Remaining: current public IPv6 EL discovery is not deterministic; the latest post-fix official-ENR and TCP-open-ENR proofs submitted 4,030 and 1,243 strict-IPv6 EL dials respectively without any accepted EL session, and geth 1.17.4 also formed zero peers in IPv6-only comparison runs on the same droplet. Strict IPv6 performance parity remains unproven without reliable operator-provided IPv6 execution bootnodes or a stronger public IPv6 peer source.
 
 - Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
   - Resolution: selected the CL address independently so EL keeps public IPv4 while CL uses public IPv6 when both routes are available; the post-fix smoke reached live `Syncing`.
@@ -132,6 +133,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Inspected the IPv6 branch for proof-only leftovers; no temporary scripts, binaries, data dirs, resolver overrides, or firewall rules are intended to remain on the droplet after bounded tests.
 - Confirmed the latest droplet proof cleanup left no LogEx process, owner IPv4 block, or resolver override active.
+- Confirmed the geth comparison cleanup left no geth process or owner IPv4 block active.
 - Repaired the temporary droplet Linux binary after an invalid macOS binary upload was detected during a trace probe.
 - Replaced the obsolete family-agnostic CL bootnode/cache seeding path with dial-family-aware helpers.
 - Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
@@ -143,7 +145,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
