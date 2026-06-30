@@ -27,12 +27,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Verified the local code with `cargo fmt --all -- --check`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager::tests::dns_event_conversion_preserves_ipv6_udp_only_enr_for_signed_discovery -- --nocapture`, `cargo check -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 - Audited local Reth dependency sources for execution bootnode and DNS discovery behavior; the static mainnet execution bootnodes are IPv4-only, so the DNS tree and explicitly configured IPv6 bootnodes remain the relevant public IPv6 EL sources.
+- Tested enabling Reth discv4 on the strict IPv6 execution bind while keeping Reth DNS disabled; the bounded smoke still reached zero EL sessions with the same sparse IPv6 candidate set, so the change was reverted.
 
 ## Remaining TODOs
 
 1. Decide the production policy for strict IPv6-only EL sync.
    - Reason: strict IPv6 CL works and EL transport works with explicit IPv6 peers, but public mainnet IPv6 EL peer availability is not sufficient for proven historical sync.
-   - Completion criteria: either demonstrate historical EL progress using only IPv6 sockets against reliable public IPv6 execution peers, or deliberately scope strict IPv6 EL as an advanced explicit-bootnode mode while default startup uses IPv4, dual-family, or outbound known-peer paths when available.
+   - Completion criteria: either demonstrate historical EL progress using only IPv6 sockets against reliable public IPv6 execution peers, approve and validate a bounded heuristic candidate source such as CL-discovered IPv6 peer addresses, or deliberately scope strict IPv6 EL as an advanced explicit-bootnode mode while default startup uses IPv4, dual-family, or outbound known-peer paths when available.
 
 2. Complete true dual-stack inbound support if it remains a product goal.
    - Reason: current automatic selection can advertise one family and dial both routed families, but true simultaneous IPv4 and IPv6 advertised inbound identity/listeners require a larger Reth integration or composite peer-manager design.
@@ -90,6 +91,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Resolution: traced Reth discv5 handling and confirmed it may use the discovery UDP port as a guessed RLPx TCP port when `tcp6` is missing; this is useful for compatibility but noisy under strict IPv6 scarcity.
   - Remaining: strict public IPv6 EL sync still needs either accepting public IPv6 execution peers or an explicit reliable IPv6 bootnode source.
 
+- Challenge: enabling Reth discv4 on strict IPv6 execution bind was a plausible missing discovery path because Reth's discv4 codec supports IPv6 endpoints.
+  - Resolution: tested it in a bounded strict IPv6 public smoke on the droplet; it did not produce additional EL candidates or sessions, so the experiment was reverted.
+  - Remaining: no discv4 change is carried forward.
+
 - Challenge: generic-port IPv6 signed ENRs are valid enough for direct dialing but not accepted by Reth discv5 as signed discovery bootnodes.
   - Resolution: kept signed discovery strict on `udp6` and added a regression test that preserves generic-port records through the unsigned/direct path instead.
   - Remaining: no code issue remains; this limits only signed discovery seeding for generic-port IPv6 records.
@@ -117,12 +122,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced the obsolete family-agnostic CL bootnode/cache seeding path with dial-family-aware helpers.
 - Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
 - Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
+- Reverted the strict IPv6 discv4 experiment after it failed to improve public EL discovery.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `fix: preserve routed dials for explicit nat`, `docs: record latest ipv6 proof`, `fix: split consensus p2p selection on dual stack`, `fix: retain tcp-less ipv6 dns enrs`.
+- Commits made this run: `fix: preserve routed dials for explicit nat`, `docs: record latest ipv6 proof`, `fix: split consensus p2p selection on dual stack`, `fix: retain tcp-less ipv6 dns enrs`, `docs: update ipv6 validation evidence`.
 - Pull request status: not created; the task is not complete while public strict IPv6 EL sync policy remains unresolved.
 - Merge status: not merged.
 - Blockers: public IPv6 EL peer availability is unresolved; GitHub Actions quota has previously blocked hosted validation.
