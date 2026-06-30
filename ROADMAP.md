@@ -17,6 +17,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 ## Completed Since Last Run
 
 - Re-ran strict IPv6 public droplet smoke with IPv4 egress blocked: CL peaked at 94 active sessions and 2,500 dialable peers, LogEx opened zero IPv4 sockets, and EL DNS submitted 255 IPv6 candidate dials without crashing.
+- Ran an additional longer strict IPv6 public window and stopped it early after the EL candidate set remained exhausted with no accepted serving execution sessions; cleanup restored the resolver and removed the IPv4 owner block.
 - Re-ran the controlled two-node IPv6 EL proof: seed/client sessions used IPv6-only bind/dial settings, established Eth70 execution sessions, and reported zero IPv4-mapped sockets.
 - Found and documented a Reth discv5 limitation: signed IPv6 ENRs with generic UDP are rejected by the discv5 add path, so LogEx must keep those records as direct/unsigned candidates unless they carry `udp6`.
 - Verified the latest local code with `cargo test -p logex-sync dns_signed_boot_node -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, `cargo fmt --all -- --check`, and remote bounded IPv6 smoke.
