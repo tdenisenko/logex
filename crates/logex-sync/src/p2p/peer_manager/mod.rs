@@ -1341,7 +1341,7 @@ mod tests {
 
         let record =
             dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
-                .expect("IPv6 DNS bootnodes with UDP should seed discv4");
+                .expect("IPv6 DNS bootnodes with UDP should seed unsigned discovery");
 
         assert!(record.tcp_addr().ip().is_ipv6());
         assert_eq!(record.udp_port, 30303);

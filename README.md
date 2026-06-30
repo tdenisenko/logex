@@ -271,13 +271,13 @@ Global options:
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
 | `--grpc-port <PORT>` | `8578` | gRPC server port for `LogExService.Query`, `GetLogs`, `StreamLogs`, and `GetHeadBlock`. |
-| `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port. |
+| `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port for IPv4 execution binds. Strict IPv6 execution binds disable discv4. |
 | `--p2p-port <PORT>` | `30303` | Execution-layer TCP listener port for the eth protocol. |
 | `--p2p-bind-ip <IP>` | auto | Local bind address for EL and CL P2P listeners. Use `::` with `--nat extip:<ipv6>` to select IPv6; LogEx narrows the listener to the concrete local public IPv6 address when it can verify that address locally. |
 | `--max-peers <N>` | `100` | Maximum EL peer sessions. Higher values help only if CPU, memory, bandwidth, and disk can keep up. |
 | `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. `any` prefers a locally owned public IPv4, then public IPv6, then outbound-only mode. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
 | `--execution-bootnode <ENODE_OR_ENR>` | none | Extra EL bootnode seed. Repeat the flag or use comma-separated values. Useful for strict IPv6 when public EL IPv6 discovery is sparse. |
-| `--execution-discv5-port <PORT>` | `9200` | Execution-layer discv5 UDP discovery port, separate from discv4. |
+| `--execution-discv5-port <PORT>` | `9200` | Execution-layer discv5 UDP discovery port used by strict IPv6 execution binds. |
 | `--cl-discovery-port <PORT>` | `9000` | Consensus-layer discv5 UDP discovery port. |
 | `--cl-p2p-port <PORT>` | `9000` | Consensus-layer libp2p TCP port advertised in the local ENR. |
 | `--cl-max-peers <N>` | `32` | Maximum dialable CL peers retained from discovery. |

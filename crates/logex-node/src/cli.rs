@@ -156,7 +156,10 @@ Security:
         #[arg(long, default_value = "8578")]
         grpc_port: u16,
 
-        /// Execution-layer discovery port (UDP discv4).
+        /// Execution-layer discv4 UDP discovery port for IPv4 execution binds.
+        ///
+        /// Strict IPv6 execution binds disable discv4 and use
+        /// --execution-discv5-port plus direct IPv6 RLPx candidates instead.
         #[arg(long, default_value = "30303")]
         discovery_port: u16,
 
@@ -205,8 +208,8 @@ Security:
 
         /// Execution-layer discovery v5 UDP port.
         ///
-        /// Used for IPv6 execution peer discovery in addition to discv4. The
-        /// default matches Reth's execution discv5 default.
+        /// Used for strict IPv6 execution peer discovery. The default matches
+        /// Reth's execution discv5 default.
         #[arg(long = "execution-discv5-port", default_value = "9200")]
         execution_discv5_port: u16,
 
