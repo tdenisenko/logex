@@ -16,7 +16,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 ## Completed Since Last Run
 
-- Re-ran strict IPv6 public droplet smoke with IPv4 egress blocked: CL peaked at 94 active sessions and 2,500 dialable peers, LogEx opened zero IPv4 sockets, and EL DNS submitted 255 IPv6 candidate dials without crashing.
+- Re-ran strict IPv6 public droplet smoke with IPv4 egress blocked: CL peaked at 70 active sessions and 2,420 dialable peers, LogEx opened zero IPv4 sockets, and EL DNS submitted 246 IPv6 candidate dials without crashing.
 - Ran an additional longer strict IPv6 public window and stopped it early after the EL candidate set remained exhausted with no accepted serving execution sessions; cleanup restored the resolver and removed the IPv4 owner block.
 - Re-ran the controlled two-node IPv6 EL proof: seed/client sessions used IPv6-only bind/dial settings, established Eth70 execution sessions, and reported zero IPv4-mapped sockets.
 - Found and documented a Reth discv5 limitation: signed IPv6 ENRs with generic UDP are rejected by the discv5 add path, so LogEx must keep those records as direct/unsigned candidates unless they carry `udp6`.
@@ -87,7 +87,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Remaining: public IPv6 EL endpoints still did not accept sessions during the bounded smoke.
 
 - Challenge: Linux droplet builds are slow without cache.
-  - Resolution: local Cargo cache/source rsync was used for proof runs; generated caches should stay outside Git.
+  - Resolution: synced source to the droplet and reused its existing Linux Cargo cache; macOS release binaries are not portable to the Linux proof host.
   - Remaining: document any future distributable cache recipe separately if build-time work becomes a product task.
 
 ## Dead Code and Obsolescence Cleanup
@@ -101,7 +101,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `fix: preserve routed dials for explicit nat`.
+- Commits made this run: `fix: preserve routed dials for explicit nat`, `docs: record latest ipv6 proof`.
 - Pull request status: not created; the task is not complete while public strict IPv6 EL sync policy remains unresolved.
 - Merge status: not merged.
 - Blockers: public IPv6 EL peer availability is unresolved; GitHub Actions quota has previously blocked hosted validation.
