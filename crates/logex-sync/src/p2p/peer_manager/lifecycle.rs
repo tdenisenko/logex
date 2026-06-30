@@ -26,7 +26,7 @@ impl PeerManager {
             .await;
         self.network_events = Box::pin(tokio_stream::empty());
         self.discovery_events = Box::pin(tokio_stream::empty());
-        self.dns_discovery_updates = None;
+        self.dns_discovery_events = None;
 
         if let Some(task) = self.network_task.take() {
             debug!(
@@ -38,10 +38,6 @@ impl PeerManager {
 
         if let Some(task) = self.eth_request_task.take() {
             abort_and_wait(task, "eth request handler task").await;
-        }
-
-        if let Some(task) = self.dns_discovery_task.take() {
-            abort_and_wait(task, "execution DNS discovery task").await;
         }
     }
 
@@ -93,7 +89,7 @@ impl PeerManager {
         while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
             self.handle_discovery_event(event);
         }
-        self.drain_dns_discovery_updates_now();
+        self.drain_dns_discovery_events_now();
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
@@ -175,22 +171,22 @@ impl PeerManager {
     }
 
     pub(super) async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
-        if self.drain_dns_discovery_updates_now() > 0 {
+        if self.drain_dns_discovery_events_now() > 0 {
             return true;
         }
 
         let delay = tokio::time::sleep(max_wait);
         tokio::pin!(delay);
 
-        if let Some(dns_updates) = self.dns_discovery_updates.as_mut() {
+        if let Some(dns_events) = self.dns_discovery_events.as_mut() {
             tokio::select! {
-                maybe_update = dns_updates.next() => {
-                    if let Some(update) = maybe_update {
-                        self.handle_dns_discovery_update(update);
+                maybe_event = dns_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_dns_discovery_event(event);
                         true
                     } else {
-                        self.dns_discovery_updates = None;
-                        warn!("execution DNS discovery update stream closed");
+                        self.dns_discovery_events = None;
+                        warn!("execution DNS discovery stream closed");
                         false
                     }
                 }
@@ -239,17 +235,17 @@ impl PeerManager {
         }
     }
 
-    fn drain_dns_discovery_updates_now(&mut self) -> usize {
+    fn drain_dns_discovery_events_now(&mut self) -> usize {
         let mut count = 0usize;
         loop {
-            let Some(update) = self
-                .dns_discovery_updates
+            let Some(event) = self
+                .dns_discovery_events
                 .as_mut()
-                .and_then(|updates| updates.next().now_or_never().flatten())
+                .and_then(|events| events.next().now_or_never().flatten())
             else {
                 break;
             };
-            self.handle_dns_discovery_update(update);
+            self.handle_dns_discovery_event(event);
             count = count.saturating_add(1);
         }
         count
@@ -347,6 +343,13 @@ impl PeerManager {
                 self.remember_pending(node);
             }
         }
+    }
+
+    pub(super) fn handle_dns_discovery_event(&mut self, event: DnsDiscoveryEvent) {
+        let Some(update) = dns_node_record_update_from_event(event) else {
+            return;
+        };
+        self.handle_dns_discovery_update(update);
     }
 
     pub(super) fn handle_dns_discovery_update(&mut self, update: DnsNodeRecordUpdate) {

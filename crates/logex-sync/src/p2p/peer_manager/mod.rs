@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,14 +16,14 @@ use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
 use reth_discv5::enr::EnrCombinedKeyWrapper;
 use reth_discv5::enr_to_discv4_id;
 use reth_dns_discovery::{
-    DnsDiscoveryConfig, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
+    DnsDiscoveryConfig, DnsDiscoveryEvent, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
 };
 use reth_eth_wire::{
     BlockBodies, BlockHeaders, BlockRangeUpdate, DisconnectReason, EthVersion, GetBlockBodies,
     GetBlockHeaders, GetReceipts, GetReceipts70, HelloMessage, NetworkPrimitives, Receipts,
     Receipts69, Receipts70, UnifiedStatus,
 };
-use reth_ethereum_forks::{ForkFilter, ForkId, Head};
+use reth_ethereum_forks::{EnrForkIdEntry, ForkFilter, ForkId, Head};
 use reth_network::p2p::headers::client::HeadersRequest;
 use reth_network::types::peers::config::PeerBackoffDurations;
 use reth_network::types::{PeerKind, ReputationChangeKind};
@@ -32,7 +32,7 @@ use reth_network::{
     NetworkEventListenerProvider, NetworkHandle, NetworkManager, NetworkSyncUpdater, PeerRequest,
     PeerRequestSender, Peers, PeersConfig, PeersInfo, SessionsConfig,
 };
-use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes};
+use reth_network_peers::{NodeRecord, PeerId, mainnet_nodes, pk2id};
 use secp256k1::SecretKey;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant as TokioInstant};
@@ -69,8 +69,9 @@ const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DNS_DISCOVERY_IPV4_REQUESTS_PER_SEC: usize = 16;
 const DNS_DISCOVERY_IPV6_REQUESTS_PER_SEC: usize = 64;
-const DNS_DISCOVERY_IPV6_BOOTNODE_TARGET: usize = 64;
-const DNS_DISCOVERY_IPV6_BOOTNODE_WAIT: Duration = Duration::from_secs(10);
+const DNS_DISCOVERY_CACHE_LIMIT: u32 = 8_192;
+const DNS_DISCOVERY_IPV6_BOOTNODE_TARGET: usize = 128;
+const DNS_DISCOVERY_IPV6_BOOTNODE_WAIT: Duration = Duration::from_secs(15);
 const REFILL_SLOTS_INTERVAL: Duration = Duration::from_millis(500);
 const NETWORK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
@@ -109,7 +110,7 @@ static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<PeerId>> =
 type NetworkEvents =
     Pin<Box<dyn Stream<Item = NetworkEvent<PeerRequest<LogexNetworkPrimitives>>> + Send>>;
 type DiscoveryEvents = Pin<Box<dyn Stream<Item = DiscoveryEvent> + Send>>;
-type DnsDiscoveryUpdates = Pin<Box<dyn Stream<Item = DnsNodeRecordUpdate> + Send>>;
+type DnsDiscoveryEvents = Pin<Box<dyn Stream<Item = DnsDiscoveryEvent> + Send>>;
 pub type SourcedBlockBody = (
     PeerId,
     <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
@@ -125,10 +126,9 @@ pub struct PeerManager {
     network: NetworkHandle<LogexNetworkPrimitives>,
     network_task: Option<JoinHandle<()>>,
     eth_request_task: Option<JoinHandle<()>>,
-    dns_discovery_task: Option<JoinHandle<()>>,
     network_events: NetworkEvents,
     discovery_events: DiscoveryEvents,
-    dns_discovery_updates: Option<DnsDiscoveryUpdates>,
+    dns_discovery_events: Option<DnsDiscoveryEvents>,
     peers: HashMap<PeerId, ActivePeer>,
     peer_order: VecDeque<PeerId>,
     request_cursor: usize,
@@ -366,24 +366,20 @@ impl PeerManager {
         let network_activated = network_head.number > 0;
         let fork_filter = MAINNET.fork_filter(network_head);
 
-        let mut dns_discovery_task = None;
-        let mut dns_discovery_updates = None;
+        let mut dns_discovery_events = None;
         let mut dns_ipv6_boot_nodes = DnsInitialBootNodes::default();
         if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
         {
             match DnsResolver::from_system_conf() {
                 Ok(resolver) => {
-                    let (mut service, _) = DnsDiscoveryService::new_pair(
-                        Arc::new(resolver),
-                        dns_discovery_config.clone(),
-                    );
-                    let mut updates = Box::pin(service.node_record_stream()) as DnsDiscoveryUpdates;
-                    let task = service.spawn();
+                    let mut service =
+                        DnsDiscoveryService::new(Arc::new(resolver), dns_discovery_config.clone());
+                    service.bootstrap();
+                    let mut events = Box::pin(service) as DnsDiscoveryEvents;
                     dns_ipv6_boot_nodes =
-                        collect_initial_dns_boot_nodes(bind_ip, &fork_filter, &mut updates).await;
-                    dns_discovery_updates = Some(updates);
-                    dns_discovery_task = Some(task);
+                        collect_initial_dns_boot_nodes(bind_ip, &fork_filter, &mut events).await;
+                    dns_discovery_events = Some(events);
                     tracing::info!(
                         dns_network,
                         bind_ip = %bind_ip,
@@ -511,10 +507,9 @@ impl PeerManager {
             network: handle,
             network_task: Some(network_task),
             eth_request_task: Some(eth_request_task),
-            dns_discovery_task,
             network_events,
             discovery_events,
-            dns_discovery_updates,
+            dns_discovery_events,
             peers: HashMap::new(),
             peer_order: VecDeque::new(),
             request_cursor: 0,
@@ -537,7 +532,18 @@ impl PeerManager {
             body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
         };
 
+        let initial_dns_direct_bootnodes = dns_ipv6_boot_nodes.node_records.clone();
         manager.seed_known_peers();
+        let queued_initial_dns_bootnodes =
+            manager.queue_initial_dns_boot_nodes(&initial_dns_direct_bootnodes);
+        if queued_initial_dns_bootnodes > 0 {
+            tracing::info!(
+                queued_initial_dns_bootnodes,
+                pending_peers = manager.pending.len(),
+                "queued initial DNS execution bootnodes for direct RLPx dialing"
+            );
+            manager.fill_open_peer_slots();
+        }
         manager.persisted_known_peers = manager.known_peers();
 
         info!(
@@ -557,6 +563,22 @@ impl PeerManager {
         }
 
         Ok(manager)
+    }
+
+    fn queue_initial_dns_boot_nodes(&mut self, nodes: &[NodeRecord]) -> usize {
+        let mut queued = 0usize;
+        for node in nodes.iter().copied() {
+            self.session_metrics.dns_discovered_candidates = self
+                .session_metrics
+                .dns_discovered_candidates
+                .saturating_add(1);
+            let before = self.pending.len();
+            self.remember_pending(node);
+            if self.pending.len() > before {
+                queued = queued.saturating_add(1);
+            }
+        }
+        queued
     }
 
     /// Update our local head view and propagate it into Reth's live network
@@ -674,6 +696,8 @@ fn mainnet_dns_discovery_config(bind_ip: IpAddr) -> Option<(String, DnsDiscovery
             lookup_timeout: Duration::from_secs(3),
             max_requests_per_sec: NonZeroUsize::new(max_requests_per_sec)
                 .expect("DNS request limit is non-zero"),
+            dns_record_cache_limit: NonZeroU32::new(DNS_DISCOVERY_CACHE_LIMIT)
+                .expect("DNS cache limit is non-zero"),
             ..DnsDiscoveryConfig::default()
         },
     ))
@@ -793,7 +817,7 @@ fn signed_enr_matches_discovery_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> boo
 async fn collect_initial_dns_boot_nodes(
     bind_ip: IpAddr,
     fork_filter: &ForkFilter,
-    updates: &mut DnsDiscoveryUpdates,
+    events: &mut DnsDiscoveryEvents,
 ) -> DnsInitialBootNodes {
     if bind_ip.is_ipv4() {
         return DnsInitialBootNodes::default();
@@ -814,8 +838,11 @@ async fn collect_initial_dns_boot_nodes(
         let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
             break;
         };
-        let Ok(Some(update)) = time::timeout(remaining, updates.next()).await else {
+        let Ok(Some(event)) = time::timeout(remaining, events.next()).await else {
             break;
+        };
+        let Some(update) = dns_node_record_update_from_event(event) else {
+            continue;
         };
         if let Some(node) = dns_boot_node_for_bind_ip(bind_ip, fork_filter, &update)
             && seen_node_records.insert(node.id)
@@ -829,6 +856,36 @@ async fn collect_initial_dns_boot_nodes(
         }
     }
     bootnodes
+}
+
+fn dns_node_record_update_from_event(event: DnsDiscoveryEvent) -> Option<DnsNodeRecordUpdate> {
+    let DnsDiscoveryEvent::Enr(enr) = event;
+    let peer_id = pk2id(&enr.public_key());
+    let address = enr
+        .ip4()
+        .map(IpAddr::V4)
+        .or_else(|| enr.ip6().map(IpAddr::V6))?;
+    let tcp_port = enr
+        .tcp4()
+        .or_else(|| enr.tcp6())
+        .or_else(|| dns_ipv6_tcp_port(&enr))?;
+    let udp_port = enr
+        .udp4()
+        .or_else(|| enr.udp6())
+        .or_else(|| dns_ipv6_udp_port(&enr));
+    let node_record = NodeRecord::new_with_ports(address, tcp_port, udp_port, peer_id);
+    let fork_id = enr
+        .get_decodable::<EnrForkIdEntry>(b"eth")
+        .transpose()
+        .ok()
+        .flatten()
+        .map(Into::into);
+
+    Some(DnsNodeRecordUpdate {
+        node_record,
+        fork_id,
+        enr,
+    })
 }
 
 fn dns_boot_node_for_bind_ip(
@@ -1070,6 +1127,30 @@ mod tests {
         assert!(record.tcp_addr().ip().is_ipv6());
         assert_eq!(record.tcp_port, expected_tcp);
         assert_eq!(record.udp_port, expected_udp);
+    }
+
+    #[test]
+    fn dns_event_conversion_preserves_ipv6_generic_ports_and_fork_id() {
+        let secret = SecretKey::from_byte_array(&[0x17; 32]).unwrap();
+        let ipv6 = "2001:db8::17".parse::<Ipv6Addr>().unwrap();
+        let fork_id = MAINNET.latest_fork_id();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip6(ipv6)
+            .tcp4(30303)
+            .udp4(30304)
+            .add_value(b"eth", &EnrForkIdEntry::from(fork_id))
+            .build(&secret)
+            .unwrap();
+
+        let update = dns_node_record_update_from_event(DnsDiscoveryEvent::Enr(enr))
+            .expect("valid ENR should convert into a DNS update");
+        let record = dns_node_record_for_dial_families(DialAddressFamilies::IPV6, &update)
+            .expect("IPv6 dial family should use generic TCP/UDP fallback");
+
+        assert_eq!(update.fork_id, Some(fork_id));
+        assert_eq!(record.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(record.tcp_port, 30303);
+        assert_eq!(record.udp_port, 30304);
     }
 
     #[test]
@@ -1400,6 +1481,10 @@ mod tests {
         assert_eq!(
             ipv6_config.max_requests_per_sec.get(),
             DNS_DISCOVERY_IPV6_REQUESTS_PER_SEC
+        );
+        assert_eq!(
+            ipv6_config.dns_record_cache_limit.get(),
+            DNS_DISCOVERY_CACHE_LIMIT
         );
         assert!(
             ipv6_config.max_requests_per_sec > ipv4_config.max_requests_per_sec,
