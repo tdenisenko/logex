@@ -40,7 +40,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 2. Conclude the IPv6 P2P branch.
    - Reason: the branch contains useful IPv6 socket, address-family, checkpoint, DNS, bootnode, and diagnostic improvements.
-   - Completion criteria: run hosted checks when GitHub Actions quota is available, create the PR, and merge only when checks and review criteria are satisfied.
+   - Completion criteria: run hosted checks when GitHub Actions quota is available and merge PR #98 only when checks and review criteria are satisfied.
 
 ## Design Decisions
 
@@ -128,8 +128,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`.
-- Pull request status: not created yet; strict IPv6 proof is complete, but hosted checks are still blocked by the previously noted GitHub Actions quota.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`.
+- Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
 - Blockers: GitHub Actions quota has previously blocked hosted validation.
