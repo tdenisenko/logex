@@ -1569,13 +1569,31 @@ impl ConsensusNetwork {
         let mut peer_lifecycle = HashMap::new();
         let mut bootnode_peers = HashSet::new();
 
+        let mut seeded_bootnodes = 0usize;
+        let mut skipped_bootnodes = 0usize;
         for enr in &bootnodes {
-            if let Err(error) = discv5.add_enr(enr.clone()) {
-                tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
+            if enr_has_discv5_endpoint_for_families(config.dial_families, enr) {
+                if let Err(error) = discv5.add_enr(enr.clone()) {
+                    tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
+                } else {
+                    seeded_bootnodes = seeded_bootnodes.saturating_add(1);
+                }
+            } else {
+                skipped_bootnodes = skipped_bootnodes.saturating_add(1);
             }
-            if let Some(peer_id) = observe_dialable_peer(&mut dialable_peers, enr) {
+            if let Some(peer_id) =
+                observe_dialable_peer_for_families(&mut dialable_peers, config.dial_families, enr)
+            {
                 bootnode_peers.insert(peer_id);
             }
+        }
+        if skipped_bootnodes > 0 {
+            tracing::debug!(
+                seeded_bootnodes,
+                skipped_bootnodes,
+                ?config.dial_families,
+                "skipped consensus bootnodes without compatible discovery endpoints"
+            );
         }
 
         for peer in &known_peers {
@@ -1595,17 +1613,28 @@ impl ConsensusNetwork {
                         );
                         continue;
                     }
-                    if let Err(error) = discv5.add_enr(enr.clone()) {
+                    let Some(peer_id) = observe_dialable_peer_for_families(
+                        &mut dialable_peers,
+                        config.dial_families,
+                        &enr,
+                    ) else {
+                        tracing::debug!(
+                            enr = %peer.enr,
+                            ?config.dial_families,
+                            "ignoring cached consensus peer without a dialable address for configured families"
+                        );
+                        continue;
+                    };
+                    if enr_has_discv5_endpoint_for_families(config.dial_families, &enr)
+                        && let Err(error) = discv5.add_enr(enr.clone())
+                    {
                         tracing::debug!(
                             %error,
                             enr = %peer.enr,
                             "skipping cached consensus peer that could not be inserted"
                         );
                     }
-                    if let Some((peer_id, _)) = enr_multiaddrs(&enr) {
-                        peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
-                    }
-                    observe_dialable_peer(&mut dialable_peers, &enr);
+                    peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
                     retained_known_peers.push(peer.clone());
                 }
                 Err(error) => {
@@ -1635,7 +1664,7 @@ impl ConsensusNetwork {
             sync_status,
             discv5,
             swarm,
-            bootnode_count: bootnodes.len(),
+            bootnode_count: seeded_bootnodes,
             bootnode_peers,
             fork_digest,
             known_peers_path,
@@ -4817,6 +4846,25 @@ fn observe_dialable_peer(peers: &mut HashMap<PeerId, Vec<Multiaddr>>, enr: &Enr)
     None
 }
 
+fn observe_dialable_peer_for_families(
+    peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
+    families: ConsensusDialAddressFamilies,
+    enr: &Enr,
+) -> Option<PeerId> {
+    let (peer_id, mut addrs) = enr_multiaddrs(enr)?;
+    retain_dial_addresses_for_families(families, &mut addrs);
+    if addrs.is_empty() {
+        return None;
+    }
+    peers.insert(peer_id, addrs);
+    Some(peer_id)
+}
+
+fn enr_has_discv5_endpoint_for_families(families: ConsensusDialAddressFamilies, enr: &Enr) -> bool {
+    (families.ipv4 && enr.ip4().is_some() && enr.udp4().is_some())
+        || (families.ipv6 && enr.ip6().is_some() && enr.udp6().is_some())
+}
+
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
     match secret_key_path.try_exists() {
         Ok(true) => {
@@ -5487,6 +5535,71 @@ mod tests {
                 .iter()
                 .all(|addr| addr.to_string().contains(&peer_id.to_string()))
         );
+    }
+
+    #[test]
+    fn consensus_bootnode_discovery_filter_matches_dial_family() {
+        let key = CombinedKey::generate_secp256k1();
+        let ipv4 = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .udp4(9000)
+            .tcp4(9000)
+            .build(&key)
+            .unwrap();
+        let ipv6 = Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp6(9000)
+            .tcp6(9000)
+            .build(&key)
+            .unwrap();
+
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV4,
+            &ipv4
+        ));
+        assert!(!enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &ipv4
+        ));
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &ipv6
+        ));
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::BOTH,
+            &ipv6
+        ));
+    }
+
+    #[test]
+    fn observed_consensus_peer_keeps_only_configured_dial_family() {
+        let key = CombinedKey::generate_secp256k1();
+        let peer_enr = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .udp4(9000)
+            .tcp4(9001)
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp6(9002)
+            .tcp6(9003)
+            .build(&key)
+            .unwrap();
+        let mut peers = HashMap::new();
+
+        let peer_id = observe_dialable_peer_for_families(
+            &mut peers,
+            ConsensusDialAddressFamilies::IPV6,
+            &peer_enr,
+        )
+        .expect("dual-stack ENR should provide an IPv6 dial address");
+
+        let addrs = peers
+            .get(&peer_id)
+            .expect("filtered dial addresses should be retained");
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| matches!(
+            dial_address_class(addr),
+            Some(DialAddressClass::Tcp6 | DialAddressClass::Quic6)
+        )));
     }
 
     #[test]
