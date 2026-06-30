@@ -79,6 +79,14 @@ struct P2pAddressSelection {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ConsensusP2pAddressSelection {
+    bind_ip: IpAddr,
+    dial_families: ConsensusDialAddressFamilies,
+    external_ip: Option<IpAddr>,
+    warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct LocalP2pAddressCandidates {
     ipv4: Option<Ipv4Addr>,
@@ -173,6 +181,8 @@ pub async fn run_sync(options: RunSyncOptions) {
         }
     };
     add_runtime_p2p_warnings(&mut p2p_address, &execution_bootnodes);
+    let consensus_p2p_address =
+        select_consensus_p2p_address(&p2p_address, detect_local_p2p_addresses());
     let nat = p2p_address.nat.clone();
     let p2p_external_ip = p2p_address.external_ip;
     let p2p_bind_ip = p2p_address.bind_ip;
@@ -190,6 +200,19 @@ pub async fn run_sync(options: RunSyncOptions) {
     );
     for warning in &p2p_address.warnings {
         tracing::warn!(warning, "p2p address selection warning");
+    }
+    let consensus_external_ip_label = consensus_p2p_address
+        .external_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unresolved".to_owned());
+    tracing::info!(
+        bind_ip = %consensus_p2p_address.bind_ip,
+        ?consensus_p2p_address.dial_families,
+        external_ip = %consensus_external_ip_label,
+        "resolved consensus p2p address selection"
+    );
+    for warning in &consensus_p2p_address.warnings {
+        tracing::warn!(warning, "consensus p2p address selection warning");
     }
 
     let data_dir = pm_config.data_dir.clone();
@@ -361,9 +384,9 @@ pub async fn run_sync(options: RunSyncOptions) {
             ConsensusNetworkConfig {
                 data_dir: data_dir.clone(),
                 checkpoint: consensus.checkpoint(),
-                bind_ip: p2p_bind_ip,
-                dial_families: consensus_dial_families(p2p_dial_families),
-                external_ip: p2p_external_ip,
+                bind_ip: consensus_p2p_address.bind_ip,
+                dial_families: consensus_p2p_address.dial_families,
+                external_ip: consensus_p2p_address.external_ip,
                 discovery_port: cl_discovery_port,
                 p2p_port: cl_p2p_port,
                 max_peers: cl_max_peers,
@@ -897,6 +920,40 @@ fn consensus_dial_families(families: DialAddressFamilies) -> ConsensusDialAddres
         (true, true) => ConsensusDialAddressFamilies::BOTH,
         (false, true) => ConsensusDialAddressFamilies::IPV6,
         _ => ConsensusDialAddressFamilies::IPV4,
+    }
+}
+
+fn select_consensus_p2p_address(
+    execution: &P2pAddressSelection,
+    candidates: LocalP2pAddressCandidates,
+) -> ConsensusP2pAddressSelection {
+    if execution.mode == P2pAddressSelectionMode::AutoPublicIpv4
+        && execution.dial_families.allows_ipv6()
+        && let Some(public_ipv6) = candidates.public_ipv6()
+    {
+        let mut warnings = vec![
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 by default while consensus advertises IPv6 because the beacon network has stronger IPv6 reachability"
+                .to_owned(),
+        ];
+        let bind_ip = narrow_unspecified_ipv6_bind(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            Some(IpAddr::V6(public_ipv6)),
+            candidates.ipv6,
+            &mut warnings,
+        );
+        return ConsensusP2pAddressSelection {
+            bind_ip,
+            dial_families: ConsensusDialAddressFamilies::IPV6,
+            external_ip: Some(IpAddr::V6(public_ipv6)),
+            warnings,
+        };
+    }
+
+    ConsensusP2pAddressSelection {
+        bind_ip: execution.bind_ip,
+        dial_families: consensus_dial_families(execution.dial_families),
+        external_ip: execution.external_ip,
+        warnings: Vec::new(),
     }
 }
 
@@ -1499,6 +1556,92 @@ mod tests {
         );
 
         assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn consensus_selection_uses_public_ipv6_when_execution_defaults_to_ipv4_on_dual_stack() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let execution = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(execution.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(execution.external_ip, Some(IpAddr::V4(public_ipv4)));
+        assert_eq!(consensus.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV6);
+        assert_eq!(consensus.warnings.len(), 1);
+        assert!(consensus.warnings[0].contains("consensus advertises IPv6"));
+    }
+
+    #[test]
+    fn consensus_selection_keeps_explicit_ipv6_strict() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let execution = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            Some(IpAddr::V6(public_ipv6)),
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(consensus.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV6);
+        assert!(consensus.warnings.is_empty());
+    }
+
+    #[test]
+    fn consensus_selection_keeps_auto_ipv4_when_no_public_ipv6_exists() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let execution = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: None,
+            },
+            None,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: None,
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(consensus.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V4(public_ipv4)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV4);
+        assert!(consensus.warnings.is_empty());
     }
 
     #[test]
