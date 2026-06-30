@@ -29,7 +29,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Re-ran a focused strict IPv6 proof against all 14 TCP-open ENRs: LogEx submitted 419 IPv6 dials, opened zero IPv4 sockets, and still established no EL session.
 - Re-ran a bounded strict IPv6 proof with Reth session tracing: LogEx reached `Syncing`, accepted one serving public Reth EL peer over IPv6, CL reached 379 dialable peers, historical sync moved from block 25,432,012 to 25,431,716, and zero LogEx IPv4 sockets were opened.
 - Re-ran the strict IPv6 proof with the full audited IPv6 ENR set: LogEx reached `Syncing`, kept listen/advertise/dial families strictly IPv6, accepted two serving public Reth EL peers, submitted 582 IPv6 EL dials, rejected 88 same-source IPv4 DNS candidates, reached 624 CL dialable peers, and moved historical sync backward by 30,215 blocks over 30 samples.
-- Confirmed the temporary droplet proof state was cleaned up after bounded tests: no LogEx process, owner IPv4 reject rule, or resolver override remained.
+- Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
+- Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
 
 ## Remaining TODOs
 
@@ -127,7 +128,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`.
 - Pull request status: not created yet; strict IPv6 proof is complete, but hosted checks are still blocked by the previously noted GitHub Actions quota.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
