@@ -42,6 +42,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Added REST coverage to ensure execution bootstrap warnings are serialized in `/status`.
 - Reconfirmed the temporary IPv6 droplet is clean after bounded tests: no long-running LogEx/geth process and no P2P/dashboard listeners left active.
 - Audited Reth 1.11.3 execution networking for true dual-stack inbound support. The current Reth integration exposes one RLPx TCP listener and one advertised local execution node record, and Reth's discv5 dual-stack conversion path explicitly leaves RLPx dual-stack unimplemented. This means LogEx can safely dial both families today, but true simultaneous IPv4+IPv6 advertised EL inbound requires a larger composite network-manager design or upstream Reth support.
+- Made outbound-only startup report when no persisted execution known peers are available, and log when outbound-only mode can seed from persisted known peers.
+- Added runtime tests for outbound-only known-peer fallback warnings.
 
 ## Remaining TODOs
 
@@ -91,6 +93,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
   - Why: IPv4 discovery has enough candidates to mask failed waves, but strict IPv6 has a small public candidate set and must keep retrying instead of dropping all candidates after one timeout.
   - Tradeoff: unreachable public IPv6 endpoints will be retried periodically until better peers are found or explicit bootnodes are configured.
 
+- Outbound-only nodes surface empty known-peer cache state at startup.
+  - Why: when no usable public address exists, LogEx should behave like common EL clients by seeding from persisted peers when possible; an empty peer cache is operationally different from a populated fallback cache.
+  - Tradeoff: fresh outbound-only data directories now show one extra startup/dashboard warning until serving peers are learned and persisted.
+
 - True EL dual-stack inbound was not forced through the current Reth API.
   - Why: Reth 1.11.3 exposes one RLPx TCP listener and one advertised local node record through `NetworkManager`, and its `reth_discv5::Discv5::try_into_reachable` branch for `IpMode::DualStack` is explicitly unimplemented.
   - Alternatives considered: bind LogEx execution to IPv6 wildcard while advertising IPv4, or inject custom ENR fields. Both risk inaccurate reachability and platform-specific socket behavior.
@@ -105,6 +111,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Challenge: true simultaneous EL IPv4+IPv6 inbound is not a small configuration change in the current Reth integration.
   - Resolution: audited the local Reth 1.11.3 source and confirmed `NetworkManager` creates one `ConnectionListener`, `NetworkHandle::local_enr()` serializes one family from one `NodeRecord`, and `reth_discv5` has an explicit unimplemented dual-stack RLPx conversion branch.
   - Remaining: a product/architecture decision is needed before implementing a composite execution network manager or declaring single-advertised-family EL behavior intentional.
+
+- Challenge: outbound-only fallback was technically present but not visible enough in status.
+  - Resolution: moved known-peer loading before initial status publication, added an empty-cache warning, and kept populated-cache startup as an info log.
+  - Remaining: no code blocker remains for the current known-peer fallback behavior; fully validating it still requires a restart test with a populated peer cache.
 
 - Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
   - Resolution: selected the CL address independently so EL keeps public IPv4 while CL uses public IPv6 when both routes are available; the post-fix smoke reached live `Syncing`.
@@ -155,12 +165,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Reverted the strict IPv6 discv4 experiment again after the post-resolver smoke also failed to improve public EL discovery.
 - Surfaced existing P2P and execution bootstrap warnings in the dashboard advanced metrics instead of leaving them available only through raw `/status`.
 - Audited Reth's execution network, listener, node record, and discv5 dual-stack paths; no safe dead code removal followed from that audit.
+- Inspected the outbound-only known-peer fallback path and kept the existing dial-family filtering; no obsolete code was identified there.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.

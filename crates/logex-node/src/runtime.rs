@@ -326,6 +326,38 @@ pub async fn run_sync(options: RunSyncOptions) {
         );
     }
 
+    let known_peers = match load_known_peers(&known_peers_file) {
+        Ok(peers) => peers,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %known_peers_file.display(),
+                "failed to load known peers, starting with an empty peer cache"
+            );
+            Vec::new()
+        }
+    };
+    tracing::info!(
+        peers = known_peers.len(),
+        path = %known_peers_file.display(),
+        "loaded known peers"
+    );
+    let p2p_warning_count_before_known_peers = p2p_address.warnings.len();
+    add_known_peer_fallback_warnings(&mut p2p_address, known_peers.len());
+    if p2p_address.mode == P2pAddressSelectionMode::AutoOutboundOnly && !known_peers.is_empty() {
+        tracing::info!(
+            peers = known_peers.len(),
+            "outbound-only execution p2p will seed from persisted known peers"
+        );
+    }
+    for warning in p2p_address
+        .warnings
+        .iter()
+        .skip(p2p_warning_count_before_known_peers)
+    {
+        tracing::warn!(warning, "p2p known-peer fallback warning");
+    }
+
     let storage_anchors = storage.chain_anchors();
     let historical_floor = storage.historical_floor();
     let historical_anchor = storage.historical_anchor();
@@ -343,23 +375,6 @@ pub async fn run_sync(options: RunSyncOptions) {
         Some(SubscriptionManager::new()),
         sync_status,
     ));
-
-    let known_peers = match load_known_peers(&known_peers_file) {
-        Ok(peers) => peers,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %known_peers_file.display(),
-                "failed to load known peers, starting with an empty peer cache"
-            );
-            Vec::new()
-        }
-    };
-    tracing::info!(
-        peers = known_peers.len(),
-        path = %known_peers_file.display(),
-        "loaded known peers"
-    );
 
     let secret_key = match load_or_create_secret_key(&discovery_secret_file) {
         Ok(secret) => secret,
@@ -899,6 +914,18 @@ fn add_runtime_p2p_warnings(selection: &mut P2pAddressSelection, execution_bootn
     if selection.dial_families == DialAddressFamilies::IPV6 && execution_bootnodes.is_empty() {
         selection.warnings.push(
             "strict IPv6-only execution sync depends on public IPv6 EL peers; public discovery can be sparse, so configure --execution-bootnode with IPv6 enode:// or enr: records if EL peers stay at zero"
+                .to_owned(),
+        );
+    }
+}
+
+fn add_known_peer_fallback_warnings(
+    selection: &mut P2pAddressSelection,
+    loaded_known_peers: usize,
+) {
+    if selection.mode == P2pAddressSelectionMode::AutoOutboundOnly && loaded_known_peers == 0 {
+        selection.warnings.push(
+            "outbound-only execution p2p has no persisted known peers yet; startup will rely on bootnodes and DNS until serving peers are learned and cached"
                 .to_owned(),
         );
     }
@@ -1800,6 +1827,30 @@ mod tests {
         assert_eq!(selection.external_ip, None);
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("outbound-only"));
+    }
+
+    #[test]
+    fn outbound_only_selection_warns_without_persisted_known_peers() {
+        let mut selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
+
+        add_known_peer_fallback_warnings(&mut selection, 0);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert!(selection.warnings.iter().any(|warning| {
+            warning.contains("outbound-only execution p2p")
+                && warning.contains("no persisted known peers")
+        }));
+    }
+
+    #[test]
+    fn outbound_only_selection_does_not_warn_when_known_peers_exist() {
+        let mut selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
+        let warning_count = selection.warnings.len();
+
+        add_known_peer_fallback_warnings(&mut selection, 3);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.warnings.len(), warning_count);
     }
 
     #[test]
