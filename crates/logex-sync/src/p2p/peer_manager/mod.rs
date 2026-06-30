@@ -367,7 +367,7 @@ impl PeerManager {
         let fork_filter = MAINNET.fork_filter(network_head);
 
         let mut dns_discovery_events = None;
-        let mut dns_ipv6_boot_nodes = DnsInitialBootNodes::default();
+        let mut dns_initial_boot_nodes = DnsInitialBootNodes::default();
         if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
         {
@@ -377,15 +377,21 @@ impl PeerManager {
                         DnsDiscoveryService::new(Arc::new(resolver), dns_discovery_config.clone());
                     service.bootstrap();
                     let mut events = Box::pin(service) as DnsDiscoveryEvents;
-                    dns_ipv6_boot_nodes =
-                        collect_initial_dns_boot_nodes(bind_ip, &fork_filter, &mut events).await;
+                    dns_initial_boot_nodes = collect_initial_dns_boot_nodes(
+                        bind_ip,
+                        dial_families,
+                        &fork_filter,
+                        &mut events,
+                    )
+                    .await;
                     dns_discovery_events = Some(events);
                     tracing::info!(
                         dns_network,
                         bind_ip = %bind_ip,
                         ?dial_families,
-                        direct_bootnodes = dns_ipv6_boot_nodes.node_records.len(),
-                        signed_bootnodes = dns_ipv6_boot_nodes.signed_enrs.len(),
+                        direct_bootnodes = dns_initial_boot_nodes.direct_node_records.len(),
+                        discovery_bootnodes = dns_initial_boot_nodes.discovery_node_records.len(),
+                        signed_bootnodes = dns_initial_boot_nodes.signed_enrs.len(),
                         "started family-aware execution DNS discovery for outbound p2p candidates"
                     );
                 }
@@ -398,8 +404,14 @@ impl PeerManager {
                 }
             }
         }
-        if !dns_ipv6_boot_nodes.node_records.is_empty() {
-            discovery.add_boot_nodes(dns_ipv6_boot_nodes.node_records.iter().copied());
+        let dns_bind_compatible_boot_nodes = dns_initial_boot_nodes
+            .discovery_node_records
+            .iter()
+            .copied()
+            .filter(|node| node_matches_bind_ip(bind_ip, node))
+            .collect::<Vec<_>>();
+        if !dns_bind_compatible_boot_nodes.is_empty() {
+            discovery.add_boot_nodes(dns_bind_compatible_boot_nodes.iter().copied());
         }
         let discovery_execution_bootnodes = filtered_execution_bootnodes
             .iter()
@@ -427,8 +439,8 @@ impl PeerManager {
                     ip,
                     port: execution_discv5_port,
                 };
-                let discv5_boot_nodes = dns_ipv6_boot_nodes
-                    .node_records
+                let discv5_boot_nodes = dns_initial_boot_nodes
+                    .discovery_node_records
                     .iter()
                     .chain(filtered_execution_bootnodes.iter())
                     .filter(|node| node_matches_bind_ip(bind_ip, node))
@@ -436,7 +448,7 @@ impl PeerManager {
                     .collect::<Vec<_>>();
                 let signed_discv5_boot_nodes = filtered_execution_bootnode_enrs
                     .iter()
-                    .chain(dns_ipv6_boot_nodes.signed_enrs.iter())
+                    .chain(dns_initial_boot_nodes.signed_enrs.iter())
                     .filter(|enr| signed_enr_matches_discovery_bind_ip(bind_ip, enr))
                     .cloned()
                     .collect::<Vec<_>>();
@@ -459,8 +471,9 @@ impl PeerManager {
             builder = builder.disable_dns_discovery();
             tracing::info!(
                 bind_ip = %bind_ip,
-                direct_bootnodes = dns_ipv6_boot_nodes.node_records.len(),
-                signed_bootnodes = dns_ipv6_boot_nodes.signed_enrs.len(),
+                direct_bootnodes = dns_initial_boot_nodes.direct_node_records.len(),
+                discovery_bootnodes = dns_initial_boot_nodes.discovery_node_records.len(),
+                signed_bootnodes = dns_initial_boot_nodes.signed_enrs.len(),
                 "enabled Reth discv4 with family-aware IPv6 DNS bootnodes and disabled Reth DNS conversion"
             );
         }
@@ -532,7 +545,7 @@ impl PeerManager {
             body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
         };
 
-        let initial_dns_direct_bootnodes = dns_ipv6_boot_nodes.node_records.clone();
+        let initial_dns_direct_bootnodes = dns_initial_boot_nodes.direct_node_records.clone();
         manager.seed_known_peers();
         let queued_initial_dns_bootnodes =
             manager.queue_initial_dns_boot_nodes(&initial_dns_direct_bootnodes);
@@ -742,7 +755,8 @@ struct ParsedExecutionBootnodes {
 
 #[derive(Debug, Default)]
 struct DnsInitialBootNodes {
-    node_records: Vec<NodeRecord>,
+    direct_node_records: Vec<NodeRecord>,
+    discovery_node_records: Vec<NodeRecord>,
     signed_enrs: Vec<Discv5Enr>,
 }
 
@@ -816,21 +830,24 @@ fn signed_enr_matches_discovery_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> boo
 
 async fn collect_initial_dns_boot_nodes(
     bind_ip: IpAddr,
+    dial_families: DialAddressFamilies,
     fork_filter: &ForkFilter,
     events: &mut DnsDiscoveryEvents,
 ) -> DnsInitialBootNodes {
-    if bind_ip.is_ipv4() {
+    if !dial_families.includes_ipv6() {
         return DnsInitialBootNodes::default();
     }
 
     let deadline = TokioInstant::now() + DNS_DISCOVERY_IPV6_BOOTNODE_WAIT;
     let mut bootnodes = DnsInitialBootNodes::default();
-    let mut seen_node_records = HashSet::new();
+    let mut seen_direct_node_records = HashSet::new();
+    let mut seen_discovery_node_records = HashSet::new();
     let mut seen_signed_enrs = HashSet::new();
     loop {
         let total_bootnodes = bootnodes
-            .node_records
+            .direct_node_records
             .len()
+            .saturating_add(bootnodes.discovery_node_records.len())
             .saturating_add(bootnodes.signed_enrs.len());
         if total_bootnodes >= DNS_DISCOVERY_IPV6_BOOTNODE_TARGET {
             break;
@@ -844,10 +861,15 @@ async fn collect_initial_dns_boot_nodes(
         let Some(update) = dns_node_record_update_from_event(event) else {
             continue;
         };
-        if let Some(node) = dns_boot_node_for_bind_ip(bind_ip, fork_filter, &update)
-            && seen_node_records.insert(node.id)
+        if let Some(node) = dns_initial_ipv6_direct_boot_node(fork_filter, &update)
+            && seen_direct_node_records.insert(node.id)
         {
-            bootnodes.node_records.push(node);
+            bootnodes.direct_node_records.push(node);
+        }
+        if let Some(node) = dns_boot_node_for_bind_ip(bind_ip, fork_filter, &update)
+            && seen_discovery_node_records.insert(node.id)
+        {
+            bootnodes.discovery_node_records.push(node);
         }
         if let Some(enr) = dns_signed_boot_node_for_bind_ip(bind_ip, fork_filter, &update)
             && seen_signed_enrs.insert(enr.to_string())
@@ -906,6 +928,19 @@ fn dns_boot_node_for_bind_ip(
     advertised_udp?;
     let node = dns_node_record_for_bind_ip(bind_ip, update)?;
     Some(node)
+}
+
+fn dns_initial_ipv6_direct_boot_node(
+    fork_filter: &ForkFilter,
+    update: &DnsNodeRecordUpdate,
+) -> Option<NodeRecord> {
+    if let Some(fork_id) = update.fork_id
+        && fork_filter.validate(fork_id).is_err()
+    {
+        return None;
+    }
+
+    dns_node_record_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), update)
 }
 
 fn dns_signed_boot_node_for_bind_ip(
@@ -1186,6 +1221,43 @@ mod tests {
     }
 
     #[test]
+    fn initial_dns_direct_boot_node_prefers_ipv6_for_dual_family_startup() {
+        let secret = SecretKey::from_byte_array(&[0x1a; 32]).unwrap();
+        let ipv4 = Ipv4Addr::new(198, 51, 100, 22);
+        let ipv6 = "2001:db8::22".parse::<Ipv6Addr>().unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip4(ipv4)
+            .tcp4(30303)
+            .udp4(30303)
+            .ip6(ipv6)
+            .tcp6(30304)
+            .udp6(30304)
+            .build(&secret)
+            .unwrap();
+        let update = DnsNodeRecordUpdate {
+            node_record: NodeRecord::new_with_ports(
+                IpAddr::V4(ipv4),
+                30303,
+                Some(30303),
+                PeerId::repeat_byte(0x01),
+            ),
+            fork_id: None,
+            enr,
+        };
+        let fork_filter = MAINNET.fork_filter(Head {
+            number: 25_000_000,
+            timestamp: 1_760_000_000,
+            ..Default::default()
+        });
+
+        let record = dns_initial_ipv6_direct_boot_node(&fork_filter, &update)
+            .expect("initial dual-family DNS bootnode collection should keep IPv6 candidates");
+
+        assert_eq!(record.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(record.tcp_port, 30304);
+    }
+
+    #[test]
     fn dns_node_record_for_dual_dial_families_accepts_ipv6_only_record() {
         let secret = SecretKey::from_byte_array(&[0x19; 32]).unwrap();
         let ipv6 = "2001:db8::19".parse::<Ipv6Addr>().unwrap();
@@ -1382,6 +1454,12 @@ mod tests {
             dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
                 .is_none()
         );
+
+        let direct = dns_initial_ipv6_direct_boot_node(&fork_filter, &update)
+            .expect("IPv6 DNS ENRs with TCP should still be direct RLPx candidates");
+        assert_eq!(direct.tcp_addr().ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(direct.tcp_port, 30303);
+        assert_eq!(direct.udp_port, 30303);
     }
 
     #[test]
