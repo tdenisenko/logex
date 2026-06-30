@@ -12,7 +12,7 @@ IPv6 validation is partially complete on temporary droplet `root@152.42.222.119`
 
 Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
-Public mainnet EL historical sync over strict IPv6 is not proven. The public execution DNS tree exposes very few usable IPv6 peers from the droplet; most DNS candidates refuse, reset, or time out, the one confirmed TCP-open public IPv6 EL endpoint did not accept an explicit bootnode proof, and a bounded official geth comparison also formed zero peers under the same IPv6-only conditions. Runtime discovery can find additional IPv6 sockets, but most are guessed RLPx endpoints from discv5 records and did not accept EL sessions in bounded probes. Local audits of geth, Reth, and Nethermind did not reveal a missed official IPv6 EL bootnode source. LogEx now keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are still retained for signed IPv6 discovery when they carry `udp6`.
+Public mainnet EL historical sync over strict IPv6 is not proven. The public execution DNS tree exposes very few usable IPv6 peers from the droplet; most DNS candidates refuse, reset, or time out. A corrected official `ethereum/discv4-dns-lists` snapshot audit found 594 IPv6 execution ENRs, only 14 had open IPv6 TCP from the droplet, and focused explicit-bootnode proofs against all open ENRs still did not establish an EL session. Runtime discovery can find additional IPv6 sockets, but most are guessed RLPx endpoints from discv5 records and did not accept EL sessions in bounded probes. Local audits of geth, Reth, and Nethermind did not reveal a missed official IPv6 EL bootnode source. LogEx now keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are still retained for signed IPv6 discovery when they carry `udp6`.
 
 Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not leave a full sync running on that droplet unless an active test requires it.
 
@@ -23,11 +23,11 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Rebuilt and tested the latest branch on the temporary IPv6 droplet with owner-level IPv4 egress blocked for the LogEx runtime user.
 - Re-ran strict public IPv6 smoke: CL peaked at 91 active sessions and 2,618 dialable peers with zero IPv4 sockets, while EL submitted 205 IPv6 candidate dials and still accepted no public serving peer.
 - Re-ran controlled two-node IPv6 EL proof: seed and client established execution sessions over IPv6, reported `eth/70` log mentions, and opened zero IPv4 sockets.
-- Re-ran explicit public IPv6 bootnode proof against the only TCP-open endpoint found by the scan: the bootnode loaded and was submitted, but no EL session or historical progress was established.
-- Verified the local code with `cargo fmt --all -- --check`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager::tests::dns_event_conversion_preserves_ipv6_udp_only_enr_for_signed_discovery -- --nocapture`, `cargo check -p logex-sync`, and `cargo clippy -p logex-sync -- -D warnings`.
+- Corrected the official `ethereum/discv4-dns-lists` ENR parser used for the IPv6 proof and selected 120 public IPv6 execution ENRs from 594 available records.
+- Re-ran strict public IPv6 smoke with those 120 ENRs: CL stayed healthy, LogEx opened zero IPv4 sockets, EL submitted 1,049 IPv6 dials, and no public EL session was accepted.
+- Probed all 594 public IPv6 execution ENRs directly: only 14 had an open IPv6 TCP port from the droplet.
+- Re-ran a focused strict IPv6 proof against all 14 TCP-open ENRs: LogEx submitted 419 IPv6 dials, opened zero IPv4 sockets, and still established no EL session.
 - Confirmed the temporary droplet proof state was cleaned up after bounded tests: no LogEx process, owner IPv4 reject rule, or resolver override remained.
-- Audited local Reth dependency sources for execution bootnode and DNS discovery behavior; the static mainnet execution bootnodes are IPv4-only, so the DNS tree and explicitly configured IPv6 bootnodes remain the relevant public IPv6 EL sources.
-- Tested enabling Reth discv4 on the strict IPv6 execution bind while keeping Reth DNS disabled; the bounded smoke still reached zero EL sessions with the same sparse IPv6 candidate set, so the change was reverted.
 
 ## Remaining TODOs
 
@@ -80,7 +80,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 ## Challenges and Resolutions
 
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
-  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and tried the only TCP-open public IPv6 EL endpoint as an explicit bootnode.
+  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, and tested the two TCP-open public IPv6 execution ENRs found in the official discovery snapshot as explicit bootnodes.
   - Remaining: public strict IPv6 historical EL sync is still unproven.
 
 - Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
@@ -128,7 +128,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `fix: preserve routed dials for explicit nat`, `docs: record latest ipv6 proof`, `fix: split consensus p2p selection on dual stack`, `fix: retain tcp-less ipv6 dns enrs`, `docs: update ipv6 validation evidence`.
+- Commits made this run: `docs: record ipv6-only validation`.
 - Pull request status: not created; the task is not complete while public strict IPv6 EL sync policy remains unresolved.
 - Merge status: not merged.
 - Blockers: public IPv6 EL peer availability is unresolved; GitHub Actions quota has previously blocked hosted validation.
