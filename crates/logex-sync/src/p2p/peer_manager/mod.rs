@@ -1785,6 +1785,48 @@ mod tests {
     }
 
     #[test]
+    fn dns_signed_boot_node_rejects_ipv6_generic_udp_fallback() {
+        let secret = SecretKey::from_byte_array(&[0x35; 32]).unwrap();
+        let ipv6 = "2001:db8:35::1".parse::<Ipv6Addr>().unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip6(ipv6)
+            .tcp4(30303)
+            .udp4(30303)
+            .build(&secret)
+            .unwrap();
+        let update = DnsNodeRecordUpdate {
+            node_record: NodeRecord::new_with_ports(
+                IpAddr::V6(ipv6),
+                30303,
+                Some(30303),
+                PeerId::repeat_byte(0x01),
+            ),
+            fork_id: None,
+            enr,
+        };
+        let fork_filter = MAINNET.fork_filter(Head {
+            number: 25_000_000,
+            timestamp: 1_760_000_000,
+            ..Default::default()
+        });
+
+        let node =
+            dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
+                .expect("IPv6 ENR with generic UDP remains usable as an unsigned discv5 candidate");
+        assert_eq!(node.tcp_addr().ip(), IpAddr::V6(ipv6));
+        assert_eq!(node.udp_port, 30303);
+        assert!(
+            dns_signed_boot_node_for_bind_ip(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                &fork_filter,
+                &update,
+            )
+            .is_none(),
+            "Reth discv5 rejects signed IPv6 ENRs unless they carry udp6"
+        );
+    }
+
+    #[test]
     fn dns_boot_node_rejects_incompatible_fork_id() {
         let secret = SecretKey::from_byte_array(&[0x44; 32]).unwrap();
         let enr = enr::Enr::<SecretKey>::builder()

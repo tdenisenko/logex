@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`.
 
 Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac mini and no longer shows the two-hour liveness stall that previously blocked ordered writes. The accepted scheduler keeps expected historical work active, limits background maintenance while history is incomplete, and was bounded by the available network during the last validated run.
 
-IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works: bounded proofs used IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user; samples reached healthy CL session counts with zero LogEx IPv4 sockets. EL IPv6 transport also works: controlled two-node proofs established Eth70 execution sessions over an explicit IPv6 `enode://` bootnode while IPv4 egress was blocked, and a public IPv6 EL ENR was reached over RLPx but rejected us with `TooManyPeers`.
+IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works: bounded proofs used IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user; samples reached healthy CL session counts with zero LogEx IPv4 sockets. EL IPv6 transport also works: controlled two-node proofs established Eth70 execution sessions over an explicit IPv6 `enode://` bootnode while IPv4 egress was blocked. Public strict IPv6 EL discovery starts cleanly and submits IPv6 candidates, but public serving-peer acceptance is still not proven.
 
 Public mainnet EL historical sync over strict IPv6 is not proven. The public execution DNS tree exposes very few usable IPv6 peers from the droplet; most candidates refuse, reset, or time out, the one confirmed reachable public IPv6 EL peer rejected with `TooManyPeers`, and a bounded official geth comparison also formed zero peers under the same IPv6-only conditions. Local audits of geth, Reth, and Nethermind did not reveal a missed official IPv6 EL bootnode source. LogEx now keeps sparse submitted EL dial candidates alive across silent timeout windows, so strict IPv6 mode continues retrying public IPv6 candidates instead of going idle after the first failed dial wave.
 
@@ -16,11 +16,11 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 ## Completed Since Last Run
 
-- Re-ran strict IPv6 droplet smoke after the retry fix: CL peaked at 86 active sessions and 2,639 dialable peers, `socket4_count` stayed `0`, and EL submitted dials rose from 41 to 248 over five samples instead of going idle after the first expiration wave.
-- Tested a public IPv6 EL ENR found by the DNS scan: LogEx reached it over RLPx and received valid `TooManyPeers` disconnects, proving the public IPv6 RLPx dial path while also confirming that peer capacity remains the public strict-IPv6 blocker.
-- Re-ran the controlled two-node IPv6 EL proof: the client established an Eth70 execution session over an explicit IPv6 `enode://` bootnode with IPv4 egress rejected.
-- Verified the latest local code with `cargo test -p logex-sync expired_submitted_dials_return_nodes_for_retry -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, and remote bounded IPv6 smoke.
-- Confirmed the temporary droplet proof state was cleaned up after testing: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or resolver override remained.
+- Re-ran strict IPv6 public droplet smoke with IPv4 egress blocked: CL peaked at 94 active sessions and 2,500 dialable peers, LogEx opened zero IPv4 sockets, and EL DNS submitted 255 IPv6 candidate dials without crashing.
+- Re-ran the controlled two-node IPv6 EL proof: seed/client sessions used IPv6-only bind/dial settings, established Eth70 execution sessions, and reported zero IPv4-mapped sockets.
+- Found and documented a Reth discv5 limitation: signed IPv6 ENRs with generic UDP are rejected by the discv5 add path, so LogEx must keep those records as direct/unsigned candidates unless they carry `udp6`.
+- Verified the latest local code with `cargo test -p logex-sync dns_signed_boot_node -- --nocapture`, `cargo test -p logex-sync p2p::peer_manager -- --nocapture`, `cargo check -p logex-sync`, `cargo clippy -p logex-sync -- -D warnings`, `cargo fmt --all -- --check`, and remote bounded IPv6 smoke.
+- Confirmed the temporary droplet proof state was cleaned up after testing: no LogEx process, owner IPv4 reject rule, or resolver override remained.
 
 ## Remaining TODOs
 
@@ -48,7 +48,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Execution bootnodes support explicit `enode://` and signed `enr:` records, including hostname resolution for enodes.
   - Why: public IPv6 EL discovery is sparse, so operators need a deterministic way to provide known IPv6 peers.
-  - Tradeoff: signed discv5 ENRs still require same-family UDP fields, while direct RLPx candidates may use geth/Nethermind-compatible generic TCP fallback.
+  - Tradeoff: signed discv5 ENRs still require same-family UDP fields because Reth discv5 rejects IPv6 signed ENRs with only generic UDP, while direct and unsigned candidates may use geth/Nethermind-compatible generic TCP/UDP fallback.
 
 - Consensus bootnodes and cached peers are filtered by dial family before discovery seeding.
   - Why: strict IPv6 mode should not seed IPv4-only ENRs or retain cached peers without a compatible dial address.
@@ -63,6 +63,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
   - Resolution: compared LogEx behavior with geth, audited major client source, and proved controlled IPv6 EL transport with explicit bootnodes.
   - Remaining: public strict IPv6 historical EL sync is still unproven.
+
+- Challenge: generic-port IPv6 signed ENRs are valid enough for direct dialing but not accepted by Reth discv5 as signed discovery bootnodes.
+  - Resolution: kept signed discovery strict on `udp6` and added a regression test that preserves generic-port records through the unsigned/direct path instead.
+  - Remaining: no code issue remains; this limits only signed discovery seeding for generic-port IPv6 records.
 
 - Challenge: strict IPv6 CL runs still saw family-incompatible bootnode/discovery paths.
   - Resolution: CL bootnodes and cached peers are now retained only when they have addresses compatible with the configured dial families.
@@ -87,7 +91,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `fix: retry sparse execution dials`.
+- Commits made this run: `test: document ipv6 enr discovery fallback`.
 - Pull request status: not created; the task is not complete while public strict IPv6 EL sync policy remains unresolved.
 - Merge status: not merged.
 - Blockers: public IPv6 EL peer availability is unresolved; GitHub Actions quota has previously blocked hosted validation.
