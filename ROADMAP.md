@@ -8,7 +8,7 @@ Active branch: `fix/ipv6-p2p-sync`.
 
 Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac mini and no longer shows the two-hour liveness stall that previously blocked ordered writes. The accepted scheduler keeps expected historical work active, limits background maintenance while history is incomplete, and was bounded by the available network during the last validated run.
 
-IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. Controlled two-node EL proofs establish RLPx/eth sessions over IPv6 with zero LogEx IPv4 sockets. Public mainnet strict IPv6 EL discovery is still not deterministic enough for a production-ready historical-sync claim: the latest 20-sample bounded run submitted 890 IPv6 EL dials, kept zero IPv4 sockets, and reached 52 active CL sessions, but accepted no public EL serving session. The resolver fix joins chunked EIP-1459 DNS TXT records and periodically re-syncs the DNS tree, increasing accepted strict-IPv6 DNS execution candidates to 144 in current public proofs.
+IPv6 validation is partially complete on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. Controlled two-node EL proofs establish RLPx/eth sessions over IPv6 with zero LogEx IPv4 sockets. Public mainnet strict IPv6 EL discovery is still not deterministic enough for a production-ready historical-sync claim: the latest bounded run kept listen/advertise/dial families strictly IPv6, kept zero IPv4 sockets, reached 14 active CL sessions and 452 CL dialable peers, accepted 46 IPv6 DNS EL candidates, submitted 52 EL dials, but accepted no public EL serving session. A direct TCP probe of 40 DNS-discovered IPv6 EL endpoints from the droplet reached zero open sockets, so the current blocker is public EL IPv6 reachability/acceptance rather than a LogEx IPv4 leak.
 
 Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
@@ -50,6 +50,9 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Added a bootstrap warning for the case where configured execution bootnodes were provided but none match the active P2P family.
 - Re-ran a fresh 10-sample strict public IPv6 smoke on the temporary droplet: LogEx opened zero IPv4 sockets, CL peaked at 81 active sessions and 3,078 dialable peers, EL accepted 144 DNS candidates and submitted 903 IPv6 dials, but no public EL session was accepted.
 - Reconfirmed the temporary IPv6 droplet cleanup after that smoke: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
+- Probed 40 DNS-discovered IPv6 execution TCP endpoints from the droplet; all 40 direct IPv6 TCP connects failed, matching the repeated public strict-IPv6 EL session failures.
+- Re-ran a short strict public IPv6 smoke on the temporary droplet: LogEx listened, advertised, and dialed only IPv6, opened zero IPv4 sockets, CL reached 14 active sessions and 452 dialable peers, EL accepted 46 DNS candidates and submitted 52 dials, but accepted no public EL session.
+- Reconfirmed cleanup after that smoke: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
 
 ## Remaining TODOs
 
@@ -179,7 +182,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Inspected the IPv6 branch for proof-only leftovers; no temporary scripts, binaries, data dirs, resolver overrides, or firewall rules are intended to remain on the droplet after bounded tests.
 - Confirmed the latest droplet proof cleanup left no LogEx process, owner IPv4 block, or resolver override active.
 - Confirmed the geth comparison cleanup left no geth process or owner IPv4 block active.
-- Repaired the temporary droplet Linux binary after an invalid macOS binary upload was detected during a trace probe.
+- Repaired the temporary droplet Linux binary after an invalid macOS binary upload was detected during a bounded trace probe.
 - Replaced the obsolete family-agnostic CL bootnode/cache seeding path with dial-family-aware helpers.
 - Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
 - Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
