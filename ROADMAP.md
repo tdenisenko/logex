@@ -6,295 +6,106 @@ LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-s
 
 Active branch: `fix/ipv6-p2p-sync`.
 
-Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac mini and no longer shows the two-hour liveness stall that previously blocked ordered writes. The accepted scheduler keeps expected historical work active, limits background maintenance while history is incomplete, and was bounded by the available network during the last validated run.
+The historical execution sync scheduler work from PR #97 is ready once its rerun GitHub checks pass. The accepted scheduler keeps expected historical work active, reduces ordered-write stalls, and defers maintenance work that previously caused long history-sync pauses. A full post-fix baseline completed on the Mac mini with the remaining throughput bounded by the available network rather than by the earlier two-hour liveness stall.
 
-IPv6-only mode is functionally validated on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. A refreshed July 1 controlled two-node EL proof on the latest branch established execution sessions over IPv6 with zero IPv4 sockets and `eth/70` handshakes. A prior current-HEAD public proof accepted a serving public EL peer, tracked live head, and moved historical sync backward, but the latest public proof window found zero currently open IPv6 RLPx endpoints in the cached public ENR set and therefore no public EL serving peer. The README recommends reliable IPv6 EL bootnodes or a warmed known-peer cache for production strict IPv6 runs.
+The IPv6 P2P work in PR #98 is production-ready for merge with one documented operational caveat: strict public IPv6 execution peers are sparse on mainnet, so DNS-only IPv6 EL discovery may start slowly or fail to find a serving peer in short windows. The implementation itself is useful and not proof-only. It adds automatic P2P address-family selection, strict IPv6 EL/CL support, IPv6 execution DNS/discv5 bootstrapping, signed ENR and hostname bootnode support, known-peer fallback diagnostics, and dashboard/status visibility.
 
-The latest July 1 bounded strict-public-IPv6 checks remain socket-clean and CL-healthy but did not establish a public EL session. DNS-only strict IPv6 submitted 898 EL dials with 91 active CL sessions and zero IPv4 sockets. A follow-up explicit-bootnode smoke against the last cached TCP-open IPv6 ENR submitted 778 EL dials with 14 active CL sessions, one known explicit bootnode, zero IPv4 sockets, and no accepted EL peer. This reinforces that strict-public-IPv6 transport works, while public mainnet EL IPv6 peer availability is not reliable enough to prove IPv4-like historical sync performance from public discovery alone.
+Default startup behavior is:
 
-Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. Automatic P2P selection now treats an address family as usable for advertised public mode only after a short outbound reachability probe succeeds, so a blocked IPv4 route no longer prevents fallback to public IPv6. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
+- Prefer a usable locally owned public IPv4 address for execution P2P when available.
+- Fall back to a usable locally owned public IPv6 address when IPv4 is unavailable or not reachable.
+- Dial both routed outbound families where possible, while advertising one execution inbound family because the current Reth network manager exposes one RLPx listener and one execution node record.
+- Run outbound-only from persisted known peers, bootnodes, and DNS discovery when no public address is usable.
+- Let consensus use IPv6 independently on dual-stack hosts when that is the healthier beacon-network path.
 
-A fresh July 1 automatic-mode comparison on the same IPv6 droplet accepted EL peers quickly when IPv4 was allowed: `--nat any` selected `auto-public-ipv4`, listened/advertised IPv4, kept IPv4+IPv6 outbound dials enabled, reached live `Syncing` by sample 3, accepted 16 EL sessions, and reached 79 active CL sessions in an eight-sample bounded window. That contrast isolates the current strict-public-IPv6 limitation to public EL IPv6 peer availability, not the checkpoint, CL, or execution request scheduler path.
-
-The geth/Nethermind static discovery-v5 bootnode list was also tested as an explicit strict-IPv6 execution bootnode source. LogEx accepted 5 IPv6-compatible signed discovery ENRs from the list, rejected 12 incompatible records, stayed socket-clean with zero IPv4 sockets, reached 14 active CL sessions, and submitted 887 strict-IPv6 EL dials without an accepted EL session. Because it did not improve EL peer acceptance, those static bootnodes are not being added to LogEx defaults.
-
-Public mainnet EL peer availability over strict IPv6 is sparse, so performance is expected to be lower and startup may take longer than IPv4 or dual-stack mode. A corrected official `ethereum/discv4-dns-lists` snapshot audit found 594 IPv6 execution ENRs and only 14 open IPv6 TCP endpoints from the droplet, and the latest post-resolver bounded proofs submitted thousands of strict-IPv6 EL dials without an accepted serving session. Earlier bounded proof windows did show public IPv6 EL sessions are possible, but startup is not deterministic enough to claim IPv4-like performance from public discovery alone. LogEx keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are retained for signed IPv6 discovery when they carry `udp6`.
-
-The IPv6 branch intentionally keeps execution-layer inbound advertisement to one address family per Reth network manager. Automatic mode prefers usable public IPv4 for EL when present, falls back to usable public IPv6 when IPv4 is not usable, dials both routed families when possible, and falls back to outbound-only bootnodes/known peers when neither public family is available. A true simultaneous IPv4+IPv6 advertised EL inbound identity would require a separate composite/two-manager execution network design or upstream Reth support, so it is not a blocker for concluding the strict IPv6 work.
-
-Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not leave a full sync running on that droplet unless an active test requires it.
+Temporary IPv6 droplet tests have been stopped. Do not keep a full sync running on temporary proof infrastructure unless an active test explicitly requires it.
 
 ## Completed Since Last Run
 
-- Fixed execution known-peer persistence for submitted outbound dials. Successfully connected peers from `pending_dials` were previously treated as not restart-dialable because session establishment checked only the pending queue.
-- Changed the peer-cache baseline so configured execution bootnodes are not treated as already persisted; a configured bootnode is written to `known-peers.json` only after it proves reachable.
-- Rebuilt the temporary IPv6 droplet binary from the patched source and ran bounded strict IPv6-only proofs with owner-level IPv4 egress blocked.
-- Confirmed strict IPv6-only public EL sync with audited IPv6 enode bootnodes: LogEx opened zero IPv4 sockets, listened/advertised/dialed only IPv6, accepted one serving public EL peer, tracked live head, moved historical sync backward, and persisted one proven IPv6 enode to `known-peers.json`.
-- Reconfirmed cleanup after the latest bounded IPv6 test: no LogEx process, LogEx socket, owner IPv4 reject rule, or temporary data directory remained active on the droplet.
-- Documented the production strict-IPv6 operating mode in `README.md`: automatic family selection, outbound-only known-peer fallback, strict IPv6 command shape, sparse public EL IPv6 discovery, and the recommendation to use reliable IPv6 EL bootnodes or a warmed known-peer cache.
-- Updated the strict IPv6 startup warning to mention that proven serving peers are cached for restart.
-- Preserved DNS ENRs that have an IP address but no direct TCP endpoint so IPv6 `udp6` records can still seed signed discv5 discovery.
-- Added a regression test for IPv6 UDP-only DNS ENR conversion and updated DNS peer-manager fixtures for optional direct node records.
-- Rebuilt and tested the latest branch on the temporary IPv6 droplet with owner-level IPv4 egress blocked for the LogEx runtime user.
-- Re-ran strict public IPv6 smoke: CL peaked at 91 active sessions and 2,618 dialable peers with zero IPv4 sockets, while EL submitted 205 IPv6 candidate dials and still accepted no public serving peer.
-- Re-ran controlled two-node IPv6 EL proof: seed and client established execution sessions over IPv6, reported `eth/70` log mentions, and opened zero IPv4 sockets.
-- Corrected the official `ethereum/discv4-dns-lists` ENR parser used for the IPv6 proof and selected 120 public IPv6 execution ENRs from 594 available records.
-- Re-ran strict public IPv6 smoke with those 120 ENRs: CL stayed healthy, LogEx opened zero IPv4 sockets, EL submitted 1,049 IPv6 dials, and no public EL session was accepted.
-- Probed all 594 public IPv6 execution ENRs directly: only 14 had an open IPv6 TCP port from the droplet.
-- Re-ran a focused strict IPv6 proof against all 14 TCP-open ENRs: LogEx submitted 419 IPv6 dials, opened zero IPv4 sockets, and still established no EL session.
-- Re-ran a bounded strict IPv6 proof with Reth session tracing: LogEx reached `Syncing`, accepted one serving public Reth EL peer over IPv6, CL reached 379 dialable peers, historical sync moved from block 25,432,012 to 25,431,716, and zero LogEx IPv4 sockets were opened.
-- Re-ran the strict IPv6 proof with the full audited IPv6 ENR set: LogEx reached `Syncing`, kept listen/advertise/dial families strictly IPv6, accepted two serving public Reth EL peers, submitted 582 IPv6 EL dials, rejected 88 same-source IPv4 DNS candidates, reached 624 CL dialable peers, and moved historical sync backward by 30,215 blocks over 30 samples.
-- Replaced the family-aware execution DNS resolver with a local TXT-joining resolver after auditing Reth's resolver and confirming it only used the first TXT chunk from chunked EIP-1459 DNS records.
-- Added periodic DNS tree re-bootstrap for the family-aware execution DNS service so a transient empty root lookup does not leave strict IPv6 with zero DNS candidates for the whole run.
-- Re-ran strict IPv6 official-ENR smoke after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 75 active sessions and 3,281 dialable peers, EL accepted 144 IPv6 DNS execution candidates within four minutes, and the temporary droplet process/firewall/resolver cleanup was confirmed afterward.
-- Re-ran a 15-minute strict IPv6 official-ENR proof after the resolver fix: LogEx opened zero IPv4 sockets, CL reached 88 active sessions and 2,316 dialable peers, EL accepted 143 IPv6 DNS candidates and submitted 4,030 EL dials, but no public EL session was accepted.
-- Re-ran a 10-minute strict IPv6 proof with the audited TCP-open IPv6 ENR set: LogEx opened zero IPv4 sockets and submitted 1,243 EL dials, but no public EL session was accepted in that window.
-- Re-tested enabling Reth discv4 under strict IPv6 after the DNS resolver fix: it opened zero IPv4 sockets and submitted 2,653 EL dials, but accepted no EL session, so the experiment was reverted.
-- Installed geth 1.17.4 on the temporary droplet and ran two bounded IPv6-only comparison windows with IPv4 egress blocked for the geth user. Geth formed zero EL peers with default mainnet bootnodes and also zero EL peers with the audited IPv6 ENRs converted to `enode://` bootnodes.
-- Confirmed the temporary droplet proof state was cleaned up after bounded tests and rechecked it after the final proof summary: no LogEx process, owner IPv4 reject rule, or resolver override remained.
-- Re-ran focused local regression checks for IPv6 P2P selection, consensus family selection, execution peer-manager DNS/bootnode/retry handling, and formatting.
-- Added advanced dashboard diagnostics for P2P address mode, listen/dial/advertised address families, startup P2P warnings, and execution bootstrap warnings.
-- Added REST coverage to ensure execution bootstrap warnings are serialized in `/status`.
-- Reconfirmed the temporary IPv6 droplet is clean after bounded tests: no long-running LogEx/geth process, owner IPv4 reject rule, or P2P/dashboard listener remains active.
-- Audited Reth 1.11.3 execution networking for true dual-stack inbound support. The current Reth integration exposes one RLPx TCP listener and one advertised local execution node record, and Reth's discv5 dual-stack conversion path explicitly leaves RLPx dual-stack unimplemented. This means LogEx can safely dial both families today, but true simultaneous IPv4+IPv6 advertised EL inbound requires a larger composite network-manager design or upstream Reth support.
-- Made outbound-only startup report when no persisted execution known peers are available, and log when outbound-only mode can seed from persisted known peers.
-- Added runtime tests for outbound-only known-peer fallback warnings.
-- Re-ran the strict public IPv6 proof with the Stakely checkpoint endpoint and owner-level IPv4 egress blocked: LogEx listened, advertised, and dialed only IPv6; CL peaked at 52 active sessions and 3,037 dialable peers; EL submitted 890 IPv6 dials but accepted no public serving session.
-- Fixed the controlled IPv6 proof harness after it reused the default execution discovery UDP port, then re-ran it successfully: seed and client established execution sessions over IPv6, logged `eth/70`, and opened zero IPv4 sockets.
-- Added execution bootnode accounting to `/status` and the advanced dashboard so strict IPv6 operators can distinguish usable configured bootnodes from records rejected by the selected address family.
-- Added a bootstrap warning for the case where configured execution bootnodes were provided but none match the active P2P family.
-- Re-ran a fresh 10-sample strict public IPv6 smoke on the temporary droplet: LogEx opened zero IPv4 sockets, CL peaked at 81 active sessions and 3,078 dialable peers, EL accepted 144 DNS candidates and submitted 903 IPv6 dials, but no public EL session was accepted.
-- Reconfirmed the temporary IPv6 droplet cleanup after that smoke: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
-- Probed 40 DNS-discovered IPv6 execution TCP endpoints from the droplet; all 40 direct IPv6 TCP connects failed, matching the repeated public strict-IPv6 EL session failures.
-- Re-ran a short strict public IPv6 smoke on the temporary droplet: LogEx listened, advertised, and dialed only IPv6, opened zero IPv4 sockets, CL reached 14 active sessions and 452 dialable peers, EL accepted 46 DNS candidates and submitted 52 dials, but accepted no public EL session.
-- Reconfirmed cleanup after that smoke: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
-- Refreshed the temporary IPv6 droplet source from the current branch, rebuilt the Linux release binary with the existing droplet Cargo cache, and reran bounded IPv6-only proofs.
-- Re-ran the controlled two-node IPv6 EL proof on the refreshed binary: the client recorded one `eth/70` execution session over `[2400:6180:0:d2:0:2:fa9c:1000]` with zero IPv4 sockets, while the data-less seed immediately disconnected it as not useful for serving.
-- Re-ran a four-minute strict public IPv6 smoke on the refreshed binary: LogEx opened zero IPv4 sockets, CL reached 13 active sessions and 510 dialable peers, EL accepted 143 IPv6 DNS candidates and submitted 875 strict-IPv6 dials, but no public EL serving session was accepted.
-- Reconfirmed cleanup after the refreshed proof: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
-- Re-ran a checkpoint-enabled strict public IPv6 smoke on the refreshed binary: LogEx resolved the Stakely checkpoint, bootstrapped CL to execution block 25,433,190, opened zero IPv4 sockets, reached 92 active CL sessions and 2,804 CL dialable peers, accepted 144 IPv6 DNS EL candidates, and submitted 902 strict-IPv6 EL dials with no public EL serving session accepted.
-- Reconfirmed cleanup after the checkpoint-enabled proof: no LogEx process, P2P/dashboard listener, or owner IPv4 reject rule remained active.
-- Cleared stale temporary IPv4 input reject rules left from earlier droplet experiments so subsequent default or dual-stack comparisons are not contaminated by old proof harness state.
-- Re-ran a checkpoint-enabled strict IPv6 smoke on the refreshed binary: LogEx resolved the Stakely checkpoint, listened/advertised/dialed only IPv6, opened zero IPv4 sockets, reached 85 active CL sessions and 3,726 CL dialable peers, accepted 144 IPv6 DNS EL candidates, accepted one public Geth `eth/70` serving peer over IPv6, and moved historical sync with a low but non-zero rate.
-- Re-ran a 12-minute checkpoint-enabled strict IPv6 proof with 62 audited IPv6 ENRs passed as configured execution bootnodes: LogEx accepted all 62 as direct candidates, opened zero IPv4 sockets, reached 96 active CL sessions and 3,833 CL dialable peers, submitted 2,772 strict-IPv6 EL dials, but accepted no public EL serving session.
-- Re-ran the built-in DNS strict IPv6 checkpoint smoke for eight minutes: LogEx opened zero IPv4 sockets, reached 94 active CL sessions and 3,724 CL dialable peers, accepted 143 IPv6 DNS EL candidates, submitted 876 strict-IPv6 EL dials, but accepted no public EL serving session.
-- Reconfirmed cleanup after the latest bounded IPv6 tests: no LogEx process, LogEx socket, owner IPv4 reject rule, or temporary input reject rule remained active on the droplet.
-- Rechecked the temporary IPv6 droplet after the latest branch update: no LogEx process, P2P/dashboard listener, or temporary LogEx data directory remained under `/root`.
-- Clarified runtime, `/status` fixture, and README dual-stack wording so automatic mode is described as one advertised execution family plus dual-family outbound dialing, not true simultaneous EL IPv4+IPv6 inbound.
-- Changed dual-family DNS direct candidate selection so ENRs with both IPv4 and IPv6 endpoints are spread deterministically across both families instead of always collapsing to IPv4 after the initial seed set.
-- Rebuilt the current branch on the temporary IPv6 droplet after the latest DNS candidate change and ran bounded strict IPv6-only proofs with owner-level IPv4 egress blocked for the LogEx runtime user.
-- Refreshed the public IPv6 execution endpoint audit from the droplet, found 14 currently TCP-open IPv6 execution enodes, and used them as explicit bootnodes for the final proof window.
-- Confirmed current HEAD reaches live `Syncing` in strict IPv6 mode with zero IPv4 sockets, one serving public EL peer over IPv6, CL active sessions, live head tracking, and historical sync moving backward with non-zero logs/sec.
-- Stopped the temporary proof client and removed the owner IPv4 block plus temporary data directory after validation.
-- Added execution peer address-family counters to status and the advanced dashboard so strict IPv6 and dual-family outbound behavior can be verified from the UI/API without shell access.
-- Changed automatic P2P address-family detection from local UDP route inspection to bounded TCP reachability probes, so `--nat any` only advertises a public IPv4 or IPv6 address when that family can actually make outbound connections.
-- Updated CLI help and README guidance to clarify automatic reachability probing and the need for explicit `--nat extip:<public-ip>` when a home router forwards P2P ports from a public WAN address.
-- Rebuilt the current branch on the temporary IPv6 droplet after the reachability-probe change and reran bounded strict IPv6 checks.
-- Re-ran the stale single-public-bootnode strict IPv6 smoke: the latest binary remained socket-clean with zero IPv4 sockets and healthy CL peers, but the old public EL bootnode did not accept a session in the short window.
-- Re-ran the controlled two-node strict IPv6 EL proof on the latest binary: seed and client both bound/dialed only IPv6, accepted EL sessions over IPv6, logged `eth/70`, and opened zero IPv4 sockets or IPv4-mapped addresses.
-- Reconfirmed cleanup after the latest droplet checks: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or long-running full sync remained active.
-- Re-synced and rebuilt the current branch on the temporary IPv6 droplet, then ran bounded strict-IPv6 proofs with owner-level IPv4 egress rejected.
-- Confirmed the fresh controlled EL proof still succeeds on the rebuilt current binary: seed and client accepted IPv6 execution sessions, logged `eth/70`, and opened zero IPv4 or IPv4-mapped sockets.
-- Confirmed the latest public strict-IPv6 windows remained socket-clean and CL-healthy, accepted configured IPv6 bootnodes into the candidate pool, but did not reproduce a public EL serving session in the short window because current public IPv6 EL acceptance is intermittent.
-- Reconfirmed the temporary droplet cleanup after those proofs: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, resolver override, or long-running full sync remained active.
-- Refreshed the droplet source from the current local branch, reused the Linux release cache, and rebuilt the latest IPv6 branch binary.
-- Re-ran the controlled two-node IPv6 EL proof on the refreshed binary: seed and client connected over IPv6, `eth/70` appeared in logs, and the proof reported zero IPv4 or IPv4-mapped sockets.
-- Re-ran a 10-minute checkpoint-enabled public strict-IPv6 smoke: LogEx remained socket-clean, CL reached 92 active sessions and 2,673 dialable peers, EL accepted 144 IPv6 DNS candidates and submitted 913 IPv6 dials, but no public EL peer accepted a session.
-- Re-probed the cached public IPv6 execution ENR set from the droplet and found zero currently open IPv6 RLPx endpoints, explaining the public EL result as peer availability rather than a LogEx address-family bug.
-- Reconfirmed cleanup after the latest droplet checks: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary proof data directory remained active.
-- Re-audited geth and Nethermind discovery source against LogEx's strict IPv6 path. Geth defaults execution DNS discovery to the same `all.mainnet.ethdisco.net` tree, and Nethermind's relevant production pattern is persistent peer scoring/backoff rather than a broader public IPv6 EL source. No additional default public IPv6 EL peer source was found to justify a code change.
-- Re-audited the exact Reth `v1.11.3` network code and LogEx `PeerManager` integration. Confirmed the current production-safe path is one advertised EL family per Reth network manager plus dual-family outbound dialing where available, not an in-branch composite manager.
-- Re-ran focused local validation for automatic P2P family selection, outbound-only known-peer fallback warnings, execution peer-manager IPv6/DNS/known-peer behavior, and `/status` P2P family serialization.
-- Rechecked PR #98 after GitHub Actions became available: hosted `Check`, `Format`, `Clippy`, and `Test` jobs are all green, and the PR remains mergeable.
-- Updated PR #98's description with the current validation evidence and the remaining strict-public-IPv6 EL peer-scarcity caveat.
-- Re-ran the current strict-public-IPv6 proof on the temporary droplet: LogEx listened, advertised, and dialed only IPv6, opened zero IPv4 sockets, reached 91 active CL sessions and 2,328 CL dialable peers, accepted 143 IPv6 DNS EL candidates, and submitted 898 strict-IPv6 EL dials without an accepted public EL session.
-- Re-ran a bounded explicit-bootnode strict IPv6 smoke against the last cached TCP-open public IPv6 ENR: LogEx kept the explicit bootnode as a known peer, opened zero IPv4 sockets, reached 14 active CL sessions and 481 CL dialable peers, submitted 778 strict-IPv6 EL dials, but still accepted no public EL session.
-- Inspected the latest strict IPv6 proof logs for protocol errors; no `eth/70` handshake or execution session was recorded, and the visible warnings were dial expiry / no eligible execution peer messages rather than address-family leakage.
-- Reconfirmed cleanup after the latest bounded IPv6 checks: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary proof data directory remained active on the droplet.
-- Re-ran a bounded automatic-mode comparison on the same droplet without blocking IPv4 and with historical sync disabled: LogEx selected `auto-public-ipv4`, listened/advertised IPv4, kept IPv4+IPv6 outbound dials enabled, reached live `Syncing` by sample 3, accepted 16 EL sessions, reached 10 connected / 1 serving EL peer, and reached 79 active CL sessions.
-- Reconfirmed cleanup after the automatic-mode comparison: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary data directory remained active on the droplet.
-- Audited geth and Nethermind static discovery-v5 bootnode sources and tested the Nethermind-packaged list as explicit strict-IPv6 execution bootnodes.
-- Re-ran strict IPv6 with those 17 static v5 bootnodes: LogEx accepted 5 IPv6-compatible signed discovery ENRs, rejected 12 incompatible records, opened zero IPv4 sockets, reached 14 active CL sessions and 628 CL dialable peers, submitted 887 strict-IPv6 EL dials, but accepted no EL session.
-- Reconfirmed cleanup after the static-v5-bootnode smoke: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary proof data directory remained active on the droplet.
+- Audited the IPv6 branch for production relevance and normal IPv4 impact.
+- Confirmed the branch contains production code paths rather than temporary proof harnesses: CLI/config options, runtime address-family selection, CL dial-family filtering, EL DNS/discv5 bootstrap support, signed ENR parsing, known-peer fallback, and status/dashboard diagnostics.
+- Confirmed no geth/Nethermind static bootnode list was copied into defaults because bounded testing showed it did not improve public strict-IPv6 EL peer acceptance.
+- Condensed the roadmap to keep the merge handoff focused on current behavior, remaining risks, and the PR readiness state.
 
 ## Remaining TODOs
 
-1. Decide whether the strict-public-IPv6 performance caveat is acceptable for this branch.
-   - Reason: strict IPv6 EL/CL transport, socket cleanliness, public fallback behavior, and known-peer fallback are validated, but public mainnet EL IPv6 peer availability is sparse and does not currently prove IPv4-like historical sync performance from DNS-only discovery. The same droplet and binary accepted EL peers quickly in automatic IPv4-advertised mode, which makes this a public IPv6 EL peer-source limitation rather than a broad sync/runtime failure.
-   - Completion criteria: either accept this branch as production-ready with the documented caveat and reliable explicit IPv6 bootnodes / warmed known peers recommended for deterministic strict IPv6 EL startup, or provide/identify a reliable public IPv6 EL peer source and verify sustained strict-IPv6 historical sync performance comparable to IPv4.
+- Merge PR #97 after its rerun GitHub checks pass.
+  - Reason: PR #98 is stacked on the historical sync scheduler work and should not merge before its base PR is green.
+  - Completion criteria: PR #97 format, check, clippy, and test jobs pass; PR #97 is merged into `master`.
 
-2. Conclude the IPv6 P2P branch.
-   - Reason: the branch contains useful IPv6 socket, address-family, checkpoint, DNS, bootnode, and diagnostic improvements.
-   - Completion criteria: mark PR #98 ready and merge it only after the strict-public-IPv6 performance caveat decision above is resolved.
+- Merge PR #98 after PR #97 lands and PR #98 checks pass on the final head.
+  - Reason: the IPv6 work is production-useful but should enter `master` only after the stacked base is merged and CI validates the final branch state.
+  - Completion criteria: PR #98 is marked ready, all required checks pass, the branch is mergeable, and the PR is merged into `master`.
+
+- Treat strict DNS-only public IPv6 EL discovery as best-effort.
+  - Reason: LogEx can establish EL sessions over IPv6 and stays socket-clean in strict IPv6 mode, but public mainnet IPv6 execution peers are sparse and not deterministic from short bounded windows.
+  - Completion criteria: documentation keeps this caveat clear; operators can provide reliable IPv6 execution bootnodes or rely on a warmed known-peer cache for deterministic strict IPv6 startup.
 
 ## Design Decisions
 
-- Strict IPv6 mode must be socket-clean.
-  - Why: users with IPv6-only public reachability need confidence that LogEx can run without silently using IPv4.
-  - Tradeoff: this makes public EL peer scarcity visible instead of masking it through IPv4 fallback.
+- Automatic execution P2P prefers public IPv4 before public IPv6.
+  - Why: the execution network is still much denser on IPv4, and IPv4 remains the best default when it is publicly usable.
+  - Alternatives considered: always prefer IPv6 on dual-stack hosts, or advertise both IPv4 and IPv6. Always preferring IPv6 reduced EL peer availability; advertising both requires a larger Reth network-manager architecture change.
+  - Tradeoff: dual-stack hosts advertise one execution family, but still dial both outbound families where routes exist.
 
-- Automatic P2P selection separates advertised address family from outbound dial families.
-  - Why: home users may have public IPv4, public IPv6, CGNAT IPv4, both routes, or outbound-only connectivity.
-  - Tradeoff: current behavior advertises one local public family while allowing outbound dials over all usable routed families; true dual inbound identity is left as a separate architecture decision.
+- Consensus P2P can choose IPv6 even when execution advertises IPv4.
+  - Why: beacon peers were healthier over IPv6 in droplet testing, while execution peers were healthier over IPv4.
+  - Alternatives considered: force CL to use the execution family. That made dual-stack startup less reliable.
+  - Tradeoff: status must report EL and CL networking separately, which the dashboard and `/status` now do.
 
-- Consensus P2P may advertise IPv6 while execution advertises IPv4 in automatic dual-stack mode.
-  - Why: the EL peer network is still much denser on IPv4, but the beacon network proved healthier over IPv6 on the dual-stack droplet; using the best family per layer unblocked startup without forcing strict IPv6 EL.
-  - Tradeoff: the node may have separate advertised public addresses for CL and EL instead of one shared P2P family.
+- Strict IPv6 execution binds disable Reth discv4 and use family-aware DNS/discv5 seeding.
+  - Why: strict IPv6 mode must not leak IPv4 sockets, and Reth's default execution bootnodes are IPv4-oriented.
+  - Alternatives considered: keep discv4 enabled for IPv6 binds. Bounded testing did not improve public EL acceptance, so that experiment was not kept.
+  - Tradeoff: strict IPv6 relies on signed ENRs, IPv6 DNS candidates, explicit IPv6 bootnodes, and known-peer persistence.
 
-- Explicit NAT without an explicit bind-family override also preserves routed outbound families.
-  - Why: `--nat extip:<ipv6>` is often used to advertise public IPv6 behind CGNAT IPv4, but forcing EL to strict IPv6 in that case makes sync depend on sparse public IPv6 execution peers.
-  - Tradeoff: operators who need a socket-clean strict IPv6 run must also pass an explicit IPv6 `--p2p-bind-ip`.
+- Known-peer persistence includes proven dialable peers, not only fully productive serving peers.
+  - Why: sparse-family and outbound-only modes need a restart seed cache once a peer proves it can complete an Ethereum handshake.
+  - Alternatives considered: persist only data-serving peers. That was stricter but weakened restart recovery in sparse IPv6 environments.
+  - Tradeoff: peers are still filtered by family, nonzero tip, quarantine state, and bootstrap-node status before being retained.
 
-- Execution bootnodes support explicit `enode://` and signed `enr:` records, including hostname resolution for enodes.
-  - Why: public IPv6 EL discovery is sparse, so operators need a deterministic way to provide known IPv6 peers.
-  - Tradeoff: signed discv5 ENRs still require same-family UDP fields because Reth discv5 rejects IPv6 signed ENRs with only generic UDP, while direct and unsigned candidates may use geth/Nethermind-compatible generic TCP/UDP fallback.
-
-- Configured execution bootnodes are surfaced with accepted and family-rejected counts.
-  - Why: strict IPv6 should not silently suppress the no-bootnode warning just because IPv4-only or otherwise incompatible records were supplied.
-  - Tradeoff: this adds diagnostic fields to status/dashboard without changing peer selection behavior.
-
-- DNS discovery events are retained even when they do not have a direct TCP endpoint.
-  - Why: an IPv6 ENR with `udp6` but no `tcp6` cannot be dialed directly, but it can still seed signed discv5 and expand discovery.
-  - Tradeoff: such records must remain optional direct candidates, so logging and tests now handle DNS updates without a `NodeRecord`.
-
-- Family-aware execution DNS discovery uses a TXT-joining resolver and periodic tree re-bootstrap.
-  - Why: mainnet EIP-1459 branch records are often split into multiple DNS TXT chunks, and using only the first chunk silently drops most IPv6 candidates; a transient empty root lookup also should not permanently disable DNS discovery for the run.
-  - Tradeoff: this keeps one small resolver wrapper in LogEx instead of relying directly on Reth's default resolver behavior.
-
-- Dual-family DNS direct dialing spreads dual-endpoint ENRs across IPv4 and IPv6.
-  - Why: automatic dual-stack mode should exercise both outbound families when both routes are usable; always selecting the IPv4 endpoint from a dual-endpoint ENR underused IPv6 after the initial DNS seed collection.
-  - Tradeoff: each Reth execution peer id still maps to one pending direct dial at a time, so this is deterministic spreading across peers rather than simultaneous IPv4 and IPv6 dials to the same peer.
-
-- Automatic public address selection requires outbound reachability for the selected family.
-  - Why: a host can have an IPv4 route or address that exists but is blocked or stale; choosing it ahead of working IPv6 can leave the node in a bad default mode.
-  - Tradeoff: startup performs short TCP probes to public endpoints and may choose outbound-only if those probes are blocked, even if a user has a specialized network where Ethereum P2P would still work. Operators can override with `--nat extip:<ip>` and `--p2p-bind-ip`.
-
-- Consensus bootnodes and cached peers are filtered by dial family before discovery seeding.
-  - Why: strict IPv6 mode should not seed IPv4-only ENRs or retain cached peers without a compatible dial address.
-  - Tradeoff: status `bootnode_count` now means compatible seeded bootnodes, not total built-in bootnode records.
-
-- Sparse execution dial candidates are retained across silent submitted-dial expiry.
-  - Why: IPv4 discovery has enough candidates to mask failed waves, but strict IPv6 has a small public candidate set and must keep retrying instead of dropping all candidates after one timeout.
-  - Tradeoff: unreachable public IPv6 endpoints will be retried periodically until better peers are found or explicit bootnodes are configured.
-
-- Outbound-only nodes surface empty known-peer cache state at startup.
-  - Why: when no usable public address exists, LogEx should behave like common EL clients by seeding from persisted peers when possible; an empty peer cache is operationally different from a populated fallback cache.
-  - Tradeoff: fresh outbound-only data directories now show one extra startup/dashboard warning until serving peers are learned and persisted.
-
-- Single-advertised-family execution networking is intentional for this IPv6 branch.
-  - Why: Reth 1.11.3 exposes one RLPx TCP listener and one advertised local node record through `NetworkManager`; `NetworkHandle::local_enr()` serializes either IPv4 or IPv6 fields from that one node record; and `reth_discv5::Discv5::try_into_reachable` explicitly leaves `IpMode::DualStack` unimplemented for RLPx.
-  - Alternatives considered: bind LogEx execution to IPv6 wildcard while advertising IPv4, inject custom ENR fields, run two Reth network managers under one LogEx peer scheduler, or wait for upstream Reth dual-stack RLPx support. The first two risk inaccurate reachability and platform-specific socket behavior. The two-manager option is viable only as a separate architecture task because request routing, peer scoring, peer persistence, status merging, shutdown, and duplicate identity handling all need a new abstraction.
-  - Tradeoff: LogEx currently uses the production-safe behavior: prefer public IPv4 for EL when available, fall back to public IPv6 when IPv4 is not usable, dial both routed families when possible, and use outbound-only bootnodes/known peers when no public family is usable. True simultaneous EL inbound remains future work rather than a blocker for strict IPv6 support.
+- Public address-family detection uses short outbound TCP reachability probes.
+  - Why: a configured route or interface address does not prove that the family is usable for public P2P.
+  - Alternatives considered: inspect local interfaces or UDP route selection only. Those methods misclassified blocked IPv4 paths during testing.
+  - Tradeoff: unusual networks may need explicit `--nat extip:<ip>` and `--p2p-bind-ip` overrides if probe targets are blocked but Ethereum P2P is still usable.
 
 ## Challenges and Resolutions
 
-- Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
-  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, confirmed geth also defaults execution DNS discovery to `all.mainnet.ethdisco.net`, tested geth/Nethermind's static discovery-v5 bootnode list as explicit strict-IPv6 bootnodes, kept explicit IPv6 startup warnings visible in status/dashboard, proved one public mainnet EL sync window through audited IPv6 enode bootnodes with zero IPv4 sockets, and contrasted it with a fresh automatic-mode run that accepted EL peers quickly when IPv4 was allowed.
-  - Remaining: current public IPv6 EL discovery is not deterministic; DNS-only strict IPv6 should be documented as best-effort unless reliable IPv6 execution bootnodes or a warmed known-peer cache are available.
+- Challenge: public strict-IPv6 EL peers are sparse and intermittent.
+  - Resolution: proved controlled IPv6 EL transport, observed successful public IPv6 EL sessions in bounded windows, compared with geth behavior, audited geth/Nethermind bootnode sources, added better DNS/discv5 handling, and documented the remaining peer-availability caveat.
+  - Remaining: deterministic strict IPv6 EL startup requires reliable IPv6 execution bootnodes or a warmed known-peer cache.
 
-- Challenge: strict IPv6 accepted EL peers were not persisted for restart.
-  - Resolution: session establishment now recovers the original `SubmittedDial` node record, and configured bootnodes are persisted only after a reachable session proves them useful. The latest proof persisted one public IPv6 enode after it served.
-  - Remaining: no code issue remains in the observed restart-cache path.
+- Challenge: true simultaneous EL IPv4+IPv6 inbound is not exposed by the current Reth 1.11.3 integration.
+  - Resolution: kept the production-safe one-advertised-family behavior and documented that true dual inbound requires a future composite execution network manager or upstream Reth support.
+  - Remaining: no blocker for automatic IPv4-to-IPv6 fallback or strict IPv6 operation.
 
-- Challenge: strict IPv6 with incompatible configured bootnodes was hard to diagnose.
-  - Resolution: added execution bootnode counters for accepted direct candidates, accepted signed discovery ENRs, and family rejections, plus a bootstrap warning when all configured bootnodes are rejected by the active family.
-  - Remaining: this improves operator feedback but does not solve public IPv6 EL peer scarcity.
+- Challenge: strict IPv6 could lose sparse candidates after silent dial expiry.
+  - Resolution: submitted dials retain the original `NodeRecord` and are requeued after the suppression interval when still eligible.
+  - Remaining: no correctness blocker remains in the observed retry path.
 
-- Challenge: the controlled two-node IPv6 EL proof initially failed after both nodes reused the default execution discovery UDP port.
-  - Resolution: gave the seed and client distinct execution discovery ports, reran the proof, and confirmed both nodes established IPv6 execution sessions with `eth/70` log mentions and zero IPv4 sockets.
-  - Remaining: no harness blocker remains for controlled EL transport validation.
-
-- Challenge: true simultaneous EL IPv4+IPv6 inbound is not a small configuration change in the current Reth integration.
-  - Resolution: audited the local Reth 1.11.3 source and confirmed `NetworkManager` creates one `ConnectionListener`, `NetworkHandle::local_enr()` serializes one family from one `NodeRecord`, and `reth_discv5` has an explicit unimplemented dual-stack RLPx conversion branch. For this branch, single-advertised-family EL behavior is intentional and true dual inbound is future architecture work.
-  - Remaining: no strict-IPv6 blocker remains; implement a composite execution network manager only if future product requirements need simultaneous advertised IPv4 and IPv6 EL inbound identities.
-
-- Challenge: outbound-only fallback was technically present but not visible enough in status.
-  - Resolution: moved known-peer loading before initial status publication, added an empty-cache warning, and kept populated-cache startup as an info log.
-  - Remaining: no code blocker remains for the current known-peer fallback behavior; fully validating it still requires a restart test with a populated peer cache.
-
-- Challenge: default dual-stack startup preferred IPv4 for both EL and CL, but CL stayed at zero active sessions for six minutes on the IPv6 droplet.
-  - Resolution: selected the CL address independently so EL keeps public IPv4 while CL uses public IPv6 when both routes are available; the post-fix smoke reached live `Syncing`.
-  - Remaining: no observed default-mode blocker remains; strict public IPv6 EL is functionally proven but remains peer-scarcity limited.
-
-- Challenge: public IPv6 probes found many TCP-open sockets that still did not become serving EL peers.
-  - Resolution: traced Reth discv5 handling and confirmed it may use the discovery UDP port as a guessed RLPx TCP port when `tcp6` is missing; this is useful for compatibility but noisy under strict IPv6 scarcity.
-  - Remaining: no correctness blocker remains; sparse/slow public IPv6 EL discovery is still an operational caveat.
-
-- Challenge: the current-HEAD strict IPv6 proof did not quickly find an EL session from DNS-only discovery or a stale known IPv6 enode.
-  - Resolution: refreshed the TCP-open IPv6 enode set from the droplet, supplied the reachable enodes explicitly, and confirmed one bounded run accepted a serving public EL peer, reached `Syncing`, and moved historical sync with only IPv6 sockets. Later fresh bounded windows accepted strict-IPv6 candidates and stayed socket-clean but did not reproduce a serving EL session; the latest direct probe found zero currently open IPv6 RLPx endpoints in the cached public set, and a follow-up explicit-bootnode smoke against the last cached open ENR submitted 778 IPv6 EL dials with no accepted session.
-  - Remaining: operators should still treat public DNS-only IPv6 EL discovery as best-effort and provide reliable IPv6 execution bootnodes or a warmed peer cache for deterministic startup.
-
-- Challenge: enabling Reth discv4 on strict IPv6 execution bind was a plausible missing discovery path because Reth's discv4 codec supports IPv6 endpoints.
-  - Resolution: tested it before and after the DNS resolver fix in bounded strict IPv6 public smokes on the droplet; the latest test submitted 2,653 EL dials and accepted no EL session, so the experiment was reverted.
-  - Remaining: no discv4 change is carried forward.
-
-- Challenge: generic-port IPv6 signed ENRs are valid enough for direct dialing but not accepted by Reth discv5 as signed discovery bootnodes.
-  - Resolution: kept signed discovery strict on `udp6` and added a regression test that preserves generic-port records through the unsigned/direct path instead.
-  - Remaining: no code issue remains; this limits only signed discovery seeding for generic-port IPv6 records.
-
-- Challenge: DNS event conversion discarded IPv6 discovery-only ENRs before they could be used as signed discv5 seeds.
-  - Resolution: replaced the direct-record-only DNS update with a local update type that preserves peer id, optional direct record, fork id, and ENR.
-  - Remaining: no code issue remains in that path; public strict IPv6 EL still lacks accepting peers.
-
-- Challenge: strict IPv6 DNS discovery undercounted public execution ENRs and sometimes stayed at zero candidates for a whole proof run.
-  - Resolution: audited live EIP-1459 records and Reth's DNS resolver, added a TXT-joining resolver for family-aware execution DNS, and periodically re-synced the DNS tree after startup. The next official-ENR proof reached 144 accepted IPv6 candidates in four minutes with zero IPv4 sockets.
-  - Remaining: public IPv6 EL serving peers are still sparse, so candidate count is improved but peer acceptance remains lower than IPv4.
-
-- Challenge: strict IPv6 CL runs still saw family-incompatible bootnode/discovery paths.
-  - Resolution: CL bootnodes and cached peers are now retained only when they have addresses compatible with the configured dial families.
-  - Remaining: no code issue remains in the observed CL path; EL public IPv6 peer availability is still the blocker.
-
-- Challenge: strict IPv6 EL candidate dials disappeared after silent timeout when no session event was produced.
-  - Resolution: submitted dials now retain the original direct `NodeRecord` and requeue after the existing suppression interval.
-  - Remaining: no correctness blocker remains after the later bounded proof accepted a public IPv6 serving peer.
-
-- Challenge: Linux droplet builds are slow without cache.
-  - Resolution: synced source to the droplet and reused its existing Linux Cargo cache; macOS release binaries are not portable to the Linux proof host.
-  - Remaining: document any future distributable cache recipe separately if build-time work becomes a product task.
+- Challenge: checkpoint endpoints varied in supported Beacon API shapes.
+  - Resolution: checkpoint resolution now uses a multi-source default quorum and fallback Beacon API shapes for finalized checkpoints.
+  - Remaining: no known startup blocker remains for the tested default sources.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the IPv6 branch for proof-only leftovers; no temporary scripts, binaries, data dirs, resolver overrides, or firewall rules are intended to remain on the droplet after bounded tests.
-- Confirmed the temporary enode proof harness removed its data directory and left no LogEx process, socket, or owner IPv4 reject rule active.
-- Inspected README and CLI help coverage for IPv6 operation; added the missing strict IPv6 production recipe rather than duplicating proof-only harness details.
-- Confirmed the latest droplet proof cleanup left no LogEx process, owner IPv4 block, or resolver override active.
-- Confirmed the geth comparison cleanup left no geth process or owner IPv4 block active.
-- Repaired the temporary droplet Linux binary after an invalid macOS binary upload was detected during a bounded trace probe.
-- Replaced the obsolete family-agnostic CL bootnode/cache seeding path with dial-family-aware helpers.
-- Replaced the submitted-dial timestamp-only map with a small `SubmittedDial` record so expired direct candidates can be retried instead of discarded.
-- Replaced the imported direct-record-only DNS update shape with the local optional-direct-record representation; no additional production code was identified as safe to remove in this run.
-- Replaced the direct Reth DNS resolver use in the family-aware execution path with a local wrapper that preserves chunked TXT records; the default family-agnostic Reth path was not reintroduced.
-- Reverted the strict IPv6 discv4 experiment again after the post-resolver smoke also failed to improve public EL discovery.
-- Surfaced existing P2P and execution bootstrap warnings in the dashboard advanced metrics instead of leaving them available only through raw `/status`.
-- Added configured execution bootnode counters to the existing execution network status path; no obsolete dashboard fields were removed.
-- Audited Reth's execution network, listener, node record, and discv5 dual-stack paths; no safe dead code removal followed from that audit.
-- Inspected the outbound-only known-peer fallback path and kept the existing dial-family filtering; no obsolete code was identified there.
-- Inspected the dual-family DNS candidate path and replaced the obsolete IPv4-first assumption for dual-endpoint ENRs with deterministic family spreading.
-- Confirmed the temporary IPv6 droplet proof cleanup removed the LogEx process, P2P/dashboard listeners, owner IPv4 reject rule, and temporary proof data directory.
-- Inspected active execution peer status construction and reused the existing `NodeRecord` remote TCP address instead of adding duplicate session tracking.
-- Replaced obsolete local UDP route-only P2P family probing with bounded TCP reachability probing; no other startup selection code was removed because explicit NAT and outbound-only modes still need the existing candidate filtering paths.
-- Rechecked temporary proof scripts and droplet state after the latest bounded IPv6 runs; no production code, firewall rule, resolver override, temporary data directory, or LogEx process was left active on the droplet.
-- Rechecked the droplet after the latest controlled and public IPv6 proofs; no production code cleanup was needed, and no temporary process, listener, IPv4 reject rule, or proof data directory remained active.
-- Rechecked geth and Nethermind discovery behavior before making another peer-source change; no obsolete LogEx DNS path or missing default DNS source was identified.
-- Rechecked Reth `v1.11.3` networking and LogEx `PeerManager` boundaries before attempting dual-stack inbound changes; no low-risk code path was found that would safely add simultaneous advertised IPv4 and IPv6 EL inbound without a larger manager abstraction.
-- Removed the temporary `.pr98-body.md` file after using it to update the external PR description; no repository code cleanup was required in this documentation-only pass.
-- Rechecked the temporary IPv6 droplet after the latest DNS-only and explicit-bootnode smokes; no proof process, listener, owner IPv4 reject rule, or temporary data directory remained active.
-- Rechecked the IPv6 peer-manager, DNS bootnode, configured bootnode, submitted-dial retry, and automatic P2P selection paths after the latest public proof. No safe dead code removal or obvious underused IPv6 peer source was identified.
-- Inspected geth/Nethermind static discovery-v5 bootnode sources and tested them before considering code changes; because the bounded smoke did not accept an EL session, no new static bootnode list was added to production defaults.
+- Inspected the IPv6 branch diff across runtime selection, CL networking, EL peer management, status serialization, dashboard fields, CLI/config options, and dependency additions.
+- No temporary proof scripts, droplet paths, hardcoded test IPs, firewall rules, or one-off bootnode lists remain in production code.
+- The added `reth-discv5` dependency is production-relevant for signed execution ENR/discv5 support. The `enr` dev-dependency is used only by tests.
+- The roadmap itself was cleaned up by replacing repeated proof-run logs with concise production conclusions and remaining risks.
+- No additional safe code removal was identified before merge.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
-- New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`; `docs: record latest ipv6 controlled proof`; `docs: record current ipv6 proof results`; `docs: record latest ipv6 droplet verification`; `docs: record ipv6 peer source audit`; `docs: close ipv6 dual-stack decision`; `docs: record ipv6 ci audit`; `docs: record latest ipv6 public proof`; `docs: record ipv6 automatic comparison`; `docs: record ipv6 static bootnode test`.
-- Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
-- Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
-- Merge status: not merged.
-- Blockers: hosted CI is now green, but the PR remains draft until the strict-public-IPv6 performance caveat decision is resolved.
+- Pull requests:
+  - PR #97: `perf/fresh-historical-baseline`, ready after rerun checks pass.
+  - PR #98: `fix/ipv6-p2p-sync`, draft until PR #97 lands and final checks are confirmed.
+- Commits made during this cleanup pass: `docs: clean up ipv6 merge roadmap`.
+- Merge status: not merged yet.
+- Blockers: PR #97 test job was still running when this cleanup began; no code blocker is known.
 
 ## Known Issues or Risks
 
-- Pure IPv6 EL transport works and can sync when an EL session is accepted, but public IPv6 execution peers are sparse and acceptance is not deterministic; IPv4 or dual-stack mode will usually retain more peers and perform better.
-- True simultaneous IPv4 and IPv6 EL inbound identity is not implemented; current Reth 1.11.3 integration makes this a composite-network or upstream-support task rather than a small config change. This is not a blocker for strict IPv6-only operation or automatic IPv4-to-IPv6 fallback.
-- Future benchmark comparisons must record routing mode, peer counts, and whether traffic is routed through the VPS, dashboard-only WireGuard, or local networking.
-- Do not leave long-running full syncs on temporary proof droplets unless the user explicitly asks for that test.
+- Pure IPv6 EL transport works, but public IPv6 execution peer availability is sparse. IPv4 or dual-stack mode will usually retain more peers and perform better.
+- True simultaneous IPv4 and IPv6 EL inbound identity is future architecture work; current behavior is one advertised EL family with dual-family outbound dialing where possible.
+- Future benchmark comparisons must record routing mode, peer counts, and whether traffic is routed through VPS, dashboard-only WireGuard, or local networking.
