@@ -1985,12 +1985,9 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
             self.refresh_connectivity_state();
-            let consensus_required_block = consensus_head_available.then(|| {
-                self.consensus
-                    .as_ref()
-                    .and_then(|consensus| consensus.anchor_coverage().floor)
-                    .map_or(1, |anchor| anchor.block_number)
-            });
+            let consensus_required_block = consensus_head_available
+                .then(|| self.consensus_required_block_for_peer_readiness())
+                .flatten();
             let consensus_ready = consensus_required_block
                 .is_some_and(|required_block| self.peers.has_block_request_peer(required_block));
             let historical_ready = historical_resume_required_block

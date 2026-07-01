@@ -199,7 +199,6 @@ Local-only dashboard and APIs:
 
 ```bash
 ./target/release/logex \
-  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
   sync
 ```
 
@@ -216,7 +215,6 @@ Server run with an explicit data directory and public dashboard:
 ```bash
 ./target/release/logex \
   --data-dir /var/lib/logex/mainnet \
-  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
   sync \
   --http-host 0.0.0.0 \
   --http-port 18683 \
@@ -241,6 +239,45 @@ When `--http-host 0.0.0.0` is used, open the dashboard at
 `logex`. Prefer firewalling, SSH tunneling, or TLS termination for public
 servers.
 
+## P2P Address Selection And IPv6
+
+By default, `--nat any` chooses the safest reachable P2P mode automatically.
+Automatic mode only advertises a locally owned public address after that address
+family passes a short outbound reachability probe:
+
+1. If a locally owned public IPv4 address is available and reachable, EL
+   advertises IPv4.
+2. If no public IPv4 is available but a locally owned public IPv6 address is
+   available and reachable, EL advertises IPv6.
+3. If no public address is available, LogEx runs outbound-only and relies on
+   discovery plus persisted known peers learned during previous runs.
+
+Home-router port forwarding cannot be proven safely from inside the process. If
+the machine only has a private LAN address but the router forwards Ethereum P2P
+ports from a real public WAN address, pass `--nat extip:<public-ip>` explicitly.
+
+When both IPv4 and IPv6 routes exist, LogEx may still dial outbound peers over
+both families even though EL advertises only one public family. CL can advertise
+IPv6 while EL advertises IPv4 because the beacon network generally has better
+IPv6 reachability than the execution network. In the current release, dual-stack
+means dual-family outbound dialing plus the safest advertised family per layer;
+it does not create two simultaneous advertised EL inbound identities.
+
+Strict IPv6-only mode is available when the host has public IPv6 reachability:
+
+```bash
+./target/release/logex \
+  sync \
+  --p2p-bind-ip :: \
+  --nat extip:YOUR_PUBLIC_IPV6 \
+  --execution-bootnode 'enode://PUBKEY@[2001:db8::1]:30303?discport=30303'
+```
+
+In strict IPv6 mode LogEx binds, advertises, and dials only IPv6 for EL and CL.
+Public EL IPv6 discovery is currently much sparser than IPv4, so reliable IPv6
+execution bootnodes or a warmed `known-peers.json` cache are recommended for
+production. Once an IPv6 EL peer proves useful, LogEx persists it for restart.
+
 ## CLI Reference
 
 Use `--help` at any level:
@@ -261,7 +298,7 @@ Global options:
 | `--partition-target-rows <N>` | `1000000` | Target log rows per storage segment before sealing and compaction. Larger values reduce segment count; smaller values seal sooner. |
 | `--config <PATH>` | none | Optional TOML config file. Supported keys are listed below. |
 | `--checkpoint <CHECKPOINT>` | none | Weak-subjectivity checkpoint root, `slot@root`, or descriptor file path. Required for a fresh data directory unless `--checkpoint-sync-url` resolves one. |
-| `--checkpoint-sync-url <URLS>` | none | Beacon/checkpoint endpoint used to fetch or validate a recent finalized checkpoint. Use comma-separated URLs to require multi-source agreement. |
+| `--checkpoint-sync-url <URLS>` | Built-in 2-of-3 mainnet quorum | Beacon/checkpoint endpoint used to fetch or validate a recent finalized checkpoint. Use comma-separated URLs to override the default sources and require multi-source agreement. |
 | `--help` | n/a | Print help for the root command or selected subcommand. |
 | `--version` | n/a | Print the LogEx binary version. |
 
@@ -273,10 +310,13 @@ Global options:
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
 | `--grpc-port <PORT>` | `8578` | gRPC server port for `LogExService.Query`, `GetLogs`, `StreamLogs`, and `GetHeadBlock`. |
-| `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port. |
+| `--discovery-port <PORT>` | `30303` | Execution-layer discv4 UDP discovery port for IPv4 execution binds. Strict IPv6 execution binds disable discv4. |
 | `--p2p-port <PORT>` | `30303` | Execution-layer TCP listener port for the eth protocol. |
+| `--p2p-bind-ip <IP>` | auto | Local bind address for EL and CL P2P listeners. Use `::` with `--nat extip:<ipv6>` to select IPv6; LogEx narrows the listener to the concrete local public IPv6 address when it can verify that address locally. |
 | `--max-peers <N>` | `100` | Maximum EL peer sessions. Higher values help only if CPU, memory, bandwidth, and disk can keep up. |
-| `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
+| `--nat <MODE>` | `any` | EL NAT/external address resolver advertised to peers. `any` prefers a locally owned public IPv4, then public IPv6, then outbound-only mode. Supported forms include `any`, `none`, `publicip`, `netif`, `extip:<ip>`, and `extaddr:<domain>`. |
+| `--execution-bootnode <ENODE_OR_ENR>` | none | Extra EL bootnode seed. Accepts signed `enr:` records and `enode://` records with IP literals or DNS names. Repeat the flag or use comma-separated values. Useful for strict IPv6 when public EL IPv6 discovery is sparse. |
+| `--execution-discv5-port <PORT>` | `9200` | Execution-layer discv5 UDP discovery port used by strict IPv6 execution binds. |
 | `--cl-discovery-port <PORT>` | `9000` | Consensus-layer discv5 UDP discovery port. |
 | `--cl-p2p-port <PORT>` | `9000` | Consensus-layer libp2p TCP port advertised in the local ENR. |
 | `--cl-max-peers <N>` | `32` | Maximum dialable CL peers retained from discovery. |
@@ -332,6 +372,9 @@ log_level = "info"
 partition_target_rows = 1000000
 checkpoint_sync_url = "https://YOUR-CHECKPOINT-ENDPOINT"
 nat = "extip:203.0.113.10"
+p2p_bind_ip = "0.0.0.0"
+execution_bootnodes = []
+execution_discv5_port = 9200
 http_host = "127.0.0.1"
 grpc_host = "127.0.0.1"
 allow_public_grpc = false
@@ -349,6 +392,9 @@ Supported config keys:
 | `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |
+| `p2p_bind_ip` | IP string | EL/CL P2P bind family. Use `"::"` with an IPv6 `nat` address to select IPv6; LogEx narrows to the concrete local public IPv6 address when it can verify that address locally. |
+| `execution_bootnodes` | string array | Extra EL bootnodes as `enode://...` records with IP literals or DNS names, or signed `enr:...` records. |
+| `execution_discv5_port` | integer | EL discv5 UDP port used for IPv6 execution discovery. |
 | `http_host` | IP string | HTTP bind host. |
 | `grpc_host` | IP string | gRPC bind host. |
 | `allow_public_grpc` | boolean | Permit non-loopback gRPC binding. |
@@ -467,6 +513,9 @@ WHERE topic0 = event'Transfer(address,address,uint256)'
 
 - Keep `30303/tcp`, `30303/udp`, `9000/tcp`, and `9000/udp` reachable when
   running a public node. Better reachability improves peer retention.
+- With `--nat any`, LogEx advertises one reachable public family. If public
+  IPv6 is the advertised family but IPv4 outbound routing exists, EL direct
+  dials can still use IPv4 DNS candidates while CL/EL listeners stay on IPv6.
 - Use a recent checkpoint. If a checkpoint or persisted consensus snapshot is
   outside the weak-subjectivity freshness window, LogEx requires a fresh data
   directory and a recent checkpoint.

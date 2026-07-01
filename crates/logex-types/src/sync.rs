@@ -185,6 +185,24 @@ pub struct ExecutionNetworkStatus {
     pub missing_fork_id_candidates: u64,
     /// Discovered candidates ignored because their ENR fork ID was incompatible.
     pub fork_id_rejected_candidates: u64,
+    /// Non-DNS execution discovery candidates accepted for dialing.
+    pub discovered_candidates: u64,
+    /// DNS execution discovery candidates accepted for dialing.
+    pub dns_discovered_candidates: u64,
+    /// DNS execution discovery candidates ignored because they lacked a dialable address
+    /// for the selected P2P address family.
+    pub dns_family_rejected_candidates: u64,
+    /// Configured execution bootnodes accepted as direct RLPx dial candidates.
+    pub configured_bootnode_direct_candidates: usize,
+    /// Configured execution bootnodes accepted as signed discovery ENRs.
+    pub configured_bootnode_discovery_enrs: usize,
+    /// Configured execution bootnodes ignored because they did not match the selected
+    /// P2P address family.
+    pub configured_bootnode_family_rejections: usize,
+    /// Execution peer dials submitted to the underlying network scheduler since startup.
+    pub submitted_dials_total: u64,
+    /// Submitted dials that aged out without becoming an accepted or closed session event.
+    pub submitted_dial_expirations: u64,
     /// Pending execution peer candidates that have not been submitted to the dialer yet.
     pub queued_candidates: usize,
     /// Execution peers currently submitted to the dialer but not yet connected or failed.
@@ -298,6 +316,10 @@ pub struct ExecutionNetworkStatus {
     pub connected_reth_peers: usize,
     /// Connected peers from other client families.
     pub connected_other_peers: usize,
+    /// Connected peers reached over IPv4 execution transport.
+    pub connected_ipv4_peers: usize,
+    /// Connected peers reached over IPv6 execution transport.
+    pub connected_ipv6_peers: usize,
     /// Serving geth peers.
     pub serving_geth_peers: usize,
     /// Serving Nethermind peers.
@@ -306,6 +328,10 @@ pub struct ExecutionNetworkStatus {
     pub serving_reth_peers: usize,
     /// Serving peers from other client families.
     pub serving_other_peers: usize,
+    /// Serving peers reached over IPv4 execution transport.
+    pub serving_ipv4_peers: usize,
+    /// Serving peers reached over IPv6 execution transport.
+    pub serving_ipv6_peers: usize,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.
@@ -322,6 +348,27 @@ pub struct SyncStatus {
     pub serving_peers: usize,
     /// Number of pending peer candidates waiting to be dialed.
     pub pending_peers: usize,
+    /// Startup P2P address selection mode, such as auto-public-ipv4 or auto-outbound-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_address_mode: Option<String>,
+    /// Local IP address used by EL and CL P2P listeners.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_bind_ip: Option<String>,
+    /// Local P2P listener address families.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_listen_families: Vec<String>,
+    /// Outbound P2P address families accepted for direct peer dials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_dial_families: Vec<String>,
+    /// Public P2P address families advertised to peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_advertised_families: Vec<String>,
+    /// Public external IP advertised to peers, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2p_external_ip: Option<String>,
+    /// Startup P2P reachability warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p2p_warnings: Vec<String>,
     /// The highest block number ingested so far.
     pub current_block: u64,
     /// The latest known block on the network.

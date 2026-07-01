@@ -21,6 +21,7 @@ alloy-rlp = "0.3"
 # Reth networking (lightweight, no EVM)
 reth-eth-wire = { workspace = true }
 reth-discv4 = { workspace = true }
+reth-discv5 = { workspace = true }
 reth-dns-discovery = { workspace = true }
 reth-network = { workspace = true }
 reth-network-peers = { workspace = true }
@@ -50,4 +51,5 @@ rand = "0.8"
 secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 
 [dev-dependencies]
+enr = { version = "0.13", features = ["rust-secp256k1"] }
 tempfile = "3"

@@ -26,6 +26,11 @@ impl PeerManager {
             .await;
         self.network_events = Box::pin(tokio_stream::empty());
         self.discovery_events = Box::pin(tokio_stream::empty());
+        self.dns_discovery_events = None;
+
+        if let Some(task) = self.dns_discovery_task.take() {
+            abort_and_wait(task, "execution DNS discovery task").await;
+        }
 
         if let Some(task) = self.network_task.take() {
             debug!(
@@ -88,6 +93,7 @@ impl PeerManager {
         while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
             self.handle_discovery_event(event);
         }
+        self.drain_dns_discovery_events_now();
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
@@ -96,12 +102,13 @@ impl PeerManager {
     }
 
     pub(super) fn dial_pending_peers(&mut self, target: usize) {
+        let now = Instant::now();
+        self.prune_submitted_dials(now);
+
         if !self.network_activated || self.peers.len() >= target || self.pending.is_empty() {
             return;
         }
 
-        let now = Instant::now();
-        self.prune_submitted_dials(now);
         let dial_capacity = MAX_CONCURRENT_OUTBOUND_DIALS.saturating_sub(self.pending_dials.len());
         if dial_capacity == 0 {
             return;
@@ -121,6 +128,7 @@ impl PeerManager {
             .copied()
             .filter(|node| {
                 !is_bootstrap_node(node.id)
+                    && node_matches_dial_families(self.dial_families, node)
                     && node.tcp_port > 0
                     && !self.peers.contains_key(&node.id)
                     && !self.recently_saturated(node.id, now)
@@ -135,7 +143,13 @@ impl PeerManager {
 
         for node in &candidates {
             self.pending.remove(&node.id);
-            self.pending_dials.insert(node.id, now);
+            self.pending_dials.insert(
+                node.id,
+                SubmittedDial {
+                    node: *node,
+                    submitted_at: now,
+                },
+            );
             self.network.connect_peer_kind(
                 node.id,
                 PeerKind::Basic,
@@ -143,6 +157,10 @@ impl PeerManager {
                 Some(node.udp_addr()),
             );
         }
+        self.session_metrics.submitted_dials_total = self
+            .session_metrics
+            .submitted_dials_total
+            .saturating_add(candidates.len() as u64);
 
         trace!(
             submitted_peers = candidates.len(),
@@ -163,30 +181,84 @@ impl PeerManager {
     }
 
     pub(super) async fn wait_for_activity(&mut self, max_wait: Duration) -> bool {
+        if self.drain_dns_discovery_events_now() > 0 {
+            return true;
+        }
+
         let delay = tokio::time::sleep(max_wait);
         tokio::pin!(delay);
 
-        tokio::select! {
-            maybe_event = self.network_events.next() => {
-                if let Some(event) = maybe_event {
-                    self.handle_network_event(event);
-                    true
-                } else {
-                    warn!("network event stream closed");
-                    false
+        if let Some(dns_events) = self.dns_discovery_events.as_mut() {
+            tokio::select! {
+                maybe_event = dns_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_dns_discovery_event(event);
+                        true
+                    } else {
+                        self.dns_discovery_events = None;
+                        warn!("execution DNS discovery stream closed");
+                        false
+                    }
                 }
-            }
-            maybe_event = self.discovery_events.next() => {
-                if let Some(event) = maybe_event {
-                    self.handle_discovery_event(event);
-                    true
-                } else {
-                    warn!("discovery event stream closed");
-                    false
+                maybe_event = self.network_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_network_event(event);
+                        true
+                    } else {
+                        warn!("network event stream closed");
+                        false
+                    }
                 }
+                maybe_event = self.discovery_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_discovery_event(event);
+                        true
+                    } else {
+                        warn!("discovery event stream closed");
+                        false
+                    }
+                }
+                _ = &mut delay => false,
             }
-            _ = &mut delay => false,
+        } else {
+            tokio::select! {
+                maybe_event = self.network_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_network_event(event);
+                        true
+                    } else {
+                        warn!("network event stream closed");
+                        false
+                    }
+                }
+                maybe_event = self.discovery_events.next() => {
+                    if let Some(event) = maybe_event {
+                        self.handle_discovery_event(event);
+                        true
+                    } else {
+                        warn!("discovery event stream closed");
+                        false
+                    }
+                }
+                _ = &mut delay => false,
+            }
         }
+    }
+
+    fn drain_dns_discovery_events_now(&mut self) -> usize {
+        let mut count = 0usize;
+        loop {
+            let Some(event) = self
+                .dns_discovery_events
+                .as_mut()
+                .and_then(|events| events.next().now_or_never().flatten())
+            else {
+                break;
+            };
+            self.handle_dns_discovery_event(event);
+            count = count.saturating_add(1);
+        }
+        count
     }
 
     pub(super) fn handle_network_event(
@@ -252,8 +324,11 @@ impl PeerManager {
                     addr.udp().map(|socket| socket.port()),
                     peer_id,
                 );
+                self.session_metrics.discovered_candidates =
+                    self.session_metrics.discovered_candidates.saturating_add(1);
                 trace!(
                     peer = %peer_id,
+                    addr = %node.tcp_addr(),
                     ?fork_id,
                     "queued execution peer discovered for compatible or unverified fork id"
                 );
@@ -273,9 +348,69 @@ impl PeerManager {
                     );
                     return;
                 }
+                self.session_metrics.discovered_candidates =
+                    self.session_metrics.discovered_candidates.saturating_add(1);
                 self.remember_pending(node);
             }
         }
+    }
+
+    pub(super) fn handle_dns_discovery_event(&mut self, event: DnsDiscoveryEvent) {
+        let Some(update) = dns_node_record_update_from_event(event) else {
+            return;
+        };
+        self.handle_dns_discovery_update(update);
+    }
+
+    pub(super) fn handle_dns_discovery_update(&mut self, update: DnsNodeRecordUpdate) {
+        if let Some(fork_id) = update.fork_id
+            && !self.is_compatible_fork_id(fork_id)
+        {
+            self.session_metrics.fork_id_rejected_candidates = self
+                .session_metrics
+                .fork_id_rejected_candidates
+                .saturating_add(1);
+            return;
+        }
+        if update.fork_id.is_none() {
+            self.session_metrics.missing_fork_id_candidates = self
+                .session_metrics
+                .missing_fork_id_candidates
+                .saturating_add(1);
+        }
+
+        let Some(node) = dns_node_record_for_dial_families(self.dial_families, &update) else {
+            self.session_metrics.dns_family_rejected_candidates = self
+                .session_metrics
+                .dns_family_rejected_candidates
+                .saturating_add(1);
+            let node_addr = update.node_record.as_ref().map(|node| node.tcp_addr());
+            trace!(
+                peer = %update.peer_id,
+                bind_ip = %self.bind_ip,
+                node_addr = ?node_addr,
+                has_ip4 = update.enr.ip4().is_some(),
+                has_tcp4 = update.enr.tcp4().is_some(),
+                has_udp4 = update.enr.udp4().is_some(),
+                has_ip6 = update.enr.ip6().is_some(),
+                has_tcp6 = update.enr.tcp6().is_some(),
+                has_udp6 = update.enr.udp6().is_some(),
+                ?self.dial_families,
+                "ignoring DNS execution peer without a dialable endpoint for configured outbound p2p address families"
+            );
+            return;
+        };
+        self.session_metrics.dns_discovered_candidates = self
+            .session_metrics
+            .dns_discovered_candidates
+            .saturating_add(1);
+        trace!(
+            peer = %node.id,
+            fork_id = ?update.fork_id,
+            addr = %node.tcp_addr(),
+            "queued execution peer discovered from family-aware DNS"
+        );
+        self.remember_pending(node);
     }
 
     pub(super) fn insert_peer(
@@ -315,14 +450,20 @@ impl PeerManager {
             return;
         }
 
-        let advertised_record = self.pending.remove(&info.peer_id);
-        let remote_record_is_dialable = advertised_record.is_some();
-        let record =
-            advertised_record.unwrap_or_else(|| NodeRecord::new(info.remote_addr, info.peer_id));
-        self.pending_dials.remove(&info.peer_id);
-
+        let (record, remote_record_is_dialable) = session_node_record(
+            self.pending.remove(&info.peer_id),
+            self.pending_dials.remove(&info.peer_id),
+            info.remote_addr,
+            info.peer_id,
+        );
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
+        let should_remember_reachable = is_restart_seed_peer(
+            remote_record_is_dialable,
+            latest_block,
+            receipt_quarantined_until.is_some(),
+            record.id,
+        );
         let body_request_limit = inherited_peer_request_limit(
             self.peers.values().map(|peer| peer.body_request_limit),
             PeerRequestKind::Bodies,
@@ -358,6 +499,14 @@ impl PeerManager {
         self.peers.insert(info.peer_id, peer);
         self.session_metrics.accepted_sessions =
             self.session_metrics.accepted_sessions.saturating_add(1);
+        let known_changed =
+            should_remember_reachable && upsert_known_peer(&mut self.known_peers, record);
+        let should_persist_reachable = should_persist_reachable_peer(
+            should_remember_reachable,
+            known_changed,
+            &self.persisted_known_peers,
+            record.id,
+        );
         self.peer_order.retain(|peer_id| *peer_id != info.peer_id);
         if was_productive {
             self.peer_order.push_front(info.peer_id);
@@ -365,6 +514,9 @@ impl PeerManager {
             self.peer_order.push_back(info.peer_id);
         }
         self.rebalance_request_cursor();
+        if should_persist_reachable {
+            self.persist_known_peer_cache();
+        }
 
         debug!(
             peer = %info.peer_id,
@@ -378,7 +530,23 @@ impl PeerManager {
     pub(super) fn remember_pending(&mut self, node: NodeRecord) {
         let now = Instant::now();
         self.prune_saturated_peers(now);
-        if is_bootstrap_node(node.id) || node.tcp_port == 0 || self.peers.contains_key(&node.id) {
+        if is_bootstrap_node(node.id) {
+            return;
+        }
+        if node.tcp_port == 0 {
+            return;
+        }
+        if !node_matches_dial_families(self.dial_families, &node) {
+            trace!(
+                peer = %node.id,
+                addr = %node.tcp_addr(),
+                bind_ip = %self.bind_ip,
+                ?self.dial_families,
+                "ignoring execution peer outside configured outbound p2p address families"
+            );
+            return;
+        }
+        if self.peers.contains_key(&node.id) {
             return;
         }
         if self.recently_saturated(node.id, now) {
@@ -446,7 +614,13 @@ impl PeerManager {
             return;
         }
 
-        self.pending_dials.insert(peer.remote_record.id, now);
+        self.pending_dials.insert(
+            peer.remote_record.id,
+            SubmittedDial {
+                node: peer.remote_record,
+                submitted_at: now,
+            },
+        );
         self.remember_pending(peer.remote_record);
     }
 
@@ -463,7 +637,7 @@ impl PeerManager {
         self.network.remove_peer(peer_id, PeerKind::Basic);
         let known_changed = self.forget_peer(peer_id);
         if known_changed {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
     }
 
@@ -539,7 +713,7 @@ impl PeerManager {
         }
 
         if self.remove_productive_peer(peer_id) {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
     }
 
@@ -734,9 +908,33 @@ fn productive_peer_priority(productive: &VecDeque<NodeRecord>, peer_id: PeerId) 
         .unwrap_or(usize::MAX)
 }
 
+fn session_node_record(
+    pending_record: Option<NodeRecord>,
+    submitted_dial: Option<SubmittedDial>,
+    remote_addr: std::net::SocketAddr,
+    peer_id: PeerId,
+) -> (NodeRecord, bool) {
+    if let Some(node) = pending_record.or_else(|| submitted_dial.map(|dial| dial.node)) {
+        return (node, true);
+    }
+
+    (NodeRecord::new(remote_addr, peer_id), false)
+}
+
+fn should_persist_reachable_peer(
+    should_remember_reachable: bool,
+    known_changed: bool,
+    persisted_known_peers: &[NodeRecord],
+    peer_id: PeerId,
+) -> bool {
+    should_remember_reachable
+        && (known_changed || !persisted_known_peers.iter().any(|peer| peer.id == peer_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
     fn dial_candidates_prefer_recent_productive_peers() {
@@ -830,5 +1028,80 @@ mod tests {
         );
 
         assert_eq!(selected.len(), 6);
+    }
+
+    #[test]
+    fn session_node_record_uses_pending_record_as_dialable() {
+        let node = NodeRecord::new_with_ports(
+            Ipv6Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x31),
+        );
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(Some(node), None, remote_addr, node.id);
+
+        assert_eq!(record, node);
+        assert!(dialable);
+    }
+
+    #[test]
+    fn session_node_record_uses_submitted_dial_as_dialable() {
+        let node = NodeRecord::new_with_ports(
+            Ipv6Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x32),
+        );
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(
+            None,
+            Some(SubmittedDial {
+                node,
+                submitted_at: Instant::now(),
+            }),
+            remote_addr,
+            node.id,
+        );
+
+        assert_eq!(record, node);
+        assert!(dialable);
+    }
+
+    #[test]
+    fn session_node_record_falls_back_to_remote_addr_as_not_dialable() {
+        let peer_id = PeerId::repeat_byte(0x33);
+        let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
+
+        let (record, dialable) = session_node_record(None, None, remote_addr, peer_id);
+
+        assert_eq!(record, NodeRecord::new(remote_addr, peer_id));
+        assert!(!dialable);
+    }
+
+    #[test]
+    fn reachable_peer_persistence_triggers_when_configured_peer_was_not_on_disk() {
+        let peer_id = PeerId::repeat_byte(0x34);
+
+        assert!(should_persist_reachable_peer(true, false, &[], peer_id));
+    }
+
+    #[test]
+    fn reachable_peer_persistence_skips_when_peer_was_already_on_disk() {
+        let peer = NodeRecord::new_with_ports(
+            Ipv4Addr::LOCALHOST.into(),
+            30303,
+            Some(30303),
+            PeerId::repeat_byte(0x35),
+        );
+
+        assert!(!should_persist_reachable_peer(
+            true,
+            false,
+            &[peer],
+            peer.id,
+        ));
     }
 }

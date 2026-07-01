@@ -157,8 +157,23 @@ impl PeerManager {
         let mut receipt_proven_peers = 0usize;
         let mut body_request_limit_total = 0usize;
         let mut receipt_request_limit_total = 0usize;
+        let mut connected_ipv4_peers = 0usize;
+        let mut connected_ipv6_peers = 0usize;
+        let mut serving_ipv4_peers = 0usize;
+        let mut serving_ipv6_peers = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
+            if peer.remote_record.tcp_addr().ip().is_ipv4() {
+                connected_ipv4_peers = connected_ipv4_peers.saturating_add(1);
+                if peer.is_serving {
+                    serving_ipv4_peers = serving_ipv4_peers.saturating_add(1);
+                }
+            } else {
+                connected_ipv6_peers = connected_ipv6_peers.saturating_add(1);
+                if peer.is_serving {
+                    serving_ipv6_peers = serving_ipv6_peers.saturating_add(1);
+                }
+            }
             let body_paused = peer_request_is_paused(peer, PeerRequestKind::Bodies);
             let receipt_paused = peer_request_is_paused(peer, PeerRequestKind::Receipts);
             if peer.body_blocks_per_sec > 0.0 {
@@ -211,6 +226,20 @@ impl PeerManager {
             nonserving_disconnects: self.session_metrics.nonserving_disconnects,
             missing_fork_id_candidates: self.session_metrics.missing_fork_id_candidates,
             fork_id_rejected_candidates: self.session_metrics.fork_id_rejected_candidates,
+            discovered_candidates: self.session_metrics.discovered_candidates,
+            dns_discovered_candidates: self.session_metrics.dns_discovered_candidates,
+            dns_family_rejected_candidates: self.session_metrics.dns_family_rejected_candidates,
+            configured_bootnode_direct_candidates: self
+                .session_metrics
+                .configured_bootnode_direct_candidates,
+            configured_bootnode_discovery_enrs: self
+                .session_metrics
+                .configured_bootnode_discovery_enrs,
+            configured_bootnode_family_rejections: self
+                .session_metrics
+                .configured_bootnode_family_rejections,
+            submitted_dials_total: self.session_metrics.submitted_dials_total,
+            submitted_dial_expirations: self.session_metrics.submitted_dial_expirations,
             queued_candidates: self.pending.len(),
             pending_dials: self.pending_dials.len(),
             productive_peers: self.productive.len(),
@@ -274,14 +303,23 @@ impl PeerManager {
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
             connected_other_peers: client_counts.connected_other,
+            connected_ipv4_peers,
+            connected_ipv6_peers,
             serving_geth_peers: client_counts.serving_geth,
             serving_nethermind_peers: client_counts.serving_nethermind,
             serving_reth_peers: client_counts.serving_reth,
             serving_other_peers: client_counts.serving_other,
+            serving_ipv4_peers,
+            serving_ipv6_peers,
         }
     }
 
-    /// Snapshot of productive peers suitable for writing to disk on shutdown.
+    /// Snapshot of restart seed peers suitable for writing to disk.
+    ///
+    /// Peers that already served data stay first because they are the highest
+    /// value restart candidates. Dialable peers that completed Eth handshake
+    /// and advertised a usable tip are retained after them so outbound-only
+    /// and sparse-family modes can still build a usable known-peer table.
     pub fn known_peers(&self) -> Vec<NodeRecord> {
         let mut peers = Vec::with_capacity(MAX_PERSISTED_PEERS);
 
@@ -291,7 +329,26 @@ impl PeerManager {
             }
             push_unique_peer(&mut peers, *peer);
             if peers.len() >= MAX_PERSISTED_PEERS {
-                break;
+                return peers;
+            }
+        }
+
+        for peer_id in &self.peer_order {
+            let Some(peer) = self.peers.get(peer_id) else {
+                continue;
+            };
+            if !is_restart_seed_peer(
+                peer.remote_record_is_dialable,
+                peer.remote_status.latest_block,
+                peer_receipts_are_quarantined(peer),
+                peer.remote_record.id,
+            ) {
+                continue;
+            }
+
+            push_unique_peer(&mut peers, peer.remote_record);
+            if peers.len() >= MAX_PERSISTED_PEERS {
+                return peers;
             }
         }
 
@@ -354,7 +411,7 @@ impl PeerManager {
         self.network.disconnect_peer(peer_id);
         let known_changed = self.forget_peer(peer_id);
         if known_changed {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
         warn!(
             peer = %peer_id,
@@ -723,7 +780,7 @@ impl PeerManager {
         self.reduce_peer_request_limit(peer_id, PeerRequestKind::Receipts);
         self.record_soft_failure(peer_id);
         if self.remove_productive_peer(peer_id) {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
         debug!(
             peer = %peer_id,
@@ -778,7 +835,7 @@ impl PeerManager {
 
         let (became_serving, should_persist) = self.mark_peer_serving(peer_id);
         if should_persist {
-            self.persist_productive_peers();
+            self.persist_known_peer_cache();
         }
         became_serving
     }
@@ -818,7 +875,7 @@ impl PeerManager {
         productive_before != self.productive.len() || known_before != self.known_peers.len()
     }
 
-    pub(super) fn persist_productive_peers(&mut self) {
+    pub(super) fn persist_known_peer_cache(&mut self) {
         let peers = self.known_peers();
         match persist_known_peers_if_changed(
             &self.known_peers_path,
@@ -829,7 +886,7 @@ impl PeerManager {
                 info!(
                     peers = peers.len(),
                     path = %self.known_peers_path.display(),
-                    "persisted known peers after serving peer update"
+                    "persisted known peer cache"
                 );
             }
             Ok(false) => {}
@@ -837,7 +894,7 @@ impl PeerManager {
                 warn!(
                     error = %error,
                     path = %self.known_peers_path.display(),
-                    "failed to persist known peers after serving peer update"
+                    "failed to persist known peer cache"
                 );
             }
         }
@@ -1123,6 +1180,18 @@ pub(super) fn upsert_known_peer(known_peers: &mut Vec<NodeRecord>, node: NodeRec
     true
 }
 
+pub(super) fn is_restart_seed_peer(
+    remote_record_is_dialable: bool,
+    latest_block: Option<u64>,
+    receipt_quarantined: bool,
+    peer_id: PeerId,
+) -> bool {
+    remote_record_is_dialable
+        && latest_block.is_some_and(|latest| latest > 0)
+        && !receipt_quarantined
+        && !is_bootstrap_node(peer_id)
+}
+
 pub(super) fn is_bootstrap_node(id: PeerId) -> bool {
     MAINNET_BOOTNODE_IDS.contains(&id)
 }
@@ -1389,6 +1458,23 @@ mod tests {
         let productive: Vec<_> = productive.into_iter().collect();
 
         assert_eq!(productive, vec![first, second]);
+    }
+
+    #[test]
+    fn restart_seed_policy_keeps_reachable_non_bootstrap_peers() {
+        let peer_id = PeerId::repeat_byte(0x42);
+
+        assert!(is_restart_seed_peer(true, Some(1), false, peer_id));
+        assert!(!is_restart_seed_peer(false, Some(1), false, peer_id));
+        assert!(!is_restart_seed_peer(true, Some(0), false, peer_id));
+        assert!(!is_restart_seed_peer(true, None, false, peer_id));
+        assert!(!is_restart_seed_peer(true, Some(1), true, peer_id));
+
+        let bootnode = mainnet_nodes()
+            .into_iter()
+            .next()
+            .expect("mainnet bootnodes should not be empty");
+        assert!(!is_restart_seed_peer(true, Some(1), false, bootnode.id));
     }
 
     #[test]

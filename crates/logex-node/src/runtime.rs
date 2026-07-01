@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -8,21 +8,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::U256;
 use logex_cl::{
-    ConsensusNetworkConfig, ConsensusStateError, ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC,
-    spawn_consensus_network,
+    AnchorCoverage, ConsensusDialAddressFamilies, ConsensusNetworkConfig, ConsensusStateError,
+    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, spawn_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
 use logex_sync::SyncConfig;
 use logex_sync::engine::SyncEngine;
 use logex_sync::p2p::{
-    peer_manager::{PeerManager, PeerManagerConfig},
+    peer_manager::{DialAddressFamilies, PeerManager, PeerManagerConfig},
     persistence::{
         discovery_secret_path, known_peers_path, load_known_peers, load_or_create_secret_key,
         persist_known_peers,
     },
 };
-use logex_types::SyncStatus;
+use logex_types::{ChainAnchors, ExecutionAnchor, SyncStatus};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
@@ -37,11 +37,90 @@ const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
 const MAINNET_SECONDS_PER_SLOT: u64 = 12;
 const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
+const IPV4_REACHABILITY_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
+const IPV6_REACHABILITY_PROBE: (Ipv6Addr, u16) = (
+    Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+    80,
+);
+const P2P_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoricalSyncMode {
     Enabled,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum P2pAddressSelectionMode {
+    Explicit,
+    AutoPublicIpv4,
+    AutoPublicIpv6,
+    AutoOutboundOnly,
+}
+
+impl P2pAddressSelectionMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::AutoPublicIpv4 => "auto-public-ipv4",
+            Self::AutoPublicIpv6 => "auto-public-ipv6",
+            Self::AutoOutboundOnly => "auto-outbound-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct P2pAddressSelection {
+    nat: NatResolver,
+    bind_ip: IpAddr,
+    dial_families: DialAddressFamilies,
+    advertised_families: DialAddressFamilies,
+    external_ip: Option<IpAddr>,
+    mode: P2pAddressSelectionMode,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConsensusP2pAddressSelection {
+    bind_ip: IpAddr,
+    dial_families: ConsensusDialAddressFamilies,
+    external_ip: Option<IpAddr>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalP2pAddressCandidates {
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
+}
+
+impl LocalP2pAddressCandidates {
+    fn public_ipv4(self) -> Option<Ipv4Addr> {
+        self.ipv4.filter(|ip| is_public_ipv4(*ip))
+    }
+
+    fn public_ipv6(self) -> Option<Ipv6Addr> {
+        self.ipv6.filter(|ip| is_public_ipv6(*ip))
+    }
+
+    fn route_dial_families(self) -> DialAddressFamilies {
+        match (self.ipv4, self.ipv6) {
+            (Some(_), Some(_)) => DialAddressFamilies::BOTH,
+            (Some(_), None) => DialAddressFamilies::IPV4,
+            (None, Some(_)) => DialAddressFamilies::IPV6,
+            (None, None) => DialAddressFamilies::IPV4,
+        }
+    }
+
+    fn outbound_only_bind_ip(self) -> IpAddr {
+        if self.ipv4.is_some() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else if self.ipv6.is_some() {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -61,6 +140,9 @@ pub struct RunSyncOptions {
     pub p2p_port: u16,
     pub max_peers: usize,
     pub nat: String,
+    pub p2p_bind_ip: Option<IpAddr>,
+    pub execution_bootnodes: Vec<String>,
+    pub execution_discv5_port: u16,
     pub cl_discovery_port: u16,
     pub cl_p2p_port: u16,
     pub cl_max_peers: usize,
@@ -82,6 +164,9 @@ pub async fn run_sync(options: RunSyncOptions) {
         p2p_port,
         max_peers,
         nat,
+        p2p_bind_ip,
+        execution_bootnodes,
+        execution_discv5_port,
         cl_discovery_port,
         cl_p2p_port,
         cl_max_peers,
@@ -89,13 +174,48 @@ pub async fn run_sync(options: RunSyncOptions) {
         dashboard_password,
         disable_historical_sync,
     } = options;
-    let nat = match nat.parse::<NatResolver>() {
-        Ok(nat) => nat,
-        Err(error) => {
-            tracing::error!(%error, "invalid EL NAT resolver");
-            std::process::exit(1);
-        }
-    };
+    let local_p2p_candidates = detect_local_p2p_addresses().await;
+    let mut p2p_address =
+        match select_p2p_address(&nat, p2p_bind_ip, p2p_port, local_p2p_candidates).await {
+            Ok(selection) => selection,
+            Err(error) => {
+                tracing::error!(%error, "invalid EL NAT resolver");
+                std::process::exit(1);
+            }
+        };
+    add_runtime_p2p_warnings(&mut p2p_address, &execution_bootnodes);
+    let consensus_p2p_address = select_consensus_p2p_address(&p2p_address, local_p2p_candidates);
+    let nat = p2p_address.nat.clone();
+    let p2p_external_ip = p2p_address.external_ip;
+    let p2p_bind_ip = p2p_address.bind_ip;
+    let p2p_dial_families = p2p_address.dial_families;
+    let p2p_external_ip_label = p2p_external_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unresolved".to_owned());
+    tracing::info!(
+        bind_ip = %p2p_bind_ip,
+        ?p2p_dial_families,
+        external_ip = %p2p_external_ip_label,
+        nat = %nat,
+        mode = p2p_address.mode.as_str(),
+        "resolved p2p address selection"
+    );
+    for warning in &p2p_address.warnings {
+        tracing::warn!(warning, "p2p address selection warning");
+    }
+    let consensus_external_ip_label = consensus_p2p_address
+        .external_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unresolved".to_owned());
+    tracing::info!(
+        bind_ip = %consensus_p2p_address.bind_ip,
+        ?consensus_p2p_address.dial_families,
+        external_ip = %consensus_external_ip_label,
+        "resolved consensus p2p address selection"
+    );
+    for warning in &consensus_p2p_address.warnings {
+        tracing::warn!(warning, "consensus p2p address selection warning");
+    }
 
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
@@ -208,22 +328,6 @@ pub async fn run_sync(options: RunSyncOptions) {
         );
     }
 
-    let storage_anchors = storage.chain_anchors();
-    let historical_floor = storage.historical_floor();
-    let historical_anchor = storage.historical_anchor();
-    let state = Arc::new(AppState::new(
-        storage,
-        Some(SubscriptionManager::new()),
-        initial_sync_status(
-            resume_block,
-            &storage_anchors,
-            historical_floor,
-            historical_anchor,
-            historical_sync_disabled,
-            consensus.as_deref(),
-        ),
-    ));
-
     let known_peers = match load_known_peers(&known_peers_file) {
         Ok(peers) => peers,
         Err(e) => {
@@ -240,6 +344,39 @@ pub async fn run_sync(options: RunSyncOptions) {
         path = %known_peers_file.display(),
         "loaded known peers"
     );
+    let p2p_warning_count_before_known_peers = p2p_address.warnings.len();
+    add_known_peer_fallback_warnings(&mut p2p_address, known_peers.len());
+    if p2p_address.mode == P2pAddressSelectionMode::AutoOutboundOnly && !known_peers.is_empty() {
+        tracing::info!(
+            peers = known_peers.len(),
+            "outbound-only execution p2p will seed from persisted known peers"
+        );
+    }
+    for warning in p2p_address
+        .warnings
+        .iter()
+        .skip(p2p_warning_count_before_known_peers)
+    {
+        tracing::warn!(warning, "p2p known-peer fallback warning");
+    }
+
+    let storage_anchors = storage.chain_anchors();
+    let historical_floor = storage.historical_floor();
+    let historical_anchor = storage.historical_anchor();
+    let mut sync_status = initial_sync_status(
+        resume_block,
+        &storage_anchors,
+        historical_floor,
+        historical_anchor,
+        historical_sync_disabled,
+        consensus.as_deref(),
+    );
+    apply_p2p_address_status(&mut sync_status, &p2p_address);
+    let state = Arc::new(AppState::new(
+        storage,
+        Some(SubscriptionManager::new()),
+        sync_status,
+    ));
 
     let secret_key = match load_or_create_secret_key(&discovery_secret_file) {
         Ok(secret) => secret,
@@ -264,6 +401,9 @@ pub async fn run_sync(options: RunSyncOptions) {
             ConsensusNetworkConfig {
                 data_dir: data_dir.clone(),
                 checkpoint: consensus.checkpoint(),
+                bind_ip: consensus_p2p_address.bind_ip,
+                dial_families: consensus_p2p_address.dial_families,
+                external_ip: consensus_p2p_address.external_ip,
                 discovery_port: cl_discovery_port,
                 p2p_port: cl_p2p_port,
                 max_peers: cl_max_peers,
@@ -323,11 +463,15 @@ pub async fn run_sync(options: RunSyncOptions) {
         secret_key,
         listener_port: p2p_port,
         discovery_port,
+        bind_ip: p2p_bind_ip,
+        dial_families: p2p_dial_families,
         max_peers,
         nat_resolver: nat,
         our_head,
         known_peers,
         known_peers_path: known_peers_file.clone(),
+        execution_bootnodes,
+        execution_discv5_port,
     })
     .await
     {
@@ -425,6 +569,435 @@ pub async fn run_sync(options: RunSyncOptions) {
         log_task_exit("consensus network", handle).await;
     }
     tracing::info!("shutting down");
+}
+
+async fn select_p2p_address(
+    nat: &str,
+    p2p_bind_ip: Option<IpAddr>,
+    p2p_port: u16,
+    candidates: LocalP2pAddressCandidates,
+) -> Result<P2pAddressSelection, String> {
+    let parsed = nat
+        .parse::<NatResolver>()
+        .map_err(|error| error.to_string())?;
+    if parsed == NatResolver::Any {
+        return Ok(choose_auto_p2p_address(candidates, p2p_bind_ip));
+    }
+
+    let resolved = resolve_startup_nat(parsed).await;
+    let mut warnings = Vec::new();
+    Ok(choose_explicit_p2p_address(
+        resolved,
+        p2p_bind_ip,
+        p2p_port,
+        candidates,
+        &mut warnings,
+    ))
+}
+
+async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
+    if matches!(
+        nat_resolver,
+        NatResolver::ExternalIp(_) | NatResolver::ExternalAddr(_) | NatResolver::None
+    ) {
+        return nat_resolver;
+    }
+
+    match nat_resolver.clone().external_addr().await {
+        Some(ip) => {
+            tracing::info!(
+                nat = %nat_resolver,
+                external_ip = %ip,
+                "resolved EL external IP before starting p2p"
+            );
+            NatResolver::ExternalIp(ip)
+        }
+        None => nat_resolver,
+    }
+}
+
+fn default_p2p_bind_ip(nat_resolver: &NatResolver, p2p_port: u16) -> IpAddr {
+    match nat_resolver.clone().as_external_ip(p2p_port) {
+        Some(IpAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+fn choose_explicit_p2p_address(
+    nat: NatResolver,
+    p2p_bind_ip: Option<IpAddr>,
+    p2p_port: u16,
+    candidates: LocalP2pAddressCandidates,
+    warnings: &mut Vec<String>,
+) -> P2pAddressSelection {
+    let external_ip = nat.clone().as_external_ip(p2p_port);
+    let bind_ip = narrow_unspecified_ipv6_bind(
+        p2p_bind_ip.unwrap_or_else(|| default_p2p_bind_ip(&nat, p2p_port)),
+        external_ip,
+        candidates.ipv6,
+        warnings,
+    );
+    let advertised_families = external_ip
+        .map(DialAddressFamilies::for_bind_ip)
+        .unwrap_or(DialAddressFamilies::for_bind_ip(bind_ip));
+    let dial_families = p2p_bind_ip
+        .map(DialAddressFamilies::for_bind_ip)
+        .unwrap_or_else(|| {
+            combine_dial_families(advertised_families, candidates.route_dial_families())
+        });
+
+    P2pAddressSelection {
+        nat,
+        bind_ip,
+        dial_families,
+        advertised_families,
+        external_ip,
+        mode: P2pAddressSelectionMode::Explicit,
+        warnings: warnings.clone(),
+    }
+}
+
+fn combine_dial_families(
+    first: DialAddressFamilies,
+    second: DialAddressFamilies,
+) -> DialAddressFamilies {
+    match (
+        first.allows_ipv4() || second.allows_ipv4(),
+        first.allows_ipv6() || second.allows_ipv6(),
+    ) {
+        (true, true) => DialAddressFamilies::BOTH,
+        (false, true) => DialAddressFamilies::IPV6,
+        _ => DialAddressFamilies::IPV4,
+    }
+}
+
+fn choose_auto_p2p_address(
+    candidates: LocalP2pAddressCandidates,
+    p2p_bind_ip: Option<IpAddr>,
+) -> P2pAddressSelection {
+    let mut warnings = Vec::new();
+    let public_ipv4 = candidates.public_ipv4();
+    let public_ipv6 = candidates.public_ipv6();
+    if p2p_bind_ip.is_none() && public_ipv4.is_some() && public_ipv6.is_some() {
+        warnings.push(
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
+                .to_owned(),
+        );
+    } else if p2p_bind_ip.is_none() && public_ipv6.is_some() && candidates.ipv4.is_some() {
+        warnings.push(
+            "public IPv6 and outbound IPv4 were detected; execution advertises IPv6 and dials both routed families where possible"
+                .to_owned(),
+        );
+    }
+
+    let selection = match p2p_bind_ip {
+        Some(bind_ip @ IpAddr::V4(_)) => public_ipv4.map(|ip| {
+            (
+                NatResolver::ExternalIp(IpAddr::V4(ip)),
+                bind_ip,
+                DialAddressFamilies::IPV4,
+                Some(IpAddr::V4(ip)),
+                P2pAddressSelectionMode::AutoPublicIpv4,
+            )
+        }),
+        Some(bind_ip @ IpAddr::V6(_)) => public_ipv6.map(|ip| {
+            let bind_ip = narrow_unspecified_ipv6_bind(
+                bind_ip,
+                Some(IpAddr::V6(ip)),
+                candidates.ipv6,
+                &mut warnings,
+            );
+            (
+                NatResolver::ExternalIp(IpAddr::V6(ip)),
+                bind_ip,
+                DialAddressFamilies::IPV6,
+                Some(IpAddr::V6(ip)),
+                P2pAddressSelectionMode::AutoPublicIpv6,
+            )
+        }),
+        None => public_ipv4
+            .map(|ip| {
+                (
+                    NatResolver::ExternalIp(IpAddr::V4(ip)),
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    if public_ipv6.is_some() || candidates.ipv6.is_some() {
+                        DialAddressFamilies::BOTH
+                    } else {
+                        DialAddressFamilies::IPV4
+                    },
+                    Some(IpAddr::V4(ip)),
+                    P2pAddressSelectionMode::AutoPublicIpv4,
+                )
+            })
+            .or_else(|| {
+                public_ipv6.map(|ip| {
+                    let bind_ip = narrow_unspecified_ipv6_bind(
+                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        Some(IpAddr::V6(ip)),
+                        candidates.ipv6,
+                        &mut warnings,
+                    );
+                    (
+                        NatResolver::ExternalIp(IpAddr::V6(ip)),
+                        bind_ip,
+                        if candidates.ipv4.is_some() {
+                            DialAddressFamilies::BOTH
+                        } else {
+                            DialAddressFamilies::IPV6
+                        },
+                        Some(IpAddr::V6(ip)),
+                        P2pAddressSelectionMode::AutoPublicIpv6,
+                    )
+                })
+            }),
+    };
+
+    let (nat, bind_ip, dial_families, external_ip, mode) = selection.unwrap_or_else(|| {
+        warnings.push(
+            "no locally owned public IPv4 or IPv6 address with outbound reachability was detected; using outbound-only P2P without advertising a public address"
+                .to_owned(),
+        );
+        let bind_ip = p2p_bind_ip.unwrap_or_else(|| candidates.outbound_only_bind_ip());
+        (
+            NatResolver::None,
+            bind_ip,
+            p2p_bind_ip
+                .map(DialAddressFamilies::for_bind_ip)
+                .unwrap_or_else(|| candidates.route_dial_families()),
+            None,
+            P2pAddressSelectionMode::AutoOutboundOnly,
+        )
+    });
+
+    P2pAddressSelection {
+        nat,
+        bind_ip,
+        dial_families,
+        advertised_families: external_ip
+            .map(DialAddressFamilies::for_bind_ip)
+            .unwrap_or_else(|| DialAddressFamilies::for_bind_ip(bind_ip)),
+        external_ip,
+        mode,
+        warnings,
+    }
+}
+
+async fn detect_local_p2p_addresses() -> LocalP2pAddressCandidates {
+    let (ipv4, ipv6) = tokio::join!(default_route_ipv4(), default_route_ipv6());
+    LocalP2pAddressCandidates { ipv4, ipv6 }
+}
+
+async fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let stream = connect_reachability_probe(SocketAddr::new(
+        IpAddr::V4(IPV4_REACHABILITY_PROBE.0),
+        IPV4_REACHABILITY_PROBE.1,
+    ))
+    .await?;
+    match stream.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }
+}
+
+async fn default_route_ipv6() -> Option<Ipv6Addr> {
+    let stream = connect_reachability_probe(SocketAddr::new(
+        IpAddr::V6(IPV6_REACHABILITY_PROBE.0),
+        IPV6_REACHABILITY_PROBE.1,
+    ))
+    .await?;
+    match stream.local_addr().ok()?.ip() {
+        IpAddr::V4(_) => None,
+        IpAddr::V6(ip) => Some(ip),
+    }
+}
+
+async fn connect_reachability_probe(addr: SocketAddr) -> Option<tokio::net::TcpStream> {
+    tokio::time::timeout(
+        P2P_REACHABILITY_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .ok()?
+    .ok()
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+    {
+        return false;
+    }
+
+    match octets {
+        [0, _, _, _] => false,
+        [100, second, _, _] if (64..=127).contains(&second) => false,
+        [192, 0, 0, _] => false,
+        [192, 0, 2, _] => false,
+        [198, second, _, _] if second == 18 || second == 19 => false,
+        [198, 51, 100, _] => false,
+        [203, 0, 113, _] => false,
+        [first, _, _, _] if first >= 240 => false,
+        _ => true,
+    }
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return false;
+    }
+
+    if !ipv6_matches_prefix(ip, Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3) {
+        return false;
+    }
+
+    for (prefix, bits) in [
+        (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32), // Teredo.
+        (Ipv6Addr::new(0x2001, 0x0002, 0, 0, 0, 0, 0, 0), 48), // Benchmarking.
+        (Ipv6Addr::new(0x2001, 0x0010, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv1.
+        (Ipv6Addr::new(0x2001, 0x0020, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv2.
+        (Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), 32), // Documentation.
+        (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16), // 6to4.
+        (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // Documentation.
+    ] {
+        if ipv6_matches_prefix(ip, prefix, bits) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn ipv6_matches_prefix(ip: Ipv6Addr, prefix: Ipv6Addr, prefix_len: u32) -> bool {
+    debug_assert!(prefix_len <= 128);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix_len)
+    };
+    let ip_bits = u128::from_be_bytes(ip.octets());
+    let prefix_bits = u128::from_be_bytes(prefix.octets());
+    (ip_bits & mask) == (prefix_bits & mask)
+}
+
+fn narrow_unspecified_ipv6_bind(
+    bind_ip: IpAddr,
+    external_ip: Option<IpAddr>,
+    local_ipv6: Option<Ipv6Addr>,
+    warnings: &mut Vec<String>,
+) -> IpAddr {
+    let IpAddr::V6(bind_ipv6) = bind_ip else {
+        return bind_ip;
+    };
+    if !bind_ipv6.is_unspecified() {
+        return bind_ip;
+    }
+
+    let Some(IpAddr::V6(external_ipv6)) = external_ip else {
+        return bind_ip;
+    };
+    if local_ipv6 == Some(external_ipv6) {
+        return IpAddr::V6(external_ipv6);
+    }
+
+    warnings.push(
+        "IPv6 wildcard P2P bind may be dual-stack on some operating systems; bind a concrete local IPv6 address to ensure OS-level IPv6-only listeners"
+            .to_owned(),
+    );
+    bind_ip
+}
+
+fn apply_p2p_address_status(status: &mut SyncStatus, selection: &P2pAddressSelection) {
+    status.p2p_address_mode = Some(selection.mode.as_str().to_owned());
+    status.p2p_bind_ip = Some(selection.bind_ip.to_string());
+    status.p2p_listen_families =
+        dial_family_labels(DialAddressFamilies::for_bind_ip(selection.bind_ip));
+    status.p2p_dial_families = dial_family_labels(selection.dial_families);
+    status.p2p_advertised_families = if selection.external_ip.is_some() {
+        dial_family_labels(selection.advertised_families)
+    } else {
+        Vec::new()
+    };
+    status.p2p_external_ip = selection.external_ip.map(|ip| ip.to_string());
+    status.p2p_warnings = selection.warnings.clone();
+}
+
+fn add_runtime_p2p_warnings(selection: &mut P2pAddressSelection, execution_bootnodes: &[String]) {
+    if selection.dial_families == DialAddressFamilies::IPV6 && execution_bootnodes.is_empty() {
+        selection.warnings.push(
+            "strict IPv6-only execution sync depends on public IPv6 EL peers; public DNS discovery can be sparse, so configure --execution-bootnode with IPv6 enode:// or enr: records if EL peers stay at zero. Proven serving peers are cached for restart."
+                .to_owned(),
+        );
+    }
+}
+
+fn add_known_peer_fallback_warnings(
+    selection: &mut P2pAddressSelection,
+    loaded_known_peers: usize,
+) {
+    if selection.mode == P2pAddressSelectionMode::AutoOutboundOnly && loaded_known_peers == 0 {
+        selection.warnings.push(
+            "outbound-only execution p2p has no persisted known peers yet; startup will rely on bootnodes and DNS until serving peers are learned and cached"
+                .to_owned(),
+        );
+    }
+}
+
+fn dial_family_labels(families: DialAddressFamilies) -> Vec<String> {
+    let mut labels = Vec::with_capacity(2);
+    if families.allows_ipv4() {
+        labels.push("ipv4".to_owned());
+    }
+    if families.allows_ipv6() {
+        labels.push("ipv6".to_owned());
+    }
+    labels
+}
+
+fn consensus_dial_families(families: DialAddressFamilies) -> ConsensusDialAddressFamilies {
+    match (families.allows_ipv4(), families.allows_ipv6()) {
+        (true, true) => ConsensusDialAddressFamilies::BOTH,
+        (false, true) => ConsensusDialAddressFamilies::IPV6,
+        _ => ConsensusDialAddressFamilies::IPV4,
+    }
+}
+
+fn select_consensus_p2p_address(
+    execution: &P2pAddressSelection,
+    candidates: LocalP2pAddressCandidates,
+) -> ConsensusP2pAddressSelection {
+    if execution.mode == P2pAddressSelectionMode::AutoPublicIpv4
+        && execution.dial_families.allows_ipv6()
+        && let Some(public_ipv6) = candidates.public_ipv6()
+    {
+        let mut warnings = vec![
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 by default while consensus advertises IPv6 because the beacon network has stronger IPv6 reachability"
+                .to_owned(),
+        ];
+        let bind_ip = narrow_unspecified_ipv6_bind(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            Some(IpAddr::V6(public_ipv6)),
+            candidates.ipv6,
+            &mut warnings,
+        );
+        return ConsensusP2pAddressSelection {
+            bind_ip,
+            dial_families: ConsensusDialAddressFamilies::IPV6,
+            external_ip: Some(IpAddr::V6(public_ipv6)),
+            warnings,
+        };
+    }
+
+    ConsensusP2pAddressSelection {
+        bind_ip: execution.bind_ip,
+        dial_families: consensus_dial_families(execution.dial_families),
+        external_ip: execution.external_ip,
+        warnings: Vec::new(),
+    }
 }
 
 fn initial_sync_status(
@@ -573,13 +1146,13 @@ fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&Consensu
             consensus
                 .and_then(|consensus| consensus.anchor_coverage().ceiling)
                 .map(consensus_anchor_network_head)
-                .or_else(|| consensus.map(consensus_checkpoint_network_head))
+                .or_else(|| consensus.map(consensus_network_head))
                 .unwrap_or_else(genesis_network_head)
         }
         None => consensus
             .and_then(|consensus| consensus.anchor_coverage().ceiling)
             .map(consensus_anchor_network_head)
-            .or_else(|| consensus.map(consensus_checkpoint_network_head))
+            .or_else(|| consensus.map(consensus_network_head))
             .unwrap_or_else(genesis_network_head),
     }
 }
@@ -594,13 +1167,33 @@ fn consensus_anchor_network_head(anchor: logex_types::ExecutionAnchor) -> Head {
     )
 }
 
-fn consensus_checkpoint_network_head(consensus: &ConsensusStore) -> Head {
+fn consensus_network_head(consensus: &ConsensusStore) -> Head {
+    if let Some(anchor) =
+        consensus_execution_head_anchor(consensus.chain_anchors(), consensus.anchor_coverage())
+    {
+        return consensus_anchor_network_head(anchor);
+    }
+
     let timestamp = consensus
         .checkpoint()
         .beacon_slot
         .map(consensus_slot_timestamp)
         .unwrap_or_else(current_unix_timestamp);
     network_head(0, MAINNET.genesis_hash(), timestamp)
+}
+
+fn consensus_execution_head_anchor(
+    anchors: ChainAnchors,
+    coverage: AnchorCoverage,
+) -> Option<ExecutionAnchor> {
+    [
+        anchors.optimistic_head,
+        anchors.finalized_head,
+        coverage.ceiling,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|anchor| anchor.block_number)
 }
 
 fn consensus_slot_timestamp(slot: u64) -> u64 {
@@ -889,6 +1482,440 @@ mod tests {
         }
     }
 
+    fn execution_anchor(block_number: u64, beacon_slot: u64) -> logex_types::ExecutionAnchor {
+        logex_types::ExecutionAnchor {
+            beacon_root: B256::repeat_byte((block_number % 251) as u8),
+            beacon_slot,
+            block_number,
+            block_hash: B256::repeat_byte((block_number % 253) as u8),
+            receipts_root: B256::repeat_byte((block_number % 241) as u8),
+        }
+    }
+
+    #[test]
+    fn auto_p2p_selection_prefers_public_ipv4() {
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(203, 0, 114, 10)),
+                ipv6: Some("2604:a880:400:d0::1".parse().unwrap()),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
+        assert_eq!(
+            selection.external_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 114, 10)))
+        );
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("both detected"));
+    }
+
+    #[test]
+    fn auto_p2p_selection_falls_back_to_public_ipv6() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+    }
+
+    #[test]
+    fn auto_p2p_selection_advertises_public_ipv6_and_dials_outbound_ipv4() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound IPv4"));
+    }
+
+    #[test]
+    fn ipv6_only_selection_warns_without_execution_bootnodes() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        add_runtime_p2p_warnings(&mut selection, &[]);
+
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("IPv6-only execution sync"));
+        assert!(selection.warnings[0].contains("--execution-bootnode"));
+        assert!(selection.warnings[0].contains("cached for restart"));
+    }
+
+    #[test]
+    fn ipv6_only_selection_does_not_warn_with_execution_bootnodes() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: None,
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        add_runtime_p2p_warnings(
+            &mut selection,
+            &["enode://abc@[2604:a880:400:d0::2]:30303".to_owned()],
+        );
+
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn consensus_selection_uses_public_ipv6_when_execution_defaults_to_ipv4_on_dual_stack() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let execution = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            None,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(execution.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(execution.external_ip, Some(IpAddr::V4(public_ipv4)));
+        assert_eq!(consensus.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV6);
+        assert_eq!(consensus.warnings.len(), 1);
+        assert!(consensus.warnings[0].contains("consensus advertises IPv6"));
+    }
+
+    #[test]
+    fn consensus_selection_keeps_explicit_ipv6_strict() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let execution = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            Some(IpAddr::V6(public_ipv6)),
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(consensus.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV6);
+        assert!(consensus.warnings.is_empty());
+    }
+
+    #[test]
+    fn consensus_selection_keeps_auto_ipv4_when_no_public_ipv6_exists() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let execution = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: None,
+            },
+            None,
+        );
+
+        let consensus = select_consensus_p2p_address(
+            &execution,
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: None,
+            },
+        );
+
+        assert_eq!(execution.mode, P2pAddressSelectionMode::AutoPublicIpv4);
+        assert_eq!(consensus.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(consensus.external_ip, Some(IpAddr::V4(public_ipv4)));
+        assert_eq!(consensus.dial_families, ConsensusDialAddressFamilies::IPV4);
+        assert!(consensus.warnings.is_empty());
+    }
+
+    #[test]
+    fn auto_p2p_selection_narrows_unspecified_ipv6_bind_to_public_ipv6() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+    }
+
+    #[test]
+    fn ipv6_wildcard_bind_warns_when_external_ipv6_is_not_local() {
+        let mut warnings = Vec::new();
+        let bind_ip = narrow_unspecified_ipv6_bind(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            Some(IpAddr::V6("2604:a880:400:d0::1".parse().unwrap())),
+            Some("2604:a880:400:d0::2".parse().unwrap()),
+            &mut warnings,
+        );
+
+        assert_eq!(bind_ip, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("dual-stack"));
+    }
+
+    #[test]
+    fn auto_p2p_selection_respects_explicit_ipv6_bind_family() {
+        let public_ipv4 = Ipv4Addr::new(203, 0, 114, 10);
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let bind_ip = "2001:db8::1234".parse::<IpAddr>().unwrap();
+
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(public_ipv4),
+                ipv6: Some(public_ipv6),
+            },
+            Some(bind_ip),
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoPublicIpv6);
+        assert_eq!(selection.bind_ip, bind_ip);
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert_eq!(
+            selection.nat,
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6))
+        );
+    }
+
+    #[test]
+    fn explicit_ipv6_nat_without_bind_keeps_outbound_ipv4_route() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            None,
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.external_ip, Some(IpAddr::V6(public_ipv6)));
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_ipv6_bind_remains_strict_ipv6() {
+        let public_ipv6 = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::ExternalIp(IpAddr::V6(public_ipv6)),
+            Some(IpAddr::V6(public_ipv6)),
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some(public_ipv6),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.bind_ip, IpAddr::V6(public_ipv6));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV6);
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV6);
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_nat_none_keeps_all_routed_outbound_families() {
+        let mut warnings = Vec::new();
+        let selection = choose_explicit_p2p_address(
+            NatResolver::None,
+            None,
+            30303,
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some("fd00::24".parse().unwrap()),
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::Explicit);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.external_ip, None);
+    }
+
+    #[test]
+    fn auto_p2p_selection_uses_outbound_only_without_public_address() {
+        let selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.external_ip, None);
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound-only"));
+    }
+
+    #[test]
+    fn auto_p2p_selection_outbound_only_keeps_both_routed_families() {
+        let selection = choose_auto_p2p_address(
+            LocalP2pAddressCandidates {
+                ipv4: Some(Ipv4Addr::new(10, 0, 0, 24)),
+                ipv6: Some("fd00::24".parse().unwrap()),
+            },
+            None,
+        );
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.nat, NatResolver::None);
+        assert_eq!(selection.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(selection.dial_families, DialAddressFamilies::BOTH);
+        assert_eq!(selection.advertised_families, DialAddressFamilies::IPV4);
+        assert_eq!(selection.external_ip, None);
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("outbound-only"));
+    }
+
+    #[test]
+    fn outbound_only_selection_warns_without_persisted_known_peers() {
+        let mut selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
+
+        add_known_peer_fallback_warnings(&mut selection, 0);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert!(selection.warnings.iter().any(|warning| {
+            warning.contains("outbound-only execution p2p")
+                && warning.contains("no persisted known peers")
+        }));
+    }
+
+    #[test]
+    fn outbound_only_selection_does_not_warn_when_known_peers_exist() {
+        let mut selection = choose_auto_p2p_address(LocalP2pAddressCandidates::default(), None);
+        let warning_count = selection.warnings.len();
+
+        add_known_peer_fallback_warnings(&mut selection, 3);
+
+        assert_eq!(selection.mode, P2pAddressSelectionMode::AutoOutboundOnly);
+        assert_eq!(selection.warnings.len(), warning_count);
+    }
+
+    #[test]
+    fn public_ipv4_filter_rejects_private_shared_and_documentation_ranges() {
+        for ip in [
+            Ipv4Addr::new(10, 1, 2, 3),
+            Ipv4Addr::new(172, 20, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(100, 64, 1, 1),
+            Ipv4Addr::new(100, 127, 255, 254),
+            Ipv4Addr::new(192, 0, 2, 1),
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(203, 0, 113, 1),
+            Ipv4Addr::new(198, 18, 0, 1),
+            Ipv4Addr::new(224, 0, 0, 1),
+        ] {
+            assert!(!is_public_ipv4(ip), "{ip} should not be public");
+        }
+
+        assert!(is_public_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(is_public_ipv4(Ipv4Addr::new(203, 0, 114, 1)));
+    }
+
+    #[test]
+    fn public_ipv6_filter_rejects_non_public_ranges() {
+        for ip in [
+            Ipv6Addr::LOCALHOST,
+            "fe80::1".parse().unwrap(),
+            "fc00::1".parse().unwrap(),
+            "fd00::1".parse().unwrap(),
+            "100::1".parse().unwrap(),
+            "64:ff9b::1".parse().unwrap(),
+            "2001::1".parse().unwrap(),
+            "2001:10::1".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+            "2001:2::1".parse().unwrap(),
+            "2001:20::1".parse().unwrap(),
+            "2002::1".parse().unwrap(),
+            "3fff::1".parse().unwrap(),
+            "8000::1".parse().unwrap(),
+        ] {
+            assert!(!is_public_ipv6(ip), "{ip} should not be public");
+        }
+
+        assert!(is_public_ipv6("2604:a880:400:d0::1".parse().unwrap()));
+        assert!(is_public_ipv6("2a00:1450:4001:80b::200e".parse().unwrap()));
+    }
+
     #[test]
     fn fresh_data_directory_requires_checkpoint_before_sync() {
         let temp = tempfile::tempdir().unwrap();
@@ -989,6 +2016,30 @@ mod tests {
         };
 
         assert!(local_execution_progress_staleness(Some(sync_head), &consensus).is_none());
+    }
+
+    #[test]
+    fn startup_network_head_uses_light_client_head_when_coverage_is_empty() {
+        let finalized = execution_anchor(25_424_100, 14_660_000);
+        let optimistic = execution_anchor(25_424_288, 14_660_188);
+        let anchors = ChainAnchors {
+            indexed_head: None,
+            finalized_head: Some(finalized),
+            optimistic_head: Some(optimistic),
+        };
+        let coverage = AnchorCoverage {
+            floor: None,
+            ceiling: None,
+            count: 0,
+            gap_count: 0,
+        };
+
+        let head = consensus_execution_head_anchor(anchors, coverage).unwrap();
+
+        assert_eq!(head, optimistic);
+        let network_head = consensus_anchor_network_head(head);
+        assert_eq!(network_head.number, optimistic.block_number);
+        assert_eq!(network_head.hash, optimistic.block_hash);
     }
 
     #[test]

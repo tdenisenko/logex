@@ -275,6 +275,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
     let verified_to_block = head_block.or(canonical_top_block);
+    let execution_network = rest_execution_network_status(sync.execution_network);
     Json(serde_json::json!({
         "synced": sync.node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
@@ -283,6 +284,13 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "connected_peers": sync.connected_peers,
         "serving_peers": sync.serving_peers,
         "pending_peers": sync.pending_peers,
+        "p2p_address_mode": sync.p2p_address_mode,
+        "p2p_bind_ip": sync.p2p_bind_ip,
+        "p2p_listen_families": sync.p2p_listen_families,
+        "p2p_dial_families": sync.p2p_dial_families,
+        "p2p_advertised_families": sync.p2p_advertised_families,
+        "p2p_external_ip": sync.p2p_external_ip,
+        "p2p_warnings": sync.p2p_warnings,
         "current_block": sync.current_block,
         "target_block": sync.target_block,
         "blocks_per_sec": sync.blocks_per_sec,
@@ -342,13 +350,93 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "materialized_execution_anchor_gap_count": sync.materialized_execution_anchor_gap_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
         "finalized_execution_head": sync.finalized_execution_head,
-        "execution_network": sync.execution_network,
+        "execution_network": execution_network,
         "consensus_network": sync.consensus_network,
         "consensus_light_client": sync.consensus_light_client,
         "index_lag_blocks": index_lag_blocks,
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
     }))
+}
+
+fn rest_execution_network_status(
+    status: Option<logex_types::ExecutionNetworkStatus>,
+) -> Option<serde_json::Value> {
+    let status = status?;
+    let mut value =
+        serde_json::to_value(&status).expect("execution network status should serialize");
+    if let Some(warning) = execution_bootstrap_warning(&status)
+        && let serde_json::Value::Object(fields) = &mut value
+    {
+        fields.insert(
+            "bootstrap_warning".to_owned(),
+            serde_json::Value::String(warning.to_owned()),
+        );
+    }
+    Some(value)
+}
+
+fn execution_bootstrap_warning(
+    status: &logex_types::ExecutionNetworkStatus,
+) -> Option<&'static str> {
+    const SERVING_PROOF_FAILURE_THRESHOLD: u64 = 4;
+
+    let pending_dials = u64::try_from(status.pending_dials).unwrap_or(u64::MAX);
+    let repeated_expirations = status.submitted_dial_expirations >= 8
+        && (status.submitted_dial_expirations >= status.submitted_dials_total
+            || status
+                .submitted_dial_expirations
+                .saturating_add(pending_dials)
+                >= status.submitted_dials_total
+            || status.submitted_dial_expirations.saturating_mul(4)
+                >= status.submitted_dials_total.saturating_mul(3));
+
+    if status.accepted_sessions == 0
+        && status.submitted_dials_total >= 8
+        && repeated_expirations
+        && (status.dns_discovered_candidates > 0
+            || status.discovered_candidates > 0
+            || status.known_peers > 0)
+    {
+        return Some(
+            "execution peer candidates are being submitted, but repeated dials expire before any session is accepted; configured bootnodes or discovered endpoints may be unreachable from the selected P2P address family",
+        );
+    }
+
+    if status.accepted_sessions == 0
+        && status.configured_bootnode_direct_candidates == 0
+        && status.configured_bootnode_discovery_enrs == 0
+        && status.configured_bootnode_family_rejections > 0
+    {
+        return Some(
+            "configured execution bootnodes were provided, but none matched the selected P2P address family; use IPv6 enode:// or enr: records for strict IPv6 runs and IPv4 records for strict IPv4 runs",
+        );
+    }
+
+    if status.accepted_sessions == 0
+        && status.dns_discovered_candidates == 0
+        && status.discovered_candidates == 0
+        && status.dns_family_rejected_candidates > 0
+    {
+        return Some(
+            "execution DNS discovery returned candidates, but none had a dialable endpoint for the selected P2P address family",
+        );
+    }
+
+    let request_failures = status
+        .historical_scheduler_body_failures
+        .saturating_add(status.historical_scheduler_receipt_failures);
+    if status.accepted_sessions > 0
+        && status.body_proven_peers == 0
+        && status.receipt_proven_peers == 0
+        && request_failures >= SERVING_PROOF_FAILURE_THRESHOLD
+    {
+        return Some(
+            "execution peer sessions are accepted, but no connected peer has served historical block bodies or receipts yet; connected peers may be non-serving, pruned beyond the requested range, or unsuitable for the selected P2P address family",
+        );
+    }
+
+    None
 }
 
 fn stored_log_range(storage: &PartitionManager) -> Option<(u64, u64)> {
@@ -474,6 +562,137 @@ mod tests {
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
+
+    #[test]
+    fn execution_bootstrap_warning_detects_expired_dns_candidates() {
+        let status = ExecutionNetworkStatus {
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("repeated dials expire"));
+        assert!(warning.contains("selected P2P address family"));
+    }
+
+    #[test]
+    fn rest_execution_network_status_includes_bootstrap_warning() {
+        let status = ExecutionNetworkStatus {
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        let value = rest_execution_network_status(Some(status)).expect("status should serialize");
+
+        assert!(
+            value["bootstrap_warning"]
+                .as_str()
+                .expect("bootstrap warning should serialize")
+                .contains("repeated dials expire")
+        );
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_retried_explicit_candidates() {
+        let status = ExecutionNetworkStatus {
+            known_peers: 2,
+            pending_dials: 2,
+            submitted_dials_total: 85,
+            submitted_dial_expirations: 83,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("configured bootnodes"));
+        assert!(warning.contains("repeated dials expire"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_after_accepted_session() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 1,
+            dns_discovered_candidates: 12,
+            submitted_dials_total: 12,
+            submitted_dial_expirations: 12,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_accepted_nonserving_sessions() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 3,
+            body_proven_peers: 0,
+            receipt_proven_peers: 0,
+            historical_scheduler_body_failures: 2,
+            historical_scheduler_receipt_failures: 2,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("sessions are accepted"));
+        assert!(warning.contains("served historical block bodies or receipts"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_after_serving_proof() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 3,
+            body_proven_peers: 1,
+            receipt_proven_peers: 1,
+            historical_scheduler_body_failures: 4,
+            historical_scheduler_receipt_failures: 4,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_stays_quiet_before_historical_requests() {
+        let status = ExecutionNetworkStatus {
+            accepted_sessions: 1,
+            body_proven_peers: 0,
+            receipt_proven_peers: 0,
+            ..Default::default()
+        };
+
+        assert!(execution_bootstrap_warning(&status).is_none());
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_family_rejected_dns_candidates() {
+        let status = ExecutionNetworkStatus {
+            dns_family_rejected_candidates: 12,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("none had a dialable endpoint"));
+    }
+
+    #[test]
+    fn execution_bootstrap_warning_detects_family_rejected_configured_bootnodes() {
+        let status = ExecutionNetworkStatus {
+            configured_bootnode_family_rejections: 2,
+            ..Default::default()
+        };
+
+        let warning = execution_bootstrap_warning(&status).expect("warning should be reported");
+
+        assert!(warning.contains("configured execution bootnodes"));
+        assert!(warning.contains("selected P2P address family"));
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -1119,6 +1338,16 @@ mod tests {
                 connected_peers: 0,
                 serving_peers: 0,
                 pending_peers: 12,
+                p2p_address_mode: Some("auto-public-ipv4".to_owned()),
+                p2p_bind_ip: Some("0.0.0.0".to_owned()),
+                p2p_listen_families: vec!["ipv4".to_owned()],
+                p2p_dial_families: vec!["ipv4".to_owned(), "ipv6".to_owned()],
+                p2p_advertised_families: vec!["ipv4".to_owned()],
+                p2p_external_ip: Some("203.0.114.10".to_owned()),
+                p2p_warnings: vec![
+                    "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
+                        .to_owned(),
+                ],
                 current_block: 250,
                 target_block: 500,
                 blocks_per_sec: 2.0,
@@ -1187,6 +1416,14 @@ mod tests {
                     nonserving_disconnects: 3,
                     missing_fork_id_candidates: 4,
                     fork_id_rejected_candidates: 6,
+                    discovered_candidates: 7,
+                    dns_discovered_candidates: 8,
+                    dns_family_rejected_candidates: 9,
+                    configured_bootnode_direct_candidates: 10,
+                    configured_bootnode_discovery_enrs: 11,
+                    configured_bootnode_family_rejections: 12,
+                    submitted_dials_total: 10,
+                    submitted_dial_expirations: 11,
                     queued_candidates: 9,
                     pending_dials: 3,
                     productive_peers: 7,
@@ -1242,10 +1479,14 @@ mod tests {
                     connected_nethermind_peers: 3,
                     connected_reth_peers: 1,
                     connected_other_peers: 0,
+                    connected_ipv4_peers: 4,
+                    connected_ipv6_peers: 2,
                     serving_geth_peers: 1,
                     serving_nethermind_peers: 2,
                     serving_reth_peers: 1,
                     serving_other_peers: 0,
+                    serving_ipv4_peers: 3,
+                    serving_ipv6_peers: 1,
                 }),
                 consensus_network: Some(ConsensusNetworkStatus {
                     local_enr: Some("enr:test".to_string()),
@@ -1389,6 +1630,17 @@ mod tests {
         assert_eq!(status["materialized_execution_anchor_count"], 311);
         assert_eq!(status["materialized_execution_anchor_gap_count"], 0);
         assert_eq!(status["connected_peers"], 0);
+        assert_eq!(status["p2p_address_mode"], "auto-public-ipv4");
+        assert_eq!(status["p2p_bind_ip"], "0.0.0.0");
+        assert_eq!(status["p2p_listen_families"][0], "ipv4");
+        assert_eq!(status["p2p_dial_families"][0], "ipv4");
+        assert_eq!(status["p2p_dial_families"][1], "ipv6");
+        assert_eq!(status["p2p_advertised_families"][0], "ipv4");
+        assert_eq!(status["p2p_external_ip"], "203.0.114.10");
+        assert_eq!(
+            status["p2p_warnings"][0],
+            "public IPv4 and IPv6 were both detected; execution advertises IPv4 and dials both routed families. True simultaneous execution IPv4+IPv6 inbound requires a future composite network backend."
+        );
         assert_eq!(status["serving_peers"], 0);
         assert_eq!(status["pending_peers"], 12);
         assert_eq!(status["execution_network"]["queued_candidates"], 9);
@@ -1404,10 +1656,37 @@ mod tests {
             status["execution_network"]["fork_id_rejected_candidates"],
             6
         );
+        assert_eq!(status["execution_network"]["discovered_candidates"], 7);
+        assert_eq!(status["execution_network"]["dns_discovered_candidates"], 8);
+        assert_eq!(
+            status["execution_network"]["dns_family_rejected_candidates"],
+            9
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_direct_candidates"],
+            10
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_discovery_enrs"],
+            11
+        );
+        assert_eq!(
+            status["execution_network"]["configured_bootnode_family_rejections"],
+            12
+        );
+        assert_eq!(status["execution_network"]["submitted_dials_total"], 10);
+        assert_eq!(
+            status["execution_network"]["submitted_dial_expirations"],
+            11
+        );
         assert_eq!(status["execution_network"]["connected_geth_peers"], 2);
         assert_eq!(status["execution_network"]["connected_nethermind_peers"], 3);
         assert_eq!(status["execution_network"]["connected_reth_peers"], 1);
+        assert_eq!(status["execution_network"]["connected_ipv4_peers"], 4);
+        assert_eq!(status["execution_network"]["connected_ipv6_peers"], 2);
         assert_eq!(status["execution_network"]["serving_nethermind_peers"], 2);
+        assert_eq!(status["execution_network"]["serving_ipv4_peers"], 3);
+        assert_eq!(status["execution_network"]["serving_ipv6_peers"], 1);
         assert_eq!(status["execution_network"]["body_request_ready_peers"], 4);
         assert_eq!(
             status["execution_network"]["receipt_request_ready_peers"],

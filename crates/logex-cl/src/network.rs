@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,9 +89,48 @@ const LOCAL_CUSTODY_GROUP_COUNT: u64 = 0;
 pub struct ConsensusNetworkConfig {
     pub data_dir: PathBuf,
     pub checkpoint: WeakSubjectivityCheckpoint,
+    pub bind_ip: IpAddr,
+    pub dial_families: ConsensusDialAddressFamilies,
+    pub external_ip: Option<IpAddr>,
     pub discovery_port: u16,
     pub p2p_port: u16,
     pub max_peers: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsensusDialAddressFamilies {
+    ipv4: bool,
+    ipv6: bool,
+}
+
+impl ConsensusDialAddressFamilies {
+    pub const IPV4: Self = Self {
+        ipv4: true,
+        ipv6: false,
+    };
+    pub const IPV6: Self = Self {
+        ipv4: false,
+        ipv6: true,
+    };
+    pub const BOTH: Self = Self {
+        ipv4: true,
+        ipv6: true,
+    };
+
+    pub const fn for_bind_ip(bind_ip: IpAddr) -> Self {
+        if bind_ip.is_ipv4() {
+            Self::IPV4
+        } else {
+            Self::IPV6
+        }
+    }
+
+    const fn includes(self, class: DialAddressClass) -> bool {
+        match class {
+            DialAddressClass::Tcp4 | DialAddressClass::Quic4 => self.ipv4,
+            DialAddressClass::Tcp6 | DialAddressClass::Quic6 => self.ipv6,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1506,15 +1545,18 @@ impl ConsensusNetwork {
         let enr_key = load_or_create_secret_key(&secret_path)?;
         let local_enr = build_local_enr(
             &enr_key,
-            &fork_id,
-            &next_fork_digest,
-            LOCAL_CUSTODY_GROUP_COUNT,
-            config.discovery_port,
-            config.p2p_port,
+            LocalEnrConfig {
+                fork_id: &fork_id,
+                next_fork_digest: &next_fork_digest,
+                custody_group_count: LOCAL_CUSTODY_GROUP_COUNT,
+                bind_ip: config.bind_ip,
+                external_ip: config.external_ip,
+                discovery_port: config.discovery_port,
+                p2p_port: config.p2p_port,
+            },
         );
         let local_keypair = build_libp2p_keypair(&enr_key)?;
-        let listen_config =
-            ListenConfig::from_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.discovery_port);
+        let listen_config = ListenConfig::from_ip(config.bind_ip, config.discovery_port);
         let discovery_config = ConfigBuilder::new(listen_config)
             .enable_packet_filter()
             .build();
@@ -1527,13 +1569,31 @@ impl ConsensusNetwork {
         let mut peer_lifecycle = HashMap::new();
         let mut bootnode_peers = HashSet::new();
 
+        let mut seeded_bootnodes = 0usize;
+        let mut skipped_bootnodes = 0usize;
         for enr in &bootnodes {
-            if let Err(error) = discv5.add_enr(enr.clone()) {
-                tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
+            if enr_has_discv5_endpoint_for_families(config.dial_families, enr) {
+                if let Err(error) = discv5.add_enr(enr.clone()) {
+                    tracing::warn!(%error, enr = %enr, "failed to seed consensus bootnode");
+                } else {
+                    seeded_bootnodes = seeded_bootnodes.saturating_add(1);
+                }
+            } else {
+                skipped_bootnodes = skipped_bootnodes.saturating_add(1);
             }
-            if let Some(peer_id) = observe_dialable_peer(&mut dialable_peers, enr) {
+            if let Some(peer_id) =
+                observe_dialable_peer_for_families(&mut dialable_peers, config.dial_families, enr)
+            {
                 bootnode_peers.insert(peer_id);
             }
+        }
+        if skipped_bootnodes > 0 {
+            tracing::debug!(
+                seeded_bootnodes,
+                skipped_bootnodes,
+                ?config.dial_families,
+                "skipped consensus bootnodes without compatible discovery endpoints"
+            );
         }
 
         for peer in &known_peers {
@@ -1553,17 +1613,28 @@ impl ConsensusNetwork {
                         );
                         continue;
                     }
-                    if let Err(error) = discv5.add_enr(enr.clone()) {
+                    let Some(peer_id) = observe_dialable_peer_for_families(
+                        &mut dialable_peers,
+                        config.dial_families,
+                        &enr,
+                    ) else {
+                        tracing::debug!(
+                            enr = %peer.enr,
+                            ?config.dial_families,
+                            "ignoring cached consensus peer without a dialable address for configured families"
+                        );
+                        continue;
+                    };
+                    if enr_has_discv5_endpoint_for_families(config.dial_families, &enr)
+                        && let Err(error) = discv5.add_enr(enr.clone())
+                    {
                         tracing::debug!(
                             %error,
                             enr = %peer.enr,
                             "skipping cached consensus peer that could not be inserted"
                         );
                     }
-                    if let Some((peer_id, _)) = enr_multiaddrs(&enr) {
-                        peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
-                    }
-                    observe_dialable_peer(&mut dialable_peers, &enr);
+                    peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
                     retained_known_peers.push(peer.clone());
                 }
                 Err(error) => {
@@ -1593,7 +1664,7 @@ impl ConsensusNetwork {
             sync_status,
             discv5,
             swarm,
-            bootnode_count: bootnodes.len(),
+            bootnode_count: seeded_bootnodes,
             bootnode_peers,
             fork_digest,
             known_peers_path,
@@ -1646,15 +1717,13 @@ impl ConsensusNetwork {
             .start()
             .await
             .map_err(|error| ConsensusNetworkError::StartDiscovery(error.to_string()))?;
-        let tcp_listen_addr = Multiaddr::empty()
-            .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
-            .with(Protocol::Tcp(self.config.p2p_port));
+        let tcp_listen_addr =
+            multiaddr_bind_ip(self.config.bind_ip).with(Protocol::Tcp(self.config.p2p_port));
         self.swarm
             .listen_on(tcp_listen_addr)
             .map_err(|error| ConsensusNetworkError::ListenRpcTransport(error.to_string()))?;
         if self.config.discovery_port != self.config.p2p_port {
-            let quic_listen_addr = Multiaddr::empty()
-                .with(Protocol::Ip4(Ipv4Addr::UNSPECIFIED))
+            let quic_listen_addr = multiaddr_bind_ip(self.config.bind_ip)
                 .with(Protocol::Udp(self.config.p2p_port))
                 .with(Protocol::QuicV1);
             self.swarm
@@ -1674,9 +1743,16 @@ impl ConsensusNetwork {
             .map_err(|error| ConsensusNetworkError::EventStream(error.to_string()))?;
 
         let local_enr = self.discv5.local_enr();
+        let external_ip = self
+            .config
+            .external_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "unresolved".to_owned());
         tracing::info!(
             local_enr = %local_enr.to_base64(),
             node_id = %local_enr.node_id(),
+            bind_ip = %self.config.bind_ip,
+            %external_ip,
             discovery_port = self.config.discovery_port,
             p2p_port = self.config.p2p_port,
             local_peer_id = %self.swarm.local_peer_id(),
@@ -3084,7 +3160,12 @@ impl ConsensusNetwork {
             .iter()
             .map(|(peer, addrs)| (*peer, addrs.clone()))
             .collect::<Vec<_>>();
-        dialable.retain(|(peer, _)| self.peer_is_dialable(*peer, bootstrap_needed, now));
+        for (_, addrs) in &mut dialable {
+            retain_dial_addresses_for_families(self.config.dial_families, addrs);
+        }
+        dialable.retain(|(peer, addrs)| {
+            !addrs.is_empty() && self.peer_is_dialable(*peer, bootstrap_needed, now)
+        });
         tracing::debug!(
             bootstrap_needed,
             discovered = self.observed.len(),
@@ -3975,6 +4056,7 @@ impl ConsensusNetwork {
         mut addrs: Vec<Multiaddr>,
         bootstrap_needed: bool,
     ) -> Vec<Multiaddr> {
+        retain_dial_addresses_for_families(self.config.dial_families, &mut addrs);
         addrs.sort_by(|left, right| {
             self.dial_address_priority(peer, right, bootstrap_needed)
                 .cmp(&self.dial_address_priority(peer, left, bootstrap_needed))
@@ -4524,29 +4606,72 @@ impl ConsensusNetwork {
     }
 }
 
-fn build_local_enr(
-    enr_key: &CombinedKey,
-    fork_id: &[u8],
-    next_fork_digest: &[u8; 4],
+struct LocalEnrConfig<'a> {
+    fork_id: &'a [u8],
+    next_fork_digest: &'a [u8; 4],
     custody_group_count: u64,
+    bind_ip: IpAddr,
+    external_ip: Option<IpAddr>,
     discovery_port: u16,
     p2p_port: u16,
-) -> Enr {
-    let custody_group_count = trim_big_endian_u64(custody_group_count);
+}
+
+fn build_local_enr(enr_key: &CombinedKey, config: LocalEnrConfig<'_>) -> Enr {
+    let custody_group_count = trim_big_endian_u64(config.custody_group_count);
     let mut builder = Enr::builder();
-    builder.udp4(discovery_port).tcp4(p2p_port);
-    if discovery_port != p2p_port {
-        builder.add_value("quic", &p2p_port);
-    }
+    configure_local_enr_endpoints(
+        &mut builder,
+        config.bind_ip,
+        config.external_ip,
+        config.discovery_port,
+        config.p2p_port,
+    );
     builder
-        .add_value("eth2", &fork_id)
-        .add_value("nfd", next_fork_digest)
+        .add_value("eth2", &config.fork_id)
+        .add_value("nfd", config.next_fork_digest)
         .add_value("cgc", &custody_group_count)
         .add_value("attnets", &ATTESTATION_SUBNET_BITFIELD)
         .add_value("syncnets", &SYNCNET_BITFIELD);
     builder
         .build(enr_key)
         .expect("local consensus ENR should always be constructible")
+}
+
+fn configure_local_enr_endpoints(
+    builder: &mut discv5::enr::Builder<CombinedKey>,
+    bind_ip: IpAddr,
+    external_ip: Option<IpAddr>,
+    discovery_port: u16,
+    p2p_port: u16,
+) {
+    let family_ip = external_ip.unwrap_or(bind_ip);
+    match family_ip {
+        IpAddr::V4(ip) => {
+            if !ip.is_unspecified() {
+                builder.ip4(ip);
+            }
+            builder.udp4(discovery_port).tcp4(p2p_port);
+            if discovery_port != p2p_port {
+                builder.add_value("quic", &p2p_port);
+            }
+        }
+        IpAddr::V6(ip) => {
+            if !ip.is_unspecified() {
+                builder.ip6(ip);
+            }
+            builder.udp6(discovery_port).tcp6(p2p_port);
+            if discovery_port != p2p_port {
+                builder.add_value("quic6", &p2p_port);
+            }
+        }
+    }
+}
+
+fn multiaddr_bind_ip(ip: IpAddr) -> Multiaddr {
+    match ip {
+        IpAddr::V4(ip) => Multiaddr::empty().with(Protocol::Ip4(ip)),
+        IpAddr::V6(ip) => Multiaddr::empty().with(Protocol::Ip6(ip)),
+    }
 }
 
 fn trim_big_endian_u64(value: u64) -> Vec<u8> {
@@ -4719,6 +4844,25 @@ fn observe_dialable_peer(peers: &mut HashMap<PeerId, Vec<Multiaddr>>, enr: &Enr)
         return Some(peer_id);
     }
     None
+}
+
+fn observe_dialable_peer_for_families(
+    peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
+    families: ConsensusDialAddressFamilies,
+    enr: &Enr,
+) -> Option<PeerId> {
+    let (peer_id, mut addrs) = enr_multiaddrs(enr)?;
+    retain_dial_addresses_for_families(families, &mut addrs);
+    if addrs.is_empty() {
+        return None;
+    }
+    peers.insert(peer_id, addrs);
+    Some(peer_id)
+}
+
+fn enr_has_discv5_endpoint_for_families(families: ConsensusDialAddressFamilies, enr: &Enr) -> bool {
+    (families.ipv4 && enr.ip4().is_some() && enr.udp4().is_some())
+        || (families.ipv6 && enr.ip6().is_some() && enr.udp6().is_some())
 }
 
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
@@ -4950,6 +5094,7 @@ fn dial_address_class(addr: &Multiaddr) -> Option<DialAddressClass> {
     for protocol in addr.iter() {
         match protocol {
             Protocol::Ip4(_) => ip_version = Some(4u8),
+            Protocol::Ip6(ip) if ip.to_ipv4_mapped().is_some() => ip_version = Some(0u8),
             Protocol::Ip6(_) => ip_version = Some(6u8),
             Protocol::Tcp(_) => transport = Some("tcp"),
             Protocol::QuicV1 => transport = Some("quic"),
@@ -4964,6 +5109,17 @@ fn dial_address_class(addr: &Multiaddr) -> Option<DialAddressClass> {
         (Some(6), Some("quic")) => Some(DialAddressClass::Quic6),
         _ => None,
     }
+}
+
+fn retain_dial_addresses_for_families(
+    families: ConsensusDialAddressFamilies,
+    addrs: &mut Vec<Multiaddr>,
+) {
+    addrs.retain(|addr| dial_address_matches_families(families, addr));
+}
+
+fn dial_address_matches_families(families: ConsensusDialAddressFamilies, addr: &Multiaddr) -> bool {
+    dial_address_class(addr).is_some_and(|class| families.includes(class))
 }
 
 fn sync_committee_period_for_slot(slot: u64) -> u64 {
@@ -5013,6 +5169,8 @@ const MAINNET_BOOTNODES: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use super::*;
     use alloy_primitives::b256;
     use libp2p::StreamProtocol;
@@ -5232,12 +5390,126 @@ mod tests {
         );
         assert_eq!(
             dial_address_class(&multiaddr_from_ip(
-                IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
                 9000,
                 peer_id
             )),
             Some(DialAddressClass::Tcp6)
         );
+        assert_eq!(
+            dial_address_class(&multiaddr_from_ip(
+                IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+                9000,
+                peer_id
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn dial_address_family_filter_matches_configured_families() {
+        let peer_id = PeerId::random();
+        let tcp4 = multiaddr_from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
+        let quic4 = multiaddr_from_ip_quic(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
+        let tcp6 = multiaddr_from_ip(IpAddr::V6(Ipv6Addr::LOCALHOST), 9000, peer_id);
+        let quic6 = multiaddr_from_ip_quic(IpAddr::V6(Ipv6Addr::LOCALHOST), 9000, peer_id);
+        let mapped_tcp = multiaddr_from_ip(
+            IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+            9000,
+            peer_id,
+        );
+        let mapped_quic = multiaddr_from_ip_quic(
+            IpAddr::V6(Ipv4Addr::new(51, 77, 18, 149).to_ipv6_mapped()),
+            9000,
+            peer_id,
+        );
+
+        let mut ipv4_addrs = vec![
+            tcp4.clone(),
+            quic4.clone(),
+            tcp6.clone(),
+            quic6.clone(),
+            mapped_tcp.clone(),
+            mapped_quic.clone(),
+        ];
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::IPV4, &mut ipv4_addrs);
+        assert_eq!(ipv4_addrs, vec![tcp4.clone(), quic4.clone()]);
+
+        let mut ipv6_addrs = vec![
+            tcp4.clone(),
+            quic4.clone(),
+            tcp6.clone(),
+            quic6.clone(),
+            mapped_tcp.clone(),
+            mapped_quic.clone(),
+        ];
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::IPV6, &mut ipv6_addrs);
+        assert_eq!(ipv6_addrs, vec![tcp6.clone(), quic6.clone()]);
+
+        let mut dual_addrs = vec![tcp4, quic4, tcp6, quic6, mapped_tcp, mapped_quic];
+        retain_dial_addresses_for_families(ConsensusDialAddressFamilies::BOTH, &mut dual_addrs);
+        assert_eq!(
+            dual_addrs
+                .iter()
+                .filter_map(dial_address_class)
+                .collect::<Vec<_>>(),
+            vec![
+                DialAddressClass::Tcp4,
+                DialAddressClass::Quic4,
+                DialAddressClass::Tcp6,
+                DialAddressClass::Quic6
+            ]
+        );
+    }
+
+    #[test]
+    fn local_enr_uses_ipv6_fields_when_external_ip_is_ipv6() {
+        let key = CombinedKey::generate_secp256k1();
+        let external_ip = "2604:a880:400:d0::1".parse::<Ipv6Addr>().unwrap();
+        let enr = build_local_enr(
+            &key,
+            LocalEnrConfig {
+                fork_id: &[0u8; 16],
+                next_fork_digest: &[1u8; 4],
+                custody_group_count: 0,
+                bind_ip: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                external_ip: Some(IpAddr::V6(external_ip)),
+                discovery_port: 9000,
+                p2p_port: 9001,
+            },
+        );
+
+        assert_eq!(enr.ip6(), Some(external_ip));
+        assert_eq!(enr.udp6(), Some(9000));
+        assert_eq!(enr.tcp6(), Some(9001));
+        assert_eq!(enr_quic6(&enr), Some(9001));
+        assert_eq!(enr.ip4(), None);
+        assert_eq!(enr.udp4(), None);
+        assert_eq!(enr.tcp4(), None);
+        assert_eq!(enr_quic4(&enr), None);
+    }
+
+    #[test]
+    fn local_enr_preserves_ipv4_fields_by_default() {
+        let key = CombinedKey::generate_secp256k1();
+        let enr = build_local_enr(
+            &key,
+            LocalEnrConfig {
+                fork_id: &[0u8; 16],
+                next_fork_digest: &[1u8; 4],
+                custody_group_count: 0,
+                bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                external_ip: None,
+                discovery_port: 9000,
+                p2p_port: 9000,
+            },
+        );
+
+        assert_eq!(enr.udp4(), Some(9000));
+        assert_eq!(enr.tcp4(), Some(9000));
+        assert_eq!(enr.ip6(), None);
+        assert_eq!(enr.udp6(), None);
+        assert_eq!(enr.tcp6(), None);
     }
 
     #[test]
@@ -5263,6 +5535,71 @@ mod tests {
                 .iter()
                 .all(|addr| addr.to_string().contains(&peer_id.to_string()))
         );
+    }
+
+    #[test]
+    fn consensus_bootnode_discovery_filter_matches_dial_family() {
+        let key = CombinedKey::generate_secp256k1();
+        let ipv4 = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .udp4(9000)
+            .tcp4(9000)
+            .build(&key)
+            .unwrap();
+        let ipv6 = Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp6(9000)
+            .tcp6(9000)
+            .build(&key)
+            .unwrap();
+
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV4,
+            &ipv4
+        ));
+        assert!(!enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &ipv4
+        ));
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &ipv6
+        ));
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::BOTH,
+            &ipv6
+        ));
+    }
+
+    #[test]
+    fn observed_consensus_peer_keeps_only_configured_dial_family() {
+        let key = CombinedKey::generate_secp256k1();
+        let peer_enr = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .udp4(9000)
+            .tcp4(9001)
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp6(9002)
+            .tcp6(9003)
+            .build(&key)
+            .unwrap();
+        let mut peers = HashMap::new();
+
+        let peer_id = observe_dialable_peer_for_families(
+            &mut peers,
+            ConsensusDialAddressFamilies::IPV6,
+            &peer_enr,
+        )
+        .expect("dual-stack ENR should provide an IPv6 dial address");
+
+        let addrs = peers
+            .get(&peer_id)
+            .expect("filtered dial addresses should be retained");
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| matches!(
+            dial_address_class(addr),
+            Some(DialAddressClass::Tcp6 | DialAddressClass::Quic6)
+        )));
     }
 
     #[test]

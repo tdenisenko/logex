@@ -68,6 +68,9 @@ fn main() {
             p2p_port,
             max_peers,
             nat,
+            p2p_bind_ip,
+            execution_bootnodes,
+            execution_discv5_port,
             cl_discovery_port,
             cl_p2p_port,
             cl_max_peers,
@@ -83,6 +86,15 @@ fn main() {
             };
             let http_host = file_config.http_host.unwrap_or(http_host);
             let grpc_host = file_config.grpc_host.unwrap_or(grpc_host);
+            let p2p_bind_ip = file_config.p2p_bind_ip.or(p2p_bind_ip);
+            let execution_bootnodes = if execution_bootnodes.is_empty() {
+                file_config.execution_bootnodes.unwrap_or_default()
+            } else {
+                execution_bootnodes
+            };
+            let execution_discv5_port = file_config
+                .execution_discv5_port
+                .unwrap_or(execution_discv5_port);
             let allow_public_grpc = file_config.allow_public_grpc.unwrap_or(allow_public_grpc);
             let dashboard_enabled =
                 file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
@@ -119,6 +131,9 @@ fn main() {
                 p2p_port,
                 max_peers,
                 nat,
+                p2p_bind_ip,
+                execution_bootnodes,
+                execution_discv5_port,
                 cl_discovery_port,
                 cl_p2p_port,
                 cl_max_peers,

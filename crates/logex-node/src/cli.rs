@@ -11,7 +11,7 @@ use serde::Deserialize;
     about = "Standalone Ethereum log-verification client and query server",
     long_about = "LogEx joins the Ethereum consensus-layer and execution-layer P2P networks, verifies receipt logs, stores them locally, and serves SQL, JSON-RPC, gRPC, WebSocket, and dashboard query APIs.",
     after_help = "Examples:
-  logex --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync
+  logex sync
   logex --data-dir /var/lib/logex/mainnet --config /etc/logex/config.toml sync --http-host 0.0.0.0 --dashboard-password '<password>'
   logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
   logex --data-dir /var/lib/logex/mainnet info"
@@ -43,8 +43,8 @@ pub struct Cli {
     /// Path to an optional TOML config file.
     ///
     /// Supported keys: data_dir, log_level, partition_target_rows, checkpoint,
-    /// checkpoint_sync_url, nat, http_host, grpc_host, allow_public_grpc,
-    /// dashboard_enabled, dashboard_password.
+    /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
+    /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -58,8 +58,9 @@ pub struct Cli {
 
     /// Trusted Beacon API/checkpoint-sync URL used to fetch or validate a recent finalized checkpoint.
     ///
-    /// Defaults to https://mainnet.checkpoint.sigp.io for sync. Use
-    /// comma-separated URLs to require multi-source checkpoint agreement.
+    /// Defaults to a 2-of-3 mainnet checkpoint quorum for sync. Use
+    /// comma-separated URLs to override the default sources and require
+    /// multi-source checkpoint agreement.
     #[arg(long, global = true)]
     pub checkpoint_sync_url: Option<String>,
 
@@ -123,7 +124,7 @@ fn platform_app_dir_name() -> &'static str {
 pub enum Command {
     /// Start the node: sync blocks from the P2P network and serve queries.
     #[command(after_help = "Examples:
-  logex --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync
+  logex sync
   logex --data-dir /var/lib/logex/mainnet --checkpoint <slot@root> sync --http-port 18683
   logex --config /etc/logex/config.toml sync --http-host 0.0.0.0 --dashboard-password '<password>'
 
@@ -155,7 +156,10 @@ Security:
         #[arg(long, default_value = "8578")]
         grpc_port: u16,
 
-        /// Execution-layer discovery port (UDP discv4).
+        /// Execution-layer discv4 UDP discovery port for IPv4 execution binds.
+        ///
+        /// Strict IPv6 execution binds disable discv4 and use
+        /// --execution-discv5-port plus direct IPv6 RLPx candidates instead.
         #[arg(long, default_value = "30303")]
         discovery_port: u16,
 
@@ -172,11 +176,43 @@ Security:
 
         /// Execution-layer NAT/external address resolver advertised to peers.
         ///
-        /// Accepted values include: any, none, publicip, netif, extip:<ip>,
-        /// extaddr:<domain>. On public servers, extip:<ip> is usually the most
-        /// deterministic choice.
+        /// The default "any" auto-selects a locally owned public IPv4 address
+        /// with outbound reachability, then a locally owned public IPv6 address
+        /// with outbound reachability, and otherwise runs outbound-only without
+        /// advertising a public address. Accepted explicit values include:
+        /// none, publicip, netif, extip:<ip>, extaddr:<domain>. On public
+        /// servers, extip:<ip> is usually the most deterministic choice.
         #[arg(long, default_value = "any")]
         nat: String,
+
+        /// Local IP address used by execution and consensus P2P listeners.
+        ///
+        /// By default, LogEx uses automatic address-family selection. Use "::"
+        /// with --nat extip:<ipv6> to select IPv6; LogEx narrows the listener
+        /// to the concrete local public IPv6 address when it can verify that
+        /// address locally.
+        #[arg(long, value_name = "IP")]
+        p2p_bind_ip: Option<IpAddr>,
+
+        /// Execution-layer bootnode to seed discovery and direct dials.
+        ///
+        /// Accepts enode:// records with IP literals or DNS names, or signed
+        /// enr: records. May be repeated or comma-separated. IPv6 enodes must
+        /// use the standard bracketed form, for example
+        /// enode://<pubkey>@[2001:db8::1]:30303?discport=30303.
+        #[arg(
+            long = "execution-bootnode",
+            value_name = "ENODE_OR_ENR",
+            value_delimiter = ','
+        )]
+        execution_bootnodes: Vec<String>,
+
+        /// Execution-layer discovery v5 UDP port.
+        ///
+        /// Used for strict IPv6 execution peer discovery. The default matches
+        /// Reth's execution discv5 default.
+        #[arg(long = "execution-discv5-port", default_value = "9200")]
+        execution_discv5_port: u16,
 
         /// Consensus-layer discovery port (UDP discv5).
         #[arg(long, default_value = "9000")]
@@ -315,6 +351,12 @@ pub struct Config {
     #[serde(default)]
     pub nat: Option<String>,
     #[serde(default)]
+    pub p2p_bind_ip: Option<IpAddr>,
+    #[serde(default)]
+    pub execution_bootnodes: Option<Vec<String>>,
+    #[serde(default)]
+    pub execution_discv5_port: Option<u16>,
+    #[serde(default)]
     pub http_host: Option<IpAddr>,
     #[serde(default)]
     pub grpc_host: Option<IpAddr>,
@@ -390,6 +432,49 @@ mod tests {
     }
 
     #[test]
+    fn sync_accepts_explicit_ipv6_p2p_bind_ip() {
+        let cli = Cli::try_parse_from(["logex", "sync", "--p2p-bind-ip", "::"]).unwrap();
+
+        let Command::Sync { p2p_bind_ip, .. } = cli.command else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(p2p_bind_ip, Some("::".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn sync_accepts_execution_bootnodes() {
+        let bootnode = "enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151";
+        let cli = Cli::try_parse_from(["logex", "sync", "--execution-bootnode", bootnode]).unwrap();
+
+        let Command::Sync {
+            execution_bootnodes,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(execution_bootnodes, vec![bootnode.to_owned()]);
+    }
+
+    #[test]
+    fn sync_accepts_execution_discv5_port() {
+        let cli =
+            Cli::try_parse_from(["logex", "sync", "--execution-discv5-port", "9201"]).unwrap();
+
+        let Command::Sync {
+            execution_discv5_port,
+            ..
+        } = cli.command
+        else {
+            panic!("expected sync command");
+        };
+
+        assert_eq!(execution_discv5_port, 9201);
+    }
+
+    #[test]
     fn sync_accepts_disable_historical_sync_flag() {
         let cli = Cli::try_parse_from(["logex", "sync", "--disable-historical-sync"]).unwrap();
 
@@ -418,6 +503,9 @@ mod tests {
         assert!(help.contains("Public gRPC requires --allow-public-grpc"));
         assert!(help.contains("--dashboard-password <PASSWORD>"));
         assert!(help.contains("--allow-public-grpc"));
+        assert!(help.contains("--p2p-bind-ip <IP>"));
+        assert!(help.contains("IPv6 enodes must"));
+        assert!(help.contains("--execution-bootnode <ENODE_OR_ENR>"));
         assert!(help.contains("--disable-historical-sync"));
         assert!(help.contains("only follows verified consensus anchors forward"));
     }
