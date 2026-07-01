@@ -98,12 +98,19 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Reconfirmed cleanup after the latest droplet checks: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary proof data directory remained active.
 - Re-audited geth and Nethermind discovery source against LogEx's strict IPv6 path. Geth defaults execution DNS discovery to the same `all.mainnet.ethdisco.net` tree, and Nethermind's relevant production pattern is persistent peer scoring/backoff rather than a broader public IPv6 EL source. No additional default public IPv6 EL peer source was found to justify a code change.
 - Re-audited the exact Reth `v1.11.3` network code and LogEx `PeerManager` integration. Confirmed the current production-safe path is one advertised EL family per Reth network manager plus dual-family outbound dialing where available, not an in-branch composite manager.
+- Re-ran focused local validation for automatic P2P family selection, outbound-only known-peer fallback warnings, execution peer-manager IPv6/DNS/known-peer behavior, and `/status` P2P family serialization.
+- Rechecked PR #98 after GitHub Actions became available: hosted `Check`, `Format`, `Clippy`, and `Test` jobs are all green, and the PR remains mergeable.
+- Updated PR #98's description with the current validation evidence and the remaining strict-public-IPv6 EL peer-scarcity caveat.
 
 ## Remaining TODOs
 
-1. Conclude the IPv6 P2P branch.
+1. Decide whether the strict-public-IPv6 performance caveat is acceptable for this branch.
+   - Reason: strict IPv6 EL/CL transport, socket cleanliness, public fallback behavior, and known-peer fallback are validated, but public mainnet EL IPv6 peer availability is sparse and does not currently prove IPv4-like historical sync performance from DNS-only discovery.
+   - Completion criteria: either accept this branch as production-ready with the documented caveat and reliable explicit IPv6 bootnodes / warmed known peers recommended for deterministic strict IPv6 EL startup, or provide/identify a reliable public IPv6 EL peer source and verify sustained strict-IPv6 historical sync performance comparable to IPv4.
+
+2. Conclude the IPv6 P2P branch.
    - Reason: the branch contains useful IPv6 socket, address-family, checkpoint, DNS, bootnode, and diagnostic improvements.
-   - Completion criteria: run hosted checks when GitHub Actions quota is available and merge PR #98 only when checks and review criteria are satisfied.
+   - Completion criteria: mark PR #98 ready and merge it only after the strict-public-IPv6 performance caveat decision above is resolved.
 
 ## Design Decisions
 
@@ -255,16 +262,17 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Rechecked the droplet after the latest controlled and public IPv6 proofs; no production code cleanup was needed, and no temporary process, listener, IPv4 reject rule, or proof data directory remained active.
 - Rechecked geth and Nethermind discovery behavior before making another peer-source change; no obsolete LogEx DNS path or missing default DNS source was identified.
 - Rechecked Reth `v1.11.3` networking and LogEx `PeerManager` boundaries before attempting dual-stack inbound changes; no low-risk code path was found that would safely add simultaneous advertised IPv4 and IPv6 EL inbound without a larger manager abstraction.
+- Removed the temporary `.pr98-body.md` file after using it to update the external PR description; no repository code cleanup was required in this documentation-only pass.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`; `docs: record latest ipv6 controlled proof`; `docs: record current ipv6 proof results`; `docs: record latest ipv6 droplet verification`; `docs: record ipv6 peer source audit`; `docs: close ipv6 dual-stack decision`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`; `docs: record latest ipv6 controlled proof`; `docs: record current ipv6 proof results`; `docs: record latest ipv6 droplet verification`; `docs: record ipv6 peer source audit`; `docs: close ipv6 dual-stack decision`; `docs: record ipv6 ci audit`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
-- Blockers: GitHub Actions quota has previously blocked hosted validation.
+- Blockers: hosted CI is now green, but the PR remains draft until the strict-public-IPv6 performance caveat decision is resolved.
 
 ## Known Issues or Risks
 
