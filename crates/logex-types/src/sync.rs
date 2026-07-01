@@ -268,6 +268,8 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_pipeline_depth: usize,
     /// Current target depth for buffered historical fetch outcomes.
     pub historical_scheduler_buffer_depth: usize,
+    /// Current target depth for cheap queued historical fetch plans.
+    pub historical_scheduler_ready_plan_depth: usize,
     /// Number of new fetches currently admitted by critical-path refill.
     pub historical_scheduler_critical_refill_limit: usize,
     /// Number of new fetches currently admitted by write-period refill.

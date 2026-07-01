@@ -54,7 +54,15 @@ pub async fn run_background_indexer(
         }
 
         {
-            let active_sync = sync_is_active(&state) || historical_sync_is_incomplete(&state).await;
+            let active_sync_status = sync_is_active(&state);
+            let historical_incomplete = historical_sync_is_incomplete(&state).await;
+            let active_sync = active_sync_status || historical_incomplete;
+            if should_defer_compaction_for_historical_sync(historical_incomplete) {
+                tracing::debug!(
+                    "skipping background compaction while historical sync is incomplete"
+                );
+                continue;
+            }
             if active_sync
                 && let Some(available_memory_bytes) = active_sync_compaction_memory_pressure()
             {
@@ -368,6 +376,10 @@ fn should_defer_query_indexing(active_sync: bool) -> bool {
     active_sync
 }
 
+fn should_defer_compaction_for_historical_sync(historical_incomplete: bool) -> bool {
+    historical_incomplete
+}
+
 fn active_sync_compaction_limits(raw_backlog: usize, base_limit: usize) -> (usize, usize) {
     let raw_limit = if raw_backlog >= ACTIVE_SYNC_COMPACTION_HIGH_BACKLOG {
         ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT
@@ -606,6 +618,12 @@ mod tests {
         );
         assert!(should_defer_query_indexing(true));
         assert!(!should_defer_query_indexing(false));
+    }
+
+    #[test]
+    fn compaction_is_deferred_while_historical_sync_is_incomplete() {
+        assert!(should_defer_compaction_for_historical_sync(true));
+        assert!(!should_defer_compaction_for_historical_sync(false));
     }
 
     #[test]

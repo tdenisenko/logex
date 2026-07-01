@@ -55,6 +55,7 @@ impl SyncEngine {
         status.historical_scheduler_write_backpressure = scheduler.write_backpressure;
         status.historical_scheduler_pipeline_depth = scheduler.pipeline_depth;
         status.historical_scheduler_buffer_depth = scheduler.buffer_depth;
+        status.historical_scheduler_ready_plan_depth = scheduler.ready_plan_depth;
         status.historical_scheduler_critical_refill_limit = scheduler.critical_refill_limit;
         status.historical_scheduler_write_refill_limit = scheduler.write_refill_limit;
         status
