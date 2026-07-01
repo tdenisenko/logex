@@ -1185,6 +1185,7 @@
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
           <div class="debug-item"><span class="k">P2P address mode</span><span class="v" id="debugP2pAddressMode">--</span></div>
           <div class="debug-item"><span class="k">P2P address families</span><span class="v" id="debugP2pAddressFamilies">--</span></div>
+          <div class="debug-item"><span class="k">Execution peer families</span><span class="v" id="debugExecutionPeerFamilies">--</span></div>
           <div class="debug-item"><span class="k">P2P warning</span><span class="v" id="debugP2pWarning">--</span></div>
           <div class="debug-item"><span class="k">Execution bootstrap warning</span><span class="v" id="debugExecutionBootstrapWarning">--</span></div>
           <div class="debug-item"><span class="k">Execution bootnodes</span><span class="v" id="debugExecutionBootnodes">--</span></div>
@@ -3238,6 +3239,11 @@ function updateStatus(data) {
     'listen ' + familyList(data.p2p_listen_families) +
     ' / dial ' + familyList(data.p2p_dial_families) +
     ' / advertised ' + familyList(data.p2p_advertised_families));
+  setText('debugExecutionPeerFamilies',
+    'connected ' + fmt(numberOrNull(executionNetwork.connected_ipv4_peers)) + ' IPv4 / ' +
+    fmt(numberOrNull(executionNetwork.connected_ipv6_peers)) + ' IPv6; serving ' +
+    fmt(numberOrNull(executionNetwork.serving_ipv4_peers)) + ' IPv4 / ' +
+    fmt(numberOrNull(executionNetwork.serving_ipv6_peers)) + ' IPv6');
   setText('debugP2pWarning', warningList(data.p2p_warnings));
   setText('debugExecutionBootstrapWarning', executionNetwork.bootstrap_warning || '--');
   setText('debugExecutionBootnodes',

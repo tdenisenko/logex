@@ -316,6 +316,10 @@ pub struct ExecutionNetworkStatus {
     pub connected_reth_peers: usize,
     /// Connected peers from other client families.
     pub connected_other_peers: usize,
+    /// Connected peers reached over IPv4 execution transport.
+    pub connected_ipv4_peers: usize,
+    /// Connected peers reached over IPv6 execution transport.
+    pub connected_ipv6_peers: usize,
     /// Serving geth peers.
     pub serving_geth_peers: usize,
     /// Serving Nethermind peers.
@@ -324,6 +328,10 @@ pub struct ExecutionNetworkStatus {
     pub serving_reth_peers: usize,
     /// Serving peers from other client families.
     pub serving_other_peers: usize,
+    /// Serving peers reached over IPv4 execution transport.
+    pub serving_ipv4_peers: usize,
+    /// Serving peers reached over IPv6 execution transport.
+    pub serving_ipv6_peers: usize,
 }
 
 /// Live sync progress, updated by the sync task, read by HTTP endpoints.

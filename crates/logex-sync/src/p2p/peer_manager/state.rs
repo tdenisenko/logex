@@ -157,8 +157,23 @@ impl PeerManager {
         let mut receipt_proven_peers = 0usize;
         let mut body_request_limit_total = 0usize;
         let mut receipt_request_limit_total = 0usize;
+        let mut connected_ipv4_peers = 0usize;
+        let mut connected_ipv6_peers = 0usize;
+        let mut serving_ipv4_peers = 0usize;
+        let mut serving_ipv6_peers = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
+            if peer.remote_record.tcp_addr().ip().is_ipv4() {
+                connected_ipv4_peers = connected_ipv4_peers.saturating_add(1);
+                if peer.is_serving {
+                    serving_ipv4_peers = serving_ipv4_peers.saturating_add(1);
+                }
+            } else {
+                connected_ipv6_peers = connected_ipv6_peers.saturating_add(1);
+                if peer.is_serving {
+                    serving_ipv6_peers = serving_ipv6_peers.saturating_add(1);
+                }
+            }
             let body_paused = peer_request_is_paused(peer, PeerRequestKind::Bodies);
             let receipt_paused = peer_request_is_paused(peer, PeerRequestKind::Receipts);
             if peer.body_blocks_per_sec > 0.0 {
@@ -288,10 +303,14 @@ impl PeerManager {
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
             connected_other_peers: client_counts.connected_other,
+            connected_ipv4_peers,
+            connected_ipv6_peers,
             serving_geth_peers: client_counts.serving_geth,
             serving_nethermind_peers: client_counts.serving_nethermind,
             serving_reth_peers: client_counts.serving_reth,
             serving_other_peers: client_counts.serving_other,
+            serving_ipv4_peers,
+            serving_ipv6_peers,
         }
     }
 

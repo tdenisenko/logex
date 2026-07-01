@@ -1479,10 +1479,14 @@ mod tests {
                     connected_nethermind_peers: 3,
                     connected_reth_peers: 1,
                     connected_other_peers: 0,
+                    connected_ipv4_peers: 4,
+                    connected_ipv6_peers: 2,
                     serving_geth_peers: 1,
                     serving_nethermind_peers: 2,
                     serving_reth_peers: 1,
                     serving_other_peers: 0,
+                    serving_ipv4_peers: 3,
+                    serving_ipv6_peers: 1,
                 }),
                 consensus_network: Some(ConsensusNetworkStatus {
                     local_enr: Some("enr:test".to_string()),
@@ -1678,7 +1682,11 @@ mod tests {
         assert_eq!(status["execution_network"]["connected_geth_peers"], 2);
         assert_eq!(status["execution_network"]["connected_nethermind_peers"], 3);
         assert_eq!(status["execution_network"]["connected_reth_peers"], 1);
+        assert_eq!(status["execution_network"]["connected_ipv4_peers"], 4);
+        assert_eq!(status["execution_network"]["connected_ipv6_peers"], 2);
         assert_eq!(status["execution_network"]["serving_nethermind_peers"], 2);
+        assert_eq!(status["execution_network"]["serving_ipv4_peers"], 3);
+        assert_eq!(status["execution_network"]["serving_ipv6_peers"], 1);
         assert_eq!(status["execution_network"]["body_request_ready_peers"], 4);
         assert_eq!(
             status["execution_network"]["receipt_request_ready_peers"],
