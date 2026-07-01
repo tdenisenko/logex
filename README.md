@@ -241,13 +241,20 @@ servers.
 
 ## P2P Address Selection And IPv6
 
-By default, `--nat any` chooses the safest reachable P2P mode automatically:
+By default, `--nat any` chooses the safest reachable P2P mode automatically.
+Automatic mode only advertises a locally owned public address after that address
+family passes a short outbound reachability probe:
 
-1. If a locally owned public IPv4 address is available, EL advertises IPv4.
+1. If a locally owned public IPv4 address is available and reachable, EL
+   advertises IPv4.
 2. If no public IPv4 is available but a locally owned public IPv6 address is
-   available, EL advertises IPv6.
+   available and reachable, EL advertises IPv6.
 3. If no public address is available, LogEx runs outbound-only and relies on
    discovery plus persisted known peers learned during previous runs.
+
+Home-router port forwarding cannot be proven safely from inside the process. If
+the machine only has a private LAN address but the router forwards Ethereum P2P
+ports from a real public WAN address, pass `--nat extip:<public-ip>` explicitly.
 
 When both IPv4 and IPv6 routes exist, LogEx may still dial outbound peers over
 both families even though EL advertises only one public family. CL can advertise

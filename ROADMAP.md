@@ -10,7 +10,7 @@ Historical EL sync has completed a post-fix pivot-to-genesis baseline on the Mac
 
 IPv6-only mode is functionally validated on temporary droplet `root@152.42.222.119` with public IPv6 `2400:6180:0:d2:0:2:fa9c:1000`. Strict IPv6 CL networking works with IPv6 DNS, `--grpc-host ::1`, IPv6-only P2P bind/dial settings, and an owner firewall rejecting IPv4 egress for the LogEx runtime user. Public mainnet strict IPv6 EL sync works when reliable IPv6 execution bootnodes/known peers are available: the latest current-HEAD bounded proof opened zero IPv4 sockets, listened/advertised/dialed only IPv6, accepted one serving public EL peer from the refreshed IPv6 enode set, tracked live head, and moved historical sync backward. Public DNS-only EL discovery remains sparse and non-deterministic, so the README now recommends reliable IPv6 EL bootnodes or a warmed known-peer cache for production strict IPv6 runs.
 
-Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
+Default dual-stack startup now keeps execution on the preferred public IPv4 path while allowing consensus to advertise IPv6 when a public IPv6 route is also available. Automatic P2P selection now treats an address family as usable for advertised public mode only after a short outbound reachability probe succeeds, so a blocked IPv4 route no longer prevents fallback to public IPv6. This fixed the droplet default-mode stall where EL waited for CL indefinitely: the post-fix bounded smoke reached `Syncing`, CL peaked at 29 active sessions, and EL accepted 13 sessions while execution still advertised IPv4.
 
 Public mainnet EL peer availability over strict IPv6 is sparse, so performance is expected to be lower and startup may take longer than IPv4 or dual-stack mode. A corrected official `ethereum/discv4-dns-lists` snapshot audit found 594 IPv6 execution ENRs and only 14 open IPv6 TCP endpoints from the droplet, and the latest post-resolver bounded proofs submitted thousands of strict-IPv6 EL dials without an accepted serving session. Earlier bounded proof windows did show public IPv6 EL sessions are possible, but startup is not deterministic enough to claim IPv4-like performance from public discovery alone. LogEx keeps sparse submitted EL dial candidates alive across silent timeout windows, and DNS ENRs without direct TCP fields are retained for signed IPv6 discovery when they carry `udp6`.
 
@@ -79,6 +79,8 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Confirmed current HEAD reaches live `Syncing` in strict IPv6 mode with zero IPv4 sockets, one serving public EL peer over IPv6, CL active sessions, live head tracking, and historical sync moving backward with non-zero logs/sec.
 - Stopped the temporary proof client and removed the owner IPv4 block plus temporary data directory after validation.
 - Added execution peer address-family counters to status and the advanced dashboard so strict IPv6 and dual-family outbound behavior can be verified from the UI/API without shell access.
+- Changed automatic P2P address-family detection from local UDP route inspection to bounded TCP reachability probes, so `--nat any` only advertises a public IPv4 or IPv6 address when that family can actually make outbound connections.
+- Updated CLI help and README guidance to clarify automatic reachability probing and the need for explicit `--nat extip:<public-ip>` when a home router forwards P2P ports from a public WAN address.
 
 ## Remaining TODOs
 
@@ -127,6 +129,10 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Dual-family DNS direct dialing spreads dual-endpoint ENRs across IPv4 and IPv6.
   - Why: automatic dual-stack mode should exercise both outbound families when both routes are usable; always selecting the IPv4 endpoint from a dual-endpoint ENR underused IPv6 after the initial DNS seed collection.
   - Tradeoff: each Reth execution peer id still maps to one pending direct dial at a time, so this is deterministic spreading across peers rather than simultaneous IPv4 and IPv6 dials to the same peer.
+
+- Automatic public address selection requires outbound reachability for the selected family.
+  - Why: a host can have an IPv4 route or address that exists but is blocked or stale; choosing it ahead of working IPv6 can leave the node in a bad default mode.
+  - Tradeoff: startup performs short TCP probes to public endpoints and may choose outbound-only if those probes are blocked, even if a user has a specialized network where Ethereum P2P would still work. Operators can override with `--nat extip:<ip>` and `--p2p-bind-ip`.
 
 - Consensus bootnodes and cached peers are filtered by dial family before discovery seeding.
   - Why: strict IPv6 mode should not seed IPv4-only ENRs or retain cached peers without a compatible dial address.
@@ -231,12 +237,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Inspected the dual-family DNS candidate path and replaced the obsolete IPv4-first assumption for dual-endpoint ENRs with deterministic family spreading.
 - Confirmed the temporary IPv6 droplet proof cleanup removed the LogEx process, P2P/dashboard listeners, owner IPv4 reject rule, and temporary proof data directory.
 - Inspected active execution peer status construction and reused the existing `NodeRecord` remote TCP address instead of adding duplicate session tracking.
+- Replaced obsolete local UDP route-only P2P family probing with bounded TCP reachability probing; no other startup selection code was removed because explicit NAT and outbound-only modes still need the existing candidate filtering paths.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.

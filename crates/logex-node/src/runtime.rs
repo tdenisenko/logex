@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -37,11 +37,12 @@ const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
 const MAINNET_SECONDS_PER_SLOT: u64 = 12;
 const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
-const IPV4_ROUTE_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
-const IPV6_ROUTE_PROBE: (Ipv6Addr, u16) = (
+const IPV4_REACHABILITY_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
+const IPV6_REACHABILITY_PROBE: (Ipv6Addr, u16) = (
     Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
     80,
 );
+const P2P_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoricalSyncMode {
@@ -173,16 +174,17 @@ pub async fn run_sync(options: RunSyncOptions) {
         dashboard_password,
         disable_historical_sync,
     } = options;
-    let mut p2p_address = match select_p2p_address(&nat, p2p_bind_ip, p2p_port).await {
-        Ok(selection) => selection,
-        Err(error) => {
-            tracing::error!(%error, "invalid EL NAT resolver");
-            std::process::exit(1);
-        }
-    };
+    let local_p2p_candidates = detect_local_p2p_addresses().await;
+    let mut p2p_address =
+        match select_p2p_address(&nat, p2p_bind_ip, p2p_port, local_p2p_candidates).await {
+            Ok(selection) => selection,
+            Err(error) => {
+                tracing::error!(%error, "invalid EL NAT resolver");
+                std::process::exit(1);
+            }
+        };
     add_runtime_p2p_warnings(&mut p2p_address, &execution_bootnodes);
-    let consensus_p2p_address =
-        select_consensus_p2p_address(&p2p_address, detect_local_p2p_addresses());
+    let consensus_p2p_address = select_consensus_p2p_address(&p2p_address, local_p2p_candidates);
     let nat = p2p_address.nat.clone();
     let p2p_external_ip = p2p_address.external_ip;
     let p2p_bind_ip = p2p_address.bind_ip;
@@ -573,12 +575,12 @@ async fn select_p2p_address(
     nat: &str,
     p2p_bind_ip: Option<IpAddr>,
     p2p_port: u16,
+    candidates: LocalP2pAddressCandidates,
 ) -> Result<P2pAddressSelection, String> {
     let parsed = nat
         .parse::<NatResolver>()
         .map_err(|error| error.to_string())?;
     if parsed == NatResolver::Any {
-        let candidates = detect_local_p2p_addresses();
         return Ok(choose_auto_p2p_address(candidates, p2p_bind_ip));
     }
 
@@ -588,7 +590,7 @@ async fn select_p2p_address(
         resolved,
         p2p_bind_ip,
         p2p_port,
-        detect_local_p2p_addresses(),
+        candidates,
         &mut warnings,
     ))
 }
@@ -752,7 +754,7 @@ fn choose_auto_p2p_address(
 
     let (nat, bind_ip, dial_families, external_ip, mode) = selection.unwrap_or_else(|| {
         warnings.push(
-            "no locally owned public IPv4 or IPv6 address was detected; using outbound-only P2P without advertising a public address"
+            "no locally owned public IPv4 or IPv6 address with outbound reachability was detected; using outbound-only P2P without advertising a public address"
                 .to_owned(),
         );
         let bind_ip = p2p_bind_ip.unwrap_or_else(|| candidates.outbound_only_bind_ip());
@@ -780,29 +782,43 @@ fn choose_auto_p2p_address(
     }
 }
 
-fn detect_local_p2p_addresses() -> LocalP2pAddressCandidates {
-    LocalP2pAddressCandidates {
-        ipv4: default_route_ipv4(),
-        ipv6: default_route_ipv6(),
-    }
+async fn detect_local_p2p_addresses() -> LocalP2pAddressCandidates {
+    let (ipv4, ipv6) = tokio::join!(default_route_ipv4(), default_route_ipv6());
+    LocalP2pAddressCandidates { ipv4, ipv6 }
 }
 
-fn default_route_ipv4() -> Option<Ipv4Addr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect(IPV4_ROUTE_PROBE).ok()?;
-    match socket.local_addr().ok()?.ip() {
+async fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let stream = connect_reachability_probe(SocketAddr::new(
+        IpAddr::V4(IPV4_REACHABILITY_PROBE.0),
+        IPV4_REACHABILITY_PROBE.1,
+    ))
+    .await?;
+    match stream.local_addr().ok()?.ip() {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
     }
 }
 
-fn default_route_ipv6() -> Option<Ipv6Addr> {
-    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect(IPV6_ROUTE_PROBE).ok()?;
-    match socket.local_addr().ok()?.ip() {
+async fn default_route_ipv6() -> Option<Ipv6Addr> {
+    let stream = connect_reachability_probe(SocketAddr::new(
+        IpAddr::V6(IPV6_REACHABILITY_PROBE.0),
+        IPV6_REACHABILITY_PROBE.1,
+    ))
+    .await?;
+    match stream.local_addr().ok()?.ip() {
         IpAddr::V4(_) => None,
         IpAddr::V6(ip) => Some(ip),
     }
+}
+
+async fn connect_reachability_probe(addr: SocketAddr) -> Option<tokio::net::TcpStream> {
+    tokio::time::timeout(
+        P2P_REACHABILITY_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .ok()?
+    .ok()
 }
 
 fn is_public_ipv4(ip: Ipv4Addr) -> bool {
