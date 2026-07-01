@@ -94,6 +94,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Re-ran a 10-minute checkpoint-enabled public strict-IPv6 smoke: LogEx remained socket-clean, CL reached 92 active sessions and 2,673 dialable peers, EL accepted 144 IPv6 DNS candidates and submitted 913 IPv6 dials, but no public EL peer accepted a session.
 - Re-probed the cached public IPv6 execution ENR set from the droplet and found zero currently open IPv6 RLPx endpoints, explaining the public EL result as peer availability rather than a LogEx address-family bug.
 - Reconfirmed cleanup after the latest droplet checks: no LogEx process, P2P/dashboard listener, owner IPv4 reject rule, or temporary proof data directory remained active.
+- Re-audited geth and Nethermind discovery source against LogEx's strict IPv6 path. Geth defaults execution DNS discovery to the same `all.mainnet.ethdisco.net` tree, and Nethermind's relevant production pattern is persistent peer scoring/backoff rather than a broader public IPv6 EL source. No additional default public IPv6 EL peer source was found to justify a code change.
 
 ## Remaining TODOs
 
@@ -167,7 +168,7 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 ## Challenges and Resolutions
 
 - Challenge: public EL IPv6 peers were effectively unavailable from the test droplet.
-  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, kept explicit IPv6 startup warnings visible in status/dashboard, and finally proved public mainnet EL sync through audited IPv6 enode bootnodes with zero IPv4 sockets.
+  - Resolution: compared LogEx behavior with geth, audited major client source, proved controlled IPv6 EL transport with explicit bootnodes, confirmed the current Reth static mainnet execution bootnodes are IPv4-only, confirmed geth also defaults execution DNS discovery to `all.mainnet.ethdisco.net`, kept explicit IPv6 startup warnings visible in status/dashboard, and finally proved public mainnet EL sync through audited IPv6 enode bootnodes with zero IPv4 sockets.
   - Remaining: current public IPv6 EL discovery is not deterministic; DNS-only strict IPv6 should be documented as best-effort unless reliable IPv6 execution bootnodes or a warmed known-peer cache are available.
 
 - Challenge: strict IPv6 accepted EL peers were not persisted for restart.
@@ -253,12 +254,13 @@ Temporary IPv6 droplet clients are stopped after bounded proof windows. Do not l
 - Replaced obsolete local UDP route-only P2P family probing with bounded TCP reachability probing; no other startup selection code was removed because explicit NAT and outbound-only modes still need the existing candidate filtering paths.
 - Rechecked temporary proof scripts and droplet state after the latest bounded IPv6 runs; no production code, firewall rule, resolver override, temporary data directory, or LogEx process was left active on the droplet.
 - Rechecked the droplet after the latest controlled and public IPv6 proofs; no production code cleanup was needed, and no temporary process, listener, IPv4 reject rule, or proof data directory remained active.
+- Rechecked geth and Nethermind discovery behavior before making another peer-source change; no obsolete LogEx DNS path or missing default DNS source was identified.
 
 ## Git Workflow
 
 - Current branch: `fix/ipv6-p2p-sync`.
 - New branch created this run: no; continued the existing IPv6 validation branch.
-- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`; `docs: record latest ipv6 controlled proof`; `docs: record current ipv6 proof results`; `docs: record latest ipv6 droplet verification`.
+- Commits made this run: `docs: record ipv6-only validation`; `docs: record strict ipv6 public proof`; `docs: update ipv6 branch workflow`; `docs: record strict ipv6 runtime proof`; `docs: record ipv6 validation checks`; `fix: join dns txt chunks for ipv6 discovery`; `docs: record ipv6 peer scarcity proof`; `docs: record geth ipv6 peer comparison`; `fix: surface p2p bootstrap warnings`; `docs: record dual-stack execution audit`; `fix: report outbound-only known-peer fallback`; `docs: record current ipv6 proof status`; `fix: expose execution bootnode family rejections`; `docs: record latest strict ipv6 public smoke`; `docs: record refreshed ipv6 proof`; `docs: record checkpoint ipv6 proof`; `docs: record latest ipv6 droplet proof`; `fix: persist ipv6 execution peers after submitted dials`; `docs: document strict ipv6 production mode`; `fix: clarify dual-stack p2p warnings`; `fix: spread dual-stack dns candidates`; `docs: record current ipv6 sync proof`; `fix: report execution peer address families`; `fix: probe p2p family reachability`; `docs: record latest ipv6 controlled proof`; `docs: record current ipv6 proof results`; `docs: record latest ipv6 droplet verification`; `docs: record ipv6 peer source audit`.
 - Pull request status: draft PR #98 created at https://github.com/tdenisenko/logex/pull/98.
 - Remote branch status: `fix/ipv6-p2p-sync` is pushed to `origin`.
 - Merge status: not merged.
