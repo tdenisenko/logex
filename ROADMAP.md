@@ -4,7 +4,7 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current branch: `docs/finalize-p2p-download-roadmap`.
+Current branch after this completed work: `master`.
 
 The main dashboard now reports Execution Layer P2P download throughput instead of an ETA tile. The metric is measured from successful decoded block-body and receipt payloads returned by peers, then shown as Mbps in the UI.
 
@@ -52,12 +52,16 @@ No remaining TODOs for the dashboard P2P download-rate task.
 
 ## Git Workflow
 
-- Current branch: `docs/finalize-p2p-download-roadmap`.
-- New branch created: yes, to remove stale post-merge roadmap state.
+- Current branch after this completed work: `master`.
+- Task branches created:
+  - `feature/dashboard-p2p-download-rate`
+  - `docs/finalize-p2p-download-roadmap`
 - Commits made during this run:
   - `9dc8b5e5 feat: show p2p download throughput`
-- Pull request status: PR #99 was created, checks passed, and it was merged.
-- Merge status: merged into `master` as `e1180489`.
+- Pull request status:
+  - PR #99 was created, checks passed, and merged.
+  - PR #100 was created for the post-merge roadmap correction, checks passed, and merged.
+- Merge status: dashboard P2P download-rate work is merged into `master`.
 - Blockers: none known.
 
 ## Known Issues or Risks
