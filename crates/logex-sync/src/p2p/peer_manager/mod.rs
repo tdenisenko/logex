@@ -175,6 +175,9 @@ struct ExecutionPeerSessionMetrics {
     configured_bootnode_family_rejections: usize,
     submitted_dials_total: u64,
     submitted_dial_expirations: u64,
+    p2p_download_bytes_per_sec: f64,
+    p2p_downloaded_payload_bytes: u64,
+    p2p_download_rate_updated_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]

@@ -6,6 +6,8 @@ use super::*;
 use crate::p2p::persistence::persist_known_peers_if_changed;
 
 const PEER_RATE_EWMA_WEIGHT: f64 = 0.25;
+const PEER_DOWNLOAD_RATE_EWMA_WEIGHT: f64 = 0.25;
+const PEER_DOWNLOAD_RATE_FRESHNESS: Duration = Duration::from_secs(15);
 const RECEIPT_QUARANTINE_DURATION: Duration = Duration::from_secs(5 * 60);
 const RECEIPT_REQUEST_FAILURE_QUARANTINE_DURATION: Duration = Duration::from_secs(30);
 
@@ -216,6 +218,12 @@ impl PeerManager {
             self.peers.len(),
             PeerRequestKind::Receipts,
         );
+        let p2p_download_bytes_per_sec = self
+            .session_metrics
+            .p2p_download_rate_updated_at
+            .filter(|updated_at| updated_at.elapsed() <= PEER_DOWNLOAD_RATE_FRESHNESS)
+            .map(|_| self.session_metrics.p2p_download_bytes_per_sec.round() as u64)
+            .unwrap_or_default();
 
         ExecutionNetworkStatus {
             max_peers: self.max_peers,
@@ -299,6 +307,8 @@ impl PeerManager {
                 .receipt_failures,
             historical_scheduler_body_blocks: self.body_receipt_scheduler_metrics.body_blocks,
             historical_scheduler_receipt_blocks: self.body_receipt_scheduler_metrics.receipt_blocks,
+            p2p_download_bytes_per_sec,
+            p2p_downloaded_payload_bytes: self.session_metrics.p2p_downloaded_payload_bytes,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -674,6 +684,25 @@ impl PeerManager {
         } else {
             observed_rate
         };
+    }
+
+    pub(super) fn record_p2p_download_payload(&mut self, payload_bytes: u64, elapsed: Duration) {
+        if payload_bytes == 0 || elapsed.is_zero() {
+            return;
+        }
+        self.session_metrics.p2p_downloaded_payload_bytes = self
+            .session_metrics
+            .p2p_downloaded_payload_bytes
+            .saturating_add(payload_bytes);
+        let observed_bytes_per_sec = payload_bytes as f64 / elapsed.as_secs_f64().max(0.001);
+        let rate = &mut self.session_metrics.p2p_download_bytes_per_sec;
+        *rate = if *rate > 0.0 {
+            (*rate * (1.0 - PEER_DOWNLOAD_RATE_EWMA_WEIGHT))
+                + (observed_bytes_per_sec * PEER_DOWNLOAD_RATE_EWMA_WEIGHT)
+        } else {
+            observed_bytes_per_sec
+        };
+        self.session_metrics.p2p_download_rate_updated_at = Some(Instant::now());
     }
 
     pub(super) fn reset_peer_timeout(&mut self, peer_id: PeerId) {
