@@ -4,66 +4,78 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current branch after this completed work: `master`.
+Current branch: `fix/auto-refresh-stale-checkpoint`.
 
-The main dashboard now reports Execution Layer P2P download throughput instead of an ETA tile. The metric is measured from successful decoded block-body and receipt payloads returned by peers, then shown as Mbps in the UI.
+The Mac mini is running this branch against the saved full-sync data directory. Public dashboard forwarding through `157.245.195.72:18683` is active, and the client can bridge a stale restart gap from the saved execution head to a refreshed consensus checkpoint.
 
 ## Completed Since Last Run
 
-- Added execution P2P decoded payload byte-rate tracking for successful body and receipt responses.
-- Exposed `p2p_download_bytes_per_sec` and `p2p_downloaded_payload_bytes` under `execution_network` in `/status`.
-- Replaced the main dashboard ETA tile with a `P2P download` Mbps tile.
-- Added the same throughput and cumulative decoded payload metric to advanced dashboard details.
-- Removed obsolete dashboard ETA formatting helpers that no longer had call sites.
+- Added automatic startup recovery for stale persisted consensus state and stale local execution progress.
+- Added a checkpoint-gap bridge that validates the EL parent chain up to a fresh CL checkpoint anchor before ingesting the missing logs.
+- Pipelined checkpoint-gap body/receipt fetching with bounded lookahead so long-offline forward catch-up no longer waits for one chunk to fully ingest before requesting the next.
+- Fixed checkpoint-gap progress accounting so dashboard logs/sec is sampled once per ingested batch instead of once per block after a batch write.
+- Kept the existing EL/log storage and known peer cache intact during checkpoint refresh.
+- Verified the remote dashboard path through the VPS and restarted the native Mac mini client with the fix.
 
 ## Remaining TODOs
 
-No remaining TODOs for the dashboard P2P download-rate task.
+No remaining TODOs for the stale-checkpoint restart recovery task.
 
 ## Design Decisions
 
-- Use decoded P2P payload bytes rather than raw socket bytes.
-  - Why: Reth's current network handle does not expose per-peer transport byte counters, while decoded body/receipt responses are available at the request accounting layer.
-  - Alternatives considered: estimate throughput from block/log progress or add invasive transport hooks. Progress-derived rates are less direct, and transport hooks would be much higher risk for this UI change.
-  - Tradeoff: The metric represents useful Ethereum payload throughput, not encrypted TCP overhead or protocol framing bytes.
+- Archive stale `cl/consensus_state.json` instead of deleting it.
+  - Why: The client can recover automatically while preserving a diagnostic copy of the old trusted state.
+  - Alternatives considered: fail startup and require manual data-dir surgery. That was operationally fragile and caused the dashboard outage.
+  - Tradeoff: The data directory may retain a small archived consensus snapshot after recovery.
 
-- Expose bytes/sec in the API and format Mbps in the browser.
-  - Why: Integer bytes/sec keeps the Rust status type simple and precise while preserving the dashboard wording the user requested.
-  - Alternatives considered: expose floating-point Mbps directly. That would require weakening the existing `ExecutionNetworkStatus` equality semantics.
-  - Tradeoff: API consumers convert to their preferred network unit.
+- Bridge long-offline gaps with EL parent-chain validation ending at a fresh CL checkpoint anchor.
+  - Why: CL historical sync is intentionally not required; the fresh checkpoint execution hash is enough to validate the canonical EL ancestor chain back to the saved head.
+  - Alternatives considered: require a fresh data directory, or reintroduce CL historical sync. Both add unnecessary operational cost for this restart case.
+  - Tradeoff: The bridge is correctness-first and less optimized than the normal historical pipeline.
 
-- Decay stale P2P download rate to zero after a short freshness window.
-  - Why: The dashboard should not show an old high throughput number when no body or receipt payloads have arrived recently.
-  - Alternatives considered: keep the last EWMA indefinitely. That would be misleading during stalls or idle periods.
-  - Tradeoff: Very bursty request windows may briefly show zero between payload samples.
+- Account checkpoint-gap progress per contiguous batch.
+  - Why: The gap bridge ingests rows in batches; per-block progress updates after a batch write distort live logs/sec because each block update can be separated by only microseconds.
+  - Alternatives considered: keep per-block progress updates. That made the dashboard report impossible rates during catch-up.
+  - Tradeoff: The live forward metric is chunk-granular during restart recovery, which matches the actual batch-oriented work.
 
 ## Challenges and Resolutions
 
-- Challenge: The previous ETA field was computed from sync progress and did not reflect actual P2P download activity.
-  - Resolution: Added request-layer byte accounting for body and receipt responses and wired it into the dashboard.
-  - Remaining: No known issue for this task.
+- Challenge: A full synced data directory failed to restart after being offline because the persisted consensus state and local execution head were older than the recent checkpoint window.
+  - Resolution: Startup now resolves a fresh checkpoint, archives stale CL state, and resumes using the existing EL/log storage.
+  - Remaining: None known for correctness.
+
+- Challenge: The first recovery attempt hit the consensus reorg guard because the fresh CL anchor was ahead of the persisted recent-header window.
+  - Resolution: Future-only anchors are classified as restart gaps, then bridged by fetching and validating the EL header chain to the CL anchor.
+  - Remaining: None known.
+
+- Challenge: The dashboard briefly reported impossible multi-billion logs/sec during checkpoint-gap catch-up.
+  - Resolution: Progress tracking now supports batched forward updates, and the gap bridge records one live rate sample per ingested chunk.
+  - Remaining: None known.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the dashboard formatting helpers after replacing the ETA tile.
-- Removed unused ETA and completion-time formatting functions from the dashboard script.
-- Checked request accounting tuple usage and converted it to typed structs so payload bytes are carried consistently.
-- No additional safe removal was identified.
+- Inspected the stale startup guards, consensus reorg classifier, checkpoint-gap bridge, and progress tracker.
+- No obsolete code was safely removable in this pass; the new bridge reuses existing validation, peer, and storage primitives.
+- Removed no files.
 
 ## Git Workflow
 
-- Current branch after this completed work: `master`.
-- Task branches created:
-  - `feature/dashboard-p2p-download-rate`
-  - `docs/finalize-p2p-download-roadmap`
+- Current branch: `fix/auto-refresh-stale-checkpoint`.
+- New branch created from `master`.
 - Commits made during this run:
-  - `9dc8b5e5 feat: show p2p download throughput`
-- Pull request status:
-  - PR #99 was created, checks passed, and merged.
-  - PR #100 was created for the post-merge roadmap correction, checks passed, and merged.
-- Merge status: dashboard P2P download-rate work is merged into `master`.
-- Blockers: none known.
+  - `7dc7c6fd fix: recover stale checkpoint restarts`
+  - `af3a59a3 fix: pipeline stale checkpoint catchup`
+- Pull request status: draft PR #102 opened for `fix/auto-refresh-stale-checkpoint` into `master`.
+- Merge status: not merged yet.
+- Validation run:
+  - `cargo test -p logex-node archived_consensus_state`
+  - `cargo test -p logex-node restart_guard`
+  - `cargo test -p logex-sync locate_consensus_reorg`
+  - `cargo test -p logex-sync checkpoint_gap_pipeline_depth`
+  - `cargo test -p logex-sync forward_batch_progress_records_one_live_rate_sample`
+  - `cargo clippy -p logex-node -p logex-sync --all-targets -- -D warnings`
 
 ## Known Issues or Risks
 
-- `p2p_download_bytes_per_sec` measures decoded Ethereum body/receipt payloads from successful responses, not raw encrypted network interface throughput.
+- The checkpoint-gap bridge is only for long-offline restart recovery. Normal historical reverse sync and live tip-following paths are unchanged.
+- The local Codex sandbox cannot directly curl the public VPS dashboard, but the VPS can reach `10.66.0.2:18683` and packet capture showed public TCP/18683 traffic being forwarded and answered.

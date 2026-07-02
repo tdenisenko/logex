@@ -137,7 +137,16 @@ impl ProgressTracker {
 
     /// Record that a block has been ingested.
     pub fn record_block(&mut self, block_number: u64, log_count: u64) {
-        self.blocks_processed += 1;
+        self.record_blocks(block_number, 1, log_count);
+    }
+
+    /// Record that a contiguous batch of forward blocks has been ingested.
+    pub fn record_blocks(&mut self, block_number: u64, block_count: u64, log_count: u64) {
+        if block_count == 0 {
+            return;
+        }
+
+        self.blocks_processed += block_count;
         self.logs_ingested += log_count;
 
         let now = Instant::now();
@@ -451,6 +460,22 @@ mod tests {
         let decayed = smoothed_live_log_rate(100.0, 0.0);
         assert!(decayed > 0.0);
         assert!(decayed < 100.0);
+    }
+
+    #[test]
+    fn forward_batch_progress_records_one_live_rate_sample() {
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let mut tracker = ProgressTracker::new(Arc::clone(&status));
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        tracker.record_blocks(128, 128, 1_280);
+
+        let status = status.lock().unwrap().clone();
+        assert_eq!(status.current_block, 128);
+        assert_eq!(status.logs_ingested, 1_280);
+        assert!(status.blocks_per_sec > 0.0);
+        assert!(status.logs_per_sec > 0.0);
+        assert!(status.logs_per_sec < 1_000_000.0);
     }
 
     #[test]
