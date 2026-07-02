@@ -1,8 +1,7 @@
 use alloy_eips::BlockHashOrNumber;
-use alloy_rlp::Encodable as _;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
-use reth_primitives_traits::{BlockBody as _, InMemorySize};
+use reth_primitives_traits::BlockBody as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
@@ -129,16 +128,47 @@ fn usize_to_u64(value: usize) -> u64 {
     value.try_into().unwrap_or(u64::MAX)
 }
 
+fn compressed_rlpx_payload_bytes<T: alloy_rlp::Encodable>(payload: &T) -> u64 {
+    let uncompressed_len = payload.length();
+    if uncompressed_len == 0 {
+        return 0;
+    }
+
+    let encoded = alloy_rlp::encode(payload);
+    let compressed_len = snap::raw::Encoder::new()
+        .compress_vec(&encoded)
+        .map(|compressed| compressed.len())
+        .unwrap_or(uncompressed_len);
+    estimate_wire_bytes_from_compressed_payload(compressed_len)
+}
+
+fn compressed_rlpx_list_payload_bytes<T: alloy_rlp::Encodable>(payload: &[T]) -> u64 {
+    let uncompressed_len = alloy_rlp::list_length::<T, T>(payload);
+    if uncompressed_len == 0 {
+        return 0;
+    }
+
+    let mut encoded = Vec::with_capacity(uncompressed_len);
+    alloy_rlp::encode_list::<T, T>(payload, &mut encoded);
+    let compressed_len = snap::raw::Encoder::new()
+        .compress_vec(&encoded)
+        .map(|compressed| compressed.len())
+        .unwrap_or(uncompressed_len);
+    estimate_wire_bytes_from_compressed_payload(compressed_len)
+}
+
+fn estimate_wire_bytes_from_compressed_payload(compressed_len: usize) -> u64 {
+    ((compressed_len as f64) * RLPX_COMPRESSED_PAYLOAD_WIRE_ESTIMATE_FACTOR)
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u64
+}
+
 fn raw_block_bodies_payload_bytes(bodies: &RawBlockBodies) -> u64 {
-    bodies.iter().fold(0u64, |total, body| {
-        total.saturating_add(usize_to_u64(body.size()))
-    })
+    compressed_rlpx_payload_bytes(bodies)
 }
 
 fn headers_payload_bytes<H: alloy_rlp::Encodable>(headers: &[H]) -> u64 {
-    headers.iter().fold(0u64, |total, header| {
-        total.saturating_add(usize_to_u64(header.length()))
-    })
+    compressed_rlpx_list_payload_bytes(headers)
 }
 
 fn request_hashes_payload_bytes(hash_count: usize) -> u64 {
@@ -158,13 +188,7 @@ fn receipts70_request_payload_bytes(hash_count: usize) -> u64 {
 }
 
 fn receipt_batch_payload_bytes(receipts: &ReceiptBatch) -> u64 {
-    receipts.iter().flatten().fold(0u64, |total, receipt| {
-        let receipt_bytes = receipt
-            .receipt
-            .length()
-            .saturating_add(receipt.logs_bloom.length());
-        total.saturating_add(usize_to_u64(receipt_bytes))
-    })
+    compressed_rlpx_payload_bytes(receipts)
 }
 
 #[derive(Debug, Clone)]
