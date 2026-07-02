@@ -15,10 +15,11 @@ The dashboard bandwidth tile and `/status` payloads show P2P download and upload
 - Replaced decoded/in-memory EL body and receipt sizing with RLPx Snappy wire-equivalent estimates.
 - Added execution upload visibility for TCP ACK-side traffic based on measured download throughput.
 - Calibrated the estimator against VPS tunnel counters; the final verification sample averaged 268.9 Mbps reported vs 271.9 Mbps observed downstream.
+- Removed the temporary Mac Mini bandwidth test data directories and restarted the original full-sync run from `/Volumes/SSD 4TB/LogEx-full-sync-20260702-0837`.
 
 ## Remaining TODOs
 
-No remaining TODOs for the dashboard P2P bandwidth task after PR review and merge.
+No remaining code TODOs for the dashboard P2P bandwidth task. PR #105 is open for review, CI, and merge.
 
 ## Design Decisions
 
@@ -58,15 +59,16 @@ No remaining TODOs for the dashboard P2P bandwidth task after PR review and merg
 
 - Current branch: `fix/p2p-bandwidth-accounting`.
 - Task branch `fix/p2p-bandwidth-accounting` was created from latest `master`.
-- Commits made during this run: pending.
-- Pull request status: pending local validation and commit.
-- Merge status: pending.
+- Commits made during this run:
+  - `9a2fb483 fix: calibrate p2p bandwidth accounting`
+- Pull request status: PR #105 is open: `https://github.com/tdenisenko/logex/pull/105`.
+- Merge status: pending CI/review.
 - Validation run:
   - `cargo fmt --check`
   - `cargo test -p logex-sync p2p::peer_manager::tests::payload_bandwidth_window`
   - `cargo check -p logex-types -p logex-sync -p logex-server`
+  - `cargo clippy -p logex-types -p logex-sync -p logex-server -- -D warnings`
 
 ## Known Issues or Risks
 
 - Bandwidth metrics are calibrated wire-equivalent estimates, not packet captures. They should track normal sync traffic closely, but exact values can differ during peer churn, retransmits, or unrelated host traffic on the same VPS tunnel.
-- The temporary Mac Mini bandwidth data dirs must be removed after PR creation, then the original full-sync run should be restarted from `/Volumes/SSD 4TB/LogEx-full-sync-20260702-0837`.
