@@ -64,8 +64,8 @@ No remaining TODOs for the stale-checkpoint restart recovery task.
 - New branch created from `master`.
 - Commits made during this run:
   - `7dc7c6fd fix: recover stale checkpoint restarts`
-  - pending checkpoint-gap pipeline/progress commit.
-- Pull request status: pending after commit/push.
+  - `af3a59a3 fix: pipeline stale checkpoint catchup`
+- Pull request status: draft PR #102 opened for `fix/auto-refresh-stale-checkpoint` into `master`.
 - Merge status: not merged yet.
 - Validation run:
   - `cargo test -p logex-node archived_consensus_state`
