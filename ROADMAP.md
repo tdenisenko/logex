@@ -4,9 +4,9 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current branch: `feature/dashboard-p2p-bandwidth`.
+Current branch: `master`.
 
-This branch updates the dashboard bandwidth tile and `/status` payloads so P2P bandwidth includes download and upload rates across execution sync, historical execution sync, and consensus sync.
+The dashboard bandwidth tile and `/status` payloads now show P2P download and upload rates across execution sync, historical execution sync, and consensus sync.
 
 ## Completed Since Last Run
 
@@ -19,9 +19,7 @@ This branch updates the dashboard bandwidth tile and `/status` payloads so P2P b
 
 ## Remaining TODOs
 
-- Merge the bandwidth dashboard task after review/CI.
-  - Reason: The code is implemented and locally validated, but the branch still needs the normal PR merge workflow.
-  - Completion criteria: PR is created, checks pass, and the branch is merged into `master`.
+No remaining TODOs for the dashboard P2P bandwidth task.
 
 ## Design Decisions
 
@@ -59,11 +57,12 @@ This branch updates the dashboard bandwidth tile and `/status` payloads so P2P b
 
 ## Git Workflow
 
-- Current branch: `feature/dashboard-p2p-bandwidth`.
-- New branch created from latest `master`.
-- Commits made during this run: pending.
-- Pull request status: pending.
-- Merge status: pending.
+- Current branch: `master`.
+- Task branch `feature/dashboard-p2p-bandwidth` was created from latest `master`.
+- Commit merged:
+  - `b88f6eff feat: show aggregate p2p bandwidth`
+- Pull request status: PR #103 created and merged.
+- Merge status: merged into `master` as `32fa3cba`.
 - Validation run:
   - `cargo fmt --check`
   - `cargo check -p logex-types -p logex-cl -p logex-sync -p logex-server`
