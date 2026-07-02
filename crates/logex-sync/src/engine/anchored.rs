@@ -23,6 +23,7 @@ const CONSENSUS_ANCHOR_FORWARD_BODY_ATTEMPTS_DURING_HISTORICAL: usize = 2;
 const CONSENSUS_ANCHOR_FORWARD_RECEIPT_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_RECEIPT_ATTEMPTS_DURING_HISTORICAL: usize = 2;
 const CONSENSUS_ANCHOR_FORWARD_RETRY_COOLDOWN_DURING_HISTORICAL: Duration = Duration::from_secs(8);
+const CHECKPOINT_GAP_PEER_REFILL_TIMEOUT: Duration = Duration::from_secs(2);
 const CONSENSUS_READY_HISTORICAL_DRAIN_LIMIT: usize = 8;
 const HISTORICAL_VALIDATION_TASKS_PER_CPU: usize = 4;
 const HISTORICAL_VALIDATION_TASK_LIMIT: usize = 256;
@@ -2117,6 +2118,32 @@ impl SyncEngine {
                 .next_consensus_anchor_batch(current, &consensus, anchor_batch_limit)
                 .await;
             if anchors.is_empty() {
+                if self
+                    .ingest_gap_to_next_consensus_anchor(
+                        current,
+                        &consensus,
+                        historical_backfill_active,
+                    )
+                    .await?
+                {
+                    continue;
+                }
+                if consensus.next_anchor_after(current).is_some() {
+                    self.set_runtime_state(NodeState::Connecting);
+                    if historical_pre_forward_progressed || historical_pre_anchor_progressed {
+                        continue;
+                    }
+                    if cancelable(
+                        &mut self.shutdown,
+                        tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        return self.finish_shutdown();
+                    }
+                    continue;
+                }
                 if self.try_mark_synced("caught up to available consensus anchors") {
                     self.sync_status_peers();
                 } else {
@@ -2321,6 +2348,363 @@ impl SyncEngine {
             || self.pending_historical_prepare_count() != pending_prepares
             || recovered_sequence_gap
             || prepare_progressed)
+    }
+
+    async fn ingest_gap_to_next_consensus_anchor(
+        &mut self,
+        current: u64,
+        consensus: &ConsensusStore,
+        historical_backfill_active: bool,
+    ) -> Result<bool> {
+        let Some(anchor) = consensus.next_anchor_after(current) else {
+            return Ok(false);
+        };
+        let Some(mut previous_header) = self.head_tracker.snapshot().last().cloned() else {
+            tracing::warn!(
+                current,
+                anchor_block = anchor.block_number,
+                "cannot bridge checkpoint gap without a persisted canonical header tip"
+            );
+            return Ok(false);
+        };
+        if anchor.block_number <= current.saturating_add(1) {
+            return Ok(false);
+        }
+
+        let start_block = current.saturating_add(1);
+        let gap_blocks = anchor.block_number.saturating_sub(current);
+        tracing::info!(
+            start_block,
+            anchor_block = anchor.block_number,
+            gap_blocks,
+            "bridging stale restart gap to fresh consensus checkpoint"
+        );
+        self.refill_checkpoint_gap_peers().await?;
+
+        let mut headers = Vec::new();
+        let mut header_peer = None;
+        let mut next_block = start_block;
+        while next_block <= anchor.block_number {
+            let remaining = anchor.block_number.saturating_sub(next_block) + 1;
+            let request_count = remaining.min(self.config.header_batch_size.max(1));
+            let header_result = if historical_backfill_active {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_headers_with_limits(
+                        next_block,
+                        request_count,
+                        CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT_DURING_HISTORICAL,
+                        CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS_DURING_HISTORICAL,
+                    ),
+                )
+                .await
+            } else {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_headers(next_block, request_count),
+                )
+                .await
+            };
+            let (peer_id, batch) = match header_result {
+                Some(Ok((peer_id, batch))) if batch.len() == request_count as usize => {
+                    (peer_id, batch)
+                }
+                Some(Ok((peer_id, batch))) => {
+                    tracing::warn!(
+                        header_peer = %peer_id,
+                        start_block = next_block,
+                        requested = request_count,
+                        returned = batch.len(),
+                        "checkpoint gap header request returned an incomplete response"
+                    );
+                    return Ok(false);
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        error = %error,
+                        start_block = next_block,
+                        requested = request_count,
+                        "checkpoint gap header request failed"
+                    );
+                    return Ok(false);
+                }
+                None => {
+                    self.finish_shutdown()?;
+                    return Ok(false);
+                }
+            };
+
+            if let Err(error) =
+                validate_downloaded_headers(next_block, Some(&previous_header), &batch)
+            {
+                tracing::warn!(
+                    start_block = next_block,
+                    headers = batch.len(),
+                    header_peer = %peer_id,
+                    %error,
+                    "checkpoint gap header validation failed"
+                );
+                self.peers.report_invalid_block_data(peer_id, "headers");
+                return Ok(false);
+            }
+
+            previous_header = batch
+                .last()
+                .cloned()
+                .expect("non-empty checkpoint gap header batch");
+            next_block = previous_header.number().saturating_add(1);
+            header_peer.get_or_insert(peer_id);
+            headers.extend(batch);
+        }
+
+        let Some(terminal_header) = headers.last() else {
+            return Ok(false);
+        };
+        let terminal_hash = terminal_header.hash_slow();
+        if let Err(error) = validate_header_matches_anchor(&anchor, terminal_header, terminal_hash)
+        {
+            tracing::warn!(
+                anchor_block = anchor.block_number,
+                expected_hash = %anchor.block_hash,
+                got_hash = %terminal_hash,
+                %error,
+                "checkpoint gap terminal header did not match consensus anchor"
+            );
+            return Ok(false);
+        }
+
+        let header_peer = header_peer.expect("checkpoint gap contains at least one header batch");
+        let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
+        let mut newly_serving_peers = HashSet::new();
+        let mut progressed = false;
+        let mut last_validated_header = None;
+        let mut last_head = None;
+
+        for (chunk_headers, chunk_hashes) in headers
+            .chunks(self.config.fetch_batch_size)
+            .zip(hashes.chunks(self.config.fetch_batch_size))
+        {
+            self.refill_checkpoint_gap_peers().await?;
+            let chunk_headers = chunk_headers.to_vec();
+            let chunk_hashes = chunk_hashes.to_vec();
+            let required_block = chunk_headers
+                .last()
+                .map(|header| header.number())
+                .unwrap_or(anchor.block_number);
+
+            let body_result = if historical_backfill_active {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_bodies_prefer_peers_with_limits(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &[header_peer],
+                        CONSENSUS_ANCHOR_FORWARD_BODY_TIMEOUT_DURING_HISTORICAL,
+                        CONSENSUS_ANCHOR_FORWARD_BODY_ATTEMPTS_DURING_HISTORICAL,
+                    ),
+                )
+                .await
+            } else {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_bodies_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &[header_peer],
+                    ),
+                )
+                .await
+            };
+            let bodies = match body_result {
+                Some(Ok(bodies)) if bodies.len() == chunk_headers.len() => bodies,
+                Some(Ok(bodies)) => {
+                    tracing::warn!(
+                        headers = chunk_headers.len(),
+                        bodies = bodies.len(),
+                        "checkpoint gap block body request returned an unexpected response"
+                    );
+                    return Ok(progressed);
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "checkpoint gap block body request failed");
+                    return Ok(progressed);
+                }
+                None => {
+                    self.finish_shutdown()?;
+                    return Ok(progressed);
+                }
+            };
+
+            for (i, header) in chunk_headers.iter().enumerate() {
+                let block_number = header.number();
+                let block_hash = chunk_hashes[i];
+                let (body_peer, body) = &bodies[i];
+                if let Err(error) = validate_block_pre_execution(header, block_hash, body) {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        body_peer = %body_peer,
+                        %error,
+                        "checkpoint gap block pre-execution validation failed"
+                    );
+                    self.peers
+                        .report_invalid_block_data(*body_peer, "block bodies");
+                    return Ok(progressed);
+                }
+            }
+
+            let expected_receipt_counts: Vec<usize> = bodies
+                .iter()
+                .map(|(_peer_id, body)| body.transaction_count())
+                .collect();
+            let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
+            let receipt_result = if historical_backfill_active {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers
+                        .get_receipts_matching_counts_prefer_peers_with_limits(
+                            chunk_hashes.clone(),
+                            required_block,
+                            &expected_receipt_counts,
+                            &receipt_peer_preference,
+                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_TIMEOUT_DURING_HISTORICAL,
+                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_ATTEMPTS_DURING_HISTORICAL,
+                        ),
+                )
+                .await
+            } else {
+                cancelable(
+                    &mut self.shutdown,
+                    self.peers.get_receipts_matching_counts_prefer_peers(
+                        chunk_hashes.clone(),
+                        required_block,
+                        &expected_receipt_counts,
+                        &receipt_peer_preference,
+                    ),
+                )
+                .await
+            };
+            let (receipt_peer, receipts) = match receipt_result {
+                Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
+                    (peer_id, receipts)
+                }
+                Some(Ok((peer_id, receipts))) => {
+                    tracing::warn!(
+                        headers = chunk_headers.len(),
+                        receipt_peer = %peer_id,
+                        returned_receipt_sets = receipts.len(),
+                        "checkpoint gap receipt request returned an unexpected response"
+                    );
+                    return Ok(progressed);
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "checkpoint gap receipt request failed");
+                    return Ok(progressed);
+                }
+                None => {
+                    self.finish_shutdown()?;
+                    return Ok(progressed);
+                }
+            };
+
+            for (i, header) in chunk_headers.iter().enumerate() {
+                let block_hash = chunk_hashes[i];
+                let block_number = header.number();
+                let (body_peer, body) = &bodies[i];
+
+                if !receipts_match_transaction_count(body, &receipts[i]) {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        receipt_peer = %receipt_peer,
+                        transactions = body.transaction_count(),
+                        receipts = receipts[i].len(),
+                        "checkpoint gap block body / receipt count mismatch"
+                    );
+                    self.peers
+                        .report_invalid_block_data(receipt_peer, "receipts");
+                    return Ok(progressed);
+                }
+
+                if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                    tracing::warn!(
+                        block_number,
+                        %block_hash,
+                        receipt_peer = %receipt_peer,
+                        %error,
+                        "checkpoint gap receipt validation failed"
+                    );
+                    self.peers
+                        .report_invalid_block_data(receipt_peer, "receipts");
+                    return Ok(progressed);
+                }
+
+                let txs = assemble_txs(body, &receipts[i]);
+                if let Some(reorg) = self.head_tracker.track(header.clone()) {
+                    self.handle_reorg(reorg).await?;
+                }
+
+                let recent_headers = self.head_tracker.snapshot();
+                self.peers
+                    .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
+                let terminal_anchor = (block_number == anchor.block_number).then_some(&anchor);
+                let log_count = self
+                    .ingest_block(header, block_hash, &txs, &recent_headers, terminal_anchor)
+                    .await?;
+                self.progress.record_block(block_number, log_count);
+                self.note_serving_peer(header_peer, &mut newly_serving_peers);
+                self.note_serving_peer(*body_peer, &mut newly_serving_peers);
+                self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
+                last_validated_header = Some(header.clone());
+                last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
+                progressed = true;
+            }
+        }
+
+        self.last_validated_header = last_validated_header;
+        self.refresh_consensus_status().await;
+        self.refresh_historical_status().await;
+
+        if let Some(head) = last_head {
+            self.peers.set_head(head);
+        }
+
+        if self.try_mark_synced("bridged stale restart gap to consensus checkpoint") {
+            self.sync_status_peers();
+        } else {
+            self.refresh_connectivity_state();
+        }
+
+        Ok(progressed)
+    }
+
+    async fn refill_checkpoint_gap_peers(&mut self) -> Result<()> {
+        self.refresh_connectivity_state();
+        let min_peers = peer_refill_goal(
+            self.peers.peer_count(),
+            self.peers.serving_peer_count(),
+            self.config.max_peers,
+        )
+        .unwrap_or_else(|| refill_peer_floor(self.config.max_peers));
+        match cancelable(
+            &mut self.shutdown,
+            tokio::time::timeout(
+                CHECKPOINT_GAP_PEER_REFILL_TIMEOUT,
+                self.peers.fill_peers(min_peers, self.config.max_peers),
+            ),
+        )
+        .await
+        {
+            Some(Ok(())) => {}
+            Some(Err(_elapsed)) => {
+                self.peers.drain_events_now();
+            }
+            None => {
+                self.finish_shutdown()?;
+            }
+        }
+        self.refresh_connectivity_state();
+        Ok(())
     }
 
     async fn refill_historical_fetch_pipeline_during_local_work(&mut self) -> Result<bool> {
@@ -6177,6 +6561,19 @@ fn locate_consensus_reorg(
         }
     }
 
+    let tip_number = tip.number();
+    let has_anchor_at_or_before_tip = consensus
+        .ordered_anchors()
+        .iter()
+        .any(|record| record.anchor.block_number <= tip_number);
+    if !has_anchor_at_or_before_tip && consensus.next_anchor_after(tip_number).is_some() {
+        tracing::debug!(
+            tip_block = tip_number,
+            "consensus anchors are ahead of the persisted header window; treating as a restart gap"
+        );
+        return Ok(None);
+    }
+
     let first_block = recent_headers
         .first()
         .map(Header::number)
@@ -7997,6 +8394,26 @@ mod tests {
             Some(second.hash_slow())
         );
         assert_eq!(reorg.reverted_hashes, vec![old_third.hash_slow()]);
+    }
+
+    #[test]
+    fn locate_consensus_reorg_ignores_future_only_checkpoint_anchor() {
+        let temp = TempDir::new().unwrap();
+        let first = header(100, B256::ZERO, 0x01);
+        let second = header(101, first.hash_slow(), 0x02);
+        let future = header(110, B256::repeat_byte(0x44), 0x10);
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        )
+        .unwrap();
+        store.append_anchors(vec![anchor_for(&future, 10)]).unwrap();
+
+        assert!(
+            locate_consensus_reorg(&store, &[first, second])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

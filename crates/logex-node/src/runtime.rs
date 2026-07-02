@@ -221,16 +221,11 @@ pub async fn run_sync(options: RunSyncOptions) {
     let discovery_secret_file = discovery_secret_path(&data_dir);
     let known_peers_file = known_peers_path(&data_dir);
     let consensus_state_exists = data_dir.join("cl").join("consensus_state.json").exists();
-    let checkpoint = if consensus_state_exists && checkpoint.is_none() {
-        checkpoint
+    let checkpoint_request = checkpoint;
+    let mut checkpoint = if consensus_state_exists && checkpoint_request.is_none() {
+        None
     } else {
-        match resolve_checkpoint(checkpoint, checkpoint_sync_url.as_deref()).await {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                tracing::error!(%error, "failed to resolve weak-subjectivity checkpoint");
-                std::process::exit(1);
-            }
-        }
+        resolve_checkpoint_or_exit(checkpoint_request, checkpoint_sync_url.as_deref()).await
     };
 
     let mut storage = match PartitionManager::open(pm_config) {
@@ -269,7 +264,9 @@ pub async fn run_sync(options: RunSyncOptions) {
         "storage ready"
     );
 
-    let consensus = match maybe_open_consensus_store(&data_dir, &storage, checkpoint.as_deref()) {
+    let mut consensus_refreshed = false;
+    let mut consensus = match maybe_open_consensus_store(&data_dir, &storage, checkpoint.as_deref())
+    {
         Ok(store) => store.map(Arc::new),
         Err(ConsensusStateError::MissingCheckpoint) => {
             tracing::error!(
@@ -278,32 +275,107 @@ pub async fn run_sync(options: RunSyncOptions) {
             );
             std::process::exit(1);
         }
+        Err(ConsensusStateError::StaleWeakSubjectivityCheckpoint { .. }) => {
+            tracing::warn!(
+                data_dir = %data_dir.display(),
+                "persisted consensus state is outside the weak-subjectivity window; refreshing from a recent checkpoint"
+            );
+            match refresh_consensus_state_from_recent_checkpoint(
+                &data_dir,
+                &mut checkpoint,
+                checkpoint_sync_url.as_deref(),
+                "weak-subjectivity-stale",
+            )
+            .await
+            {
+                Ok(store) => {
+                    consensus_refreshed = true;
+                    Some(Arc::new(store))
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to refresh stale consensus state");
+                    std::process::exit(1);
+                }
+            }
+        }
         Err(error) => {
             tracing::error!(%error, "failed to initialize consensus state");
             std::process::exit(1);
         }
     };
 
-    if let Some(consensus) = consensus.as_ref() {
-        if let Some(staleness) = recent_consensus_state_staleness(consensus) {
-            tracing::error!(
-                trusted_slot = staleness.trusted_slot,
-                trusted_epoch = staleness.trusted_epoch,
-                current_epoch = staleness.current_epoch,
-                max_epochs = staleness.max_epochs,
-                "persisted consensus state is too stale; start from a fresh recent checkpoint"
-            );
-            std::process::exit(1);
+    if let Some(store) = consensus.as_ref()
+        && let Some(staleness) = recent_consensus_state_staleness(store)
+    {
+        tracing::warn!(
+            trusted_slot = staleness.trusted_slot,
+            trusted_epoch = staleness.trusted_epoch,
+            current_epoch = staleness.current_epoch,
+            max_epochs = staleness.max_epochs,
+            "persisted consensus state is older than the recent checkpoint window; refreshing from checkpoint-sync source"
+        );
+        match refresh_consensus_state_from_recent_checkpoint(
+            &data_dir,
+            &mut checkpoint,
+            checkpoint_sync_url.as_deref(),
+            "recent-checkpoint-stale",
+        )
+        .await
+        {
+            Ok(store) => {
+                consensus = Some(Arc::new(store));
+                consensus_refreshed = true;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to refresh stale consensus state");
+                std::process::exit(1);
+            }
         }
+    }
+
+    if let Some(store) = consensus.as_ref()
+        && let Some(staleness) = local_execution_progress_staleness(sync_head, store)
+        && !consensus_refreshed
+    {
+        tracing::warn!(
+            block_number = staleness.block_number,
+            timestamp = staleness.timestamp,
+            age_secs = staleness.age_secs,
+            max_age_secs = staleness.max_age_secs,
+            "local execution progress is older than the recent checkpoint window; refreshing consensus checkpoint before resuming"
+        );
+        match refresh_consensus_state_from_recent_checkpoint(
+            &data_dir,
+            &mut checkpoint,
+            checkpoint_sync_url.as_deref(),
+            "execution-progress-stale",
+        )
+        .await
+        {
+            Ok(store) => {
+                consensus = Some(Arc::new(store));
+                consensus_refreshed = true;
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "failed to refresh checkpoint for stale local execution progress"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(consensus) = consensus.as_ref() {
         if let Some(staleness) = local_execution_progress_staleness(sync_head, consensus) {
-            tracing::error!(
+            tracing::warn!(
                 block_number = staleness.block_number,
                 timestamp = staleness.timestamp,
                 age_secs = staleness.age_secs,
                 max_age_secs = staleness.max_age_secs,
-                "local execution progress is too stale; start from a fresh recent checkpoint in a fresh data directory"
+                checkpoint_refreshed = consensus_refreshed,
+                "local execution progress is stale but startup has a recent checkpoint; CL anchors will bridge the gap before live EL sync advances"
             );
-            std::process::exit(1);
         }
         let checkpoint = consensus.checkpoint();
         let mut anchors = consensus.chain_anchors();
@@ -1250,6 +1322,91 @@ fn maybe_open_consensus_store(
     Ok(None)
 }
 
+async fn resolve_checkpoint_or_exit(
+    checkpoint: Option<String>,
+    checkpoint_sync_url: Option<&str>,
+) -> Option<String> {
+    match resolve_checkpoint(checkpoint, checkpoint_sync_url).await {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            tracing::error!(%error, "failed to resolve weak-subjectivity checkpoint");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn refresh_consensus_state_from_recent_checkpoint(
+    data_dir: &Path,
+    checkpoint: &mut Option<String>,
+    checkpoint_sync_url: Option<&str>,
+    reason: &str,
+) -> Result<ConsensusStore, String> {
+    let checkpoint = resolve_checkpoint_for_recovery(checkpoint, checkpoint_sync_url).await?;
+    if let Some(archive_path) =
+        archive_consensus_state(data_dir, reason).map_err(|error| error.to_string())?
+    {
+        tracing::warn!(
+            path = %archive_path.display(),
+            "archived stale consensus state before checkpoint refresh"
+        );
+    }
+    ConsensusStore::open(data_dir, Some(&checkpoint)).map_err(|error| error.to_string())
+}
+
+async fn resolve_checkpoint_for_recovery(
+    checkpoint: &mut Option<String>,
+    checkpoint_sync_url: Option<&str>,
+) -> Result<String, String> {
+    if let Some(checkpoint) = checkpoint.clone() {
+        return Ok(checkpoint);
+    }
+
+    let resolved = resolve_checkpoint(None, checkpoint_sync_url)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "checkpoint-sync source did not return a checkpoint".to_owned())?;
+    *checkpoint = Some(resolved.clone());
+    Ok(resolved)
+}
+
+fn archive_consensus_state(
+    data_dir: &Path,
+    reason: &str,
+) -> Result<Option<PathBuf>, ConsensusStateError> {
+    let path = data_dir.join("cl").join("consensus_state.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let parent = path.parent().unwrap_or(data_dir);
+    let timestamp = current_unix_timestamp();
+    for suffix in 0..1000 {
+        let archive_path = if suffix == 0 {
+            parent.join(format!("consensus_state.{reason}.{timestamp}.json"))
+        } else {
+            parent.join(format!(
+                "consensus_state.{reason}.{timestamp}.{suffix}.json"
+            ))
+        };
+        if archive_path.exists() {
+            continue;
+        }
+        fs::rename(&path, &archive_path).map_err(|source| ConsensusStateError::PersistState {
+            path: archive_path.clone(),
+            source,
+        })?;
+        return Ok(Some(archive_path));
+    }
+
+    Err(ConsensusStateError::PersistState {
+        path,
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not choose a unique consensus state archive path",
+        ),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RecentConsensusStateStaleness {
     trusted_slot: u64,
@@ -1997,6 +2154,30 @@ mod tests {
         assert_eq!(staleness.block_number, sync_head.block_number);
         assert_eq!(staleness.timestamp, stale_timestamp);
         assert!(staleness.age_secs > staleness.max_age_secs);
+    }
+
+    #[test]
+    fn archived_consensus_state_allows_fresh_checkpoint_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+        let _old_store = ConsensusStore::open(temp.path(), Some(&old_checkpoint)).unwrap();
+        let state_path = temp.path().join("cl").join("consensus_state.json");
+
+        let archive_path = archive_consensus_state(temp.path(), "test-refresh")
+            .unwrap()
+            .unwrap();
+
+        assert!(!state_path.exists());
+        assert!(archive_path.exists());
+
+        let new_slot = recent_checkpoint_slot(0);
+        let new_root = B256::repeat_byte(0x43);
+        let new_checkpoint = format!("{new_slot}@{new_root:#x}");
+        let refreshed = ConsensusStore::open(temp.path(), Some(&new_checkpoint)).unwrap();
+
+        let checkpoint = refreshed.checkpoint();
+        assert_eq!(checkpoint.beacon_slot, Some(new_slot));
+        assert_eq!(checkpoint.beacon_root, new_root);
     }
 
     #[test]
