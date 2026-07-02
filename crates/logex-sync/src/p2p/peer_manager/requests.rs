@@ -1,7 +1,8 @@
 use alloy_eips::BlockHashOrNumber;
+use alloy_rlp::Encodable as _;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
-use reth_primitives_traits::BlockBody as _;
+use reth_primitives_traits::{BlockBody as _, InMemorySize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
@@ -69,14 +70,80 @@ const REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES: usize = 3;
 type ReceiptBatch = Vec<
     Vec<alloy_consensus::ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
 >;
-type RequestStats = Vec<(PeerId, usize, Duration)>;
-type TypedRequestStats = Vec<(PeerId, PeerRequestKind, usize, Duration)>;
+type RequestStats = Vec<RequestStat>;
+type TypedRequestStats = Vec<TypedRequestStat>;
 type ParallelChunkFailures = Vec<ChunkRequestFailure>;
 type ParallelChunkError = (ParallelChunkFailures, RequestStats);
 type RawBlockBodies = Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>;
 type ParallelBodies = (Vec<SourcedBlockBody>, RequestStats, ParallelChunkFailures);
 type ParallelSourcedReceipts = (Vec<SourcedReceiptSet>, RequestStats, ParallelChunkFailures);
 type ParallelReceipts = (PeerId, ReceiptBatch, RequestStats, ParallelChunkFailures);
+
+#[derive(Debug, Clone, Copy)]
+struct RequestStat {
+    peer_id: PeerId,
+    blocks: usize,
+    elapsed: Duration,
+    payload_bytes: u64,
+}
+
+impl RequestStat {
+    fn new(peer_id: PeerId, blocks: usize, elapsed: Duration, payload_bytes: u64) -> Self {
+        Self {
+            peer_id,
+            blocks,
+            elapsed,
+            payload_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TypedRequestStat {
+    peer_id: PeerId,
+    kind: PeerRequestKind,
+    blocks: usize,
+    elapsed: Duration,
+    payload_bytes: u64,
+}
+
+impl TypedRequestStat {
+    fn new(
+        peer_id: PeerId,
+        kind: PeerRequestKind,
+        blocks: usize,
+        elapsed: Duration,
+        payload_bytes: u64,
+    ) -> Self {
+        Self {
+            peer_id,
+            kind,
+            blocks,
+            elapsed,
+            payload_bytes,
+        }
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
+}
+
+fn raw_block_bodies_payload_bytes(bodies: &RawBlockBodies) -> u64 {
+    bodies.iter().fold(0u64, |total, body| {
+        total.saturating_add(usize_to_u64(body.size()))
+    })
+}
+
+fn receipt_batch_payload_bytes(receipts: &ReceiptBatch) -> u64 {
+    receipts.iter().flatten().fold(0u64, |total, receipt| {
+        let receipt_bytes = receipt
+            .receipt
+            .length()
+            .saturating_add(receipt.logs_bloom.length());
+        total.saturating_add(usize_to_u64(receipt_bytes))
+    })
+}
 
 #[derive(Debug, Clone)]
 struct ChunkRequestFailure {
@@ -596,13 +663,14 @@ impl PeerManager {
             .await
         {
             Ok(Some((bodies, stats, failures))) => {
-                for (peer_id, blocks, elapsed) in stats {
+                for stat in stats {
                     self.record_peer_request_success(
-                        peer_id,
+                        stat.peer_id,
                         PeerRequestKind::Bodies,
-                        blocks,
-                        elapsed,
+                        stat.blocks,
+                        stat.elapsed,
                     );
+                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
                 self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
                 self.remove_dead_peers(&dead_peers);
@@ -611,13 +679,14 @@ impl PeerManager {
             }
             Ok(None) => {}
             Err((failures, stats)) => {
-                for (peer_id, blocks, elapsed) in stats {
+                for stat in stats {
                     self.record_peer_request_success(
-                        peer_id,
+                        stat.peer_id,
                         PeerRequestKind::Bodies,
-                        blocks,
-                        elapsed,
+                        stat.blocks,
+                        stat.elapsed,
                     );
+                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
                 self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
                 self.remove_dead_peers(&dead_peers);
@@ -654,24 +723,30 @@ impl PeerManager {
 
                 match classify_response_progress(request_hashes.len(), bodies.len()) {
                     ResponseProgress::Complete => {
+                        let elapsed = started_at.elapsed();
+                        let payload_bytes = raw_block_bodies_payload_bytes(&bodies);
                         self.record_peer_request_success(
                             peer_id,
                             PeerRequestKind::Bodies,
                             bodies.len(),
-                            started_at.elapsed(),
+                            elapsed,
                         );
+                        self.record_p2p_download_payload(payload_bytes, elapsed);
                         self.advance_request_cursor();
                         collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
                         self.remove_dead_peers(&dead_peers);
                         return Ok(collected);
                     }
                     ResponseProgress::Partial { returned } => {
+                        let elapsed = started_at.elapsed();
+                        let payload_bytes = raw_block_bodies_payload_bytes(&bodies);
                         self.record_peer_request_success(
                             peer_id,
                             PeerRequestKind::Bodies,
                             returned,
-                            started_at.elapsed(),
+                            elapsed,
                         );
+                        self.record_p2p_download_payload(payload_bytes, elapsed);
                         self.on_partial_response(
                             peer_id,
                             PeerRequestKind::Bodies,
@@ -1082,8 +1157,9 @@ impl PeerManager {
             &stats,
             &failures,
         );
-        for (peer_id, kind, blocks, elapsed) in &stats {
-            self.record_peer_request_success(*peer_id, *kind, *blocks, *elapsed);
+        for stat in &stats {
+            self.record_peer_request_success(stat.peer_id, stat.kind, stat.blocks, stat.elapsed);
+            self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
         }
         self.apply_parallel_chunk_failures("body/receipt chunks", failures, &mut dead_peers);
         self.remove_dead_peers(&dead_peers);
@@ -1095,19 +1171,19 @@ fn update_body_receipt_scheduler_attempt_metrics(
     stats: &TypedRequestStats,
     failures: &[ChunkRequestFailure],
 ) {
-    for (_, kind, blocks, _) in stats {
-        match kind {
+    for stat in stats {
+        match stat.kind {
             PeerRequestKind::Bodies => {
                 metrics.body_successes = metrics.body_successes.saturating_add(1);
                 metrics.body_blocks = metrics
                     .body_blocks
-                    .saturating_add((*blocks).try_into().unwrap_or(u64::MAX));
+                    .saturating_add(stat.blocks.try_into().unwrap_or(u64::MAX));
             }
             PeerRequestKind::Receipts => {
                 metrics.receipt_successes = metrics.receipt_successes.saturating_add(1);
                 metrics.receipt_blocks = metrics
                     .receipt_blocks
-                    .saturating_add((*blocks).try_into().unwrap_or(u64::MAX));
+                    .saturating_add(stat.blocks.try_into().unwrap_or(u64::MAX));
             }
             PeerRequestKind::Headers => {}
         }
@@ -1237,10 +1313,17 @@ fn emit_body_receipt_role_success(
     kind: PeerRequestKind,
     blocks: usize,
     elapsed: Duration,
+    payload_bytes: u64,
 ) {
     emit_body_receipt_request_accounting(
         accounting_tx,
-        vec![(peer_id, kind, blocks, elapsed)],
+        vec![TypedRequestStat::new(
+            peer_id,
+            kind,
+            blocks,
+            elapsed,
+            payload_bytes,
+        )],
         Vec::new(),
     );
 }
@@ -1713,17 +1796,17 @@ impl BodyReceiptRequestPlan {
         let mut receipt_max_ms = 0u128;
         let mut body_failures = 0usize;
         let mut receipt_failures = 0usize;
-        for (_, kind, _, elapsed) in &stats {
-            match kind {
+        for stat in &stats {
+            match stat.kind {
                 PeerRequestKind::Bodies => {
                     body_requests += 1;
-                    let elapsed_ms = elapsed.as_millis();
+                    let elapsed_ms = stat.elapsed.as_millis();
                     body_total_ms += elapsed_ms;
                     body_max_ms = body_max_ms.max(elapsed_ms);
                 }
                 PeerRequestKind::Receipts => {
                     receipt_requests += 1;
-                    let elapsed_ms = elapsed.as_millis();
+                    let elapsed_ms = stat.elapsed.as_millis();
                     receipt_total_ms += elapsed_ms;
                     receipt_max_ms = receipt_max_ms.max(elapsed_ms);
                 }
@@ -1874,18 +1957,22 @@ impl BodyReceiptRequestPlan {
             };
             let raw_bodies = match body_result {
                 Ok(raw_bodies) => {
-                    stats.push((
+                    let elapsed = body_started_at.elapsed();
+                    let payload_bytes = raw_block_bodies_payload_bytes(&raw_bodies);
+                    stats.push(TypedRequestStat::new(
                         body_peer,
                         PeerRequestKind::Bodies,
                         raw_bodies.len(),
-                        body_started_at.elapsed(),
+                        elapsed,
+                        payload_bytes,
                     ));
                     emit_body_receipt_role_success(
                         &self.accounting_tx,
                         body_peer,
                         PeerRequestKind::Bodies,
                         raw_bodies.len(),
-                        body_started_at.elapsed(),
+                        elapsed,
+                        payload_bytes,
                     );
                     raw_bodies
                 }
@@ -1947,18 +2034,22 @@ impl BodyReceiptRequestPlan {
                 };
                 match receipt_result {
                     Ok(receipts) => {
-                        stats.push((
+                        let elapsed = receipt_started_at.elapsed();
+                        let payload_bytes = receipt_batch_payload_bytes(&receipts);
+                        stats.push(TypedRequestStat::new(
                             receipt_peer,
                             PeerRequestKind::Receipts,
                             receipts.len(),
-                            receipt_started_at.elapsed(),
+                            elapsed,
+                            payload_bytes,
                         ));
                         emit_body_receipt_role_success(
                             &self.accounting_tx,
                             receipt_peer,
                             PeerRequestKind::Receipts,
                             receipts.len(),
-                            receipt_started_at.elapsed(),
+                            elapsed,
+                            payload_bytes,
                         );
                         match body_receipt_blocks_if_counts_match(
                             &sourced_bodies,
@@ -2543,13 +2634,14 @@ impl PeerManager {
             .await
         {
             Ok(Some((peer_id, receipts, stats, failures))) => {
-                for (peer_id, blocks, elapsed) in stats {
+                for stat in stats {
                     self.record_peer_request_success(
-                        peer_id,
+                        stat.peer_id,
                         PeerRequestKind::Receipts,
-                        blocks,
-                        elapsed,
+                        stat.blocks,
+                        stat.elapsed,
                     );
+                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
                 self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
                 self.remove_dead_peers(&dead_peers);
@@ -2558,13 +2650,14 @@ impl PeerManager {
             }
             Ok(None) => {}
             Err((failures, stats)) => {
-                for (peer_id, blocks, elapsed) in stats {
+                for stat in stats {
                     self.record_peer_request_success(
-                        peer_id,
+                        stat.peer_id,
                         PeerRequestKind::Receipts,
-                        blocks,
-                        elapsed,
+                        stat.blocks,
+                        stat.elapsed,
                     );
+                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
                 self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
                 self.remove_dead_peers(&dead_peers);
@@ -2617,12 +2710,15 @@ impl PeerManager {
                             }
                             continue;
                         }
+                        let elapsed = started_at.elapsed();
+                        let payload_bytes = receipt_batch_payload_bytes(&receipts);
                         self.record_peer_request_success(
                             peer_id,
                             PeerRequestKind::Receipts,
                             receipts.len(),
-                            started_at.elapsed(),
+                            elapsed,
                         );
+                        self.record_p2p_download_payload(payload_bytes, elapsed);
                         self.advance_request_cursor();
                         return Ok((peer_id, receipts));
                     }
@@ -2677,12 +2773,15 @@ impl PeerManager {
                                     }
                                     break;
                                 }
+                                let elapsed = started_at.elapsed();
+                                let payload_bytes = receipt_batch_payload_bytes(&receipts);
                                 self.record_peer_request_success(
                                     peer_id,
                                     PeerRequestKind::Receipts,
                                     receipts.len(),
-                                    started_at.elapsed(),
+                                    elapsed,
                                 );
+                                self.record_p2p_download_payload(payload_bytes, elapsed);
                                 self.advance_request_cursor();
                                 collected.extend(receipts);
                                 return Ok((peer_id, collected));
@@ -2702,12 +2801,15 @@ impl PeerManager {
                                     }
                                     break;
                                 }
+                                let elapsed = started_at.elapsed();
+                                let payload_bytes = receipt_batch_payload_bytes(&receipts);
                                 self.record_peer_request_success(
                                     peer_id,
                                     PeerRequestKind::Receipts,
                                     returned,
-                                    started_at.elapsed(),
+                                    elapsed,
                                 );
+                                self.record_p2p_download_payload(payload_bytes, elapsed);
                                 self.on_partial_response(
                                     peer_id,
                                     PeerRequestKind::Receipts,
@@ -2937,7 +3039,13 @@ impl PeerManager {
             let request_failed = result.is_err();
             match result {
                 Ok(bodies) => {
-                    stats.push((peer_id, bodies.len(), elapsed));
+                    let payload_bytes = raw_block_bodies_payload_bytes(&bodies);
+                    stats.push(RequestStat::new(
+                        peer_id,
+                        bodies.len(),
+                        elapsed,
+                        payload_bytes,
+                    ));
                     chunks.insert(range.start, (peer_id, bodies));
                 }
                 Err(kind) => {
@@ -3019,7 +3127,14 @@ impl PeerManager {
                         .await
                     {
                         Ok(bodies) => {
-                            stats.push((peer_id, bodies.len(), started_at.elapsed()));
+                            let elapsed = started_at.elapsed();
+                            let payload_bytes = raw_block_bodies_payload_bytes(&bodies);
+                            stats.push(RequestStat::new(
+                                peer_id,
+                                bodies.len(),
+                                elapsed,
+                                payload_bytes,
+                            ));
                             chunks.insert(range.start, (peer_id, bodies));
                             break;
                         }
@@ -3155,7 +3270,13 @@ impl PeerManager {
             let request_failed = result.is_err();
             match result {
                 Ok(receipts) => {
-                    stats.push((peer_id, receipts.len(), elapsed));
+                    let payload_bytes = receipt_batch_payload_bytes(&receipts);
+                    stats.push(RequestStat::new(
+                        peer_id,
+                        receipts.len(),
+                        elapsed,
+                        payload_bytes,
+                    ));
                     chunks.insert(range.start, (peer_id, receipts));
                 }
                 Err(kind) => {
@@ -3245,7 +3366,14 @@ impl PeerManager {
                         .await
                     {
                         Ok(receipts) => {
-                            stats.push((peer_id, receipts.len(), started_at.elapsed()));
+                            let elapsed = started_at.elapsed();
+                            let payload_bytes = receipt_batch_payload_bytes(&receipts);
+                            stats.push(RequestStat::new(
+                                peer_id,
+                                receipts.len(),
+                                elapsed,
+                                payload_bytes,
+                            ));
                             chunks.insert(range.start, (peer_id, receipts));
                             break;
                         }
@@ -4419,13 +4547,21 @@ fn apply_body_receipt_plan_role_attempt(
             }
             match result {
                 Ok(raw_bodies) => {
-                    stats.push((peer_id, PeerRequestKind::Bodies, raw_bodies.len(), elapsed));
+                    let payload_bytes = raw_block_bodies_payload_bytes(&raw_bodies);
+                    stats.push(TypedRequestStat::new(
+                        peer_id,
+                        PeerRequestKind::Bodies,
+                        raw_bodies.len(),
+                        elapsed,
+                        payload_bytes,
+                    ));
                     emit_body_receipt_role_success(
                         accounting_tx,
                         peer_id,
                         PeerRequestKind::Bodies,
                         raw_bodies.len(),
                         elapsed,
+                        payload_bytes,
                     );
                     let sourced_bodies = raw_bodies
                         .into_iter()
@@ -4501,13 +4637,21 @@ fn apply_body_receipt_plan_role_attempt(
             }
             match result {
                 Ok(receipts) => {
-                    stats.push((peer_id, PeerRequestKind::Receipts, receipts.len(), elapsed));
+                    let payload_bytes = receipt_batch_payload_bytes(&receipts);
+                    stats.push(TypedRequestStat::new(
+                        peer_id,
+                        PeerRequestKind::Receipts,
+                        receipts.len(),
+                        elapsed,
+                        payload_bytes,
+                    ));
                     emit_body_receipt_role_success(
                         accounting_tx,
                         peer_id,
                         PeerRequestKind::Receipts,
                         receipts.len(),
                         elapsed,
+                        payload_bytes,
                     );
                     if let Some(bodies) = chunk.bodies.as_ref() {
                         match body_receipt_blocks_if_counts_match(
@@ -7818,12 +7962,19 @@ mod tests {
                     reth_network::p2p::error::RequestError::Timeout,
                 )),
             }],
-            stats: vec![(peer, PeerRequestKind::Bodies, 4, Duration::from_millis(250))],
+            stats: vec![TypedRequestStat::new(
+                peer,
+                PeerRequestKind::Bodies,
+                4,
+                Duration::from_millis(250),
+                1024,
+            )],
             accounting_forwarded: false,
         };
 
         let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
         assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].payload_bytes, 1024);
         assert_eq!(failures.len(), 1);
 
         let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
@@ -7846,17 +7997,19 @@ mod tests {
 
         emit_body_receipt_request_accounting(
             &Some(tx),
-            vec![(
+            vec![TypedRequestStat::new(
                 peer,
                 PeerRequestKind::Receipts,
                 4,
                 Duration::from_millis(500),
+                2048,
             )],
             vec![failure],
         );
 
         let accounting = rx.try_recv().expect("accounting event should be emitted");
         assert_eq!(accounting.stats.len(), 1);
+        assert_eq!(accounting.stats[0].payload_bytes, 2048);
         assert_eq!(accounting.failures.len(), 1);
         assert!(accounting.active_requests.is_empty());
     }
@@ -7866,12 +8019,19 @@ mod tests {
         let peer = PeerId::repeat_byte(0x11);
         let mut metrics = BodyReceiptSchedulerMetrics::default();
         let stats = vec![
-            (peer, PeerRequestKind::Bodies, 4, Duration::from_millis(100)),
-            (
+            TypedRequestStat::new(
+                peer,
+                PeerRequestKind::Bodies,
+                4,
+                Duration::from_millis(100),
+                1024,
+            ),
+            TypedRequestStat::new(
                 peer,
                 PeerRequestKind::Receipts,
                 3,
                 Duration::from_millis(150),
+                2048,
             ),
         ];
         let failures = vec![

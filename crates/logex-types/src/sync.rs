@@ -308,6 +308,10 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_body_blocks: u64,
     /// Cumulative blocks returned by successful historical receipt requests.
     pub historical_scheduler_receipt_blocks: u64,
+    /// Recent successful execution P2P payload download rate in decoded bytes per second.
+    pub p2p_download_bytes_per_sec: u64,
+    /// Cumulative decoded bytes returned by successful execution P2P body and receipt responses.
+    pub p2p_downloaded_payload_bytes: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,
     /// Connected Nethermind peers.

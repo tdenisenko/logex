@@ -1475,6 +1475,8 @@ mod tests {
                     historical_scheduler_receipt_failures: 0,
                     historical_scheduler_body_blocks: 0,
                     historical_scheduler_receipt_blocks: 0,
+                    p2p_download_bytes_per_sec: 12_500_000,
+                    p2p_downloaded_payload_bytes: 123_456_789,
                     connected_geth_peers: 2,
                     connected_nethermind_peers: 3,
                     connected_reth_peers: 1,
@@ -1704,6 +1706,14 @@ mod tests {
         assert_eq!(status["execution_network"]["receipt_proven_peers"], 12);
         assert_eq!(status["execution_network"]["body_request_limit_avg"], 13);
         assert_eq!(status["execution_network"]["receipt_request_limit_avg"], 14);
+        assert_eq!(
+            status["execution_network"]["p2p_download_bytes_per_sec"],
+            12_500_000
+        );
+        assert_eq!(
+            status["execution_network"]["p2p_downloaded_payload_bytes"],
+            123_456_789
+        );
         assert_eq!(status["raw_log_segment_backlog"], 2);
         assert_eq!(status["storage_profile_rewrite_backlog"], 5);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
