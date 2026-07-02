@@ -135,6 +135,28 @@ fn raw_block_bodies_payload_bytes(bodies: &RawBlockBodies) -> u64 {
     })
 }
 
+fn headers_payload_bytes<H: alloy_rlp::Encodable>(headers: &[H]) -> u64 {
+    headers.iter().fold(0u64, |total, header| {
+        total.saturating_add(usize_to_u64(header.length()))
+    })
+}
+
+fn request_hashes_payload_bytes(hash_count: usize) -> u64 {
+    usize_to_u64(hash_count).saturating_mul(32)
+}
+
+fn header_request_payload_bytes(request: &HeadersRequest) -> u64 {
+    let start_bytes = match request.start {
+        BlockHashOrNumber::Hash(_) => 32,
+        BlockHashOrNumber::Number(_) => 8,
+    };
+    start_bytes + 8 + 8 + 8
+}
+
+fn receipts70_request_payload_bytes(hash_count: usize) -> u64 {
+    8u64.saturating_add(request_hashes_payload_bytes(hash_count))
+}
+
 fn receipt_batch_payload_bytes(receipts: &ReceiptBatch) -> u64 {
     receipts.iter().flatten().fold(0u64, |total, receipt| {
         let receipt_bytes = receipt
@@ -553,6 +575,7 @@ impl PeerManager {
                 headers.len(),
                 elapsed,
             );
+            self.record_p2p_download_payload(headers_payload_bytes(&headers), elapsed);
             pages.push((peer_id, headers));
         }
 
@@ -2463,6 +2486,10 @@ impl PeerManager {
                         headers.len(),
                         started_at.elapsed(),
                     );
+                    self.record_p2p_download_payload(
+                        headers_payload_bytes(&headers),
+                        started_at.elapsed(),
+                    );
                     self.advance_request_cursor();
                     self.remove_dead_peers(&dead_peers);
                     return Ok((peer_id, headers));
@@ -3621,6 +3648,8 @@ impl PeerManager {
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
         RequestAttempt,
     > {
+        self.serve_cache
+            .record_p2p_upload_payload(header_request_payload_bytes(&request));
         self.request_with_channel(
             peer_id,
             &move |response| PeerRequest::GetBlockHeaders {
@@ -3658,6 +3687,8 @@ impl PeerManager {
         Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>,
         RequestAttempt,
     > {
+        self.serve_cache
+            .record_p2p_upload_payload(request_hashes_payload_bytes(hashes.len()));
         self.request_with_channel(
             peer_id,
             &move |response| PeerRequest::GetBlockBodies {
@@ -3736,6 +3767,8 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
+        self.serve_cache
+            .record_p2p_upload_payload(request_hashes_payload_bytes(hashes.len()));
         self.request_with_channel(
             peer_id,
             &move |response| PeerRequest::GetReceipts {
@@ -3762,6 +3795,8 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
+        self.serve_cache
+            .record_p2p_upload_payload(request_hashes_payload_bytes(hashes.len()));
         let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
             .request_with_channel(
                 peer_id,
@@ -3801,6 +3836,8 @@ impl PeerManager {
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
+            self.serve_cache
+                .record_p2p_upload_payload(receipts70_request_payload_bytes(request_hashes.len()));
             let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
                 .request_with_channel(
                     peer_id,

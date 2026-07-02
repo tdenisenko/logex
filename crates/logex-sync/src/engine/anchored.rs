@@ -3045,8 +3045,11 @@ impl SyncEngine {
         }
 
         if let Some(block_number) = last_progress_block {
-            self.progress
-                .record_blocks(block_number, canonical_updates.len() as u64, rows.len() as u64);
+            self.progress.record_blocks(
+                block_number,
+                canonical_updates.len() as u64,
+                rows.len() as u64,
+            );
         }
 
         tracing::debug!(

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::net::IpAddr;
@@ -76,6 +76,7 @@ const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
 const GOSSIP_MAX_TRANSMIT_SIZE: usize = 10 * 1024 * 1024 + 1024;
+const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
 const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
 const GOSSIP_ENCODING_NAME: &str = "ssz_snappy";
@@ -493,6 +494,8 @@ struct ConsensusNetwork {
     request_failures: RpcFailureCounts,
     gossip_topics: ConsensusGossipTopics,
     gossip_counts: GossipMessageCounts,
+    p2p_download_metrics: PayloadBandwidthWindow,
+    p2p_upload_metrics: PayloadBandwidthWindow,
     gossip_subscriptions: HashSet<gossipsub::TopicHash>,
     last_connection_event: Option<String>,
     last_identify_event: Option<String>,
@@ -1027,6 +1030,109 @@ struct GossipMessageCounts {
     finality_update: u64,
     optimistic_update: u64,
     decode_failures: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PayloadBandwidthSnapshot {
+    bytes_per_sec: u64,
+    total_payload_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PayloadBandwidthWindow {
+    events: VecDeque<(Instant, u64)>,
+    window_payload_bytes: u64,
+    total_payload_bytes: u64,
+}
+
+impl PayloadBandwidthWindow {
+    fn record(&mut self, payload_bytes: u64, now: Instant) {
+        if payload_bytes == 0 {
+            return;
+        }
+        self.events.push_back((now, payload_bytes));
+        self.window_payload_bytes = self.window_payload_bytes.saturating_add(payload_bytes);
+        self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_bytes);
+        self.prune(now);
+    }
+
+    fn snapshot(&mut self, now: Instant) -> PayloadBandwidthSnapshot {
+        self.prune(now);
+        let bytes_per_sec = self
+            .events
+            .front()
+            .map(|(first_event_at, _)| {
+                let elapsed = now
+                    .saturating_duration_since(*first_event_at)
+                    .max(Duration::from_secs(1))
+                    .min(P2P_BANDWIDTH_RATE_WINDOW);
+                (self.window_payload_bytes as f64 / elapsed.as_secs_f64()).round() as u64
+            })
+            .unwrap_or_default();
+
+        PayloadBandwidthSnapshot {
+            bytes_per_sec,
+            total_payload_bytes: self.total_payload_bytes,
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some((event_at, payload_bytes)) = self.events.front().copied() {
+            if now.saturating_duration_since(event_at) <= P2P_BANDWIDTH_RATE_WINDOW {
+                break;
+            }
+            self.events.pop_front();
+            self.window_payload_bytes = self.window_payload_bytes.saturating_sub(payload_bytes);
+        }
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
+}
+
+fn raw_rpc_response_payload_bytes(payload: &RawRpcResponse) -> u64 {
+    usize_to_u64(payload.context_bytes.map(|_| 4).unwrap_or_default())
+        .saturating_add(usize_to_u64(payload.bytes.len()))
+}
+
+fn raw_rpc_response_payloads_bytes(payloads: &[RawRpcResponse]) -> u64 {
+    payloads.iter().fold(0u64, |total, payload| {
+        total.saturating_add(raw_rpc_response_payload_bytes(payload))
+    })
+}
+
+fn consensus_request_payload_bytes(request: &Eth2RpcRequest) -> u64 {
+    match request {
+        Eth2RpcRequest::Status(_) => 92,
+        Eth2RpcRequest::Goodbye(_) | Eth2RpcRequest::Ping(_) => 8,
+        Eth2RpcRequest::MetaData
+        | Eth2RpcRequest::LightClientFinalityUpdate
+        | Eth2RpcRequest::LightClientOptimisticUpdate => 0,
+        Eth2RpcRequest::LightClientBootstrap(_) => 32,
+        Eth2RpcRequest::LightClientUpdatesByRange(_) => 16,
+        Eth2RpcRequest::BeaconBlocksByRange(_) => 24,
+        Eth2RpcRequest::BeaconBlocksByRoot(roots) => usize_to_u64(roots.len()).saturating_mul(32),
+    }
+}
+
+fn consensus_response_payload_bytes(response: &Eth2RpcResponse) -> u64 {
+    match response {
+        Eth2RpcResponse::Status(_) => 92,
+        Eth2RpcResponse::Goodbye(_) | Eth2RpcResponse::Ping(_) => 8,
+        Eth2RpcResponse::MetaData(_) => 17,
+        Eth2RpcResponse::LightClientBootstrap(payload)
+        | Eth2RpcResponse::LightClientFinalityUpdate(payload)
+        | Eth2RpcResponse::LightClientOptimisticUpdate(payload) => {
+            raw_rpc_response_payload_bytes(payload)
+        }
+        Eth2RpcResponse::LightClientUpdatesByRange(payloads)
+        | Eth2RpcResponse::BeaconBlocksByRange(payloads)
+        | Eth2RpcResponse::BeaconBlocksByRoot(payloads) => {
+            raw_rpc_response_payloads_bytes(payloads)
+        }
+        Eth2RpcResponse::Error(error) => usize_to_u64(error.message.len()),
+    }
 }
 
 #[derive(Debug)]
@@ -1696,6 +1802,8 @@ impl ConsensusNetwork {
             request_failures: RpcFailureCounts::default(),
             gossip_topics,
             gossip_counts: GossipMessageCounts::default(),
+            p2p_download_metrics: PayloadBandwidthWindow::default(),
+            p2p_upload_metrics: PayloadBandwidthWindow::default(),
             gossip_subscriptions: HashSet::new(),
             last_connection_event: None,
             last_identify_event: None,
@@ -2111,6 +2219,7 @@ impl ConsensusNetwork {
                 message_id,
                 message,
             } => {
+                self.record_p2p_download_payload(usize_to_u64(message.data.len()));
                 let acceptance = self.handle_gossip_message(propagation_source, &message);
                 if !self
                     .swarm
@@ -2282,6 +2391,7 @@ impl ConsensusNetwork {
                     request, channel, ..
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus RPC request");
+                    self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
                     let response = match request {
                         Eth2RpcRequest::Status(status) => {
                             if status.fork_digest != self.fork_digest {
@@ -2460,17 +2570,22 @@ impl ConsensusNetwork {
                     request, channel, ..
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus goodbye RPC request");
+                    self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
                     let response = match request {
                         Eth2RpcRequest::Goodbye(reason) => Eth2RpcResponse::Goodbye(reason),
                         _ => resource_unavailable("unsupported request on goodbye RPC family"),
                     };
-                    if let Err(response) = self
+                    let payload_bytes = consensus_response_payload_bytes(&response);
+                    let result = self
                         .swarm
                         .behaviour_mut()
                         .goodbye_rpc
                         .inner
-                        .send_response(channel, response)
-                    {
+                        .send_response(channel, response);
+                    if result.is_ok() {
+                        self.record_p2p_upload_payload(payload_bytes);
+                    }
+                    if let Err(response) = result {
                         if matches!(response, Eth2RpcResponse::Goodbye(_)) {
                             tracing::debug!(
                                 %peer,
@@ -2500,6 +2615,7 @@ impl ConsensusNetwork {
                         tracing::warn!(%peer, ?request_id, "received consensus goodbye response for an unknown request");
                         return;
                     };
+                    self.record_p2p_download_payload(consensus_response_payload_bytes(&response));
                     match response {
                         Eth2RpcResponse::Goodbye(reason) => {
                             tracing::debug!(%peer, reason, "received consensus goodbye response");
@@ -2582,19 +2698,24 @@ impl ConsensusNetwork {
                     request, channel, ..
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus metadata RPC request");
+                    self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
                     let response = match request {
                         Eth2RpcRequest::MetaData => {
                             Eth2RpcResponse::MetaData(self.local_metadata())
                         }
                         _ => resource_unavailable("unsupported request on metadata RPC family"),
                     };
-                    if let Err(response) = self
+                    let payload_bytes = consensus_response_payload_bytes(&response);
+                    let result = self
                         .swarm
                         .behaviour_mut()
                         .metadata_rpc
                         .inner
-                        .send_response(channel, response)
-                    {
+                        .send_response(channel, response);
+                    if result.is_ok() {
+                        self.record_p2p_upload_payload(payload_bytes);
+                    }
+                    if let Err(response) = result {
                         let peer_context = self.peer_context(peer);
                         self.last_response_send_failure = Some(format!(
                             "{peer_context} request=metadata response={response:?}"
@@ -2663,6 +2784,7 @@ impl ConsensusNetwork {
             None
         };
         self.reset_peer_failure(peer, kind);
+        self.record_p2p_download_payload(consensus_response_payload_bytes(&response));
 
         match (kind, response) {
             (RpcRequestKind::Status, Eth2RpcResponse::Status(status)) => {
@@ -3322,7 +3444,8 @@ impl ConsensusNetwork {
         channel: request_response::ResponseChannel<Eth2RpcResponse>,
         response: Eth2RpcResponse,
     ) -> Result<(), Eth2RpcResponse> {
-        match kind {
+        let payload_bytes = consensus_response_payload_bytes(&response);
+        let result = match kind {
             RpcRequestKind::Status => self
                 .swarm
                 .behaviour_mut()
@@ -3383,7 +3506,21 @@ impl ConsensusNetwork {
                 .beacon_blocks_by_root_rpc
                 .inner
                 .send_response(channel, response),
+        };
+        if result.is_ok() {
+            self.record_p2p_upload_payload(payload_bytes);
         }
+        result
+    }
+
+    fn record_p2p_download_payload(&mut self, payload_bytes: u64) {
+        self.p2p_download_metrics
+            .record(payload_bytes, Instant::now());
+    }
+
+    fn record_p2p_upload_payload(&mut self, payload_bytes: u64) {
+        self.p2p_upload_metrics
+            .record(payload_bytes, Instant::now());
     }
 
     fn ensure_connected(&mut self, peer: PeerId, addrs: Vec<Multiaddr>) {
@@ -3446,6 +3583,7 @@ impl ConsensusNetwork {
         let Some(request) = self.build_request(kind) else {
             return;
         };
+        let payload_bytes = consensus_request_payload_bytes(&request);
         let requested_history_roots = match &request {
             Eth2RpcRequest::BeaconBlocksByRoot(roots) => Some(roots.clone()),
             _ => None,
@@ -3517,6 +3655,7 @@ impl ConsensusNetwork {
                 .send_request(&peer, request),
         };
         tracing::debug!(%peer, request = kind.as_str(), ?request_id, "sent outbound consensus RPC request");
+        self.record_p2p_upload_payload(payload_bytes);
         let key = PendingRequestKey { kind, request_id };
         self.pending_requests.insert(key, peer);
         if let Some(roots) = requested_history_roots {
@@ -4252,6 +4391,7 @@ impl ConsensusNetwork {
             .goodbye_rpc
             .inner
             .send_request(&peer, Eth2RpcRequest::Goodbye(reason));
+        self.record_p2p_upload_payload(8);
         self.pending_requests.insert(
             PendingRequestKey {
                 kind: RpcRequestKind::Goodbye,
@@ -4377,7 +4517,7 @@ impl ConsensusNetwork {
         self.pending_requests_for_kind(kind) < max_concurrent_requests_for_kind(kind)
     }
 
-    fn refresh_status(&self) {
+    fn refresh_status(&mut self) {
         let table_entries = self.discv5.table_entries_enr();
         let light_client = self.consensus.light_client_status();
         let checkpoint = self.consensus.checkpoint();
@@ -4446,6 +4586,8 @@ impl ConsensusNetwork {
             .filter(|support| support.beacon_blocks_by_root)
             .count();
         let pending_forward_ranges = self.pending_history_range_requests.len();
+        let p2p_download = self.p2p_download_metrics.snapshot(now);
+        let p2p_upload = self.p2p_upload_metrics.snapshot(now);
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
@@ -4509,6 +4651,10 @@ impl ConsensusNetwork {
             finality_update_gossip_messages: self.gossip_counts.finality_update,
             optimistic_update_gossip_messages: self.gossip_counts.optimistic_update,
             gossip_decode_failures: self.gossip_counts.decode_failures,
+            p2p_download_bytes_per_sec: p2p_download.bytes_per_sec,
+            p2p_upload_bytes_per_sec: p2p_upload.bytes_per_sec,
+            p2p_downloaded_payload_bytes: p2p_download.total_payload_bytes,
+            p2p_uploaded_payload_bytes: p2p_upload.total_payload_bytes,
             last_connection_event: self.last_connection_event.clone(),
             last_identify_event: self.last_identify_event.clone(),
             last_peer_policy_event: self.last_peer_policy_event.clone(),

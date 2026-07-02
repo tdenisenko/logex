@@ -1476,7 +1476,9 @@ mod tests {
                     historical_scheduler_body_blocks: 0,
                     historical_scheduler_receipt_blocks: 0,
                     p2p_download_bytes_per_sec: 12_500_000,
+                    p2p_upload_bytes_per_sec: 1_250_000,
                     p2p_downloaded_payload_bytes: 123_456_789,
+                    p2p_uploaded_payload_bytes: 12_345_678,
                     connected_geth_peers: 2,
                     connected_nethermind_peers: 3,
                     connected_reth_peers: 1,
@@ -1547,6 +1549,10 @@ mod tests {
                     finality_update_gossip_messages: 4,
                     optimistic_update_gossip_messages: 9,
                     gossip_decode_failures: 1,
+                    p2p_download_bytes_per_sec: 2_500_000,
+                    p2p_upload_bytes_per_sec: 250_000,
+                    p2p_downloaded_payload_bytes: 22_222_222,
+                    p2p_uploaded_payload_bytes: 2_222_222,
                     last_connection_event: Some("connected peer=peer1 endpoint=Dialer".to_string()),
                     last_identify_event: Some(
                         "peer=peer1 agent=lighthouse protocols=12 status=true metadata=true bootstrap=false updates_by_range=false finality=false optimistic=false blocks_by_range=true blocks_by_root=true preview=[/eth2/beacon_chain/req/status/2/ssz_snappy]".to_string(),
@@ -1711,13 +1717,37 @@ mod tests {
             12_500_000
         );
         assert_eq!(
+            status["execution_network"]["p2p_upload_bytes_per_sec"],
+            1_250_000
+        );
+        assert_eq!(
             status["execution_network"]["p2p_downloaded_payload_bytes"],
             123_456_789
+        );
+        assert_eq!(
+            status["execution_network"]["p2p_uploaded_payload_bytes"],
+            12_345_678
         );
         assert_eq!(status["raw_log_segment_backlog"], 2);
         assert_eq!(status["storage_profile_rewrite_backlog"], 5);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
         assert_eq!(status["consensus_network"]["dialable_peers"], 13);
+        assert_eq!(
+            status["consensus_network"]["p2p_download_bytes_per_sec"],
+            2_500_000
+        );
+        assert_eq!(
+            status["consensus_network"]["p2p_upload_bytes_per_sec"],
+            250_000
+        );
+        assert_eq!(
+            status["consensus_network"]["p2p_downloaded_payload_bytes"],
+            22_222_222
+        );
+        assert_eq!(
+            status["consensus_network"]["p2p_uploaded_payload_bytes"],
+            2_222_222
+        );
         assert_eq!(
             status["consensus_light_client"]["bootstrap"]["fork"],
             "electra"

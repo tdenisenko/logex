@@ -1,13 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Bound, RangeBounds, RangeInclusive};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-use alloy_consensus::{Block, BlockBody, Header, ReceiptWithBloom};
+use alloy_consensus::{
+    Block, BlockBody, Header, ReceiptWithBloom, RlpEncodableReceipt as _, TxReceipt as _,
+};
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Address, B256, BlockHash, BlockNumber, TxHash, TxNumber};
+use alloy_rlp::Encodable as _;
 use reth_chainspec::{ChainInfo, ChainSpecProvider, MAINNET};
 use reth_db_models::StoredBlockBodyIndices;
-use reth_primitives_traits::{RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{InMemorySize, RecoveredBlock, SealedHeader};
 use reth_storage_api::errors::provider::ProviderResult;
 use reth_storage_api::{
     BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader,
@@ -19,11 +23,13 @@ use crate::primitives::LogexReceipt;
 
 const SERVE_CACHE_BLOCK_LIMIT: usize = 4_096;
 const SERVE_CACHE_HEADER_LIMIT: usize = 8_192;
+const P2P_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct ServeCacheProvider {
     chain_spec: Arc<reth_chainspec::ChainSpec>,
     inner: Arc<RwLock<ServeCacheState>>,
+    upload_metrics: Arc<Mutex<PayloadBandwidthWindow>>,
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +45,87 @@ struct ServeCacheState {
 struct CachedBlock {
     block: Block<reth_ethereum_primitives::TransactionSigned>,
     receipts: Vec<LogexReceipt>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct P2pUploadSnapshot {
+    bytes_per_sec: u64,
+    total_payload_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PayloadBandwidthWindow {
+    events: VecDeque<(Instant, u64)>,
+    window_payload_bytes: u64,
+    total_payload_bytes: u64,
+}
+
+impl PayloadBandwidthWindow {
+    fn record(&mut self, payload_bytes: u64, now: Instant) {
+        if payload_bytes == 0 {
+            return;
+        }
+        self.events.push_back((now, payload_bytes));
+        self.window_payload_bytes = self.window_payload_bytes.saturating_add(payload_bytes);
+        self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_bytes);
+        self.prune(now);
+    }
+
+    fn snapshot(&mut self, now: Instant) -> P2pUploadSnapshot {
+        self.prune(now);
+        let bytes_per_sec = self
+            .events
+            .front()
+            .map(|(first_event_at, _)| {
+                let elapsed = now
+                    .saturating_duration_since(*first_event_at)
+                    .max(Duration::from_secs(1))
+                    .min(P2P_UPLOAD_RATE_WINDOW);
+                (self.window_payload_bytes as f64 / elapsed.as_secs_f64()).round() as u64
+            })
+            .unwrap_or_default();
+
+        P2pUploadSnapshot {
+            bytes_per_sec,
+            total_payload_bytes: self.total_payload_bytes,
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some((event_at, payload_bytes)) = self.events.front().copied() {
+            if now.saturating_duration_since(event_at) <= P2P_UPLOAD_RATE_WINDOW {
+                break;
+            }
+            self.events.pop_front();
+            self.window_payload_bytes = self.window_payload_bytes.saturating_sub(payload_bytes);
+        }
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
+}
+
+fn header_payload_bytes(header: &Header) -> u64 {
+    usize_to_u64(header.length())
+}
+
+fn headers_payload_bytes(headers: &[Header]) -> u64 {
+    headers.iter().fold(0u64, |total, header| {
+        total.saturating_add(header_payload_bytes(header))
+    })
+}
+
+fn block_payload_bytes(block: &Block<reth_ethereum_primitives::TransactionSigned>) -> u64 {
+    usize_to_u64(block.body.size())
+}
+
+fn receipts_payload_bytes(receipts: &[LogexReceipt]) -> u64 {
+    receipts.iter().fold(0u64, |total, receipt| {
+        let bloom = receipt.bloom();
+        let receipt_bytes = receipt.rlp_encoded_length_with_bloom(&bloom);
+        total.saturating_add(usize_to_u64(receipt_bytes))
+    })
 }
 
 fn insert_header_inner(state: &mut ServeCacheState, header: Header) {
@@ -65,7 +152,24 @@ impl ServeCacheProvider {
         Self {
             chain_spec: MAINNET.clone(),
             inner: Arc::new(RwLock::new(ServeCacheState::default())),
+            upload_metrics: Arc::new(Mutex::new(PayloadBandwidthWindow::default())),
         }
+    }
+
+    pub fn p2p_upload_snapshot(&self) -> (u64, u64) {
+        let snapshot = self
+            .upload_metrics
+            .lock()
+            .expect("serve cache upload metrics poisoned")
+            .snapshot(Instant::now());
+        (snapshot.bytes_per_sec, snapshot.total_payload_bytes)
+    }
+
+    pub fn record_p2p_upload_payload(&self, payload_bytes: u64) {
+        self.upload_metrics
+            .lock()
+            .expect("serve cache upload metrics poisoned")
+            .record(payload_bytes, Instant::now());
     }
 
     pub fn insert_block(
@@ -217,7 +321,7 @@ impl ServeCacheProvider {
 
     fn header_by_number_inner(&self, number: u64) -> Option<Header> {
         let hash = self.header_hash_for_number(number)?;
-        self.header(hash).ok().flatten()
+        self.header_by_hash_inner(hash)
     }
 
     fn receipts_by_block_inner(&self, block: BlockHashOrNumber) -> Option<Vec<LogexReceipt>> {
@@ -337,11 +441,19 @@ impl HeaderProvider for ServeCacheProvider {
     type Header = Header;
 
     fn header(&self, block_hash: BlockHash) -> ProviderResult<Option<Self::Header>> {
-        Ok(self.header_by_hash_inner(block_hash))
+        let header = self.header_by_hash_inner(block_hash);
+        if let Some(header) = &header {
+            self.record_p2p_upload_payload(header_payload_bytes(header));
+        }
+        Ok(header)
     }
 
     fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
-        Ok(self.header_by_number_inner(num))
+        let header = self.header_by_number_inner(num);
+        if let Some(header) = &header {
+            self.record_p2p_upload_payload(header_payload_bytes(header));
+        }
+        Ok(header)
     }
 
     fn headers_range(
@@ -352,9 +464,11 @@ impl HeaderProvider for ServeCacheProvider {
             return Ok(Vec::new());
         };
 
-        Ok(range
+        let headers = range
             .filter_map(|number| self.header_by_number_inner(number))
-            .collect())
+            .collect::<Vec<_>>();
+        self.record_p2p_upload_payload(headers_payload_bytes(&headers));
+        Ok(headers)
     }
 
     fn sealed_header(
@@ -364,9 +478,11 @@ impl HeaderProvider for ServeCacheProvider {
         let Some(hash) = self.block_hash_for_number(number) else {
             return Ok(None);
         };
-        Ok(self
-            .header_by_number_inner(number)
-            .map(|header| SealedHeader::new(header, hash)))
+        let header = self.header_by_number_inner(number);
+        if let Some(header) = &header {
+            self.record_p2p_upload_payload(header_payload_bytes(header));
+        }
+        Ok(header.map(|header| SealedHeader::new(header, hash)))
     }
 
     fn sealed_headers_while(
@@ -458,7 +574,23 @@ impl TransactionsProvider for ServeCacheProvider {
         &self,
         block: BlockHashOrNumber,
     ) -> ProviderResult<Option<Vec<Self::Transaction>>> {
-        Ok(self.block(block)?.map(|block| block.body.transactions))
+        let hash = match block {
+            BlockHashOrNumber::Hash(hash) => hash,
+            BlockHashOrNumber::Number(number) => match self.block_hash_for_number(number) {
+                Some(hash) => hash,
+                None => return Ok(None),
+            },
+        };
+        let transactions = self
+            .block_by_hash_inner(hash)
+            .map(|block| block.body.transactions);
+        if let Some(transactions) = &transactions {
+            let payload_bytes = transactions.iter().fold(0u64, |total, tx| {
+                total.saturating_add(usize_to_u64(tx.size()))
+            });
+            self.record_p2p_upload_payload(payload_bytes);
+        }
+        Ok(transactions)
     }
 
     fn transactions_by_block_range(
@@ -508,7 +640,11 @@ impl ReceiptProvider for ServeCacheProvider {
         &self,
         block: BlockHashOrNumber,
     ) -> ProviderResult<Option<Vec<Self::Receipt>>> {
-        Ok(self.receipts_by_block_inner(block))
+        let receipts = self.receipts_by_block_inner(block);
+        if let Some(receipts) = &receipts {
+            self.record_p2p_upload_payload(receipts_payload_bytes(receipts));
+        }
+        Ok(receipts)
     }
 
     fn receipts_by_tx_range(
@@ -553,7 +689,11 @@ impl BlockReader for ServeCacheProvider {
             },
         };
 
-        Ok(self.block_by_hash_inner(hash))
+        let block = self.block_by_hash_inner(hash);
+        if let Some(block) = &block {
+            self.record_p2p_upload_payload(block_payload_bytes(block));
+        }
+        Ok(block)
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
@@ -671,6 +811,19 @@ mod tests {
             provider.block_by_number(7).unwrap().unwrap().header.number,
             7
         );
+    }
+
+    #[test]
+    fn p2p_upload_snapshot_reports_recent_payloads() {
+        let provider = ServeCacheProvider::new();
+
+        assert_eq!(provider.p2p_upload_snapshot(), (0, 0));
+
+        provider.record_p2p_upload_payload(1_024);
+        let (bytes_per_sec, total_payload_bytes) = provider.p2p_upload_snapshot();
+
+        assert_eq!(total_payload_bytes, 1_024);
+        assert!(bytes_per_sec >= 1_024);
     }
 
     #[test]
