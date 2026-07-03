@@ -6,8 +6,6 @@ use super::*;
 use crate::p2p::persistence::persist_known_peers_if_changed;
 
 const PEER_RATE_EWMA_WEIGHT: f64 = 0.25;
-const PEER_DOWNLOAD_RATE_EWMA_WEIGHT: f64 = 0.25;
-const PEER_DOWNLOAD_RATE_FRESHNESS: Duration = Duration::from_secs(15);
 const RECEIPT_QUARANTINE_DURATION: Duration = Duration::from_secs(5 * 60);
 const RECEIPT_REQUEST_FAILURE_QUARANTINE_DURATION: Duration = Duration::from_secs(30);
 
@@ -218,14 +216,12 @@ impl PeerManager {
             self.peers.len(),
             PeerRequestKind::Receipts,
         );
-        let p2p_download_bytes_per_sec = self
-            .session_metrics
-            .p2p_download_rate_updated_at
-            .filter(|updated_at| updated_at.elapsed() <= PEER_DOWNLOAD_RATE_FRESHNESS)
-            .map(|_| self.session_metrics.p2p_download_bytes_per_sec.round() as u64)
-            .unwrap_or_default();
-        let (p2p_upload_bytes_per_sec, p2p_uploaded_payload_bytes) =
+        let p2p_download = self.session_metrics.p2p_download.snapshot(Instant::now());
+        let (served_upload_bytes_per_sec, served_uploaded_payload_bytes) =
             self.serve_cache.p2p_upload_snapshot();
+        let ack_upload_bytes_per_sec = estimate_tcp_ack_upload_bytes(p2p_download.bytes_per_sec);
+        let ack_uploaded_payload_bytes =
+            estimate_tcp_ack_upload_bytes(p2p_download.total_payload_bytes);
 
         ExecutionNetworkStatus {
             max_peers: self.max_peers,
@@ -309,10 +305,12 @@ impl PeerManager {
                 .receipt_failures,
             historical_scheduler_body_blocks: self.body_receipt_scheduler_metrics.body_blocks,
             historical_scheduler_receipt_blocks: self.body_receipt_scheduler_metrics.receipt_blocks,
-            p2p_download_bytes_per_sec,
-            p2p_upload_bytes_per_sec,
-            p2p_downloaded_payload_bytes: self.session_metrics.p2p_downloaded_payload_bytes,
-            p2p_uploaded_payload_bytes,
+            p2p_download_bytes_per_sec: p2p_download.bytes_per_sec,
+            p2p_upload_bytes_per_sec: served_upload_bytes_per_sec
+                .saturating_add(ack_upload_bytes_per_sec),
+            p2p_downloaded_payload_bytes: p2p_download.total_payload_bytes,
+            p2p_uploaded_payload_bytes: served_uploaded_payload_bytes
+                .saturating_add(ack_uploaded_payload_bytes),
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -690,23 +688,10 @@ impl PeerManager {
         };
     }
 
-    pub(super) fn record_p2p_download_payload(&mut self, payload_bytes: u64, elapsed: Duration) {
-        if payload_bytes == 0 || elapsed.is_zero() {
-            return;
-        }
-        self.session_metrics.p2p_downloaded_payload_bytes = self
-            .session_metrics
-            .p2p_downloaded_payload_bytes
-            .saturating_add(payload_bytes);
-        let observed_bytes_per_sec = payload_bytes as f64 / elapsed.as_secs_f64().max(0.001);
-        let rate = &mut self.session_metrics.p2p_download_bytes_per_sec;
-        *rate = if *rate > 0.0 {
-            (*rate * (1.0 - PEER_DOWNLOAD_RATE_EWMA_WEIGHT))
-                + (observed_bytes_per_sec * PEER_DOWNLOAD_RATE_EWMA_WEIGHT)
-        } else {
-            observed_bytes_per_sec
-        };
-        self.session_metrics.p2p_download_rate_updated_at = Some(Instant::now());
+    pub(super) fn record_p2p_download_payload(&mut self, payload_bytes: u64, _elapsed: Duration) {
+        self.session_metrics
+            .p2p_download
+            .record(payload_bytes, Instant::now());
     }
 
     pub(super) fn reset_peer_timeout(&mut self, peer_id: PeerId) {
@@ -1043,6 +1028,12 @@ impl PeerManager {
             self.request_cursor %= len;
         }
     }
+}
+
+fn estimate_tcp_ack_upload_bytes(download_bytes: u64) -> u64 {
+    ((download_bytes as f64) * TCP_ACK_UPLOAD_ESTIMATE_FACTOR)
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 pub(super) fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {

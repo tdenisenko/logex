@@ -4,74 +4,71 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current branch: `master`.
+Current branch: `fix/p2p-bandwidth-accounting`.
 
-The dashboard bandwidth tile and `/status` payloads now show P2P download and upload rates across execution sync, historical execution sync, and consensus sync.
+The dashboard bandwidth tile and `/status` payloads show P2P download and upload rates across execution sync, historical execution sync, and consensus sync. The current branch fixes the execution bandwidth estimator so the dashboard tracks VPS-observed network traffic closely during high-throughput historical sync.
 
 ## Completed Since Last Run
 
-- Renamed the dashboard metric from `P2P download` to `P2P bandwidth`.
-- Added aggregate dashboard display for download and upload throughput in Mbps.
-- Added consensus-layer P2P payload download/upload rates and cumulative totals to `/status`.
-- Added execution-layer upload accounting for outbound requests and data served from the local serve cache.
-- Included execution header responses in the existing execution download metric.
-- Added server/status and serve-cache test coverage for the new fields.
+- Verified the dashboard bandwidth metric against fresh Mac Mini runs through the VPS tunnel.
+- Replaced per-request EL download EWMA accounting with a rolling aggregate byte window so concurrent peer downloads are summed correctly.
+- Replaced decoded/in-memory EL body and receipt sizing with RLPx Snappy wire-equivalent estimates.
+- Added execution upload visibility for TCP ACK-side traffic based on measured download throughput.
+- Calibrated the estimator against VPS tunnel counters; the final verification sample averaged 268.9 Mbps reported vs 271.9 Mbps observed downstream.
+- Removed the temporary Mac Mini bandwidth test data directories and restarted the original full-sync run from `/Volumes/SSD 4TB/LogEx-full-sync-20260702-0837`.
 
 ## Remaining TODOs
 
-No remaining TODOs for the dashboard P2P bandwidth task.
+No remaining code TODOs for the dashboard P2P bandwidth task. PR #105 is open for review, CI, and merge.
 
 ## Design Decisions
 
-- Track payload-level P2P bandwidth instead of OS network-interface throughput.
-  - Why: The dashboard should reflect data LogEx processes, not unrelated host traffic or encrypted transport overhead.
-  - Alternatives considered: polling system network counters. That would include non-LogEx traffic and vary by OS.
-  - Tradeoff: Mbps is application payload throughput, not exact TCP wire bytes.
+- Track estimated wire-equivalent P2P bandwidth instead of decoded payload throughput.
+  - Why: The dashboard is used to compare LogEx sync traffic with VPS/router charts, so decoded payload bytes underreport and memory-size estimates overreport.
+  - Alternatives considered: OS network counters and decoded payload counters. OS counters include unrelated host traffic and vary by platform; decoded payload counters do not match real network charts.
+  - Tradeoff: The estimator is calibrated to RLPx/Snappy/TCP/WireGuard behavior and should be close for sync traffic, but it is still an estimate rather than packet-perfect accounting.
 
 - Aggregate EL and CL bandwidth in the dashboard instead of replacing individual network-layer fields.
   - Why: Existing API consumers can still inspect layer-specific data, while the main UI shows the user-facing total.
   - Alternatives considered: a single top-level bandwidth field. That would hide useful debugging detail.
   - Tradeoff: UI aggregation must handle missing per-layer fields as zero.
 
-- Use short rolling windows for CL and EL upload rates.
-  - Why: Upload events are bursty, especially when serving peers or sending small RPC requests.
-  - Alternatives considered: cumulative average since startup. That would be too stale for a live dashboard.
-  - Tradeoff: The displayed upload rate drops to zero when no recent upload payloads were observed.
+- Include an ACK-side upload estimate for execution downloads.
+  - Why: The client sends very small request payloads while TCP/WireGuard ACK traffic is visible on network charts; without this, upload appeared near zero during heavy downloads.
+  - Alternatives considered: reporting request payloads only. That was technically payload-accurate but misleading for user-facing bandwidth.
+  - Tradeoff: Upload is estimated from download traffic unless LogEx is serving larger payloads to peers.
 
 ## Challenges and Resolutions
 
-- Challenge: The prior dashboard metric only showed execution-layer download payloads.
-  - Resolution: Added upload fields, CL bandwidth fields, and aggregate UI formatting.
+- Challenge: The prior dashboard metric underreported a fresh run by an order of magnitude because concurrent request completions were smoothed as one per-request EWMA.
+  - Resolution: Replaced it with a rolling aggregate byte window.
   - Remaining: None known.
 
-- Challenge: Execution upload is served partly through Reth provider callbacks.
-  - Resolution: Instrumented `ServeCacheProvider` return paths and outbound request helpers to account for local EL P2P upload payloads.
-  - Remaining: Payload sizes are estimates of decoded protocol payloads, not encrypted TCP bytes.
+- Challenge: Raw decoded/in-memory payload sizes did not match VPS traffic counters.
+  - Resolution: Account EL response sizes as Snappy-compressed RLPx wire-equivalent bytes and include measured lower-layer overhead factors.
+  - Remaining: The value is an estimate, not a packet capture.
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the old `P2P download` UI labels and status fields.
-- Replaced obsolete dashboard copy with `P2P bandwidth`.
-- Kept existing download fields for compatibility and added upload fields rather than renaming API keys.
+- Inspected the previous payload-only bandwidth accounting path in `logex-sync`.
+- Removed obsolete EL download EWMA fields and constants.
+- Kept the public `/status` field names stable while updating their documented semantics to estimated wire bytes.
 - No files were removed.
 
 ## Git Workflow
 
-- Current branch: `master`.
-- Task branch `feature/dashboard-p2p-bandwidth` was created from latest `master`.
-- Commit merged:
-  - `b88f6eff feat: show aggregate p2p bandwidth`
-- Pull request status: PR #103 created and merged.
-- Merge status: merged into `master` as `32fa3cba`.
+- Current branch: `fix/p2p-bandwidth-accounting`.
+- Task branch `fix/p2p-bandwidth-accounting` was created from latest `master`.
+- Commits made during this run:
+  - `9a2fb483 fix: calibrate p2p bandwidth accounting`
+- Pull request status: PR #105 is open: `https://github.com/tdenisenko/logex/pull/105`.
+- Merge status: pending CI/review.
 - Validation run:
   - `cargo fmt --check`
-  - `cargo check -p logex-types -p logex-cl -p logex-sync -p logex-server`
-  - `cargo test -p logex-server`
-  - `cargo test -p logex-sync p2p::serve_cache`
-  - `cargo test -p logex-cl network::tests`
-  - `cargo clippy -p logex-types -p logex-cl -p logex-sync -p logex-server -- -D warnings`
+  - `cargo test -p logex-sync p2p::peer_manager::tests::payload_bandwidth_window`
+  - `cargo check -p logex-types -p logex-sync -p logex-server`
+  - `cargo clippy -p logex-types -p logex-sync -p logex-server -- -D warnings`
 
 ## Known Issues or Risks
 
-- Bandwidth metrics report decoded application payload bytes, not full encrypted TCP wire bytes or host network-interface counters.
-- The execution upload metric estimates served receipt payloads from encoded receipts and computed blooms; it is intended for dashboard throughput visibility, not byte-perfect packet accounting.
+- Bandwidth metrics are calibrated wire-equivalent estimates, not packet captures. They should track normal sync traffic closely, but exact values can differ during peer churn, retransmits, or unrelated host traffic on the same VPS tunnel.

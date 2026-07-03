@@ -150,13 +150,13 @@ pub struct ConsensusNetworkStatus {
     pub optimistic_update_gossip_messages: u64,
     /// Number of malformed or undecodable light-client gossip payloads observed since startup.
     pub gossip_decode_failures: u64,
-    /// Recent consensus P2P payload download rate in decoded bytes per second.
+    /// Recent consensus P2P payload download rate in bytes per second.
     pub p2p_download_bytes_per_sec: u64,
-    /// Recent consensus P2P payload upload rate in decoded bytes per second.
+    /// Recent consensus P2P payload upload rate in bytes per second.
     pub p2p_upload_bytes_per_sec: u64,
-    /// Cumulative decoded bytes received through consensus RPC and gossip payloads.
+    /// Cumulative bytes received through consensus RPC and gossip payloads.
     pub p2p_downloaded_payload_bytes: u64,
-    /// Cumulative decoded bytes sent through consensus RPC payloads.
+    /// Cumulative bytes sent through consensus RPC payloads.
     pub p2p_uploaded_payload_bytes: u64,
     /// Most recent noteworthy consensus connection event.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -316,13 +316,13 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_body_blocks: u64,
     /// Cumulative blocks returned by successful historical receipt requests.
     pub historical_scheduler_receipt_blocks: u64,
-    /// Recent successful execution P2P payload download rate in decoded bytes per second.
+    /// Recent successful execution P2P download rate in estimated wire bytes per second.
     pub p2p_download_bytes_per_sec: u64,
-    /// Recent successful execution P2P payload upload rate in decoded bytes per second.
+    /// Recent successful execution P2P upload rate in estimated wire bytes per second.
     pub p2p_upload_bytes_per_sec: u64,
-    /// Cumulative decoded bytes returned by successful execution P2P responses.
+    /// Cumulative estimated wire bytes returned by successful execution P2P responses.
     pub p2p_downloaded_payload_bytes: u64,
-    /// Cumulative decoded bytes served to execution P2P peers.
+    /// Cumulative estimated wire bytes sent for execution P2P traffic.
     pub p2p_uploaded_payload_bytes: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,

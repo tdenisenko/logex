@@ -5216,6 +5216,7 @@ dependencies = [
  "rustc-hash",
  "secp256k1 0.30.0",
  "serde_json",
+ "snap",
  "tempfile",
  "tokio",
  "tokio-stream",
