@@ -4,9 +4,9 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current task branch: `fix/nightly-bail-ci`.
+Current branch: `master`.
 
-The nightly Rust CI compatibility failure is fixed in PR #106. The fix is validated locally and the task is complete after PR #106 is merged and all non-`master` remote branches are removed.
+The nightly Rust CI compatibility failure is fixed and merged through PR #106. Both the PR and merge-triggered `master` workflows pass all four CI jobs, and `master` is the only remaining remote branch.
 
 ## Completed Since Last Run
 
@@ -15,8 +15,9 @@ The nightly Rust CI compatibility failure is fixed in PR #106. The fix is valida
 - Terminated seven expression-position `eyre::bail!` invocations as statements without changing their early-return behavior.
 - Validated the full workspace against the newly enforced lint and all four CI commands.
 - Searched for additional expression-position `bail!` invocations and found none requiring changes.
-- Opened PR #106 for the CI fix.
-- Removed every non-`master` remote branch after merging PR #106.
+- Merged PR #106 after all four GitHub checks passed.
+- Verified the merge-triggered `master` workflow also passed all four GitHub checks.
+- Removed every non-`master` remote branch, including the temporary CI-fix and roadmap-finalization branches.
 
 ## Remaining TODOs
 
@@ -66,12 +67,17 @@ No remaining TODOs for the nightly Rust CI compatibility and remote branch clean
 
 ## Git Workflow
 
-- Current task branch: `fix/nightly-bail-ci`.
+- Final branch: `master`.
 - Task branch `fix/nightly-bail-ci` was created from the latest `master`.
 - Commits made during this run:
   - `8d02f434 fix: restore nightly CI compatibility`
-- Pull request status: PR #106 was created and merged into `master`: `https://github.com/tdenisenko/logex/pull/106`.
-- Remote branch cleanup: every remote branch except `master` was deleted after the merge.
+  - `58c18e72 docs: record CI fix workflow`
+  - `docs: finalize nightly CI roadmap`
+- Pull request status:
+  - PR #106 fixed CI and was merged into `master`: `https://github.com/tdenisenko/logex/pull/106`.
+  - PR #107 finalized the roadmap and was merged into `master`: `https://github.com/tdenisenko/logex/pull/107`.
+- Merge status: both pull requests were merged after their required checks passed.
+- Remote branch cleanup: every remote branch except `master` was deleted after both merges.
 - GitHub CLI authentication was expired; the connected GitHub app supplied workflow logs, PR creation, and merge operations, while authenticated SSH handled Git fetch/push operations.
 - Validation run:
   - `cargo fmt --all -- --check`
