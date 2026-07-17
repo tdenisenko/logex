@@ -1,6 +1,6 @@
 # LogEx
 
-**A trustless Ethereum log client built for transfer intelligence.**
+**A trustless Ethereum Light Client that indexes ERC transfers and all log data without executing the EVM or relying on an external RPC**
 
 LogEx is a standalone Ethereum client that joins the consensus-layer and
 execution-layer P2P networks, verifies the chain, downloads every event log,
