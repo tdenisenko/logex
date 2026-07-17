@@ -4,24 +4,30 @@
 
 LogEx starts from a recent consensus checkpoint, tracks the live head, reverse-syncs execution history toward genesis, stores compressed verified logs, and serves the dashboard, SQL query API, JSON-RPC, gRPC, and live ERC20 transfer subscriptions.
 
-Current branch: `fix/p2p-bandwidth-accounting`.
+Current task branch: `fix/nightly-bail-ci`.
 
-The dashboard bandwidth tile and `/status` payloads show P2P download and upload rates across execution sync, historical execution sync, and consensus sync. The current branch fixes the execution bandwidth estimator so the dashboard tracks VPS-observed network traffic closely during high-throughput historical sync.
+The nightly Rust CI compatibility failure is fixed in PR #106. The fix is validated locally and the task is complete after PR #106 is merged and all non-`master` remote branches are removed.
 
 ## Completed Since Last Run
 
-- Verified the dashboard bandwidth metric against fresh Mac Mini runs through the VPS tunnel.
-- Replaced per-request EL download EWMA accounting with a rolling aggregate byte window so concurrent peer downloads are summed correctly.
-- Replaced decoded/in-memory EL body and receipt sizing with RLPx Snappy wire-equivalent estimates.
-- Added execution upload visibility for TCP ACK-side traffic based on measured download throughput.
-- Calibrated the estimator against VPS tunnel counters; the final verification sample averaged 268.9 Mbps reported vs 271.9 Mbps observed downstream.
-- Removed the temporary Mac Mini bandwidth test data directories and restarted the original full-sync run from `/Volumes/SSD 4TB/LogEx-full-sync-20260702-0837`.
+- Inspected the latest failed GitHub Actions run on `master`.
+- Confirmed that Check, Clippy, and Test all failed during compilation from the same newly denied nightly Rust lint; Format passed.
+- Terminated seven expression-position `eyre::bail!` invocations as statements without changing their early-return behavior.
+- Validated the full workspace against the newly enforced lint and all four CI commands.
+- Searched for additional expression-position `bail!` invocations and found none requiring changes.
+- Opened PR #106 for the CI fix.
+- Removed every non-`master` remote branch after merging PR #106.
 
 ## Remaining TODOs
 
-No remaining code TODOs for the dashboard P2P bandwidth task. PR #105 is open for review, CI, and merge.
+No remaining TODOs for the nightly Rust CI compatibility and remote branch cleanup task.
 
 ## Design Decisions
+
+- Fix the affected call sites instead of pinning the nightly toolchain or replacing `eyre`.
+  - Why: Explicit statement termination is source-compatible, preserves behavior, and addresses the compiler rule directly.
+  - Alternatives considered: Pinning an older nightly compiler or changing error-handling dependencies.
+  - Tradeoff: Future `eyre::bail!` call sites must also be statement-terminated, but the repository can continue receiving nightly compiler fixes and diagnostics.
 
 - Track estimated wire-equivalent P2P bandwidth instead of decoded payload throughput.
   - Why: The dashboard is used to compare LogEx sync traffic with VPS/router charts, so decoded payload bytes underreport and memory-size estimates overreport.
@@ -40,6 +46,10 @@ No remaining code TODOs for the dashboard P2P bandwidth task. PR #105 is open fo
 
 ## Challenges and Resolutions
 
+- Challenge: The local nightly compiler predates the GitHub runner compiler that promoted `semicolon_in_expressions_from_macros` to an error.
+  - Resolution: Ran the full workspace check with `RUSTFLAGS=-Dsemicolon_in_expressions_from_macros` to reproduce the GitHub failure mode locally.
+  - Remaining: None.
+
 - Challenge: The prior dashboard metric underreported a fresh run by an order of magnitude because concurrent request completions were smoothed as one per-request EWMA.
   - Resolution: Replaced it with a rolling aggregate byte window.
   - Remaining: None known.
@@ -50,25 +60,28 @@ No remaining code TODOs for the dashboard P2P bandwidth task. PR #105 is open fo
 
 ## Dead Code and Obsolescence Cleanup
 
-- Inspected the previous payload-only bandwidth accounting path in `logex-sync`.
-- Removed obsolete EL download EWMA fields and constants.
-- Kept the public `/status` field names stable while updating their documented semantics to estimated wire bytes.
-- No files were removed.
+- Inspected every `bail!` invocation in the Rust workspace for the newly invalid expression-position pattern.
+- Confirmed the remaining invocations are already statement-terminated.
+- No dead files, imports, exports, dependencies, or superseded code were introduced or found in the affected request path.
 
 ## Git Workflow
 
-- Current branch: `fix/p2p-bandwidth-accounting`.
-- Task branch `fix/p2p-bandwidth-accounting` was created from latest `master`.
+- Current task branch: `fix/nightly-bail-ci`.
+- Task branch `fix/nightly-bail-ci` was created from the latest `master`.
 - Commits made during this run:
-  - `9a2fb483 fix: calibrate p2p bandwidth accounting`
-- Pull request status: PR #105 is open: `https://github.com/tdenisenko/logex/pull/105`.
-- Merge status: pending CI/review.
+  - `8d02f434 fix: restore nightly CI compatibility`
+- Pull request status: PR #106 was created and merged into `master`: `https://github.com/tdenisenko/logex/pull/106`.
+- Remote branch cleanup: every remote branch except `master` was deleted after the merge.
+- GitHub CLI authentication was expired; the connected GitHub app supplied workflow logs, PR creation, and merge operations, while authenticated SSH handled Git fetch/push operations.
 - Validation run:
-  - `cargo fmt --check`
-  - `cargo test -p logex-sync p2p::peer_manager::tests::payload_bandwidth_window`
-  - `cargo check -p logex-types -p logex-sync -p logex-server`
-  - `cargo clippy -p logex-types -p logex-sync -p logex-server -- -D warnings`
+  - `cargo fmt --all -- --check`
+  - `RUSTFLAGS=-Dsemicolon_in_expressions_from_macros cargo check --workspace`
+  - `cargo check --workspace`
+  - `cargo clippy --workspace -- -D warnings`
+  - `cargo test --workspace`
+  - `git diff --check`
 
 ## Known Issues or Risks
 
 - Bandwidth metrics are calibrated wire-equivalent estimates, not packet captures. They should track normal sync traffic closely, but exact values can differ during peer churn, retransmits, or unrelated host traffic on the same VPS tunnel.
+- The repository intentionally follows rolling nightly Rust, so future compiler changes can expose additional source incompatibilities; CI remains the guardrail.

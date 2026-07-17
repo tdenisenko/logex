@@ -514,7 +514,7 @@ impl PeerManager {
             .await;
         self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Headers);
         if peer_ids.is_empty() {
-            bail!("no peers available to handle reverse header page request")
+            bail!("no peers available to handle reverse header page request");
         }
 
         let peers = peer_ids
@@ -526,7 +526,7 @@ impl PeerManager {
             })
             .collect::<Vec<_>>();
         if peers.is_empty() {
-            bail!("no connected peers available to handle reverse header page request")
+            bail!("no connected peers available to handle reverse header page request");
         }
 
         let mut pages = Vec::new();
@@ -609,7 +609,7 @@ impl PeerManager {
             return Ok(Vec::new());
         }
         if pages.is_empty() {
-            bail!("no peers available to handle reverse header page request")
+            bail!("no peers available to handle reverse header page request");
         }
         Ok(pages)
     }
@@ -831,7 +831,7 @@ impl PeerManager {
         if remaining_hashes.is_empty() {
             Ok(collected)
         } else {
-            bail!("no peers available to handle block body request")
+            bail!("no peers available to handle block body request");
         }
     }
 
@@ -1146,7 +1146,7 @@ impl PeerManager {
                 blocks.len(),
                 total_hashes,
                 min_accepted_prefix
-            )
+            );
         }
     }
 
@@ -2533,7 +2533,7 @@ impl PeerManager {
         if saw_empty_response {
             return Ok((PeerId::ZERO, Vec::new()));
         }
-        bail!("no peers available to handle header request")
+        bail!("no peers available to handle header request");
     }
 
     /// Request receipts for the given block hashes.
@@ -2906,7 +2906,7 @@ impl PeerManager {
         }
 
         self.remove_dead_peers(&dead_peers);
-        bail!("no peers available to handle receipt request")
+        bail!("no peers available to handle receipt request");
     }
 
     async fn peer_ids_for_receipt_requests(
