@@ -20,7 +20,8 @@ use super::catalog::{
 use super::segment::{
     append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
     persist_segment_manifest, persist_segment_manifest_with_columns,
-    segment_uses_current_compaction_profile, write_compacted_rows,
+    segment_uses_current_compaction_profile, verify_raw_segment_files_complete,
+    write_compacted_rows,
 };
 
 const STORAGE_STATE_FILE: &str = "storage_state.json";
@@ -63,7 +64,22 @@ impl SegmentCompactionTask {
     }
 
     pub fn compact(&self) -> std::io::Result<()> {
-        compact_segment(&self.paths, &self.descriptor)
+        compact_segment(&self.paths, &self.descriptor).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to compact storage segment {} rows={} blocks=[{}, {}]: {error}",
+                    self.descriptor.id,
+                    self.descriptor.row_count,
+                    self.descriptor
+                        .min_block
+                        .map_or_else(|| "?".to_owned(), |block| block.to_string()),
+                    self.descriptor
+                        .max_block
+                        .map_or_else(|| "?".to_owned(), |block| block.to_string())
+                ),
+            )
+        })
     }
 }
 
@@ -1354,6 +1370,7 @@ fn verify_segment_integrity(
     }
 
     if dir.join("address.col").exists() {
+        verify_raw_segment_files_complete(descriptor, &dir)?;
         for (name, physical_rows) in hot_segment_physical_row_counts(&dir)? {
             if physical_rows != row_count {
                 return Err(io::Error::new(
@@ -2364,6 +2381,84 @@ mod tests {
         .err()
         .expect("broken recent-header window should fail integrity checks");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn startup_integrity_rejects_truncated_raw_column_body() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 5,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let sealed_id;
+
+        {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&make_rows(6, 100)).unwrap();
+            let sealed = storage
+                .segments()
+                .iter()
+                .find(|segment| segment.kind == SegmentKind::Sealed)
+                .cloned()
+                .unwrap();
+            sealed_id = sealed.id;
+
+            let path = storage.segment_path(sealed.id).join("topic2.col");
+            let mut data = fs::read(&path).unwrap();
+            data.truncate(data.len() - 32);
+            fs::write(path, data).unwrap();
+        }
+
+        let err = NativeStorage::open(config)
+            .err()
+            .expect("truncated raw column should fail startup integrity");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(message.contains(&format!("segment {sealed_id} raw column topic2.col")));
+        assert!(message.contains("length mismatch"));
+    }
+
+    #[test]
+    fn compaction_error_identifies_truncated_raw_column() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 5,
+            compaction_safety_margin_blocks: 100,
+        })
+        .unwrap();
+
+        storage.write_batch(&make_rows(6, 100)).unwrap();
+        let sealed = storage
+            .segments()
+            .iter()
+            .find(|segment| segment.kind == SegmentKind::Sealed)
+            .cloned()
+            .unwrap();
+        storage
+            .record_sync_head(
+                sealed.max_block.unwrap() + 200,
+                B256::repeat_byte(0xAA),
+                999,
+            )
+            .unwrap();
+
+        let path = storage.segment_path(sealed.id).join("topic2.col");
+        let mut data = fs::read(&path).unwrap();
+        data.truncate(data.len() - 32);
+        fs::write(path, data).unwrap();
+
+        let err = storage
+            .segment_compaction_plan(1)
+            .unwrap()
+            .compact()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(message.contains(&format!("failed to compact storage segment {}", sealed.id)));
+        assert!(message.contains("raw column topic2.col"));
+        assert!(message.contains("length mismatch"));
     }
 
     #[test]
