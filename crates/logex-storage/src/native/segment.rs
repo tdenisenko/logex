@@ -1,6 +1,6 @@
 use std::fs;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -8,7 +8,7 @@ use std::thread;
 use alloy_primitives::{Address, B256};
 use logex_types::LogRow;
 
-use crate::column::{ColumnFile, NullBitmap};
+use crate::column::{ColumnFile, ColumnFileHeader, NullBitmap};
 use crate::page::{
     PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
     encode_var_bytes_page, write_page_index,
@@ -23,6 +23,30 @@ use super::catalog::{
 
 const DEFAULT_PAGE_ROWS: u32 = 16_384;
 const RECOMPACTED_COLUMNS_DIR: &str = "columns_profile_v2";
+const RAW_FIXED_COLUMNS: &[(&str, u64)] = &[
+    ("address.col", 20),
+    ("block_number.col", 8),
+    ("block_hash.col", 32),
+    ("timestamp.col", 8),
+    ("tx_hash.col", 32),
+    ("tx_index.col", 4),
+    ("log_index.col", 4),
+    ("data_len.col", 4),
+    ("source.col", 1),
+    ("topic0.col", 32),
+    ("topic1.col", 32),
+    ("topic2.col", 32),
+    ("topic3.col", 32),
+];
+const RAW_NULL_BITMAP_COLUMNS: &[&str] =
+    &["topic0.null", "topic1.null", "topic2.null", "topic3.null"];
+const RAW_BITMAP_COLUMNS: &[&str] = &[
+    "topic0.null",
+    "topic1.null",
+    "topic2.null",
+    "topic3.null",
+    "canonical.bitmap",
+];
 
 pub(crate) fn append_rows(
     segment_dir: &Path,
@@ -306,6 +330,7 @@ pub(crate) fn compact_segment(
 
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(segment_dir.join("columns"))?;
+    verify_raw_segment_files_complete(descriptor, &segment_dir)?;
 
     let columns = vec![
         compact_address_column(&segment_dir)?,
@@ -853,32 +878,266 @@ where
 }
 
 fn remove_raw_hot_files(segment_dir: &Path) -> std::io::Result<()> {
-    for name in [
-        "address.col",
-        "block_number.col",
-        "block_hash.col",
-        "timestamp.col",
-        "tx_hash.col",
-        "tx_index.col",
-        "log_index.col",
-        "data.col",
-        "data_len.col",
-        "source.col",
-        "topic0.col",
-        "topic1.col",
-        "topic2.col",
-        "topic3.col",
-        "topic0.null",
-        "topic1.null",
-        "topic2.null",
-        "topic3.null",
-    ] {
+    for name in RAW_FIXED_COLUMNS
+        .iter()
+        .map(|(name, _width)| *name)
+        .chain(std::iter::once("data.col"))
+        .chain(RAW_NULL_BITMAP_COLUMNS.iter().copied())
+    {
         let path = segment_dir.join(name);
         if path.exists() {
             fs::remove_file(path)?;
         }
     }
     Ok(())
+}
+
+pub(crate) fn verify_raw_segment_files_complete(
+    descriptor: &SegmentDescriptor,
+    segment_dir: &Path,
+) -> std::io::Result<()> {
+    for (name, width) in RAW_FIXED_COLUMNS {
+        verify_fixed_raw_column_file(descriptor, segment_dir, name, *width)?;
+    }
+    for name in RAW_BITMAP_COLUMNS {
+        verify_raw_bitmap_file(descriptor, segment_dir, name)?;
+    }
+    verify_raw_data_column_file(descriptor, segment_dir)?;
+    Ok(())
+}
+
+fn verify_fixed_raw_column_file(
+    descriptor: &SegmentDescriptor,
+    segment_dir: &Path,
+    name: &str,
+    width: u64,
+) -> std::io::Result<()> {
+    let path = segment_dir.join(name);
+    let header = read_raw_column_header(descriptor, &path, name)?;
+    if header.row_count != descriptor.row_count {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!(
+                "row-count mismatch: manifest={} header={}",
+                descriptor.row_count, header.row_count
+            ),
+        ));
+    }
+
+    let expected_len =
+        (ColumnFileHeader::SIZE as u64)
+            .checked_add(header.row_count.checked_mul(width).ok_or_else(|| {
+                raw_segment_error(descriptor, name, "expected byte length overflow")
+            })?)
+            .ok_or_else(|| raw_segment_error(descriptor, name, "expected byte length overflow"))?;
+    let actual_len = raw_file_len(descriptor, &path, name)?;
+    if actual_len != expected_len {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!("length mismatch: expected {expected_len} bytes, got {actual_len} bytes"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_raw_bitmap_file(
+    descriptor: &SegmentDescriptor,
+    segment_dir: &Path,
+    name: &str,
+) -> std::io::Result<()> {
+    let path = segment_dir.join(name);
+    let mut file = open_raw_file(descriptor, &path, name)?;
+    let mut len_bytes = [0u8; 8];
+    file.read_exact(&mut len_bytes).map_err(|error| {
+        raw_segment_error(
+            descriptor,
+            name,
+            format!("failed to read bitmap length: {error}"),
+        )
+    })?;
+    let bitmap_rows = u64::from_le_bytes(len_bytes);
+    if bitmap_rows != descriptor.row_count {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!(
+                "row-count mismatch: manifest={} bitmap={bitmap_rows}",
+                descriptor.row_count
+            ),
+        ));
+    }
+
+    let expected_len = 8u64
+        .checked_add(bitmap_rows.div_ceil(8))
+        .ok_or_else(|| raw_segment_error(descriptor, name, "expected byte length overflow"))?;
+    let actual_len = file
+        .metadata()
+        .map_err(|error| {
+            raw_segment_error(
+                descriptor,
+                name,
+                format!("failed to read file metadata: {error}"),
+            )
+        })?
+        .len();
+    if actual_len != expected_len {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!("length mismatch: expected {expected_len} bytes, got {actual_len} bytes"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_raw_data_column_file(
+    descriptor: &SegmentDescriptor,
+    segment_dir: &Path,
+) -> std::io::Result<()> {
+    let name = "data.col";
+    let path = segment_dir.join(name);
+    let mut file = open_raw_file(descriptor, &path, name)?;
+    let header = read_raw_column_header_from_file(descriptor, &mut file, name)?;
+    if header.row_count != descriptor.row_count {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!(
+                "row-count mismatch: manifest={} header={}",
+                descriptor.row_count, header.row_count
+            ),
+        ));
+    }
+
+    let offsets_size = header
+        .row_count
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(8))
+        .ok_or_else(|| raw_segment_error(descriptor, name, "offset table size overflow"))?;
+    let blob_start = (ColumnFileHeader::SIZE as u64)
+        .checked_add(offsets_size)
+        .ok_or_else(|| raw_segment_error(descriptor, name, "blob offset overflow"))?;
+    let actual_len = file
+        .metadata()
+        .map_err(|error| {
+            raw_segment_error(
+                descriptor,
+                name,
+                format!("failed to read file metadata: {error}"),
+            )
+        })?
+        .len();
+    if actual_len < blob_start {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!(
+                "offset table is truncated: expected at least {blob_start} bytes, got {actual_len} bytes"
+            ),
+        ));
+    }
+
+    let last_offset_position =
+        (ColumnFileHeader::SIZE as u64)
+            .checked_add(header.row_count.checked_mul(8).ok_or_else(|| {
+                raw_segment_error(descriptor, name, "last offset position overflow")
+            })?)
+            .ok_or_else(|| raw_segment_error(descriptor, name, "last offset position overflow"))?;
+    file.seek(SeekFrom::Start(last_offset_position))
+        .map_err(|error| {
+            raw_segment_error(
+                descriptor,
+                name,
+                format!("failed to seek final data offset: {error}"),
+            )
+        })?;
+    let mut last_offset_bytes = [0u8; 8];
+    file.read_exact(&mut last_offset_bytes).map_err(|error| {
+        raw_segment_error(
+            descriptor,
+            name,
+            format!("failed to read final data offset: {error}"),
+        )
+    })?;
+    let last_offset = u64::from_le_bytes(last_offset_bytes);
+    let blob_len = actual_len - blob_start;
+    if last_offset != blob_len {
+        return Err(raw_segment_error(
+            descriptor,
+            name,
+            format!(
+                "blob length mismatch: final offset={last_offset} bytes, blob={blob_len} bytes"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn read_raw_column_header(
+    descriptor: &SegmentDescriptor,
+    path: &Path,
+    name: &str,
+) -> std::io::Result<ColumnFileHeader> {
+    let mut file = open_raw_file(descriptor, path, name)?;
+    read_raw_column_header_from_file(descriptor, &mut file, name)
+}
+
+fn open_raw_file(descriptor: &SegmentDescriptor, path: &Path, name: &str) -> std::io::Result<File> {
+    File::open(path).map_err(|error| {
+        raw_segment_error(
+            descriptor,
+            name,
+            format!("failed to open {}: {error}", path.display()),
+        )
+    })
+}
+
+fn raw_file_len(descriptor: &SegmentDescriptor, path: &Path, name: &str) -> std::io::Result<u64> {
+    fs::metadata(path)
+        .map_err(|error| {
+            raw_segment_error(
+                descriptor,
+                name,
+                format!("failed to read metadata for {}: {error}", path.display()),
+            )
+        })
+        .map(|metadata| metadata.len())
+}
+
+fn read_raw_column_header_from_file(
+    descriptor: &SegmentDescriptor,
+    file: &mut File,
+    name: &str,
+) -> std::io::Result<ColumnFileHeader> {
+    let mut header_buf = [0u8; ColumnFileHeader::SIZE];
+    file.read_exact(&mut header_buf).map_err(|error| {
+        raw_segment_error(
+            descriptor,
+            name,
+            format!("failed to read column header: {error}"),
+        )
+    })?;
+    ColumnFileHeader::read_from(&header_buf)
+        .ok_or_else(|| raw_segment_error(descriptor, name, "corrupt column header"))
+}
+
+fn raw_segment_error(
+    descriptor: &SegmentDescriptor,
+    name: &str,
+    detail: impl std::fmt::Display,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "segment {} raw column {name} is incomplete: {detail}",
+            descriptor.id
+        ),
+    )
 }
 
 fn remove_superseded_column_dirs(segment_dir: &Path, active_dir: &str) -> std::io::Result<()> {
