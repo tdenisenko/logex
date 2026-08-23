@@ -171,6 +171,14 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
+    let reported_node_state = if sync.node_state == logex_types::NodeState::Synced
+        && (sync.consensus_head_fresh == Some(false)
+            || (sync.checkpoint.is_some() && sync.consensus_head_fresh.is_none()))
+    {
+        logex_types::NodeState::WaitingForConsensus
+    } else {
+        sync.node_state
+    };
     let (
         total_rows,
         sealed_partitions,
@@ -277,10 +285,10 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let verified_to_block = head_block.or(canonical_top_block);
     let execution_network = rest_execution_network_status(sync.execution_network);
     Json(serde_json::json!({
-        "synced": sync.node_state == logex_types::NodeState::Synced,
+        "synced": reported_node_state == logex_types::NodeState::Synced,
         "syncing": sync.syncing,
-        "node_state": sync.node_state,
-        "node_state_label": sync.node_state.as_label(),
+        "node_state": reported_node_state,
+        "node_state_label": reported_node_state.as_label(),
         "connected_peers": sync.connected_peers,
         "serving_peers": sync.serving_peers,
         "pending_peers": sync.pending_peers,
@@ -349,6 +357,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "materialized_execution_anchor_count": sync.materialized_execution_anchor_count,
         "materialized_execution_anchor_gap_count": sync.materialized_execution_anchor_gap_count,
         "optimistic_execution_head": sync.optimistic_execution_head,
+        "consensus_current_slot": sync.consensus_current_slot,
+        "consensus_head_lag_slots": sync.consensus_head_lag_slots,
+        "consensus_head_fresh": sync.consensus_head_fresh,
         "finalized_execution_head": sync.finalized_execution_head,
         "execution_network": execution_network,
         "consensus_network": sync.consensus_network,
@@ -1400,6 +1411,9 @@ mod tests {
                     block_hash: B256::repeat_byte(0x05),
                     receipts_root: B256::repeat_byte(0x06),
                 }),
+                consensus_current_slot: Some(6),
+                consensus_head_lag_slots: Some(4),
+                consensus_head_fresh: Some(true),
                 finalized_execution_head: Some(ExecutionAnchor {
                     beacon_root: B256::repeat_byte(0x07),
                     beacon_slot: 3,
@@ -1546,9 +1560,16 @@ mod tests {
                     beacon_blocks_by_range_request_failures: 0,
                     beacon_blocks_by_root_request_failures: 0,
                     gossip_subscriptions: 2,
+                    finality_update_gossip_mesh_peers: 3,
+                    optimistic_update_gossip_mesh_peers: 4,
                     finality_update_gossip_messages: 4,
                     optimistic_update_gossip_messages: 9,
                     gossip_decode_failures: 1,
+                    current_slot: 123_456,
+                    optimistic_head_slot: Some(123_452),
+                    optimistic_head_lag_slots: Some(4),
+                    head_recovery_active: false,
+                    head_recovery_attempts: 2,
                     p2p_download_bytes_per_sec: 2_500_000,
                     p2p_upload_bytes_per_sec: 250_000,
                     p2p_downloaded_payload_bytes: 22_222_222,
@@ -1732,6 +1753,12 @@ mod tests {
         assert_eq!(status["storage_profile_rewrite_backlog"], 5);
         assert_eq!(status["consensus_network"]["active_sessions"], 3);
         assert_eq!(status["consensus_network"]["dialable_peers"], 13);
+        assert_eq!(status["consensus_head_lag_slots"], 4);
+        assert_eq!(status["consensus_head_fresh"], true);
+        assert_eq!(
+            status["consensus_network"]["optimistic_update_gossip_mesh_peers"],
+            4
+        );
         assert_eq!(
             status["consensus_network"]["p2p_download_bytes_per_sec"],
             2_500_000
@@ -1819,5 +1846,40 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["synced"], false);
         assert_eq!(status["node_state"], "disconnected");
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_does_not_report_stale_consensus_as_synced() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                node_state: NodeState::Synced,
+                current_block: 100,
+                target_block: 100,
+                consensus_current_slot: Some(1_050),
+                consensus_head_lag_slots: Some(50),
+                consensus_head_fresh: Some(false),
+                ..Default::default()
+            },
+        ));
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["synced"], false);
+        assert_eq!(status["node_state"], "waiting_for_consensus");
+        assert_eq!(status["node_state_label"], "Waiting For Consensus");
+        assert_eq!(status["consensus_head_lag_slots"], 50);
     }
 }

@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use logex_cl::{
+    MAINNET_CONSENSUS_CHAIN_SPEC, optimistic_head_is_fresh_at, optimistic_head_lag_slots,
+};
 use logex_types::{
     ChainAnchors, ExecutionBlockMarker, ExecutionNetworkStatus, NodeState, SyncStatus,
     WeakSubjectivityCheckpoint,
@@ -80,14 +83,38 @@ impl ProgressTracker {
         checkpoint: WeakSubjectivityCheckpoint,
         anchors: &ChainAnchors,
     ) {
+        self.update_consensus_state_at(
+            checkpoint,
+            anchors,
+            MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_slot(),
+        );
+    }
+
+    fn update_consensus_state_at(
+        &self,
+        checkpoint: WeakSubjectivityCheckpoint,
+        anchors: &ChainAnchors,
+        current_slot: u64,
+    ) {
         let mut status = self.status.lock().unwrap();
+        let optimistic_slot = anchors.optimistic_head.map(|anchor| anchor.beacon_slot);
+        let head_fresh =
+            optimistic_slot.is_some_and(|slot| optimistic_head_is_fresh_at(current_slot, slot));
         status.checkpoint = Some(checkpoint);
         status.indexed_execution_head = anchors.indexed_head;
         status.optimistic_execution_head = anchors.optimistic_head;
         status.finalized_execution_head = anchors.finalized_head;
+        status.consensus_current_slot = Some(current_slot);
+        status.consensus_head_lag_slots =
+            optimistic_slot.map(|slot| optimistic_head_lag_slots(current_slot, slot));
+        status.consensus_head_fresh = Some(head_fresh);
         status.target_block = anchors
             .optimistic_head
             .map_or(status.current_block, |anchor| anchor.block_number);
+        if !head_fresh && status.node_state == NodeState::Synced {
+            status.node_state = NodeState::WaitingForConsensus;
+            status.syncing = false;
+        }
     }
 
     /// Update the node's connectivity state and peer counts.
@@ -107,6 +134,11 @@ impl ProgressTracker {
                 NodeState::Synced | NodeState::WaitingForConsensus
             ) {
             NodeState::Syncing
+        } else if node_state == NodeState::Synced
+            && (status.consensus_head_fresh == Some(false)
+                || (status.checkpoint.is_some() && status.consensus_head_fresh.is_none()))
+        {
+            NodeState::WaitingForConsensus
         } else {
             node_state
         };
@@ -306,6 +338,14 @@ impl ProgressTracker {
     /// Mark sync as complete (caught up to tip).
     pub fn mark_synced(&self) {
         let mut status = self.status.lock().unwrap();
+        if status.consensus_head_fresh == Some(false)
+            || (status.checkpoint.is_some() && status.consensus_head_fresh.is_none())
+        {
+            status.node_state = NodeState::WaitingForConsensus;
+            status.syncing = false;
+            status.eta_seconds = None;
+            return;
+        }
         status.node_state = NodeState::Synced;
         status.syncing = false;
         status.target_block = status.current_block;
@@ -487,7 +527,7 @@ mod tests {
         }));
         let tracker = ProgressTracker::new(Arc::clone(&status));
 
-        tracker.update_consensus_state(
+        tracker.update_consensus_state_at(
             WeakSubjectivityCheckpoint {
                 beacon_root: B256::repeat_byte(0x11),
                 beacon_slot: Some(1),
@@ -503,9 +543,103 @@ mod tests {
                     receipts_root: B256::repeat_byte(0x44),
                 }),
             },
+            2,
         );
 
         let status = status.lock().unwrap().clone();
         assert_eq!(status.target_block, 97);
+    }
+
+    #[test]
+    fn stale_consensus_head_prevents_synced_state() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            node_state: NodeState::Synced,
+            current_block: 97,
+            target_block: 97,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_consensus_state_at(
+            WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x11),
+                beacon_slot: Some(100),
+            },
+            &ChainAnchors {
+                indexed_head: None,
+                finalized_head: None,
+                optimistic_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x22),
+                    beacon_slot: 100,
+                    block_number: 97,
+                    block_hash: B256::repeat_byte(0x33),
+                    receipts_root: B256::repeat_byte(0x44),
+                }),
+            },
+            105,
+        );
+        tracker.mark_synced();
+
+        let status = status.lock().unwrap().clone();
+        assert_eq!(status.consensus_head_lag_slots, Some(5));
+        assert_eq!(status.consensus_head_fresh, Some(false));
+        assert_eq!(status.node_state, NodeState::WaitingForConsensus);
+        assert!(!status.syncing);
+    }
+
+    #[test]
+    fn fresh_consensus_head_allows_synced_state() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            node_state: NodeState::WaitingForConsensus,
+            current_block: 97,
+            target_block: 97,
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_consensus_state_at(
+            WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x11),
+                beacon_slot: Some(100),
+            },
+            &ChainAnchors {
+                indexed_head: None,
+                finalized_head: None,
+                optimistic_head: Some(ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(0x22),
+                    beacon_slot: 100,
+                    block_number: 97,
+                    block_hash: B256::repeat_byte(0x33),
+                    receipts_root: B256::repeat_byte(0x44),
+                }),
+            },
+            104,
+        );
+        tracker.mark_synced();
+
+        let status = status.lock().unwrap().clone();
+        assert_eq!(status.consensus_head_lag_slots, Some(4));
+        assert_eq!(status.consensus_head_fresh, Some(true));
+        assert_eq!(status.node_state, NodeState::Synced);
+        assert!(!status.syncing);
+    }
+
+    #[test]
+    fn connectivity_refresh_cannot_overwrite_stale_consensus_state() {
+        let status = Arc::new(Mutex::new(SyncStatus {
+            checkpoint: Some(WeakSubjectivityCheckpoint {
+                beacon_root: B256::repeat_byte(0x11),
+                beacon_slot: Some(100),
+            }),
+            consensus_head_fresh: Some(false),
+            ..Default::default()
+        }));
+        let tracker = ProgressTracker::new(Arc::clone(&status));
+
+        tracker.update_network_state(NodeState::Synced, 8, 4, 16);
+
+        let status = status.lock().unwrap().clone();
+        assert_eq!(status.node_state, NodeState::WaitingForConsensus);
+        assert!(!status.syncing);
     }
 }

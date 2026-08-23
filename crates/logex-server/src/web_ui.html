@@ -1205,6 +1205,7 @@
           <div class="debug-item"><span class="k">Estimated logs remaining</span><span class="v" id="debugRemainingLogs">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer status</span><span class="v" id="debugConsensusStatus">--</span></div>
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
+          <div class="debug-item"><span class="k">Consensus head freshness</span><span class="v" id="debugConsensusFreshness">--</span></div>
           <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
           <div class="debug-item"><span class="k">LogEx storage used</span><span class="v" id="debugStorageUsed">--</span></div>
           <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
@@ -3153,10 +3154,12 @@ function updateStatus(data) {
   var consensusPeers = numberOrNull(consensusNetwork.connected_peer_sessions);
   var consensusMaxPeers = numberOrNull(consensusNetwork.max_peers);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
+  var consensusHeadFresh = data.consensus_head_fresh === true;
+  var consensusHeadLagSlots = numberOrNull(data.consensus_head_lag_slots);
 
   var displayState = state;
   var displayStateLabel = stateLabel;
-  if (historicalComplete && liveRemaining != null && liveRemaining < 3) {
+  if (historicalComplete && consensusHeadFresh && liveRemaining != null && liveRemaining < 3) {
     displayState = 'synced';
     displayStateLabel = 'Synced';
   }
@@ -3170,7 +3173,9 @@ function updateStatus(data) {
   setText('executionSummary', historicalSyncDisabled
     ? (liveRemaining == null ? 'Waiting for the latest Execution Layer block.' : fmtBlocks(liveRemaining) + ' remaining to head.')
     : (historicalComplete
-      ? (liveRemaining == null ? 'Waiting for the latest Execution Layer block.' : fmtBlocks(liveRemaining) + ' remaining to head.')
+      ? (!consensusHeadFresh
+        ? 'Waiting for the current Consensus Layer head.'
+        : (liveRemaining == null ? 'Waiting for the latest Execution Layer block.' : fmtBlocks(liveRemaining) + ' remaining to head.'))
       : (floorBlock == null
         ? 'Waiting for the first verified historical Execution Layer block.'
         : fmtBlocks(historicalRemaining) + ' remaining to genesis.')));
@@ -3182,19 +3187,21 @@ function updateStatus(data) {
   setText('executionEnd', historicalSyncDisabled
     ? (liveTargetBlock == null ? 'Head block --' : 'Head ' + blockWithAge(liveTargetBlock, liveTargetBlock === storedHeadBlock ? latestTime : null))
     : (historicalComplete
-      ? (liveTargetBlock == null ? 'Head block --' : 'Head ' + blockWithAge(liveTargetBlock, liveTargetBlock === storedHeadBlock ? latestTime : null))
+      ? (liveTargetBlock == null
+        ? 'Head block --'
+        : (consensusHeadFresh ? 'Head ' : 'Known head ') + blockWithAge(liveTargetBlock, liveTargetBlock === storedHeadBlock ? latestTime : null))
       : 'Genesis block ' + fmt(historicalTargetBlock)));
   setWidth('executionBar', barPct);
   setExecutionBarState(active, false);
   setText('executionRemaining', historicalComplete
-    ? (liveRemaining == null ? '--' : fmtBlocks(liveRemaining))
+    ? (!consensusHeadFresh || liveRemaining == null ? '--' : fmtBlocks(liveRemaining))
     : (historicalRemaining == null ? '--' : fmtBlocks(historicalRemaining)));
   setText('executionRate', fmtLogRate(logRate));
   setText('executionP2pDownload', fmtP2pBandwidth(p2pDownloadBytesPerSec, p2pUploadBytesPerSec));
   setText('executionPeers', fmt(servingPeers));
 
   var consensusStatus = 'Waiting';
-  if (consensusHeadLag != null && consensusHeadLag < 3) {
+  if (consensusHeadFresh && consensusHeadLag != null && consensusHeadLag < 3) {
     consensusStatus = 'Tracking head';
   } else if (materializedBlock != null && consensusHeadBlock != null) {
     consensusStatus = 'Catching up';
@@ -3299,6 +3306,12 @@ function updateStatus(data) {
   setText('debugConsensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
     : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.');
+  setText('debugConsensusFreshness', data.consensus_head_fresh == null
+    ? '--'
+    : (consensusHeadFresh
+      ? 'Fresh; ' + fmt(consensusHeadLagSlots) + ' slots behind'
+      : 'Stale; ' + fmt(consensusHeadLagSlots) + ' slots behind; recovery ' +
+        (consensusNetwork.head_recovery_active ? 'active' : 'waiting')));
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
   setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
   setText('debugStorageWritePath', data.storage_write_path);

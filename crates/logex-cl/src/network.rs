@@ -506,6 +506,7 @@ struct ConsensusNetwork {
     verified_beacon_block_children: HashMap<B256, Vec<VerifiedBeaconBlock>>,
     verified_beacon_block_payloads: HashMap<B256, RawRpcResponse>,
     active_history_target: Option<HistorySyncTarget>,
+    head_recovery_attempts: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,8 +569,11 @@ fn select_forward_history_range_target(
     }
 }
 
-fn live_head_progression_needed(target: Option<HistorySyncTarget>) -> bool {
-    target.is_some_and(|target| target.optimistic_slot <= target.checkpoint_slot)
+fn live_head_progression_needed(target: Option<HistorySyncTarget>, current_slot: u64) -> bool {
+    target.is_some_and(|target| {
+        target.optimistic_slot <= target.checkpoint_slot
+            || !crate::optimistic_head_is_fresh_at(current_slot, target.optimistic_slot)
+    })
 }
 
 fn limited_local_status_message(fork_digest: [u8; 4]) -> StatusMessage {
@@ -695,6 +699,22 @@ fn select_post_bootstrap_request_kind(
         Some(RpcRequestKind::LightClientFinalityUpdate)
     } else if readiness.optimistic_ready {
         Some(RpcRequestKind::LightClientOptimisticUpdate)
+    } else {
+        None
+    }
+}
+
+fn select_live_head_progression_request_kind(
+    updates_ready: bool,
+    optimistic_ready: bool,
+    finality_ready: bool,
+) -> Option<RpcRequestKind> {
+    if updates_ready {
+        Some(RpcRequestKind::LightClientUpdatesByRange)
+    } else if optimistic_ready {
+        Some(RpcRequestKind::LightClientOptimisticUpdate)
+    } else if finality_ready {
+        Some(RpcRequestKind::LightClientFinalityUpdate)
     } else {
         None
     }
@@ -1814,6 +1834,7 @@ impl ConsensusNetwork {
             verified_beacon_block_children,
             verified_beacon_block_payloads: HashMap::new(),
             active_history_target: None,
+            head_recovery_attempts: 0,
         })
     }
 
@@ -3665,6 +3686,17 @@ impl ConsensusNetwork {
             self.pending_history_range_requests.insert(key, request);
         }
         self.pending_peer_kinds.insert((peer, kind));
+        if matches!(
+            kind,
+            RpcRequestKind::LightClientUpdatesByRange
+                | RpcRequestKind::LightClientFinalityUpdate
+                | RpcRequestKind::LightClientOptimisticUpdate
+        ) && live_head_progression_needed(
+            self.latest_history_sync_target(),
+            current_wall_clock_slot(),
+        ) {
+            self.head_recovery_attempts = self.head_recovery_attempts.saturating_add(1);
+        }
     }
 
     fn build_request(&self, kind: RpcRequestKind) -> Option<Eth2RpcRequest> {
@@ -3695,23 +3727,19 @@ impl ConsensusNetwork {
     }
 
     fn next_post_bootstrap_request_kind(&self, support: PeerRpcSupport) -> Option<RpcRequestKind> {
-        if live_head_progression_needed(self.current_history_sync_target()) {
-            if support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
+        if live_head_progression_needed(
+            self.latest_history_sync_target(),
+            current_wall_clock_slot(),
+        ) && let Some(kind) = select_live_head_progression_request_kind(
+            support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
                 && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
-                && self.next_updates_by_range_request().is_some()
-            {
-                return Some(RpcRequestKind::LightClientUpdatesByRange);
-            }
-            if support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
-            {
-                return Some(RpcRequestKind::LightClientFinalityUpdate);
-            }
-            if support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
-            {
-                return Some(RpcRequestKind::LightClientOptimisticUpdate);
-            }
+                && self.next_updates_by_range_request().is_some(),
+            support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
+            support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
+                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
+        ) {
+            return Some(kind);
         }
 
         let priority_root_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
@@ -4168,8 +4196,18 @@ impl ConsensusNetwork {
         let Some(lifecycle) = self.peer_lifecycle.get(&peer) else {
             return 0;
         };
+        let head_progression_needed = !bootstrap_needed
+            && live_head_progression_needed(
+                self.latest_history_sync_target(),
+                current_wall_clock_slot(),
+            );
         let support_score = match lifecycle.remembered_support {
             Some(support) if bootstrap_needed && support.supports_bootstrap_sync() => 4,
+            Some(support)
+                if head_progression_needed && support.supports_light_client_progression() =>
+            {
+                5
+            }
             Some(support) if !bootstrap_needed && support.supports_any_post_bootstrap_work() => 4,
             Some(support) if bootstrap_needed && support.supports_any_post_bootstrap_work() => 3,
             Some(support) if support.status => 2,
@@ -4588,6 +4626,24 @@ impl ConsensusNetwork {
         let pending_forward_ranges = self.pending_history_range_requests.len();
         let p2p_download = self.p2p_download_metrics.snapshot(now);
         let p2p_upload = self.p2p_upload_metrics.snapshot(now);
+        let current_slot = current_wall_clock_slot();
+        let optimistic_head_slot = anchors.optimistic_head.map(|anchor| anchor.beacon_slot);
+        let optimistic_head_lag_slots =
+            optimistic_head_slot.map(|slot| crate::optimistic_head_lag_slots(current_slot, slot));
+        let head_recovery_active =
+            live_head_progression_needed(self.latest_history_sync_target(), current_slot);
+        let finality_update_gossip_mesh_peers = self
+            .swarm
+            .behaviour()
+            .gossip
+            .mesh_peers(&self.gossip_topics.finality_update.hash())
+            .count();
+        let optimistic_update_gossip_mesh_peers = self
+            .swarm
+            .behaviour()
+            .gossip
+            .mesh_peers(&self.gossip_topics.optimistic_update.hash())
+            .count();
         let status = ConsensusNetworkStatus {
             local_enr: Some(self.discv5.local_enr().to_base64()),
             local_node_id: Some(self.discv5.local_enr().node_id().to_string()),
@@ -4648,9 +4704,16 @@ impl ConsensusNetwork {
             beacon_blocks_by_range_request_failures: self.request_failures.beacon_blocks_by_range,
             beacon_blocks_by_root_request_failures: self.request_failures.beacon_blocks_by_root,
             gossip_subscriptions: self.gossip_subscriptions.len(),
+            finality_update_gossip_mesh_peers,
+            optimistic_update_gossip_mesh_peers,
             finality_update_gossip_messages: self.gossip_counts.finality_update,
             optimistic_update_gossip_messages: self.gossip_counts.optimistic_update,
             gossip_decode_failures: self.gossip_counts.decode_failures,
+            current_slot,
+            optimistic_head_slot,
+            optimistic_head_lag_slots,
+            head_recovery_active,
+            head_recovery_attempts: self.head_recovery_attempts,
             p2p_download_bytes_per_sec: p2p_download.bytes_per_sec,
             p2p_upload_bytes_per_sec: p2p_upload.bytes_per_sec,
             p2p_downloaded_payload_bytes: p2p_download.total_payload_bytes,
@@ -4666,6 +4729,18 @@ impl ConsensusNetwork {
         sync_status.consensus_network = Some(status);
         sync_status.consensus_light_client = (!light_client.is_empty()).then_some(light_client);
         sync_status.optimistic_execution_head = anchors.optimistic_head;
+        sync_status.consensus_current_slot = Some(current_slot);
+        sync_status.consensus_head_lag_slots = optimistic_head_lag_slots;
+        sync_status.consensus_head_fresh = Some(
+            optimistic_head_slot
+                .is_some_and(|slot| crate::optimistic_head_is_fresh_at(current_slot, slot)),
+        );
+        if sync_status.consensus_head_fresh == Some(false)
+            && sync_status.node_state == logex_types::NodeState::Synced
+        {
+            sync_status.node_state = logex_types::NodeState::WaitingForConsensus;
+            sync_status.syncing = false;
+        }
         sync_status.finalized_execution_head = anchors.finalized_head;
         sync_status.materialized_execution_floor = anchor_coverage.floor;
         sync_status.materialized_execution_ceiling = anchor_coverage.ceiling;
@@ -5275,7 +5350,7 @@ fn sync_committee_period_for_slot(slot: u64) -> u64 {
 }
 
 fn current_wall_clock_slot() -> u64 {
-    MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch() * 32
+    MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_slot()
 }
 
 fn peer_backoff_delay(attempts: u32) -> Duration {
@@ -6043,6 +6118,22 @@ mod tests {
     }
 
     #[test]
+    fn stale_head_recovery_prioritizes_optimistic_progress_over_finality() {
+        assert_eq!(
+            select_live_head_progression_request_kind(false, true, true),
+            Some(RpcRequestKind::LightClientOptimisticUpdate)
+        );
+        assert_eq!(
+            select_live_head_progression_request_kind(true, true, true),
+            Some(RpcRequestKind::LightClientUpdatesByRange)
+        );
+        assert_eq!(
+            select_live_head_progression_request_kind(false, false, true),
+            Some(RpcRequestKind::LightClientFinalityUpdate)
+        );
+    }
+
+    #[test]
     fn post_bootstrap_request_selection_prefers_ranges_before_deferred_root_chasing() {
         assert_eq!(
             select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
@@ -6126,7 +6217,7 @@ mod tests {
     }
 
     #[test]
-    fn live_head_progression_is_needed_until_head_moves_past_checkpoint() {
+    fn live_head_progression_is_needed_until_optimistic_head_is_fresh() {
         let target = HistorySyncTarget {
             checkpoint_root: B256::repeat_byte(0x10),
             checkpoint_slot: 100,
@@ -6134,15 +6225,17 @@ mod tests {
             optimistic_root: B256::repeat_byte(0x10),
             optimistic_slot: 100,
         };
-        assert!(live_head_progression_needed(Some(target)));
+        assert!(live_head_progression_needed(Some(target), 100));
 
         let advanced = HistorySyncTarget {
             optimistic_root: B256::repeat_byte(0x11),
             optimistic_slot: 101,
             ..target
         };
-        assert!(!live_head_progression_needed(Some(advanced)));
-        assert!(!live_head_progression_needed(None));
+        assert!(!live_head_progression_needed(Some(advanced), 105));
+        assert!(live_head_progression_needed(Some(advanced), 106));
+        assert!(live_head_progression_needed(Some(advanced), 151));
+        assert!(!live_head_progression_needed(None, 151));
     }
 
     #[test]
