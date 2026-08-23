@@ -4,6 +4,8 @@ use alloy_primitives::{B256, b256};
 use sha2::{Digest, Sha256};
 
 const SECONDS_PER_SLOT: u64 = 12;
+/// Maximum optimistic-head lag that still represents normal live-chain propagation.
+pub const CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS: u64 = 4;
 const SLOTS_PER_EPOCH: u64 = 32;
 const FAR_FUTURE_EPOCH: u64 = u64::MAX;
 
@@ -11,6 +13,15 @@ const FAR_FUTURE_EPOCH: u64 = u64::MAX;
 pub struct ScheduledFork {
     pub epoch: u64,
     pub version: [u8; 4],
+}
+
+pub const fn optimistic_head_lag_slots(current_slot: u64, optimistic_slot: u64) -> u64 {
+    current_slot.saturating_sub(optimistic_slot)
+}
+
+pub const fn optimistic_head_is_fresh_at(current_slot: u64, optimistic_slot: u64) -> bool {
+    optimistic_head_lag_slots(current_slot, optimistic_slot)
+        <= CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +53,19 @@ impl ConsensusChainSpec {
         slot / SLOTS_PER_EPOCH
     }
 
-    pub fn wall_clock_epoch(self) -> u64 {
+    pub fn wall_clock_slot(self) -> u64 {
         let unix_now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(self.genesis_time);
         unix_now
             .saturating_sub(self.genesis_time)
-            .checked_div(SECONDS_PER_SLOT * SLOTS_PER_EPOCH)
+            .checked_div(SECONDS_PER_SLOT)
             .unwrap_or(0)
+    }
+
+    pub fn wall_clock_epoch(self) -> u64 {
+        self.wall_clock_slot() / SLOTS_PER_EPOCH
     }
 
     pub const fn fork_version_for_epoch(self, epoch: u64) -> [u8; 4] {
@@ -251,7 +266,25 @@ pub const MAINNET_CONSENSUS_CHAIN_SPEC: ConsensusChainSpec = ConsensusChainSpec 
 mod tests {
     use alloy_primitives::hex;
 
-    use super::MAINNET_CONSENSUS_CHAIN_SPEC;
+    use super::{
+        CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS, MAINNET_CONSENSUS_CHAIN_SPEC,
+        optimistic_head_is_fresh_at, optimistic_head_lag_slots,
+    };
+
+    #[test]
+    fn optimistic_head_freshness_uses_a_bounded_slot_tolerance() {
+        let current_slot = 1_000;
+        assert!(optimistic_head_is_fresh_at(current_slot, current_slot));
+        assert!(optimistic_head_is_fresh_at(
+            current_slot,
+            current_slot - CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS
+        ));
+        assert!(!optimistic_head_is_fresh_at(
+            current_slot,
+            current_slot - CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS - 1
+        ));
+        assert_eq!(optimistic_head_lag_slots(10, 12), 0);
+    }
 
     #[test]
     fn mainnet_fork_version_tracks_known_boundaries() {

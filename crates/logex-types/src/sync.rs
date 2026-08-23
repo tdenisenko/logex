@@ -144,12 +144,28 @@ pub struct ConsensusNetworkStatus {
     pub beacon_blocks_by_root_request_failures: u64,
     /// Number of active CL gossipsub topic subscriptions.
     pub gossip_subscriptions: usize,
+    /// Peers currently in the finality-update gossip mesh.
+    pub finality_update_gossip_mesh_peers: usize,
+    /// Peers currently in the optimistic-update gossip mesh.
+    pub optimistic_update_gossip_mesh_peers: usize,
     /// Number of light-client finality-update gossip messages observed since startup.
     pub finality_update_gossip_messages: u64,
     /// Number of light-client optimistic-update gossip messages observed since startup.
     pub optimistic_update_gossip_messages: u64,
     /// Number of malformed or undecodable light-client gossip payloads observed since startup.
     pub gossip_decode_failures: u64,
+    /// Current mainnet slot derived from the local wall clock.
+    pub current_slot: u64,
+    /// Latest verified optimistic light-client slot, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimistic_head_slot: Option<u64>,
+    /// Wall-clock slot distance from the latest verified optimistic head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimistic_head_lag_slots: Option<u64>,
+    /// Whether stale-head recovery is currently requesting fresh light-client data.
+    pub head_recovery_active: bool,
+    /// Number of stale-head recovery RPC requests sent since startup.
+    pub head_recovery_attempts: u64,
     /// Recent consensus P2P payload download rate in bytes per second.
     pub p2p_download_bytes_per_sec: u64,
     /// Recent consensus P2P payload upload rate in bytes per second.
@@ -446,6 +462,15 @@ pub struct SyncStatus {
     /// Highest optimistic execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optimistic_execution_head: Option<ExecutionAnchor>,
+    /// Current mainnet slot derived from the local wall clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_current_slot: Option<u64>,
+    /// Wall-clock slot distance from the latest optimistic CL head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_head_lag_slots: Option<u64>,
+    /// Whether the optimistic CL head is recent enough to represent the live chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_head_fresh: Option<bool>,
     /// Highest finalized execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_execution_head: Option<ExecutionAnchor>,

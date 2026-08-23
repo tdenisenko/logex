@@ -19,7 +19,10 @@ mod network;
 mod rpc;
 
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
-pub use chain::MAINNET_CONSENSUS_CHAIN_SPEC;
+pub use chain::{
+    CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS, MAINNET_CONSENSUS_CHAIN_SPEC,
+    optimistic_head_is_fresh_at, optimistic_head_lag_slots,
+};
 pub(crate) use light_client::{
     AppliedLightClientUpdate, VerifiedLightClientStore, apply_finality_update_payload,
     apply_light_client_update_payload, apply_optimistic_update_payload,

@@ -150,6 +150,9 @@ impl SyncEngine {
         }
         {
             let status = self.sync_status.lock().unwrap();
+            if self.consensus.is_some() && status.consensus_head_fresh != Some(true) {
+                return false;
+            }
             if !status.historical_sync_disabled
                 && status
                     .historical_execution_floor
