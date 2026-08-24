@@ -60,6 +60,7 @@ const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const DISCOVERY_QUERY_FANOUT: usize = 4;
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
+const FINALITY_UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_CONCURRENT_DEFAULT_RPC_REQUESTS: usize = 2;
 const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
 const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 8;
@@ -67,6 +68,7 @@ const MAX_BEACON_BLOCKS_BY_ROOT_REQUEST: usize = 128;
 const FORWARD_BEACON_BLOCK_RANGE_WINDOW: u64 = 16;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
+const HEAD_RECOVERY_PROGRESSION_PEER_RESERVE: usize = 2;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
 const PEER_BACKOFF_BASE: Duration = Duration::from_secs(15);
@@ -491,6 +493,7 @@ struct ConsensusNetwork {
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
     pending_history_range_requests: HashMap<PendingRequestKey, BeaconBlocksByRangeRequest>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
+    last_light_client_request_at: HashMap<RpcRequestKind, Instant>,
     request_failures: RpcFailureCounts,
     gossip_topics: ConsensusGossipTopics,
     gossip_counts: GossipMessageCounts,
@@ -1382,6 +1385,15 @@ impl PeerLifecycleState {
     }
 
     fn record_success(&mut self, kind: RpcRequestKind) {
+        let useful_rpc = matches!(
+            kind,
+            RpcRequestKind::LightClientBootstrap
+                | RpcRequestKind::LightClientUpdatesByRange
+                | RpcRequestKind::LightClientFinalityUpdate
+                | RpcRequestKind::LightClientOptimisticUpdate
+                | RpcRequestKind::BeaconBlocksByRange
+                | RpcRequestKind::BeaconBlocksByRoot
+        );
         match kind {
             RpcRequestKind::Status => self.status_successes += 1,
             RpcRequestKind::LightClientBootstrap => {
@@ -1397,8 +1409,17 @@ impl PeerLifecycleState {
             }
             RpcRequestKind::Goodbye | RpcRequestKind::MetaData | RpcRequestKind::Ping => {}
         }
-        self.rpc_failures = 0;
-        self.cooldown_until = None;
+        // Backoff tracks consecutive failures. A verified RPC response proves that the
+        // connection is healthy, so old transport and disconnect streaks must not poison a
+        // useful peer for the rest of a long-running process.
+        self.transport_failures = 0;
+        self.disconnects = 0;
+        if useful_rpc {
+            self.rpc_failures = 0;
+        }
+        if self.rpc_failures == 0 {
+            self.cooldown_until = None;
+        }
     }
 
     fn record_dial_success(&mut self, class: DialAddressClass) {
@@ -1420,8 +1441,7 @@ impl PeerLifecycleState {
 
     fn record_rpc_failure(&mut self, kind: RpcRequestKind, now: Instant) -> Option<Duration> {
         match kind {
-            RpcRequestKind::Status
-            | RpcRequestKind::LightClientBootstrap
+            RpcRequestKind::LightClientBootstrap
             | RpcRequestKind::LightClientUpdatesByRange
             | RpcRequestKind::LightClientFinalityUpdate
             | RpcRequestKind::LightClientOptimisticUpdate
@@ -1432,7 +1452,10 @@ impl PeerLifecycleState {
                 self.cooldown_until = Some(now + delay);
                 Some(delay)
             }
-            RpcRequestKind::Goodbye | RpcRequestKind::MetaData | RpcRequestKind::Ping => None,
+            RpcRequestKind::Status
+            | RpcRequestKind::Goodbye
+            | RpcRequestKind::MetaData
+            | RpcRequestKind::Ping => None,
         }
     }
 
@@ -1819,6 +1842,7 @@ impl ConsensusNetwork {
             pending_history_root_requests: HashMap::new(),
             pending_history_range_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
+            last_light_client_request_at: HashMap::new(),
             request_failures: RpcFailureCounts::default(),
             gossip_topics,
             gossip_counts: GossipMessageCounts::default(),
@@ -3325,7 +3349,89 @@ impl ConsensusNetwork {
                 .then_with(|| left.cmp(right))
         });
 
-        let mut active_targets = self.connected_peers.len() + self.dialing_peers.len();
+        let active_targets = self.connected_peers.len() + self.dialing_peers.len();
+        if !bootstrap_needed
+            && live_head_progression_needed(
+                self.latest_history_sync_target(),
+                current_wall_clock_slot(),
+            )
+        {
+            let active_progression_peers = self
+                .connected_peers
+                .iter()
+                .filter(|peer| {
+                    self.peer_support
+                        .get(peer)
+                        .is_some_and(|support| support.supports_light_client_progression())
+                })
+                .count()
+                + self
+                    .dialing_peers
+                    .iter()
+                    .filter(|peer| {
+                        self.peer_lifecycle
+                            .get(peer)
+                            .and_then(|lifecycle| lifecycle.remembered_support)
+                            .is_some_and(|support| support.supports_light_client_progression())
+                    })
+                    .count();
+            let dialable_progression_candidates = dialable
+                .iter()
+                .filter(|(peer, _)| {
+                    !self.connected_peers.contains(peer)
+                        && !self.dialing_peers.contains(peer)
+                        && self
+                            .peer_lifecycle
+                            .get(peer)
+                            .and_then(|lifecycle| lifecycle.remembered_support)
+                            .is_some_and(|support| support.supports_light_client_progression())
+                })
+                .count();
+            let slots_to_reclaim = head_recovery_connection_slots_to_reclaim(
+                self.config.max_peers,
+                active_targets,
+                active_progression_peers,
+                dialable_progression_candidates,
+            );
+
+            if slots_to_reclaim > 0 {
+                let mut replaceable_peers =
+                    self.connected_peers
+                        .iter()
+                        .copied()
+                        .filter(|peer| {
+                            !self.closing_peers.contains(peer)
+                                && self.pending_requests_for_peer(*peer) == 0
+                                && self.peer_support.get(peer).is_some_and(|support| {
+                                    !support.supports_light_client_progression()
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                replaceable_peers.sort_by(|left, right| {
+                    self.peer_priority(*left, bootstrap_needed)
+                        .cmp(&self.peer_priority(*right, bootstrap_needed))
+                        .then_with(|| left.cmp(right))
+                });
+                let replaceable_peers = replaceable_peers
+                    .into_iter()
+                    .take(slots_to_reclaim)
+                    .collect::<Vec<_>>();
+                if !replaceable_peers.is_empty() {
+                    tracing::info!(
+                        peers = replaceable_peers.len(),
+                        active_progression_peers,
+                        dialable_progression_candidates,
+                        "reclaiming consensus connections for stale-head recovery"
+                    );
+                    for peer in replaceable_peers {
+                        self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                    }
+                    return;
+                }
+            }
+        }
+
+        let mut active_targets = active_targets;
         for (peer, addrs) in dialable {
             if self.connected_peers.contains(&peer) || self.dialing_peers.contains(&peer) {
                 continue;
@@ -3688,6 +3794,13 @@ impl ConsensusNetwork {
         self.pending_peer_kinds.insert((peer, kind));
         if matches!(
             kind,
+            RpcRequestKind::LightClientFinalityUpdate | RpcRequestKind::LightClientOptimisticUpdate
+        ) {
+            self.last_light_client_request_at
+                .insert(kind, Instant::now());
+        }
+        if matches!(
+            kind,
             RpcRequestKind::LightClientUpdatesByRange
                 | RpcRequestKind::LightClientFinalityUpdate
                 | RpcRequestKind::LightClientOptimisticUpdate
@@ -3727,18 +3840,32 @@ impl ConsensusNetwork {
     }
 
     fn next_post_bootstrap_request_kind(&self, support: PeerRpcSupport) -> Option<RpcRequestKind> {
-        if live_head_progression_needed(
+        let now = Instant::now();
+        let head_progression_needed = live_head_progression_needed(
             self.latest_history_sync_target(),
             current_wall_clock_slot(),
-        ) && let Some(kind) = select_live_head_progression_request_kind(
-            support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
-                && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
-                && self.next_updates_by_range_request().is_some(),
-            support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
-            support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
-        ) {
+        );
+        if head_progression_needed
+            && let Some(kind) = select_live_head_progression_request_kind(
+                support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
+                    && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
+                    && self.next_updates_by_range_request().is_some(),
+                support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
+                    && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
+                    && self.light_client_request_due(
+                        RpcRequestKind::LightClientOptimisticUpdate,
+                        now,
+                        RPC_REQUEST_INTERVAL,
+                    ),
+                support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
+                    && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
+                    && self.light_client_request_due(
+                        RpcRequestKind::LightClientFinalityUpdate,
+                        now,
+                        RPC_REQUEST_INTERVAL,
+                    ),
+            )
+        {
             return Some(kind);
         }
 
@@ -3763,13 +3890,30 @@ impl ConsensusNetwork {
                 && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
                 && self.next_updates_by_range_request().is_some(),
             finality_ready: support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate),
-            optimistic_ready: support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
-                && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate),
+                && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
+                && self.light_client_request_due(
+                    RpcRequestKind::LightClientFinalityUpdate,
+                    now,
+                    FINALITY_UPDATE_POLL_INTERVAL,
+                ),
+            optimistic_ready: false,
             pending_priority_root,
             pending_range,
             prefer_range_when_both_ready: true,
         })
+    }
+
+    fn light_client_request_due(
+        &self,
+        kind: RpcRequestKind,
+        now: Instant,
+        interval: Duration,
+    ) -> bool {
+        light_client_request_due(
+            self.last_light_client_request_at.get(&kind).copied(),
+            now,
+            interval,
+        )
     }
 
     fn local_status_message(&self) -> StatusMessage {
@@ -4214,17 +4358,11 @@ impl ConsensusNetwork {
             Some(_) => 0,
             None => 1,
         };
-        let usefulness = lifecycle.bootstrap_successes.saturating_mul(4)
-            + lifecycle.useful_successes.saturating_mul(3)
-            + lifecycle.status_successes;
-        let penalties = lifecycle.transport_failures.saturating_mul(3)
-            + lifecycle.rpc_failures
-            + lifecycle.disconnects;
-        let bootnode_penalty = self.bootnode_peers.contains(&peer) as i32 * 250;
-        let preferred = lifecycle.preferred() as i32;
-        preferred * 10_000 + support_score * 1_000 + usefulness as i32 * 10
-            - penalties as i32
-            - bootnode_penalty
+        peer_lifecycle_priority(
+            lifecycle,
+            support_score,
+            self.bootnode_peers.contains(&peer),
+        )
     }
 
     fn select_dial_addresses(
@@ -5363,6 +5501,52 @@ fn peer_backoff_delay(attempts: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
+fn peer_lifecycle_priority(
+    lifecycle: &PeerLifecycleState,
+    support_score: i32,
+    bootnode: bool,
+) -> i32 {
+    let usefulness = lifecycle
+        .bootstrap_successes
+        .saturating_mul(4)
+        .saturating_add(lifecycle.useful_successes.saturating_mul(3))
+        .saturating_add(lifecycle.status_successes)
+        .min(100) as i32;
+    let failure_penalty = lifecycle.transport_failures.min(4) as i32 * 2_500
+        + lifecycle.rpc_failures.min(4) as i32 * 2_500
+        + lifecycle.disconnects.min(8) as i32 * 1_000;
+    let preferred_bonus = lifecycle.preferred() as i32 * 2_000;
+    let bootnode_penalty = bootnode as i32 * 250;
+
+    preferred_bonus + support_score * 1_000 + usefulness * 10 - failure_penalty - bootnode_penalty
+}
+
+fn light_client_request_due(
+    last_request: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+) -> bool {
+    last_request.is_none_or(|last_request| now.duration_since(last_request) >= interval)
+}
+
+fn head_recovery_connection_slots_to_reclaim(
+    max_peers: usize,
+    active_targets: usize,
+    active_progression_peers: usize,
+    dialable_progression_candidates: usize,
+) -> usize {
+    if max_peers == 0 || dialable_progression_candidates == 0 {
+        return 0;
+    }
+
+    let progression_peer_reserve = HEAD_RECOVERY_PROGRESSION_PEER_RESERVE.min(max_peers);
+    let progression_peer_deficit = progression_peer_reserve
+        .saturating_sub(active_progression_peers)
+        .min(dialable_progression_candidates);
+    let available_slots = max_peers.saturating_sub(active_targets);
+    progression_peer_deficit.saturating_sub(available_slots)
+}
+
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     while !*shutdown.borrow_and_update() {
         if shutdown.changed().await.is_err() {
@@ -5503,6 +5687,68 @@ mod tests {
     }
 
     #[test]
+    fn peer_priority_yields_to_discovery_after_consecutive_failures() {
+        let now = Instant::now();
+        let mut known_capable = PeerLifecycleState::default();
+        known_capable.record_success(RpcRequestKind::Status);
+        let unknown = PeerLifecycleState::default();
+
+        assert!(
+            peer_lifecycle_priority(&known_capable, 5, false)
+                > peer_lifecycle_priority(&unknown, 1, false)
+        );
+        for _ in 0..3 {
+            known_capable.record_transport_failure(now);
+        }
+        assert!(
+            peer_lifecycle_priority(&known_capable, 5, false)
+                < peer_lifecycle_priority(&unknown, 1, false)
+        );
+
+        known_capable.record_success(RpcRequestKind::Status);
+        assert!(
+            peer_lifecycle_priority(&known_capable, 5, false)
+                > peer_lifecycle_priority(&unknown, 1, false)
+        );
+    }
+
+    #[test]
+    fn light_client_request_polling_is_bounded() {
+        let now = Instant::now();
+        assert!(light_client_request_due(None, now, RPC_REQUEST_INTERVAL));
+        assert!(!light_client_request_due(
+            Some(now),
+            now + Duration::from_secs(4),
+            RPC_REQUEST_INTERVAL
+        ));
+        assert!(light_client_request_due(
+            Some(now),
+            now + RPC_REQUEST_INTERVAL,
+            RPC_REQUEST_INTERVAL
+        ));
+        assert!(!light_client_request_due(
+            Some(now),
+            now + Duration::from_secs(59),
+            FINALITY_UPDATE_POLL_INTERVAL
+        ));
+        assert!(light_client_request_due(
+            Some(now),
+            now + FINALITY_UPDATE_POLL_INTERVAL,
+            FINALITY_UPDATE_POLL_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn stale_head_reclaims_capacity_for_progression_peers() {
+        assert_eq!(head_recovery_connection_slots_to_reclaim(32, 32, 0, 4), 2);
+        assert_eq!(head_recovery_connection_slots_to_reclaim(32, 31, 0, 4), 1);
+        assert_eq!(head_recovery_connection_slots_to_reclaim(32, 32, 1, 4), 1);
+        assert_eq!(head_recovery_connection_slots_to_reclaim(32, 32, 2, 4), 0);
+        assert_eq!(head_recovery_connection_slots_to_reclaim(32, 32, 0, 1), 1);
+        assert_eq!(head_recovery_connection_slots_to_reclaim(0, 32, 0, 4), 0);
+    }
+
+    #[test]
     fn request_concurrency_is_wider_for_status_and_history() {
         assert_eq!(
             max_concurrent_requests_for_kind(RpcRequestKind::Status),
@@ -5535,6 +5781,40 @@ mod tests {
         assert!(lifecycle.in_cooldown(now + Duration::from_secs(1)));
 
         lifecycle.record_success(RpcRequestKind::BeaconBlocksByRange);
+        assert!(!lifecycle.in_cooldown(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn lifecycle_success_resets_consecutive_connection_penalties() {
+        let mut lifecycle = PeerLifecycleState::default();
+        let now = Instant::now();
+
+        lifecycle.record_transport_failure(now);
+        lifecycle.record_disconnect(now);
+        lifecycle.record_disconnect(now);
+        assert_eq!(lifecycle.transport_failures, 1);
+        assert_eq!(lifecycle.disconnects, 2);
+
+        lifecycle.record_success(RpcRequestKind::Status);
+        assert_eq!(lifecycle.transport_failures, 0);
+        assert_eq!(lifecycle.rpc_failures, 0);
+        assert_eq!(lifecycle.disconnects, 0);
+        assert!(!lifecycle.in_cooldown(now));
+        assert_eq!(lifecycle.record_disconnect(now), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn status_success_does_not_hide_useful_rpc_failures() {
+        let mut lifecycle = PeerLifecycleState::default();
+        let now = Instant::now();
+
+        lifecycle.record_rpc_failure(RpcRequestKind::LightClientOptimisticUpdate, now);
+        lifecycle.record_success(RpcRequestKind::Status);
+        assert_eq!(lifecycle.rpc_failures, 1);
+        assert!(lifecycle.in_cooldown(now + Duration::from_secs(1)));
+
+        lifecycle.record_success(RpcRequestKind::LightClientOptimisticUpdate);
+        assert_eq!(lifecycle.rpc_failures, 0);
         assert!(!lifecycle.in_cooldown(now + Duration::from_secs(1)));
     }
 
