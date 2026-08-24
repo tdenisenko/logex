@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::fs;
 use std::io;
 use std::net::IpAddr;
@@ -44,13 +45,14 @@ use crate::rpc::{
     build_goodbye_behaviour, build_light_client_bootstrap_behaviour,
     build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
     build_light_client_updates_by_range_behaviour, build_metadata_behaviour, build_ping_behaviour,
-    build_status_behaviour, resource_unavailable,
+    build_status_behaviour, invalid_request, rate_limited, resource_unavailable,
 };
 use crate::{
-    ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, VerifiedBeaconBlock, VerifiedLightClientStore,
-    apply_finality_update_payload, apply_light_client_update_payload,
-    apply_optimistic_update_payload, decode_finality_update, decode_optimistic_update,
-    decode_verified_beacon_block, force_update_light_client_store, verify_bootstrap_payload,
+    ConsensusStore, LightClientVerificationError, MAINNET_CONSENSUS_CHAIN_SPEC,
+    VerifiedBeaconBlock, VerifiedLightClientStore, apply_finality_update_payload,
+    apply_light_client_update_payload, apply_optimistic_update_payload, decode_finality_update,
+    decode_optimistic_update, decode_verified_beacon_block, force_update_light_client_store,
+    verify_bootstrap_payload,
 };
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -58,13 +60,19 @@ const DISCOVERY_SECRET_FILE: &str = "discovery-secret";
 const KNOWN_PEERS_FILE: &str = "known-peers.json";
 const DISCOVERY_QUERY_INTERVAL: Duration = Duration::from_secs(15);
 const DISCOVERY_QUERY_FANOUT: usize = 4;
+const MIN_DISCOVERY_PEER_RESERVE: usize = 256;
+const MAX_RETAINED_DISCONNECTED_PEERS: usize = 500;
 const KNOWN_PEER_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
+const STATUS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
+const PING_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15);
 const FINALITY_UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_CONCURRENT_DEFAULT_RPC_REQUESTS: usize = 2;
 const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
 const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 8;
 const MAX_BEACON_BLOCKS_BY_ROOT_REQUEST: usize = 128;
+const MAX_LIGHT_CLIENT_UPDATES_BY_RANGE_REQUEST: u64 = 128;
+const MAX_BEACON_BLOCKS_BY_RANGE_REQUEST: u64 = 128;
 const FORWARD_BEACON_BLOCK_RANGE_WINDOW: u64 = 16;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
@@ -82,11 +90,13 @@ const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
 const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
 const GOSSIP_ENCODING_NAME: &str = "ssz_snappy";
-const MESSAGE_DOMAIN_INVALID_SNAPPY: [u8; 4] = [0, 0, 0, 0];
 const MESSAGE_DOMAIN_VALID_SNAPPY: [u8; 4] = [1, 0, 0, 0];
 const ATTESTATION_SUBNET_BITFIELD: [u8; 8] = [0u8; 8];
 const SYNCNET_BITFIELD: [u8; 1] = [0u8; 1];
 const LOCAL_CUSTODY_GROUP_COUNT: u64 = 0;
+const INBOUND_RATE_LIMIT_RETENTION: Duration = Duration::from_secs(60);
+const FORK_TOPIC_SUBSCRIBE_DELAY_SLOTS: u64 = 2;
+const FORK_TOPIC_UNSUBSCRIBE_DELAY_EPOCHS: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct ConsensusNetworkConfig {
@@ -186,6 +196,7 @@ struct PersistedPeer {
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "ConsensusBehaviourEvent")]
 struct ConsensusBehaviour {
+    connection_limits: libp2p::connection_limits::Behaviour,
     identify: identify::Behaviour,
     gossip: gossipsub::Behaviour,
     status_rpc: StatusRpcBehaviour,
@@ -202,6 +213,7 @@ struct ConsensusBehaviour {
 
 #[derive(Debug)]
 enum ConsensusBehaviourEvent {
+    ConnectionLimits(Infallible),
     Identify(Box<identify::Event>),
     Gossip(Box<gossipsub::Event>),
     StatusRpc(Eth2RpcEvent),
@@ -214,6 +226,12 @@ enum ConsensusBehaviourEvent {
     LightClientOptimisticUpdateRpc(Eth2RpcEvent),
     BeaconBlocksByRangeRpc(Eth2RpcEvent),
     BeaconBlocksByRootRpc(Eth2RpcEvent),
+}
+
+impl From<Infallible> for ConsensusBehaviourEvent {
+    fn from(event: Infallible) -> Self {
+        Self::ConnectionLimits(event)
+    }
 }
 
 impl From<identify::Event> for ConsensusBehaviourEvent {
@@ -444,6 +462,12 @@ struct PendingRequestKey {
     request_id: Eth2OutboundRequestId,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InboundRateLimitBucket {
+    window_started_at: Instant,
+    used: u64,
+}
+
 pub fn spawn_consensus_network(
     config: ConsensusNetworkConfig,
     consensus: Arc<ConsensusStore>,
@@ -469,7 +493,7 @@ struct ConsensusNetwork {
     fork_digest: [u8; 4],
     known_peers_path: PathBuf,
     last_persisted: Vec<PersistedPeer>,
-    observed: BTreeSet<String>,
+    observed: HashSet<PeerId>,
     dialable_peers: HashMap<PeerId, Vec<Multiaddr>>,
     dialing_peers: HashSet<PeerId>,
     connected_peers: HashSet<PeerId>,
@@ -483,6 +507,8 @@ struct ConsensusNetwork {
     status_peers: HashSet<PeerId>,
     metadata_peers: HashSet<PeerId>,
     ping_peers: HashSet<PeerId>,
+    last_status_success_at: HashMap<PeerId, Instant>,
+    last_ping_success_at: HashMap<PeerId, Instant>,
     bootstrap_peers: HashSet<PeerId>,
     updates_by_range_peers: HashSet<PeerId>,
     finality_update_peers: HashSet<PeerId>,
@@ -493,9 +519,12 @@ struct ConsensusNetwork {
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
     pending_history_range_requests: HashMap<PendingRequestKey, BeaconBlocksByRangeRequest>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
+    inbound_rate_limits: HashMap<(PeerId, RpcRequestKind), InboundRateLimitBucket>,
     last_light_client_request_at: HashMap<RpcRequestKind, Instant>,
     request_failures: RpcFailureCounts,
     gossip_topics: ConsensusGossipTopics,
+    pre_subscribed_fork_digest: Option<[u8; 4]>,
+    retiring_gossip_topics: Vec<RetiringGossipTopics>,
     gossip_counts: GossipMessageCounts,
     p2p_download_metrics: PayloadBandwidthWindow,
     p2p_upload_metrics: PayloadBandwidthWindow,
@@ -1048,6 +1077,12 @@ struct ConsensusGossipTopics {
     optimistic_update: gossipsub::IdentTopic,
 }
 
+#[derive(Debug, Clone)]
+struct RetiringGossipTopics {
+    unsubscribe_at_epoch: u64,
+    topics: ConsensusGossipTopics,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct GossipMessageCounts {
     finality_update: u64,
@@ -1193,6 +1228,106 @@ impl RpcRequestKind {
             Self::BeaconBlocksByRoot => "beacon_blocks_by_root",
         }
     }
+}
+
+fn inbound_request_cost(request: &Eth2RpcRequest) -> Result<u64, &'static str> {
+    match request {
+        Eth2RpcRequest::LightClientUpdatesByRange(request)
+            if request.count > MAX_LIGHT_CLIENT_UPDATES_BY_RANGE_REQUEST =>
+        {
+            Err("light-client updates request count exceeds 128")
+        }
+        Eth2RpcRequest::BeaconBlocksByRange(request)
+            if request.count > MAX_BEACON_BLOCKS_BY_RANGE_REQUEST =>
+        {
+            Err("beacon blocks by range request count exceeds 128")
+        }
+        Eth2RpcRequest::BeaconBlocksByRange(request) if request.step == 0 => {
+            Err("beacon blocks by range request step must be non-zero")
+        }
+        Eth2RpcRequest::BeaconBlocksByRoot(roots)
+            if roots.len() > MAX_BEACON_BLOCKS_BY_ROOT_REQUEST =>
+        {
+            Err("beacon blocks by root request count exceeds 128")
+        }
+        Eth2RpcRequest::BeaconBlocksByRange(request) => Ok(request.count.max(1)),
+        Eth2RpcRequest::BeaconBlocksByRoot(roots) => {
+            Ok(u64::try_from(roots.len()).unwrap_or(u64::MAX).max(1))
+        }
+        _ => Ok(1),
+    }
+}
+
+fn inbound_rate_limit_quota(kind: RpcRequestKind) -> (u64, Duration) {
+    match kind {
+        RpcRequestKind::Status => (5, Duration::from_secs(15)),
+        RpcRequestKind::Goodbye => (1, Duration::from_secs(10)),
+        RpcRequestKind::MetaData => (2, Duration::from_secs(5)),
+        RpcRequestKind::Ping => (2, Duration::from_secs(10)),
+        RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot => {
+            (128, Duration::from_secs(10))
+        }
+        RpcRequestKind::LightClientBootstrap
+        | RpcRequestKind::LightClientUpdatesByRange
+        | RpcRequestKind::LightClientFinalityUpdate
+        | RpcRequestKind::LightClientOptimisticUpdate => (1, Duration::from_secs(10)),
+    }
+}
+
+fn consume_inbound_rate_limit(
+    bucket: &mut InboundRateLimitBucket,
+    now: Instant,
+    cost: u64,
+    quota: u64,
+    window: Duration,
+) -> bool {
+    if now.saturating_duration_since(bucket.window_started_at) >= window {
+        bucket.window_started_at = now;
+        bucket.used = 0;
+    }
+    if bucket.used.saturating_add(cost) > quota {
+        return false;
+    }
+    bucket.used = bucket.used.saturating_add(cost);
+    true
+}
+
+fn status_irrelevance_reason(
+    local: StatusMessage,
+    remote: StatusMessage,
+    current_slot: u64,
+) -> Option<&'static str> {
+    if remote.fork_digest != local.fork_digest {
+        return Some("incompatible fork digest");
+    }
+    if remote.head_slot > current_slot.saturating_add(1) {
+        return Some("peer head is more than one slot in the future");
+    }
+    if remote.finalized_epoch == local.finalized_epoch
+        && remote.finalized_root != B256::ZERO
+        && local.finalized_root != B256::ZERO
+        && remote.finalized_root != local.finalized_root
+    {
+        return Some("conflicting finalized root at the local finalized epoch");
+    }
+    None
+}
+
+fn light_client_verification_error_is_peer_fault(error: &LightClientVerificationError) -> bool {
+    !matches!(
+        error,
+        LightClientVerificationError::UnknownSyncCommitteePeriod { .. }
+            | LightClientVerificationError::IrrelevantUpdate { .. }
+            | LightClientVerificationError::SignatureFromFuture { .. }
+    )
+}
+
+fn rpc_context_matches_slot(payload: &RawRpcResponse, slot: u64) -> bool {
+    payload.context_bytes.is_some_and(|context| {
+        context
+            == MAINNET_CONSENSUS_CHAIN_SPEC
+                .fork_digest_for_epoch(MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot))
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1796,7 +1931,7 @@ impl ConsensusNetwork {
             }
         }
 
-        let swarm = build_rpc_swarm(local_keypair)?;
+        let swarm = build_rpc_swarm(local_keypair, config.max_peers)?;
         let mut verified_beacon_blocks =
             verified_beacon_blocks_from_anchor_records(&consensus.ordered_anchors());
         if let Some(store) = consensus.light_client_store() {
@@ -1818,7 +1953,7 @@ impl ConsensusNetwork {
             fork_digest,
             known_peers_path,
             last_persisted: retained_known_peers,
-            observed: BTreeSet::new(),
+            observed: HashSet::new(),
             dialable_peers,
             dialing_peers: HashSet::new(),
             connected_peers: HashSet::new(),
@@ -1832,6 +1967,8 @@ impl ConsensusNetwork {
             status_peers: HashSet::new(),
             metadata_peers: HashSet::new(),
             ping_peers: HashSet::new(),
+            last_status_success_at: HashMap::new(),
+            last_ping_success_at: HashMap::new(),
             bootstrap_peers: HashSet::new(),
             updates_by_range_peers: HashSet::new(),
             finality_update_peers: HashSet::new(),
@@ -1842,9 +1979,12 @@ impl ConsensusNetwork {
             pending_history_root_requests: HashMap::new(),
             pending_history_range_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
+            inbound_rate_limits: HashMap::new(),
             last_light_client_request_at: HashMap::new(),
             request_failures: RpcFailureCounts::default(),
             gossip_topics,
+            pre_subscribed_fork_digest: None,
+            retiring_gossip_topics: Vec::new(),
             gossip_counts: GossipMessageCounts::default(),
             p2p_download_metrics: PayloadBandwidthWindow::default(),
             p2p_upload_metrics: PayloadBandwidthWindow::default(),
@@ -1934,9 +2074,11 @@ impl ConsensusNetwork {
                 _ = query_interval.tick() => {
                     self.launch_discovery_queries(&discovery_query_tx, &mut pending_discovery_queries);
                     self.refresh_dialable_peers_from_routing_table();
+                    self.prune_inactive_peer_state();
                     self.refresh_status();
                 }
                 _ = rpc_interval.tick() => {
+                    self.maintain_fork_subscriptions();
                     self.maybe_force_light_client_store();
                     self.drive_peer_connections();
                     self.drive_rpc_requests();
@@ -1955,8 +2097,8 @@ impl ConsensusNetwork {
                     };
                     pending_discovery_queries = pending_discovery_queries.saturating_sub(1);
                     self.handle_discovery_query_result(result);
-                    self.launch_discovery_queries(&discovery_query_tx, &mut pending_discovery_queries);
                     self.refresh_dialable_peers_from_routing_table();
+                    self.prune_inactive_peer_state();
                     self.refresh_status();
                 }
                 event = event_stream.recv() => {
@@ -1991,6 +2133,9 @@ impl ConsensusNetwork {
         discovery_query_tx: &mpsc::UnboundedSender<DiscoveryQueryResult>,
         pending_discovery_queries: &mut usize,
     ) {
+        if !self.discovery_query_needed() {
+            return;
+        }
         while *pending_discovery_queries < DISCOVERY_QUERY_FANOUT {
             let target = NodeId::random();
             let tx = discovery_query_tx.clone();
@@ -2001,6 +2146,26 @@ impl ConsensusNetwork {
                 let _ = tx.send(DiscoveryQueryResult { target, result });
             });
         }
+    }
+
+    fn discovery_query_needed(&self) -> bool {
+        let now = Instant::now();
+        let eligible_inventory = self
+            .dialable_peers
+            .iter()
+            .filter(|(peer, addrs)| {
+                !addrs.is_empty()
+                    && self.peer_lifecycle.get(peer).is_none_or(|lifecycle| {
+                        !lifecycle.ignored_for_run && !lifecycle.in_cooldown(now)
+                    })
+            })
+            .count();
+        let target = self
+            .config
+            .max_peers
+            .saturating_mul(3)
+            .max(MIN_DISCOVERY_PEER_RESERVE);
+        eligible_inventory < target
     }
 
     fn handle_discovery_query_result(&mut self, result: DiscoveryQueryResult) {
@@ -2071,8 +2236,58 @@ impl ConsensusNetwork {
             );
             return;
         }
-        self.observed.insert(enr.node_id().to_string());
-        observe_dialable_peer(&mut self.dialable_peers, enr);
+        if let Some(peer) = observe_dialable_peer(&mut self.dialable_peers, enr) {
+            self.observed.insert(peer);
+        }
+    }
+
+    fn prune_inactive_peer_state(&mut self) {
+        let inactive_count = self
+            .dialable_peers
+            .keys()
+            .filter(|peer| {
+                !self.connected_peers.contains(peer)
+                    && !self.dialing_peers.contains(peer)
+                    && !self.closing_peers.contains(peer)
+            })
+            .count();
+        let excess = inactive_count.saturating_sub(MAX_RETAINED_DISCONNECTED_PEERS);
+        if excess > 0 {
+            let mut candidates = self
+                .dialable_peers
+                .keys()
+                .copied()
+                .filter(|peer| {
+                    !self.connected_peers.contains(peer)
+                        && !self.dialing_peers.contains(peer)
+                        && !self.closing_peers.contains(peer)
+                        && !self.bootnode_peers.contains(peer)
+                        && self.pending_requests_for_peer(*peer) == 0
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|peer| {
+                let lifecycle = self.peer_lifecycle.get(peer);
+                (
+                    lifecycle.is_some_and(PeerLifecycleState::preferred),
+                    lifecycle.map_or(0, |state| state.useful_successes),
+                    lifecycle.map_or(0, |state| state.status_successes),
+                    *peer,
+                )
+            });
+            for peer in candidates.into_iter().take(excess) {
+                self.dialable_peers.remove(&peer);
+                self.observed.remove(&peer);
+                self.peer_lifecycle.remove(&peer);
+                self.clear_peer_state(peer);
+                self.inbound_rate_limits
+                    .retain(|(bucket_peer, _), _| *bucket_peer != peer);
+            }
+        }
+
+        let now = Instant::now();
+        self.inbound_rate_limits.retain(|_, bucket| {
+            now.saturating_duration_since(bucket.window_started_at) <= INBOUND_RATE_LIMIT_RETENTION
+        });
     }
 
     fn handle_swarm_event(&mut self, event: SwarmEvent<ConsensusBehaviourEvent>) {
@@ -2242,9 +2457,13 @@ impl ConsensusNetwork {
     }
 
     fn subscribe_gossip_topics(&mut self) {
+        self.subscribe_gossip_topic_set(&self.gossip_topics.clone());
+    }
+
+    fn subscribe_gossip_topic_set(&mut self, topics: &ConsensusGossipTopics) {
         for topic in [
-            self.gossip_topics.finality_update.clone(),
-            self.gossip_topics.optimistic_update.clone(),
+            topics.finality_update.clone(),
+            topics.optimistic_update.clone(),
         ] {
             match self.swarm.behaviour_mut().gossip.subscribe(&topic) {
                 Ok(true) | Ok(false) => {
@@ -2253,6 +2472,87 @@ impl ConsensusNetwork {
                 Err(error) => {
                     tracing::warn!(topic = %topic.hash(), %error, "failed to subscribe to consensus gossip topic");
                 }
+            }
+        }
+    }
+
+    fn unsubscribe_gossip_topic_set(&mut self, topics: &ConsensusGossipTopics) {
+        for topic in [
+            topics.finality_update.clone(),
+            topics.optimistic_update.clone(),
+        ] {
+            self.swarm.behaviour_mut().gossip.unsubscribe(&topic);
+            self.gossip_subscriptions.remove(&topic.hash());
+        }
+    }
+
+    fn maintain_fork_subscriptions(&mut self) {
+        let current_slot = current_wall_clock_slot();
+        let current_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(current_slot);
+        let expected_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(current_epoch);
+
+        if let Some(next_epoch) =
+            MAINNET_CONSENSUS_CHAIN_SPEC.next_scheduled_epoch_after(current_epoch)
+        {
+            let next_slot = next_epoch.saturating_mul(32);
+            if next_slot <= current_slot.saturating_add(FORK_TOPIC_SUBSCRIBE_DELAY_SLOTS) {
+                let next_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(next_epoch);
+                if self.pre_subscribed_fork_digest != Some(next_digest) {
+                    self.subscribe_gossip_topic_set(&build_gossip_topics(next_digest));
+                    self.pre_subscribed_fork_digest = Some(next_digest);
+                    tracing::info!(
+                        next_epoch,
+                        next_fork_digest = %hex::encode(next_digest),
+                        "pre-subscribed to upcoming consensus fork gossip topics"
+                    );
+                }
+            }
+        }
+
+        if expected_digest != self.fork_digest {
+            let old_digest = self.fork_digest;
+            let old_topics = self.gossip_topics.clone();
+            let new_topics = build_gossip_topics(expected_digest);
+            self.subscribe_gossip_topic_set(&new_topics);
+            self.fork_digest = expected_digest;
+            self.gossip_topics = new_topics;
+            self.pre_subscribed_fork_digest = None;
+            self.retiring_gossip_topics.push(RetiringGossipTopics {
+                unsubscribe_at_epoch: current_epoch
+                    .saturating_add(FORK_TOPIC_UNSUBSCRIBE_DELAY_EPOCHS),
+                topics: old_topics,
+            });
+
+            let fork_id = MAINNET_CONSENSUS_CHAIN_SPEC.enr_fork_id_for_epoch(current_epoch);
+            let next_fork_digest =
+                MAINNET_CONSENSUS_CHAIN_SPEC.next_fork_digest_for_epoch(current_epoch);
+            if let Err(error) = self.discv5.enr_insert("eth2", &fork_id.as_slice()) {
+                tracing::warn!(%error, "failed to update consensus fork ID in the local ENR");
+            }
+            if let Err(error) = self.discv5.enr_insert("nfd", &next_fork_digest.as_slice()) {
+                tracing::warn!(%error, "failed to update next fork digest in the local ENR");
+            }
+
+            self.status_peers.clear();
+            self.last_status_success_at.clear();
+            tracing::info!(
+                current_epoch,
+                old_fork_digest = %hex::encode(old_digest),
+                new_fork_digest = %hex::encode(expected_digest),
+                "rotated consensus ENR and gossip topics at a scheduled fork transition"
+            );
+        }
+
+        let retiring = std::mem::take(&mut self.retiring_gossip_topics);
+        for topics in retiring {
+            if topics.unsubscribe_at_epoch <= current_epoch {
+                self.unsubscribe_gossip_topic_set(&topics.topics);
+                tracing::info!(
+                    current_epoch,
+                    "unsubscribed from retired consensus fork gossip topics"
+                );
+            } else {
+                self.retiring_gossip_topics.push(topics);
             }
         }
     }
@@ -2351,7 +2651,7 @@ impl ConsensusNetwork {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
-                    return gossipsub::MessageAcceptance::Ignore;
+                    return gossipsub::MessageAcceptance::Accept;
                 }
                 Err(error) => {
                     self.gossip_counts.decode_failures += 1;
@@ -2411,7 +2711,7 @@ impl ConsensusNetwork {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
-                    return gossipsub::MessageAcceptance::Ignore;
+                    return gossipsub::MessageAcceptance::Accept;
                 }
                 Err(error) => {
                     self.gossip_counts.decode_failures += 1;
@@ -2437,7 +2737,21 @@ impl ConsensusNetwork {
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus RPC request");
                     self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
-                    let response = match request {
+                    let status_irrelevance = match &request {
+                        Eth2RpcRequest::Status(status) => status_irrelevance_reason(
+                            self.local_status_message(),
+                            *status,
+                            current_wall_clock_slot(),
+                        ),
+                        _ => None,
+                    };
+                    let response = match self.validate_and_rate_limit_inbound_request(
+                        peer,
+                        kind,
+                        &request,
+                    ) {
+                        Err(response) => response,
+                        Ok(()) => match request {
                         Eth2RpcRequest::Status(status) => {
                             if status.fork_digest != self.fork_digest {
                                 tracing::debug!(
@@ -2516,6 +2830,7 @@ impl ConsensusNetwork {
                                 self.cached_verified_beacon_blocks_by_root(&roots),
                             )
                         }
+                        },
                     };
                     if let Err(response) = self.send_rpc_response(kind, channel, response) {
                         let peer_context = self.peer_context(peer);
@@ -2528,6 +2843,13 @@ impl ConsensusNetwork {
                             error = ?response,
                             "failed to send consensus RPC response"
                         );
+                    }
+                    if let Some(reason) = status_irrelevance {
+                        self.mark_peer_ignored_for_run(
+                            peer,
+                            format!("irrelevant inbound status: {reason}"),
+                        );
+                        self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
                     }
                 }
                 request_response::Message::Response {
@@ -2608,6 +2930,36 @@ impl ConsensusNetwork {
         }
     }
 
+    fn validate_and_rate_limit_inbound_request(
+        &mut self,
+        peer: PeerId,
+        kind: RpcRequestKind,
+        request: &Eth2RpcRequest,
+    ) -> Result<(), Eth2RpcResponse> {
+        let cost = inbound_request_cost(request).map_err(invalid_request)?;
+        let now = Instant::now();
+        let (quota, window) = inbound_rate_limit_quota(kind);
+        let bucket =
+            self.inbound_rate_limits
+                .entry((peer, kind))
+                .or_insert(InboundRateLimitBucket {
+                    window_started_at: now,
+                    used: 0,
+                });
+        if consume_inbound_rate_limit(bucket, now, cost, quota, window) {
+            Ok(())
+        } else {
+            tracing::debug!(
+                %peer,
+                request = kind.as_str(),
+                cost,
+                quota,
+                "rate limiting inbound consensus RPC request"
+            );
+            Err(rate_limited("rate limit exceeded"))
+        }
+    }
+
     fn handle_goodbye_rpc_event(&mut self, event: Eth2RpcEvent) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
@@ -2616,39 +2968,15 @@ impl ConsensusNetwork {
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus goodbye RPC request");
                     self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
-                    let response = match request {
-                        Eth2RpcRequest::Goodbye(reason) => Eth2RpcResponse::Goodbye(reason),
-                        _ => resource_unavailable("unsupported request on goodbye RPC family"),
-                    };
-                    let payload_bytes = consensus_response_payload_bytes(&response);
-                    let result = self
-                        .swarm
-                        .behaviour_mut()
-                        .goodbye_rpc
-                        .inner
-                        .send_response(channel, response);
-                    if result.is_ok() {
-                        self.record_p2p_upload_payload(payload_bytes);
+                    if let Eth2RpcRequest::Goodbye(reason) = request {
+                        let _ = self.validate_and_rate_limit_inbound_request(
+                            peer,
+                            RpcRequestKind::Goodbye,
+                            &Eth2RpcRequest::Goodbye(reason),
+                        );
+                        tracing::debug!(%peer, reason, "consensus peer sent goodbye");
                     }
-                    if let Err(response) = result {
-                        if matches!(response, Eth2RpcResponse::Goodbye(_)) {
-                            tracing::debug!(
-                                %peer,
-                                response = ?response,
-                                "consensus goodbye response channel closed before response was sent"
-                            );
-                        } else {
-                            let peer_context = self.peer_context(peer);
-                            self.last_response_send_failure = Some(format!(
-                                "{peer_context} request=goodbye response={response:?}"
-                            ));
-                            tracing::debug!(
-                                %peer,
-                                error = ?response,
-                                "failed to send consensus goodbye RPC response"
-                            );
-                        }
-                    }
+                    drop(channel);
                     self.disconnect_now(peer);
                 }
                 request_response::Message::Response {
@@ -2744,11 +3072,18 @@ impl ConsensusNetwork {
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus metadata RPC request");
                     self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
-                    let response = match request {
-                        Eth2RpcRequest::MetaData => {
-                            Eth2RpcResponse::MetaData(self.local_metadata())
-                        }
-                        _ => resource_unavailable("unsupported request on metadata RPC family"),
+                    let response = match self.validate_and_rate_limit_inbound_request(
+                        peer,
+                        RpcRequestKind::MetaData,
+                        &request,
+                    ) {
+                        Err(response) => response,
+                        Ok(()) => match request {
+                            Eth2RpcRequest::MetaData => {
+                                Eth2RpcResponse::MetaData(self.local_metadata())
+                            }
+                            _ => resource_unavailable("unsupported request on metadata RPC family"),
+                        },
                     };
                     let payload_bytes = consensus_response_payload_bytes(&response);
                     let result = self
@@ -2828,18 +3163,26 @@ impl ConsensusNetwork {
         } else {
             None
         };
-        self.reset_peer_failure(peer, kind);
         self.record_p2p_download_payload(consensus_response_payload_bytes(&response));
 
         match (kind, response) {
             (RpcRequestKind::Status, Eth2RpcResponse::Status(status)) => {
-                if status.fork_digest != self.fork_digest {
-                    tracing::debug!(
+                if let Some(reason) = status_irrelevance_reason(
+                    self.local_status_message(),
+                    status,
+                    current_wall_clock_slot(),
+                ) {
+                    self.mark_peer_ignored_for_run(peer, format!("irrelevant status: {reason}"));
+                    tracing::info!(
                         %peer,
-                        local = hex::encode(self.fork_digest),
-                        remote = hex::encode(status.fork_digest),
-                        "consensus peer replied with a different fork digest"
+                        %reason,
+                        local_fork = %hex::encode(self.fork_digest),
+                        remote_fork = %hex::encode(status.fork_digest),
+                        remote_head_slot = status.head_slot,
+                        "disconnecting consensus peer after an irrelevant status response"
                     );
+                    self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                    return;
                 }
                 tracing::debug!(
                     %peer,
@@ -2850,6 +3193,7 @@ impl ConsensusNetwork {
                 );
                 self.record_peer_success(peer, RpcRequestKind::Status);
                 self.status_peers.insert(peer);
+                self.last_status_success_at.insert(peer, Instant::now());
                 self.drive_rpc_requests();
             }
             (RpcRequestKind::MetaData, Eth2RpcResponse::MetaData(metadata)) => {
@@ -2858,18 +3202,24 @@ impl ConsensusNetwork {
                     seq_number = metadata.seq_number,
                     "received consensus metadata response"
                 );
+                self.record_peer_success(peer, RpcRequestKind::MetaData);
                 self.metadata_peers.insert(peer);
                 self.drive_rpc_requests();
             }
             (RpcRequestKind::Ping, Eth2RpcResponse::Ping(seq_number)) => {
                 tracing::debug!(%peer, seq_number, "received consensus ping response");
+                self.record_peer_success(peer, RpcRequestKind::Ping);
                 self.ping_peers.insert(peer);
+                self.last_ping_success_at.insert(peer, Instant::now());
+                self.drive_rpc_requests();
             }
             (
                 RpcRequestKind::LightClientBootstrap,
                 Eth2RpcResponse::LightClientBootstrap(payload),
             ) => match verify_bootstrap_payload(&payload.bytes, self.config.checkpoint) {
-                Ok((summary, store)) => {
+                Ok((summary, store))
+                    if rpc_context_matches_slot(&payload, summary.header.beacon_slot) =>
+                {
                     tracing::info!(
                         %peer,
                         bytes = payload.bytes.len(),
@@ -2896,12 +3246,29 @@ impl ConsensusNetwork {
                     self.materialize_verified_anchor_segments();
                     self.drive_rpc_requests();
                 }
+                Ok((summary, _)) => {
+                    let detail = format!(
+                        "fork context {:?} does not match bootstrap slot {}",
+                        payload.context_bytes, summary.header.beacon_slot
+                    );
+                    tracing::warn!(%peer, %detail, "rejected light-client bootstrap response");
+                    self.record_invalid_light_client_response(
+                        peer,
+                        RpcRequestKind::LightClientBootstrap,
+                        detail,
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         %peer,
                         bytes = payload.bytes.len(),
                         %error,
                         "failed to verify light-client bootstrap payload"
+                    );
+                    self.record_invalid_light_client_response(
+                        peer,
+                        RpcRequestKind::LightClientBootstrap,
+                        error.to_string(),
                     );
                 }
             },
@@ -2921,12 +3288,19 @@ impl ConsensusNetwork {
                 };
                 let mut applied = None;
                 let mut verified_updates_by_period = Vec::new();
+                let mut peer_fault = None;
                 for chunk in &chunks {
                     match apply_light_client_update_payload(&chunk.bytes, &store) {
                         Ok(next) => {
-                            let period = sync_committee_period_for_slot(
-                                next.optimistic_status.attested_header.beacon_slot,
-                            );
+                            let attested_slot = next.optimistic_status.attested_header.beacon_slot;
+                            if !rpc_context_matches_slot(chunk, attested_slot) {
+                                peer_fault = Some(format!(
+                                    "fork context {:?} does not match update attested slot {attested_slot}",
+                                    chunk.context_bytes
+                                ));
+                                continue;
+                            }
+                            let period = sync_committee_period_for_slot(attested_slot);
                             tracing::debug!(
                                 %peer,
                                 bytes = chunk.bytes.len(),
@@ -2950,6 +3324,9 @@ impl ConsensusNetwork {
                                 %error,
                                 "failed to verify light-client update payload"
                             );
+                            if light_client_verification_error_is_peer_fault(&error) {
+                                peer_fault = Some(error.to_string());
+                            }
                         }
                     }
                 }
@@ -2976,6 +3353,13 @@ impl ConsensusNetwork {
                         total_bytes,
                         "light-client updates by range stream did not yield a usable verified update"
                     );
+                    if let Some(detail) = peer_fault {
+                        self.record_invalid_light_client_response(
+                            peer,
+                            RpcRequestKind::LightClientUpdatesByRange,
+                            detail,
+                        );
+                    }
                 }
             }
             (
@@ -2999,6 +3383,18 @@ impl ConsensusNetwork {
                 }
                 match apply_finality_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _, _)) => {
+                        if !rpc_context_matches_slot(&payload, summary.attested_header.beacon_slot)
+                        {
+                            self.record_invalid_light_client_response(
+                                peer,
+                                RpcRequestKind::LightClientFinalityUpdate,
+                                format!(
+                                    "fork context {:?} does not match finality attested slot {}",
+                                    payload.context_bytes, summary.attested_header.beacon_slot
+                                ),
+                            );
+                            return;
+                        }
                         tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
@@ -3036,6 +3432,13 @@ impl ConsensusNetwork {
                             %error,
                             "failed to verify light-client finality update payload"
                         );
+                        if light_client_verification_error_is_peer_fault(&error) {
+                            self.record_invalid_light_client_response(
+                                peer,
+                                RpcRequestKind::LightClientFinalityUpdate,
+                                error.to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -3060,6 +3463,18 @@ impl ConsensusNetwork {
                 }
                 match apply_optimistic_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _)) => {
+                        if !rpc_context_matches_slot(&payload, summary.attested_header.beacon_slot)
+                        {
+                            self.record_invalid_light_client_response(
+                                peer,
+                                RpcRequestKind::LightClientOptimisticUpdate,
+                                format!(
+                                    "fork context {:?} does not match optimistic attested slot {}",
+                                    payload.context_bytes, summary.attested_header.beacon_slot
+                                ),
+                            );
+                            return;
+                        }
                         tracing::debug!(
                             %peer,
                             bytes = payload.bytes.len(),
@@ -3096,6 +3511,13 @@ impl ConsensusNetwork {
                             %error,
                             "failed to verify light-client optimistic update payload"
                         );
+                        if light_client_verification_error_is_peer_fault(&error) {
+                            self.record_invalid_light_client_response(
+                                peer,
+                                RpcRequestKind::LightClientOptimisticUpdate,
+                                error.to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -3506,11 +3928,18 @@ impl ConsensusNetwork {
                 continue;
             }
 
-            if !self.status_peers.contains(&peer) {
+            if !self.is_request_satisfied(peer, RpcRequestKind::Status) {
                 if self.can_issue_request(RpcRequestKind::Status) {
                     self.ensure_request(peer, RpcRequestKind::Status);
                 }
                 continue;
+            }
+
+            if support.supports_request(RpcRequestKind::Ping)
+                && !self.is_request_satisfied(peer, RpcRequestKind::Ping)
+                && self.can_issue_request(RpcRequestKind::Ping)
+            {
+                self.ensure_request(peer, RpcRequestKind::Ping);
             }
 
             if bootstrap_needed && !support.supports_bootstrap_sync() {
@@ -4466,6 +4895,7 @@ impl ConsensusNetwork {
     }
 
     fn record_peer_success(&mut self, peer: PeerId, kind: RpcRequestKind) {
+        self.reset_peer_failure(peer, kind);
         self.peer_lifecycle
             .entry(peer)
             .or_default()
@@ -4509,6 +4939,28 @@ impl ConsensusNetwork {
             failures = peer_failures,
             %detail,
             "consensus history RPC response did not contain usable beacon blocks"
+        );
+    }
+
+    fn record_invalid_light_client_response(
+        &mut self,
+        peer: PeerId,
+        kind: RpcRequestKind,
+        detail: String,
+    ) {
+        self.request_failures.increment(kind);
+        let failures = self.record_peer_failure(peer, kind);
+        self.last_rpc_failure = Some(format!(
+            "{} request={} invalid_response={detail}",
+            self.peer_context(peer),
+            kind.as_str()
+        ));
+        tracing::info!(
+            %peer,
+            request = kind.as_str(),
+            failures,
+            %detail,
+            "penalized consensus peer for an invalid light-client response"
         );
     }
 
@@ -4641,6 +5093,8 @@ impl ConsensusNetwork {
         self.status_peers.remove(&peer);
         self.metadata_peers.remove(&peer);
         self.ping_peers.remove(&peer);
+        self.last_status_success_at.remove(&peer);
+        self.last_ping_success_at.remove(&peer);
         self.bootstrap_peers.remove(&peer);
         self.updates_by_range_peers.remove(&peer);
         self.finality_update_peers.remove(&peer);
@@ -4655,10 +5109,22 @@ impl ConsensusNetwork {
 
     fn is_request_satisfied(&self, peer: PeerId, kind: RpcRequestKind) -> bool {
         match kind {
-            RpcRequestKind::Status => self.status_peers.contains(&peer),
+            RpcRequestKind::Status => {
+                self.status_peers.contains(&peer)
+                    && self
+                        .last_status_success_at
+                        .get(&peer)
+                        .is_some_and(|last| last.elapsed() < STATUS_MAINTENANCE_INTERVAL)
+            }
             RpcRequestKind::Goodbye => false,
             RpcRequestKind::MetaData => self.metadata_peers.contains(&peer),
-            RpcRequestKind::Ping => self.ping_peers.contains(&peer),
+            RpcRequestKind::Ping => {
+                self.ping_peers.contains(&peer)
+                    && self
+                        .last_ping_success_at
+                        .get(&peer)
+                        .is_some_and(|last| last.elapsed() < PING_MAINTENANCE_INTERVAL)
+            }
             RpcRequestKind::LightClientBootstrap
             | RpcRequestKind::LightClientUpdatesByRange
             | RpcRequestKind::LightClientFinalityUpdate
@@ -5052,6 +5518,7 @@ fn build_libp2p_keypair(enr_key: &CombinedKey) -> Result<identity::Keypair, Cons
 
 fn build_rpc_swarm(
     keypair: identity::Keypair,
+    max_peers: usize,
 ) -> Result<Swarm<ConsensusBehaviour>, ConsensusNetworkError> {
     let public_key = keypair.public();
     let transport = build_rpc_transport(&keypair)?;
@@ -5067,6 +5534,7 @@ fn build_rpc_swarm(
                     .with_cache_size(0),
             );
             Ok(ConsensusBehaviour {
+                connection_limits: build_connection_limits(max_peers),
                 identify,
                 gossip,
                 status_rpc: StatusRpcBehaviour {
@@ -5113,6 +5581,21 @@ fn build_rpc_swarm(
                 })
                 .build()
         })
+}
+
+fn build_connection_limits(max_peers: usize) -> libp2p::connection_limits::Behaviour {
+    let mut limits = libp2p::connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(5))
+        .with_max_pending_outgoing(Some(16))
+        .with_max_established_per_peer(Some(1));
+    if max_peers > 0 {
+        let max_peers = u32::try_from(max_peers).unwrap_or(u32::MAX);
+        limits = limits
+            .with_max_established_incoming(Some(max_peers.saturating_mul(9).div_ceil(10)))
+            .with_max_established_outgoing(Some(max_peers.saturating_mul(11).div_ceil(10)))
+            .with_max_established(Some(max_peers.saturating_mul(13).div_ceil(10)));
+    }
+    libp2p::connection_limits::Behaviour::new(limits)
 }
 
 fn build_rpc_transport(
@@ -5172,18 +5655,21 @@ fn build_gossip_topics(fork_digest: [u8; 4]) -> ConsensusGossipTopics {
 }
 
 fn eth2_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
-    let (domain, data) = match decode_gossip_payload(&message.data) {
-        Some(decoded) => (MESSAGE_DOMAIN_VALID_SNAPPY, decoded),
-        None => (MESSAGE_DOMAIN_INVALID_SNAPPY, message.data.clone()),
-    };
+    let topic = message.topic.as_str().as_bytes();
     let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(data);
+    hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY);
+    hasher.update(usize_to_u64(topic.len()).to_le_bytes());
+    hasher.update(topic);
+    hasher.update(&message.data);
     let digest = hasher.finalize();
-    gossipsub::MessageId::from(hex::encode(&digest[..20]))
+    gossipsub::MessageId::from(digest[..20].to_vec())
 }
 
 fn decode_gossip_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let decompressed_len = snap::raw::decompress_len(payload).ok()?;
+    if decompressed_len > GOSSIP_MAX_TRANSMIT_SIZE {
+        return None;
+    }
     snap::raw::Decoder::new().decompress_vec(payload).ok()
 }
 
@@ -5556,10 +6042,11 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 }
 
 const MAINNET_BOOTNODES: &[&str] = &[
-    "enr:-KG4QNTx85fjxABbSq_Rta9wy56nQ1fHK0PewJbGjLm1M4bMGx5-3Qq4ZX2-iFJ0pys_O90sVXNNOxp2E7afBsGsBrgDhGV0aDKQu6TalgMAAAD__________4JpZIJ2NIJpcIQEnfA2iXNlY3AyNTZrMaECGXWQ-rQ2KZKRH1aOW4IlPDBkY4XDphxg9pxKytFCkayDdGNwgiMog3VkcIIjKA",
-    "enr:-KG4QF4B5WrlFcRhUU6dZETwY5ZzAXnA0vGC__L1Kdw602nDZwXSTs5RFXFIFUnbQJmhNGVU6OIX7KVrCSTODsz1tK4DhGV0aDKQu6TalgMAAAD__________4JpZIJ2NIJpcIQExNYEiXNlY3AyNTZrMaECQmM9vp7KhaXhI-nqL_R0ovULLCFSFTa9CPPSdb1zPX6DdGNwgiMog3VkcIIjKA",
+    "enr:-Iu4QLm7bZGdAt9NSeJG0cEnJohWcQTQaI9wFLu3Q7eHIDfrI4cwtzvEW3F3VbG9XdFXlrHyFGeXPn9snTCQJ9bnMRABgmlkgnY0gmlwhAOTJQCJc2VjcDI1NmsxoQIZdZD6tDYpkpEfVo5bgiU8MGRjhcOmHGD2nErK0UKRrIN0Y3CCIyiDdWRwgiMo",
+    "enr:-Iu4QEDJ4Wa_UQNbK8Ay1hFEkXvd8psolVK6OhfTL9irqz3nbXxxWyKwEplPfkju4zduVQj6mMhUCm9R2Lc4YM5jPcIBgmlkgnY0gmlwhANrfESJc2VjcDI1NmsxoQJCYz2-nsqFpeEj6eov9HSi9QssIVIVNr0I89J1vXM9foN0Y3CCIyiDdWRwgiMo",
     "enr:-Ku4QImhMc1z8yCiNJ1TyUxdcfNucje3BGwEHzodEZUan8PherEo4sF7pPHPSIB1NNuSg5fZy7qFsjmUKs2ea1Whi0EBh2F0dG5ldHOIAAAAAAAAAACEZXRoMpD1pf1CAAAAAP__________gmlkgnY0gmlwhBLf22SJc2VjcDI1NmsxoQOVphkDqal4QzPMksc5wnpuC3gvSC8AfbFOnZY_On34wIN1ZHCCIyg",
     "enr:-Ku4QP2xDnEtUXIjzJ_DhlCRN9SN99RYQPJL92TMlSv7U5C1YnYLjwOQHgZIUXw6c-BvRg2Yc2QsZxxoS_pPRVe0yK8Bh2F0dG5ldHOIAAAAAAAAAACEZXRoMpD1pf1CAAAAAP__________gmlkgnY0gmlwhBLf22SJc2VjcDI1NmsxoQMeFF5GrS7UZpAH2Ly84aLK-TyvH-dRo0JM1i8yygH50YN1ZHCCJxA",
+    "enr:-Ku4QPp9z1W4tAO8Ber_NQierYaOStqhDqQdOPY3bB3jDgkjcbk6YrEnVYIiCBbTxuar3CzS528d2iE7TdJsrL-dEKoBh2F0dG5ldHOIAAAAAAAAAACEZXRoMpD1pf1CAAAAAP__________gmlkgnY0gmlwhBLf22SJc2VjcDI1NmsxoQMw5fqqkw2hHC4F5HZZDPsNmPdB1Gi8JPQK7pRc9XHh-oN1ZHCCKvg",
     "enr:-Le4QPUXJS2BTORXxyx2Ia-9ae4YqA_JWX3ssj4E_J-3z1A-HmFGrU8BpvpqhNabayXeOZ2Nq_sbeDgtzMJpLLnXFgAChGV0aDKQtTA_KgEAAAAAIgEAAAAAAIJpZIJ2NIJpcISsaa0Zg2lwNpAkAIkHAAAAAPA8kv_-awoTiXNlY3AyNTZrMaEDHAD2JKYevx89W0CcFJFiskdcEzkH_Wdv9iW42qLK79ODdWRwgiMohHVkcDaCI4I",
     "enr:-Le4QLHZDSvkLfqgEo8IWGG96h6mxwe_PsggC20CL3neLBjfXLGAQFOPSltZ7oP6ol54OvaNqO02Rnvb8YmDR274uq8ChGV0aDKQtTA_KgEAAAAAIgEAAAAAAIJpZIJ2NIJpcISLosQxg2lwNpAqAX4AAAAAAPA8kv_-ax65iXNlY3AyNTZrMaEDBJj7_dLFACaxBfaI8KZTh_SSJUjhyAyfshimvSqo22WDdWRwgiMohHVkcDaCI4I",
     "enr:-Le4QH6LQrusDbAHPjU_HcKOuMeXfdEB5NJyXgHWFadfHgiySqeDyusQMvfphdYWOzuSZO9Uq2AMRJR5O4ip7OvVma8BhGV0aDKQtTA_KgEAAAAAIgEAAAAAAIJpZIJ2NIJpcISLY9ncg2lwNpAkAh8AgQIBAAAAAAAAAAmXiXNlY3AyNTZrMaECDYCZTZEksF-kmgPholqgVt8IXr-8L7Nu7YrZ7HUpgxmDdWRwgiMohHVkcDaCI4I",
@@ -5570,6 +6057,8 @@ const MAINNET_BOOTNODES: &[&str] = &[
     "enr:-Ku4QEWzdnVtXc2Q0ZVigfCGggOVB2Vc1ZCPEc6j21NIFLODSJbvNaef1g4PxhPwl_3kax86YPheFUSLXPRs98vvYsoBh2F0dG5ldHOIAAAAAAAAAACEZXRoMpC1MD8qAAAAAP__________gmlkgnY0gmlwhDZBrP2Jc2VjcDI1NmsxoQM6jr8Rb1ktLEsVcKAPa08wCsKUmvoQ8khiOl_SLozf9IN1ZHCCIyg",
     "enr:-LK4QA8FfhaAjlb_BXsXxSfiysR7R52Nhi9JBt4F8SPssu8hdE1BXQQEtVDC3qStCW60LSO7hEsVHv5zm8_6Vnjhcn0Bh2F0dG5ldHOIAAAAAAAAAACEZXRoMpC1MD8qAAAAAP__________gmlkgnY0gmlwhAN4aBKJc2VjcDI1NmsxoQJerDhsJ-KxZ8sHySMOCmTO6sHM3iCFQ6VMvLTe948MyYN0Y3CCI4yDdWRwgiOM",
     "enr:-LK4QKWrXTpV9T78hNG6s8AM6IO4XH9kFT91uZtFg1GcsJ6dKovDOr1jtAAFPnS2lvNltkOGA9k29BUN7lFh_sjuc9QBh2F0dG5ldHOIAAAAAAAAAACEZXRoMpC1MD8qAAAAAP__________gmlkgnY0gmlwhANAdd-Jc2VjcDI1NmsxoQLQa6ai7y9PMN5hpLe5HmiJSlYzMuzP7ZhwRiwHvqNXdoN0Y3CCI4yDdWRwgiOM",
+    "enr:-IS4QPi-onjNsT5xAIAenhCGTDl4z-4UOR25Uq-3TmG4V3kwB9ljLTb_Kp1wdjHNj-H8VVLRBSSWVZo3GUe3z6k0E-IBgmlkgnY0gmlwhKB3_qGJc2VjcDI1NmsxoQMvAfgB4cJXvvXeM6WbCG86CstbSxbQBSGx31FAwVtOTYN1ZHCCIyg",
+    "enr:-KG4QPUf8-g_jU-KrwzG42AGt0wWM1BTnQxgZXlvCEIfTQ5hSmptkmgmMbRkpOqv6kzb33SlhPHJp7x4rLWWiVq5lSECgmlkgnY0gmlwhFPlR9KDaXA2kCoGxcAJAAAVAAAAAAAAABCJc2VjcDI1NmsxoQLdUv9Eo9sxCt0tc_CheLOWnX59yHJtkBSOL7kpxdJ6GYN1ZHCCIyiEdWRwNoIjKA",
 ];
 
 #[cfg(test)]
@@ -5662,7 +6151,7 @@ mod tests {
         let bootnodes = mainnet_bootnodes().unwrap();
         let current_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch();
 
-        assert!(bootnodes.len() >= 10);
+        assert_eq!(bootnodes.len(), 17);
         assert!(bootnodes.iter().all(|enr| enr.udp4().is_some()));
         assert_eq!(
             MAINNET_CONSENSUS_CHAIN_SPEC
@@ -5676,6 +6165,182 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    #[test]
+    fn inbound_request_validation_enforces_consensus_limits() {
+        assert!(
+            inbound_request_cost(&Eth2RpcRequest::BeaconBlocksByRange(
+                BeaconBlocksByRangeRequest {
+                    start_slot: 1,
+                    count: 128,
+                    step: 1,
+                }
+            ))
+            .is_ok()
+        );
+        assert!(
+            inbound_request_cost(&Eth2RpcRequest::BeaconBlocksByRange(
+                BeaconBlocksByRangeRequest {
+                    start_slot: 1,
+                    count: 129,
+                    step: 1,
+                }
+            ))
+            .is_err()
+        );
+        assert!(
+            inbound_request_cost(&Eth2RpcRequest::BeaconBlocksByRange(
+                BeaconBlocksByRangeRequest {
+                    start_slot: 1,
+                    count: 1,
+                    step: 0,
+                }
+            ))
+            .is_err()
+        );
+        assert!(
+            inbound_request_cost(&Eth2RpcRequest::BeaconBlocksByRoot(vec![B256::ZERO; 129]))
+                .is_err()
+        );
+        assert!(
+            inbound_request_cost(&Eth2RpcRequest::LightClientUpdatesByRange(
+                LightClientUpdatesByRangeRequest {
+                    start_period: 1,
+                    count: 129,
+                }
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn inbound_rate_limit_replenishes_after_window() {
+        let now = Instant::now();
+        let mut bucket = InboundRateLimitBucket {
+            window_started_at: now,
+            used: 0,
+        };
+
+        assert!(consume_inbound_rate_limit(
+            &mut bucket,
+            now,
+            64,
+            128,
+            Duration::from_secs(10)
+        ));
+        assert!(!consume_inbound_rate_limit(
+            &mut bucket,
+            now,
+            65,
+            128,
+            Duration::from_secs(10)
+        ));
+        assert!(consume_inbound_rate_limit(
+            &mut bucket,
+            now + Duration::from_secs(10),
+            128,
+            128,
+            Duration::from_secs(10)
+        ));
+    }
+
+    #[test]
+    fn status_relevance_rejects_wrong_fork_future_head_and_finality_conflict() {
+        let local = StatusMessage {
+            fork_digest: [1, 2, 3, 4],
+            finalized_root: B256::repeat_byte(1),
+            finalized_epoch: 10,
+            head_root: B256::repeat_byte(2),
+            head_slot: 330,
+            earliest_available_slot: 0,
+        };
+        assert_eq!(status_irrelevance_reason(local, local, 330), None);
+        assert_eq!(
+            status_irrelevance_reason(
+                local,
+                StatusMessage {
+                    fork_digest: [4, 3, 2, 1],
+                    ..local
+                },
+                330
+            ),
+            Some("incompatible fork digest")
+        );
+        assert_eq!(
+            status_irrelevance_reason(
+                local,
+                StatusMessage {
+                    head_slot: 332,
+                    ..local
+                },
+                330
+            ),
+            Some("peer head is more than one slot in the future")
+        );
+        assert_eq!(
+            status_irrelevance_reason(
+                local,
+                StatusMessage {
+                    finalized_root: B256::repeat_byte(3),
+                    ..local
+                },
+                330
+            ),
+            Some("conflicting finalized root at the local finalized epoch")
+        );
+    }
+
+    #[test]
+    fn gossip_message_id_uses_post_altair_topic_aware_wire_hash() {
+        let topic = gossipsub::TopicHash::from_raw(
+            "/eth2/8c9f62fe/light_client_optimistic_update/ssz_snappy",
+        );
+        let message = gossipsub::Message {
+            source: None,
+            data: vec![1, 2, 3, 4],
+            sequence_number: None,
+            topic,
+        };
+        let topic_bytes = message.topic.as_str().as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY);
+        hasher.update(usize_to_u64(topic_bytes.len()).to_le_bytes());
+        hasher.update(topic_bytes);
+        hasher.update(&message.data);
+        let expected = hasher.finalize();
+
+        assert_eq!(
+            eth2_message_id(&message),
+            gossipsub::MessageId::from(expected[..20].to_vec())
+        );
+    }
+
+    #[test]
+    fn rpc_context_must_match_payload_slot_fork_digest() {
+        let slot = 419_072 * 32;
+        let expected = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(419_072);
+        assert!(rpc_context_matches_slot(
+            &RawRpcResponse {
+                context_bytes: Some(expected),
+                bytes: Vec::new(),
+            },
+            slot
+        ));
+        assert!(!rpc_context_matches_slot(
+            &RawRpcResponse {
+                context_bytes: Some([0xff; 4]),
+                bytes: Vec::new(),
+            },
+            slot
+        ));
+        assert!(!rpc_context_matches_slot(
+            &RawRpcResponse {
+                context_bytes: None,
+                bytes: Vec::new(),
+            },
+            slot
+        ));
     }
 
     #[test]

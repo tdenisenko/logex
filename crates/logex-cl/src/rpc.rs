@@ -34,10 +34,16 @@ pub(crate) const BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID: &str =
     "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
 const SUCCESS_CODE: u8 = 0;
+const INVALID_REQUEST_CODE: u8 = 1;
 const RESOURCE_UNAVAILABLE_CODE: u8 = 3;
+const RATE_LIMITED_CODE: u8 = 139;
 const ERROR_MESSAGE_LIMIT: usize = 256;
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_RPC_REQUEST_SSZ_BYTES: usize = 128 * 32;
+const MAX_RPC_RESPONSE_SSZ_BYTES: usize = 10 * 1024 * 1024 + 1024;
+const MAX_RPC_RESPONSE_CHUNKS: usize = 128;
+const MAX_RPC_STREAM_WIRE_BYTES: usize = 256 * 1024 * 1024;
 
 pub type Eth2RpcBehaviour = request_response::Behaviour<Eth2RpcCodec>;
 pub type Eth2RpcEvent = request_response::Event<Eth2RpcRequest, Eth2RpcResponse>;
@@ -326,8 +332,8 @@ impl Codec for Eth2RpcCodec {
         T: AsyncRead + Unpin + Send,
     {
         if is_multi_chunk_protocol(protocol) {
-            let mut bytes = Vec::new();
-            io.read_to_end(&mut bytes).await?;
+            let bytes =
+                read_bounded_to_end(io, MAX_RPC_STREAM_WIRE_BYTES, "RPC response stream").await?;
             return decode_response(protocol, &bytes);
         }
 
@@ -587,12 +593,38 @@ async fn read_request_payload<T>(io: &mut T) -> io::Result<Vec<u8>>
 where
     T: AsyncRead + Unpin + Send,
 {
-    let mut bytes = Vec::new();
-    io.read_to_end(&mut bytes).await?;
+    let max_wire_bytes = max_snappy_wire_bytes(MAX_RPC_REQUEST_SSZ_BYTES);
+    let bytes = read_bounded_to_end(io, max_wire_bytes, "RPC request").await?;
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    decode_ssz_snappy_payload(&bytes)
+    decode_ssz_snappy_payload_with_limit(&bytes, MAX_RPC_REQUEST_SSZ_BYTES)
+}
+
+async fn read_bounded_to_end<T>(
+    io: &mut T,
+    max_bytes: usize,
+    label: &'static str,
+) -> io::Result<Vec<u8>>
+where
+    T: AsyncRead + Unpin + Send,
+{
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut limited = io.take(read_limit);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).await?;
+    if bytes.len() > max_bytes {
+        return Err(invalid_data(format!(
+            "{label} exceeds the {max_bytes}-byte wire limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+fn max_snappy_wire_bytes(uncompressed_bytes: usize) -> usize {
+    10usize.saturating_add(snap::raw::max_compress_len(uncompressed_bytes))
 }
 
 fn encode_single_success_response(raw_ssz: &[u8]) -> io::Result<Vec<u8>> {
@@ -603,6 +635,11 @@ fn encode_single_success_response_with_context(
     context_bytes: Option<[u8; 4]>,
     raw_ssz: &[u8],
 ) -> io::Result<Vec<u8>> {
+    if raw_ssz.len() > MAX_RPC_RESPONSE_SSZ_BYTES {
+        return Err(invalid_data(format!(
+            "RPC response payload exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
+        )));
+    }
     let mut response = Vec::with_capacity(1 + raw_ssz.len());
     response.push(SUCCESS_CODE);
     if let Some(context_bytes) = context_bytes {
@@ -623,6 +660,19 @@ fn encode_single_error_response(error: Eth2RpcErrorResponse) -> io::Result<Vec<u
 }
 
 fn encode_streamed_success_responses(chunks: Vec<RawRpcResponse>) -> io::Result<Vec<u8>> {
+    if chunks.len() > MAX_RPC_RESPONSE_CHUNKS {
+        return Err(invalid_data(format!(
+            "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
+        )));
+    }
+    if chunks
+        .iter()
+        .any(|chunk| chunk.bytes.len() > MAX_RPC_RESPONSE_SSZ_BYTES)
+    {
+        return Err(invalid_data(format!(
+            "RPC response chunk exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
+        )));
+    }
     let mut response = Vec::new();
     for chunk in chunks {
         response.push(SUCCESS_CODE);
@@ -630,6 +680,11 @@ fn encode_streamed_success_responses(chunks: Vec<RawRpcResponse>) -> io::Result<
             response.extend_from_slice(&context_bytes);
         }
         response.extend(encode_ssz_snappy_payload(&chunk.bytes)?);
+        if response.len() > MAX_RPC_STREAM_WIRE_BYTES {
+            return Err(invalid_data(format!(
+                "RPC response stream exceeds the {MAX_RPC_STREAM_WIRE_BYTES}-byte wire limit"
+            )));
+        }
     }
     Ok(response)
 }
@@ -660,6 +715,8 @@ where
 {
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 4096];
+    let max_wire_bytes = max_snappy_wire_bytes(MAX_RPC_RESPONSE_SSZ_BYTES)
+        .saturating_add(1 + success_response_context_len(protocol));
     loop {
         if let Some(consumed) = single_response_len(protocol, &bytes)? {
             return decode_response(protocol, &bytes[..consumed]);
@@ -670,11 +727,24 @@ where
             return decode_response(protocol, &bytes);
         }
         bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() > max_wire_bytes {
+            return Err(invalid_data(format!(
+                "RPC response exceeds the {max_wire_bytes}-byte wire limit"
+            )));
+        }
     }
 }
 
 fn decode_ssz_snappy_payload(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let (raw, consumed) = decode_ssz_snappy_payload_prefix(bytes)?;
+    decode_ssz_snappy_payload_with_limit(bytes, MAX_RPC_RESPONSE_SSZ_BYTES)
+}
+
+fn decode_ssz_snappy_payload_with_limit(
+    bytes: &[u8],
+    max_uncompressed_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let (raw, consumed) =
+        decode_ssz_snappy_payload_prefix_with_limit(bytes, max_uncompressed_bytes)?;
     if consumed != bytes.len() {
         return Err(invalid_data(format!(
             "decoded payload consumed {} bytes, but {} bytes were available",
@@ -686,18 +756,32 @@ fn decode_ssz_snappy_payload(bytes: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 fn decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<(Vec<u8>, usize)> {
+    decode_ssz_snappy_payload_prefix_with_limit(bytes, MAX_RPC_RESPONSE_SSZ_BYTES)
+}
+
+fn decode_ssz_snappy_payload_prefix_with_limit(
+    bytes: &[u8],
+    max_uncompressed_bytes: usize,
+) -> io::Result<(Vec<u8>, usize)> {
     let (declared_len, varint_len) = decode_unsigned_varint_prefix(bytes)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "missing payload length prefix",
         )
     })?;
+    let declared_len = usize::try_from(declared_len)
+        .map_err(|_| invalid_data("payload length does not fit in memory"))?;
+    if declared_len > max_uncompressed_bytes {
+        return Err(invalid_data(format!(
+            "declared payload length {declared_len} exceeds the {max_uncompressed_bytes}-byte limit"
+        )));
+    }
     let compressed = &bytes[varint_len..];
     let mut cursor = io::Cursor::new(compressed);
     let mut decoder = FrameDecoder::new(&mut cursor);
-    let mut raw = Vec::with_capacity(declared_len as usize);
+    let mut raw = Vec::with_capacity(declared_len);
     let mut chunk = [0u8; 4096];
-    while raw.len() < declared_len as usize {
+    while raw.len() < declared_len {
         let read = io::Read::read(&mut decoder, &mut chunk)?;
         if read == 0 {
             return Err(io::Error::new(
@@ -709,10 +793,10 @@ fn decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<(Vec<u8>, usize)
                 ),
             ));
         }
-        let remaining = declared_len as usize - raw.len();
+        let remaining = declared_len - raw.len();
         raw.extend_from_slice(&chunk[..read.min(remaining)]);
     }
-    if raw.len() != declared_len as usize {
+    if raw.len() != declared_len {
         return Err(invalid_data(format!(
             "decoded payload length {} did not match declared {}",
             raw.len(),
@@ -726,12 +810,19 @@ fn try_decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<Option<(Vec<
     let Some((declared_len, varint_len)) = decode_unsigned_varint_prefix(bytes)? else {
         return Ok(None);
     };
+    let declared_len = usize::try_from(declared_len)
+        .map_err(|_| invalid_data("payload length does not fit in memory"))?;
+    if declared_len > MAX_RPC_RESPONSE_SSZ_BYTES {
+        return Err(invalid_data(format!(
+            "declared payload length {declared_len} exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
+        )));
+    }
     let compressed = &bytes[varint_len..];
     let mut cursor = io::Cursor::new(compressed);
     let mut decoder = FrameDecoder::new(&mut cursor);
-    let mut raw = Vec::with_capacity(declared_len as usize);
+    let mut raw = Vec::with_capacity(declared_len);
     let mut chunk = [0u8; 4096];
-    while raw.len() < declared_len as usize {
+    while raw.len() < declared_len {
         let read = match io::Read::read(&mut decoder, &mut chunk) {
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
@@ -740,7 +831,7 @@ fn try_decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<Option<(Vec<
         if read == 0 {
             return Ok(None);
         }
-        let remaining = declared_len as usize - raw.len();
+        let remaining = declared_len - raw.len();
         raw.extend_from_slice(&chunk[..read.min(remaining)]);
     }
     Ok(Some((raw, varint_len + cursor.position() as usize)))
@@ -1001,6 +1092,11 @@ fn decode_stream_response(
             context_bytes,
             bytes: payload,
         });
+        if chunks.len() > MAX_RPC_RESPONSE_CHUNKS {
+            return Err(invalid_data(format!(
+                "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
+            )));
+        }
     }
 
     Ok(StreamedRpcResponse::Success(chunks))
@@ -1064,8 +1160,28 @@ fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
 pub fn resource_unavailable(message: impl Into<Vec<u8>>) -> Eth2RpcResponse {
     Eth2RpcResponse::Error(Eth2RpcErrorResponse {
         code: RESOURCE_UNAVAILABLE_CODE,
-        message: message.into(),
+        message: bounded_error_message(message),
     })
+}
+
+pub fn invalid_request(message: impl Into<Vec<u8>>) -> Eth2RpcResponse {
+    Eth2RpcResponse::Error(Eth2RpcErrorResponse {
+        code: INVALID_REQUEST_CODE,
+        message: bounded_error_message(message),
+    })
+}
+
+pub fn rate_limited(message: impl Into<Vec<u8>>) -> Eth2RpcResponse {
+    Eth2RpcResponse::Error(Eth2RpcErrorResponse {
+        code: RATE_LIMITED_CODE,
+        message: bounded_error_message(message),
+    })
+}
+
+fn bounded_error_message(message: impl Into<Vec<u8>>) -> Vec<u8> {
+    let mut message = message.into();
+    message.truncate(ERROR_MESSAGE_LIMIT);
+    message
 }
 
 #[cfg(test)]
@@ -1096,6 +1212,52 @@ mod tests {
         let decoded = decode_ssz_snappy_payload(&encoded).unwrap();
 
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn oversized_declared_payload_is_rejected_before_allocation() {
+        let mut prefix = unsigned_varint::encode::u64_buffer();
+        let encoded = unsigned_varint::encode::u64(
+            u64::try_from(MAX_RPC_RESPONSE_SSZ_BYTES).unwrap() + 1,
+            &mut prefix,
+        );
+
+        let error = decode_ssz_snappy_payload(encoded).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("declared payload length"));
+    }
+
+    #[test]
+    fn streamed_response_rejects_more_than_spec_chunk_limit() {
+        let empty_chunk = encode_response(
+            &Eth2RpcProtocol::BeaconBlocksByRangeV1,
+            Eth2RpcResponse::BeaconBlocksByRange(vec![RawRpcResponse {
+                context_bytes: None,
+                bytes: Vec::new(),
+            }]),
+        )
+        .unwrap();
+        let encoded = empty_chunk.repeat(MAX_RPC_RESPONSE_CHUNKS + 1);
+
+        let error = decode_response(&Eth2RpcProtocol::BeaconBlocksByRangeV1, &encoded).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("chunk limit"));
+    }
+
+    #[test]
+    fn error_helpers_bound_wire_message_length() {
+        for response in [
+            invalid_request(vec![b'x'; ERROR_MESSAGE_LIMIT + 1]),
+            resource_unavailable(vec![b'x'; ERROR_MESSAGE_LIMIT + 1]),
+            rate_limited(vec![b'x'; ERROR_MESSAGE_LIMIT + 1]),
+        ] {
+            let Eth2RpcResponse::Error(error) = response else {
+                panic!("expected RPC error response");
+            };
+            assert_eq!(error.message.len(), ERROR_MESSAGE_LIMIT);
+        }
     }
 
     #[test]

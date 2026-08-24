@@ -197,7 +197,7 @@ impl ConsensusChainSpec {
             .find(|scheduled| scheduled.epoch > epoch)
     }
 
-    fn next_scheduled_epoch_after(self, epoch: u64) -> Option<u64> {
+    pub fn next_scheduled_epoch_after(self, epoch: u64) -> Option<u64> {
         let next_regular_epoch = self
             .next_regular_fork_for_epoch(epoch)
             .map(|fork| fork.epoch);
@@ -379,6 +379,22 @@ mod tests {
         assert_eq!(
             MAINNET_CONSENSUS_CHAIN_SPEC.next_fork_digest_for_epoch(441_630),
             [0u8; 4]
+        );
+    }
+
+    #[test]
+    fn next_scheduled_epoch_includes_blob_parameter_transitions() {
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC.next_scheduled_epoch_after(411_392),
+            Some(412_672)
+        );
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC.next_scheduled_epoch_after(412_672),
+            Some(419_072)
+        );
+        assert_eq!(
+            MAINNET_CONSENSUS_CHAIN_SPEC.next_scheduled_epoch_after(419_072),
+            None
         );
     }
 }
