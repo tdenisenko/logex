@@ -16,12 +16,10 @@ const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL: u64 = 4;
 const CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS: u64 = 64;
-const CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
-const CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS_DURING_HISTORICAL: usize = 2;
-const CONSENSUS_ANCHOR_FORWARD_BODY_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
-const CONSENSUS_ANCHOR_FORWARD_BODY_ATTEMPTS_DURING_HISTORICAL: usize = 2;
-const CONSENSUS_ANCHOR_FORWARD_RECEIPT_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
-const CONSENSUS_ANCHOR_FORWARD_RECEIPT_ATTEMPTS_DURING_HISTORICAL: usize = 2;
+const CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS: usize = 4;
+const CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
+const CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL: usize = 2;
 const CONSENSUS_ANCHOR_FORWARD_RETRY_COOLDOWN_DURING_HISTORICAL: Duration = Duration::from_secs(8);
 const CHECKPOINT_GAP_PEER_REFILL_TIMEOUT: Duration = Duration::from_secs(2);
 const CHECKPOINT_GAP_PIPELINE_CHUNK_BLOCKS: usize = 128;
@@ -1985,6 +1983,20 @@ fn consensus_anchor_forward_batch_limit(
     configured_limit.max(1).min(fairness_limit)
 }
 
+fn consensus_anchor_forward_request_policy(historical_backfill_active: bool) -> (Duration, usize) {
+    if historical_backfill_active {
+        (
+            CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL,
+            CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL,
+        )
+    } else {
+        (
+            CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT,
+            CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS,
+        )
+    }
+}
+
 impl SyncEngine {
     pub(super) async fn run_consensus_sync(&mut self) -> Result<()> {
         self.refresh_consensus_status().await;
@@ -2423,6 +2435,8 @@ impl SyncEngine {
             "bridging stale restart gap to fresh consensus checkpoint"
         );
         self.refill_checkpoint_gap_peers().await?;
+        let (request_timeout, request_attempts) =
+            consensus_anchor_forward_request_policy(historical_backfill_active);
 
         let mut headers = Vec::new();
         let mut header_peer = None;
@@ -2430,24 +2444,16 @@ impl SyncEngine {
         while next_block <= anchor.block_number {
             let remaining = anchor.block_number.saturating_sub(next_block) + 1;
             let request_count = remaining.min(self.config.header_batch_size.max(1));
-            let header_result = if historical_backfill_active {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_headers_with_limits(
-                        next_block,
-                        request_count,
-                        CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT_DURING_HISTORICAL,
-                        CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS_DURING_HISTORICAL,
-                    ),
-                )
-                .await
-            } else {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_headers(next_block, request_count),
-                )
-                .await
-            };
+            let header_result = cancelable(
+                &mut self.shutdown,
+                self.peers.get_headers_with_limits(
+                    next_block,
+                    request_count,
+                    request_timeout,
+                    request_attempts,
+                ),
+            )
+            .await;
             let (peer_id, batch) = match header_result {
                 Some(Ok((peer_id, batch))) if batch.len() == request_count as usize => {
                     (peer_id, batch)
@@ -2784,6 +2790,8 @@ impl SyncEngine {
         let mut progressed = false;
         let mut last_validated_header = None;
         let mut last_head = None;
+        let (request_timeout, request_attempts) =
+            consensus_anchor_forward_request_policy(historical_backfill_active);
 
         for (chunk_headers, chunk_hashes) in headers
             .chunks(self.config.fetch_batch_size)
@@ -2796,29 +2804,17 @@ impl SyncEngine {
                 continue;
             };
 
-            let body_result = if historical_backfill_active {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_bodies_prefer_peers_with_limits(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &[header_peer],
-                        CONSENSUS_ANCHOR_FORWARD_BODY_TIMEOUT_DURING_HISTORICAL,
-                        CONSENSUS_ANCHOR_FORWARD_BODY_ATTEMPTS_DURING_HISTORICAL,
-                    ),
-                )
-                .await
-            } else {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_bodies_prefer_peers(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &[header_peer],
-                    ),
-                )
-                .await
-            };
+            let body_result = cancelable(
+                &mut self.shutdown,
+                self.peers.get_bodies_prefer_peers_with_limits(
+                    chunk_hashes.clone(),
+                    required_block,
+                    &[header_peer],
+                    request_timeout,
+                    request_attempts,
+                ),
+            )
+            .await;
             let bodies = match body_result {
                 Some(Ok(bodies)) if bodies.len() == chunk_headers.len() => bodies,
                 Some(Ok(bodies)) => {
@@ -2844,32 +2840,19 @@ impl SyncEngine {
                 .map(|(_peer_id, body)| body.transaction_count())
                 .collect();
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
-            let receipt_result = if historical_backfill_active {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers
-                        .get_receipts_matching_counts_prefer_peers_with_limits(
-                            chunk_hashes.clone(),
-                            required_block,
-                            &expected_receipt_counts,
-                            &receipt_peer_preference,
-                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_TIMEOUT_DURING_HISTORICAL,
-                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_ATTEMPTS_DURING_HISTORICAL,
-                        ),
-                )
-                .await
-            } else {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_receipts_matching_counts_prefer_peers(
+            let receipt_result = cancelable(
+                &mut self.shutdown,
+                self.peers
+                    .get_receipts_matching_counts_prefer_peers_with_limits(
                         chunk_hashes.clone(),
                         required_block,
                         &expected_receipt_counts,
                         &receipt_peer_preference,
+                        request_timeout,
+                        request_attempts,
                     ),
-                )
-                .await
-            };
+            )
+            .await;
             let (receipt_peer, receipts) = match receipt_result {
                 Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
                     (peer_id, receipts)
@@ -3145,25 +3128,18 @@ impl SyncEngine {
             return Ok(false);
         };
         let request_count = anchors.len() as u64;
-        let header_result = if historical_backfill_active {
-            cancelable(
-                &mut self.shutdown,
-                self.peers.get_headers_with_limits(
-                    first_anchor.block_number,
-                    request_count,
-                    CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT_DURING_HISTORICAL,
-                    CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS_DURING_HISTORICAL,
-                ),
-            )
-            .await
-        } else {
-            cancelable(
-                &mut self.shutdown,
-                self.peers
-                    .get_headers(first_anchor.block_number, request_count),
-            )
-            .await
-        };
+        let (request_timeout, request_attempts) =
+            consensus_anchor_forward_request_policy(historical_backfill_active);
+        let header_result = cancelable(
+            &mut self.shutdown,
+            self.peers.get_headers_with_limits(
+                first_anchor.block_number,
+                request_count,
+                request_timeout,
+                request_attempts,
+            ),
+        )
+        .await;
         let (header_peer, headers) = match header_result {
             Some(Ok((peer_id, headers))) if !headers.is_empty() => (peer_id, headers),
             Some(Ok((_peer_id, _headers))) => {
@@ -3250,29 +3226,17 @@ impl SyncEngine {
                 .map(|header| header.number())
                 .unwrap_or(first_anchor.block_number);
 
-            let body_result = if historical_backfill_active {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_bodies_prefer_peers_with_limits(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &[header_peer],
-                        CONSENSUS_ANCHOR_FORWARD_BODY_TIMEOUT_DURING_HISTORICAL,
-                        CONSENSUS_ANCHOR_FORWARD_BODY_ATTEMPTS_DURING_HISTORICAL,
-                    ),
-                )
-                .await
-            } else {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_bodies_prefer_peers(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &[header_peer],
-                    ),
-                )
-                .await
-            };
+            let body_result = cancelable(
+                &mut self.shutdown,
+                self.peers.get_bodies_prefer_peers_with_limits(
+                    chunk_hashes.clone(),
+                    required_block,
+                    &[header_peer],
+                    request_timeout,
+                    request_attempts,
+                ),
+            )
+            .await;
             let bodies = match body_result {
                 Some(Ok(bodies)) if bodies.len() == chunk_headers.len() => bodies,
                 Some(Ok(bodies)) => {
@@ -3316,32 +3280,19 @@ impl SyncEngine {
                 .map(|(_peer_id, body)| body.transaction_count())
                 .collect();
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
-            let receipt_result = if historical_backfill_active {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers
-                        .get_receipts_matching_counts_prefer_peers_with_limits(
-                            chunk_hashes.clone(),
-                            required_block,
-                            &expected_receipt_counts,
-                            &receipt_peer_preference,
-                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_TIMEOUT_DURING_HISTORICAL,
-                            CONSENSUS_ANCHOR_FORWARD_RECEIPT_ATTEMPTS_DURING_HISTORICAL,
-                        ),
-                )
-                .await
-            } else {
-                cancelable(
-                    &mut self.shutdown,
-                    self.peers.get_receipts_matching_counts_prefer_peers(
+            let receipt_result = cancelable(
+                &mut self.shutdown,
+                self.peers
+                    .get_receipts_matching_counts_prefer_peers_with_limits(
                         chunk_hashes.clone(),
                         required_block,
                         &expected_receipt_counts,
                         &receipt_peer_preference,
+                        request_timeout,
+                        request_attempts,
                     ),
-                )
-                .await
-            };
+            )
+            .await;
             let (receipt_peer, receipts) = match receipt_result {
                 Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
                     (peer_id, receipts)
@@ -7194,6 +7145,29 @@ mod tests {
         );
         assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 2, true), 2);
         assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 0, true), 1);
+    }
+
+    #[test]
+    fn consensus_forward_requests_have_bounded_peer_tail_latency() {
+        assert_eq!(
+            consensus_anchor_forward_request_policy(false),
+            (
+                CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT,
+                CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS
+            )
+        );
+        assert_eq!(
+            consensus_anchor_forward_request_policy(true),
+            (
+                CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL,
+                CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL
+            )
+        );
+        assert_eq!(
+            CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT
+                * CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS as u32,
+            Duration::from_secs(16)
+        );
     }
 
     #[test]
