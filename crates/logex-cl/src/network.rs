@@ -6683,10 +6683,7 @@ mod tests {
         let peer_id = PeerId::random();
         let addr = multiaddr_from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000, peer_id);
 
-        assert_eq!(
-            strip_peer_id(addr).to_string(),
-            format!("/ip4/127.0.0.1/tcp/9000")
-        );
+        assert_eq!(strip_peer_id(addr).to_string(), "/ip4/127.0.0.1/tcp/9000");
     }
 
     #[test]
