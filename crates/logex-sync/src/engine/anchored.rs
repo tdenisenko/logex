@@ -16,8 +16,10 @@ const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL: u64 = 4;
 const CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS: u64 = 64;
-const CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
-const CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS: usize = 4;
+const CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT: Duration = Duration::from_secs(4);
+const CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS: usize = 4;
+const CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(10);
+const CONSENSUS_ANCHOR_FORWARD_PAYLOAD_ATTEMPTS: usize = 2;
 const CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL: usize = 2;
 const CONSENSUS_ANCHOR_FORWARD_RETRY_COOLDOWN_DURING_HISTORICAL: Duration = Duration::from_secs(8);
@@ -1983,18 +1985,35 @@ fn consensus_anchor_forward_batch_limit(
     configured_limit.max(1).min(fairness_limit)
 }
 
-fn consensus_anchor_forward_request_policy(historical_backfill_active: bool) -> (Duration, usize) {
+fn consensus_anchor_forward_request_policy(
+    historical_backfill_active: bool,
+    live_timeout: Duration,
+    live_attempts: usize,
+) -> (Duration, usize) {
     if historical_backfill_active {
         (
             CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL,
             CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL,
         )
     } else {
-        (
-            CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT,
-            CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS,
-        )
+        (live_timeout, live_attempts)
     }
+}
+
+fn consensus_anchor_forward_header_policy(historical_backfill_active: bool) -> (Duration, usize) {
+    consensus_anchor_forward_request_policy(
+        historical_backfill_active,
+        CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT,
+        CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS,
+    )
+}
+
+fn consensus_anchor_forward_payload_policy(historical_backfill_active: bool) -> (Duration, usize) {
+    consensus_anchor_forward_request_policy(
+        historical_backfill_active,
+        CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT,
+        CONSENSUS_ANCHOR_FORWARD_PAYLOAD_ATTEMPTS,
+    )
 }
 
 impl SyncEngine {
@@ -2436,7 +2455,7 @@ impl SyncEngine {
         );
         self.refill_checkpoint_gap_peers().await?;
         let (request_timeout, request_attempts) =
-            consensus_anchor_forward_request_policy(historical_backfill_active);
+            consensus_anchor_forward_header_policy(historical_backfill_active);
 
         let mut headers = Vec::new();
         let mut header_peer = None;
@@ -2791,7 +2810,7 @@ impl SyncEngine {
         let mut last_validated_header = None;
         let mut last_head = None;
         let (request_timeout, request_attempts) =
-            consensus_anchor_forward_request_policy(historical_backfill_active);
+            consensus_anchor_forward_payload_policy(historical_backfill_active);
 
         for (chunk_headers, chunk_hashes) in headers
             .chunks(self.config.fetch_batch_size)
@@ -3128,15 +3147,15 @@ impl SyncEngine {
             return Ok(false);
         };
         let request_count = anchors.len() as u64;
-        let (request_timeout, request_attempts) =
-            consensus_anchor_forward_request_policy(historical_backfill_active);
+        let (header_timeout, header_attempts) =
+            consensus_anchor_forward_header_policy(historical_backfill_active);
         let header_result = cancelable(
             &mut self.shutdown,
             self.peers.get_headers_with_limits(
                 first_anchor.block_number,
                 request_count,
-                request_timeout,
-                request_attempts,
+                header_timeout,
+                header_attempts,
             ),
         )
         .await;
@@ -3213,6 +3232,8 @@ impl SyncEngine {
         let mut progressed = false;
         let mut last_validated_header = None;
         let mut last_head = None;
+        let (payload_timeout, payload_attempts) =
+            consensus_anchor_forward_payload_policy(historical_backfill_active);
 
         for ((chunk_headers, chunk_hashes), chunk_anchors) in headers
             .chunks(self.config.fetch_batch_size)
@@ -3232,8 +3253,8 @@ impl SyncEngine {
                     chunk_hashes.clone(),
                     required_block,
                     &[header_peer],
-                    request_timeout,
-                    request_attempts,
+                    payload_timeout,
+                    payload_attempts,
                 ),
             )
             .await;
@@ -3288,8 +3309,8 @@ impl SyncEngine {
                         required_block,
                         &expected_receipt_counts,
                         &receipt_peer_preference,
-                        request_timeout,
-                        request_attempts,
+                        payload_timeout,
+                        payload_attempts,
                     ),
             )
             .await;
@@ -7148,26 +7169,46 @@ mod tests {
     }
 
     #[test]
-    fn consensus_forward_requests_have_bounded_peer_tail_latency() {
+    fn consensus_forward_requests_bound_tail_latency_by_response_size() {
         assert_eq!(
-            consensus_anchor_forward_request_policy(false),
+            consensus_anchor_forward_header_policy(false),
             (
-                CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT,
-                CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS
+                CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT,
+                CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS
             )
         );
         assert_eq!(
-            consensus_anchor_forward_request_policy(true),
+            consensus_anchor_forward_payload_policy(false),
+            (
+                CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT,
+                CONSENSUS_ANCHOR_FORWARD_PAYLOAD_ATTEMPTS
+            )
+        );
+        assert_eq!(
+            consensus_anchor_forward_header_policy(true),
             (
                 CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT_DURING_HISTORICAL,
                 CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS_DURING_HISTORICAL
             )
         );
         assert_eq!(
-            CONSENSUS_ANCHOR_FORWARD_REQUEST_TIMEOUT
-                * CONSENSUS_ANCHOR_FORWARD_REQUEST_ATTEMPTS as u32,
+            consensus_anchor_forward_payload_policy(true),
+            consensus_anchor_forward_header_policy(true)
+        );
+        assert_eq!(
+            CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT
+                * CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS as u32,
             Duration::from_secs(16)
         );
+        assert_eq!(
+            CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT
+                * CONSENSUS_ANCHOR_FORWARD_PAYLOAD_ATTEMPTS as u32,
+            Duration::from_secs(20)
+        );
+
+        let delayed_payload_response = Duration::from_secs(5);
+        assert!(CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT < delayed_payload_response);
+        assert!(CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT > delayed_payload_response);
     }
 
     #[test]
