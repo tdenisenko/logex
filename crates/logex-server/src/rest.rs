@@ -15,6 +15,7 @@ use crate::storage_metrics;
 const HISTORICAL_RATE_STALE_AFTER_MS: u64 = 10_000;
 const HISTORICAL_RATE_DECAY_HALF_LIFE_MS: f64 = 5_000.0;
 const HISTORICAL_RATE_ZERO_THRESHOLD: f64 = 0.01;
+const CONSENSUS_STATUS_STALE_AFTER_MS: u64 = 30_000;
 const HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK: u64 = 25_093_066;
 const HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL: f64 = 6_780_563_686.0;
 const HISTORICAL_LOG_ESTIMATE_RECENT_LOGS_PER_BLOCK: f64 = 733.0;
@@ -171,14 +172,26 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// Handle GET /status — return detailed sync and storage status.
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sync = state.sync_status.lock().unwrap().clone();
+    let consensus_status_stale = consensus_status_is_stale(
+        sync.checkpoint.is_some(),
+        sync.consensus_status_updated_at_unix_ms,
+        unix_time_millis(),
+    );
+    let consensus_head_fresh = if consensus_status_stale {
+        Some(false)
+    } else {
+        sync.consensus_head_fresh
+    };
+    let live_head_available = consensus_head_fresh == Some(true);
     let reported_node_state = if sync.node_state == logex_types::NodeState::Synced
-        && (sync.consensus_head_fresh == Some(false)
-            || (sync.checkpoint.is_some() && sync.consensus_head_fresh.is_none()))
+        && (consensus_head_fresh == Some(false)
+            || (sync.checkpoint.is_some() && consensus_head_fresh.is_none()))
     {
         logex_types::NodeState::WaitingForConsensus
     } else {
         sync.node_state
     };
+    let reported_syncing = sync.syncing && !consensus_status_stale;
     let (
         total_rows,
         sealed_partitions,
@@ -208,8 +221,10 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     };
     let storage_metrics =
         storage_metrics::load_or_refresh(Arc::clone(&state.storage_metrics), data_dir).await;
-    let progress_pct = if sync.target_block > 0 {
-        Some((sync.current_block as f64 / sync.target_block as f64 * 100.0).min(100.0))
+    let live_target_block =
+        (live_head_available && sync.target_block > 0).then_some(sync.target_block);
+    let progress_pct = if let Some(target_block) = live_target_block {
+        Some((sync.current_block as f64 / target_block as f64 * 100.0).min(100.0))
     } else {
         None
     };
@@ -283,10 +298,15 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         .map(|floor| floor.block_number)
         .or(stored_log_range.map(|range| range.0));
     let verified_to_block = head_block.or(canonical_top_block);
+    let reported_canonical_top_block = live_head_available.then_some(canonical_top_block).flatten();
+    let latest_block = live_head_available.then_some(head_block).flatten();
+    let latest_timestamp = latest_block
+        .filter(|block| Some(*block) == head_block)
+        .and(head_timestamp);
     let execution_network = rest_execution_network_status(sync.execution_network);
     Json(serde_json::json!({
         "synced": reported_node_state == logex_types::NodeState::Synced,
-        "syncing": sync.syncing,
+        "syncing": reported_syncing,
         "node_state": reported_node_state,
         "node_state_label": reported_node_state.as_label(),
         "connected_peers": sync.connected_peers,
@@ -300,7 +320,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "p2p_external_ip": sync.p2p_external_ip,
         "p2p_warnings": sync.p2p_warnings,
         "current_block": sync.current_block,
-        "target_block": sync.target_block,
+        "target_block": live_target_block,
         "blocks_per_sec": sync.blocks_per_sec,
         "blocks_per_minute": sync.blocks_per_minute,
         "logs_per_sec": logs_per_sec,
@@ -316,8 +336,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
             "stored_log_to_block": stored_log_range.map(|range| range.1),
             "verified_from_block": verified_from_block,
             "verified_to_block": verified_to_block,
-            "latest_block": head_block,
-            "latest_timestamp": head_timestamp,
+            "latest_block": latest_block,
+            "latest_timestamp": latest_timestamp,
             "indexed_head_block": indexed_head_block,
             "stored_rows": total_rows,
         },
@@ -332,7 +352,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "cpu_utilization_pct": storage_metrics.cpu_utilization_pct,
         "cpu_utilization_raw_pct": storage_metrics.cpu_utilization_raw_pct,
         "cpu_logical_cores": storage_metrics.cpu_logical_cores,
-        "eta_seconds": sync.eta_seconds,
+        "eta_seconds": live_head_available.then_some(sync.eta_seconds).flatten(),
         "historical_sync_disabled": historical_sync_disabled,
         "historical_execution_floor": historical_floor,
         "historical_execution_anchor": historical_anchor,
@@ -348,7 +368,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "raw_log_segment_backlog": sync.raw_log_segment_backlog,
         "storage_profile_rewrite_backlog": sync.storage_profile_rewrite_backlog,
         "progress_pct": progress_pct,
-        "canonical_top_block": canonical_top_block,
+        "canonical_top_block": reported_canonical_top_block,
         "checkpoint_root": sync.checkpoint.map(|checkpoint| checkpoint.beacon_root),
         "checkpoint_slot": sync.checkpoint.and_then(|checkpoint| checkpoint.beacon_slot),
         "indexed_execution_head": sync.indexed_execution_head,
@@ -359,7 +379,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "optimistic_execution_head": sync.optimistic_execution_head,
         "consensus_current_slot": sync.consensus_current_slot,
         "consensus_head_lag_slots": sync.consensus_head_lag_slots,
-        "consensus_head_fresh": sync.consensus_head_fresh,
+        "consensus_head_fresh": consensus_head_fresh,
+        "consensus_status_stale": consensus_status_stale,
+        "consensus_status_updated_at_unix_ms": sync.consensus_status_updated_at_unix_ms,
         "finalized_execution_head": sync.finalized_execution_head,
         "execution_network": execution_network,
         "consensus_network": sync.consensus_network,
@@ -536,6 +558,17 @@ fn historical_rate_for_age(rate: f64, age_ms: u64) -> f64 {
     } else {
         decayed
     }
+}
+
+fn consensus_status_is_stale(
+    checkpoint_present: bool,
+    updated_at_unix_ms: Option<u64>,
+    now_unix_ms: u64,
+) -> bool {
+    checkpoint_present
+        && updated_at_unix_ms.is_none_or(|updated_at| {
+            now_unix_ms.saturating_sub(updated_at) > CONSENSUS_STATUS_STALE_AFTER_MS
+        })
 }
 
 fn unix_time_millis() -> u64 {
@@ -1414,6 +1447,7 @@ mod tests {
                 consensus_current_slot: Some(6),
                 consensus_head_lag_slots: Some(4),
                 consensus_head_fresh: Some(true),
+                consensus_status_updated_at_unix_ms: Some(unix_time_millis()),
                 finalized_execution_head: Some(ExecutionAnchor {
                     beacon_root: B256::repeat_byte(0x07),
                     beacon_slot: 3,
@@ -1881,5 +1915,80 @@ mod tests {
         assert_eq!(status["node_state"], "waiting_for_consensus");
         assert_eq!(status["node_state_label"], "Waiting For Consensus");
         assert_eq!(status["consensus_head_lag_slots"], 50);
+        assert!(status["target_block"].is_null());
+        assert!(status["progress_pct"].is_null());
+        assert!(status["eta_seconds"].is_null());
+    }
+
+    #[test]
+    fn consensus_status_freshness_requires_a_recent_publication() {
+        let now = 100_000;
+
+        assert!(!consensus_status_is_stale(false, None, now));
+        assert!(consensus_status_is_stale(true, None, now));
+        assert!(!consensus_status_is_stale(
+            true,
+            Some(now - CONSENSUS_STATUS_STALE_AFTER_MS),
+            now
+        ));
+        assert!(consensus_status_is_stale(
+            true,
+            Some(now - CONSENSUS_STATUS_STALE_AFTER_MS - 1),
+            now
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint_withholds_stale_consensus_target_and_progress() {
+        let (_tmp, mut storage) = setup_storage();
+        storage
+            .record_sync_head(100, B256::repeat_byte(0xFE), 1_650_000_000)
+            .unwrap();
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                node_state: NodeState::Synced,
+                syncing: true,
+                current_block: 100,
+                target_block: 100,
+                eta_seconds: Some(0.0),
+                checkpoint: Some(WeakSubjectivityCheckpoint {
+                    beacon_root: B256::repeat_byte(0x77),
+                    beacon_slot: Some(1_000),
+                }),
+                consensus_current_slot: Some(1_000),
+                consensus_head_lag_slots: Some(0),
+                consensus_head_fresh: Some(true),
+                consensus_status_updated_at_unix_ms: Some(
+                    unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
+                ),
+                ..Default::default()
+            },
+        ));
+        let app = crate::build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(status["synced"], false);
+        assert_eq!(status["syncing"], false);
+        assert_eq!(status["node_state"], "waiting_for_consensus");
+        assert_eq!(status["consensus_head_fresh"], false);
+        assert_eq!(status["consensus_status_stale"], true);
+        assert!(status["target_block"].is_null());
+        assert!(status["progress_pct"].is_null());
+        assert!(status["eta_seconds"].is_null());
+        assert!(status["canonical_top_block"].is_null());
+        assert!(status["query_coverage"]["latest_block"].is_null());
+        assert_eq!(status["head_block"], 100);
     }
 }

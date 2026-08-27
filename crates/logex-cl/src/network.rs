@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, hex};
 use discv5::enr::{CombinedKey, CombinedPublicKey, NodeId};
@@ -24,7 +24,7 @@ use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, tcp, yamux};
 use libp2p_mplex as mplex;
 use logex_types::{
-    ConsensusDataFork, ConsensusNetworkStatus, SyncStatus, WeakSubjectivityCheckpoint,
+    ConsensusDataFork, ConsensusNetworkStatus, NodeState, SyncStatus, WeakSubjectivityCheckpoint,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -97,6 +97,7 @@ const LOCAL_CUSTODY_GROUP_COUNT: u64 = 0;
 const INBOUND_RATE_LIMIT_RETENTION: Duration = Duration::from_secs(60);
 const FORK_TOPIC_SUBSCRIBE_DELAY_SLOTS: u64 = 2;
 const FORK_TOPIC_UNSUBSCRIBE_DELAY_EPOCHS: u64 = 2;
+const CONSENSUS_NETWORK_RESTART_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct ConsensusNetworkConfig {
@@ -474,12 +475,86 @@ pub fn spawn_consensus_network(
     sync_status: Arc<Mutex<SyncStatus>>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<JoinHandle<()>, ConsensusNetworkError> {
-    let network = ConsensusNetwork::new(config, consensus, sync_status)?;
+    let network = ConsensusNetwork::new(
+        config.clone(),
+        Arc::clone(&consensus),
+        Arc::clone(&sync_status),
+    )?;
     Ok(tokio::spawn(async move {
-        if let Err(error) = network.run(shutdown).await {
-            tracing::error!(%error, "consensus discovery task exited with an error");
+        let mut shutdown = shutdown;
+        let mut network = network;
+        loop {
+            let outcome = tokio::spawn(network.run(shutdown.clone())).await;
+            if *shutdown.borrow() {
+                break;
+            }
+
+            mark_consensus_network_unavailable(&sync_status);
+            match outcome {
+                Ok(Ok(())) => {
+                    tracing::error!("consensus network exited unexpectedly; restarting");
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "consensus network exited with an error; restarting");
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        panicked = error.is_panic(),
+                        "consensus network task failed; restarting"
+                    );
+                }
+            }
+
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(CONSENSUS_NETWORK_RESTART_DELAY) => {}
+                    _ = wait_for_shutdown(&mut shutdown) => return,
+                }
+                match ConsensusNetwork::new(
+                    config.clone(),
+                    Arc::clone(&consensus),
+                    Arc::clone(&sync_status),
+                ) {
+                    Ok(next_network) => {
+                        network = next_network;
+                        tracing::info!("consensus network supervisor restarted the network task");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to reconstruct consensus network; retrying");
+                    }
+                }
+            }
         }
     }))
+}
+
+fn mark_consensus_network_unavailable(sync_status: &Arc<Mutex<SyncStatus>>) {
+    let current_slot = current_wall_clock_slot();
+    let mut status = sync_status.lock().unwrap();
+    let optimistic_slot = status
+        .optimistic_execution_head
+        .map(|anchor| anchor.beacon_slot);
+    let optimistic_lag =
+        optimistic_slot.map(|slot| crate::optimistic_head_lag_slots(current_slot, slot));
+
+    status.consensus_current_slot = Some(current_slot);
+    status.consensus_head_lag_slots = optimistic_lag;
+    status.consensus_head_fresh = Some(false);
+    status.consensus_status_updated_at_unix_ms = Some(unix_time_millis());
+    status.node_state = NodeState::WaitingForConsensus;
+    status.syncing = false;
+    if let Some(network) = status.consensus_network.as_mut() {
+        network.current_slot = current_slot;
+        network.optimistic_head_lag_slots = optimistic_lag;
+        network.head_recovery_active = true;
+        network.connected_peer_sessions = 0;
+        network.dialing_peer_sessions = 0;
+        network.pending_rpc_requests = 0;
+        network.p2p_download_bytes_per_sec = 0;
+        network.p2p_upload_bytes_per_sec = 0;
+    }
 }
 
 struct ConsensusNetwork {
@@ -3740,6 +3815,11 @@ impl ConsensusNetwork {
 
     fn drive_peer_connections(&mut self) {
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
+        let head_progression_needed = !bootstrap_needed
+            && live_head_progression_needed(
+                self.latest_history_sync_target(),
+                current_wall_clock_slot(),
+            );
         let now = Instant::now();
         for lifecycle in self.peer_lifecycle.values_mut() {
             lifecycle.clear_expired_cooldown(now);
@@ -3766,18 +3846,13 @@ impl ConsensusNetwork {
             "driving consensus peer connections"
         );
         dialable.sort_by(|(left, _), (right, _)| {
-            self.peer_priority(*right, bootstrap_needed)
-                .cmp(&self.peer_priority(*left, bootstrap_needed))
+            self.peer_priority(*right, bootstrap_needed, head_progression_needed)
+                .cmp(&self.peer_priority(*left, bootstrap_needed, head_progression_needed))
                 .then_with(|| left.cmp(right))
         });
 
         let active_targets = self.connected_peers.len() + self.dialing_peers.len();
-        if !bootstrap_needed
-            && live_head_progression_needed(
-                self.latest_history_sync_target(),
-                current_wall_clock_slot(),
-            )
-        {
+        if head_progression_needed {
             let active_progression_peers = self
                 .connected_peers
                 .iter()
@@ -3830,8 +3905,8 @@ impl ConsensusNetwork {
                         })
                         .collect::<Vec<_>>();
                 replaceable_peers.sort_by(|left, right| {
-                    self.peer_priority(*left, bootstrap_needed)
-                        .cmp(&self.peer_priority(*right, bootstrap_needed))
+                    self.peer_priority(*left, bootstrap_needed, head_progression_needed)
+                        .cmp(&self.peer_priority(*right, bootstrap_needed, head_progression_needed))
                         .then_with(|| left.cmp(right))
                 });
                 let replaceable_peers = replaceable_peers
@@ -3875,6 +3950,11 @@ impl ConsensusNetwork {
         self.seed_verified_light_client_headers();
         self.refresh_history_sync_target();
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
+        let head_progression_needed = !bootstrap_needed
+            && live_head_progression_needed(
+                self.latest_history_sync_target(),
+                current_wall_clock_slot(),
+            );
         let now = Instant::now();
         if !bootstrap_needed {
             for lifecycle in self.peer_lifecycle.values_mut() {
@@ -3883,8 +3963,8 @@ impl ConsensusNetwork {
         }
         let mut connected = self.connected_peers.iter().copied().collect::<Vec<_>>();
         connected.sort_by(|left, right| {
-            self.peer_priority(*right, bootstrap_needed)
-                .cmp(&self.peer_priority(*left, bootstrap_needed))
+            self.peer_priority(*right, bootstrap_needed, head_progression_needed)
+                .cmp(&self.peer_priority(*left, bootstrap_needed, head_progression_needed))
                 .then_with(|| left.cmp(right))
         });
         for peer in connected {
@@ -4765,15 +4845,15 @@ impl ConsensusNetwork {
         !lifecycle.in_cooldown(now)
     }
 
-    fn peer_priority(&self, peer: PeerId, bootstrap_needed: bool) -> i32 {
+    fn peer_priority(
+        &self,
+        peer: PeerId,
+        bootstrap_needed: bool,
+        head_progression_needed: bool,
+    ) -> i32 {
         let Some(lifecycle) = self.peer_lifecycle.get(&peer) else {
             return 0;
         };
-        let head_progression_needed = !bootstrap_needed
-            && live_head_progression_needed(
-                self.latest_history_sync_target(),
-                current_wall_clock_slot(),
-            );
         let support_score = match lifecycle.remembered_support {
             Some(support) if bootstrap_needed && support.supports_bootstrap_sync() => 4,
             Some(support)
@@ -5339,6 +5419,7 @@ impl ConsensusNetwork {
             optimistic_head_slot
                 .is_some_and(|slot| crate::optimistic_head_is_fresh_at(current_slot, slot)),
         );
+        sync_status.consensus_status_updated_at_unix_ms = Some(unix_time_millis());
         if sync_status.consensus_head_fresh == Some(false)
             && sync_status.node_state == logex_types::NodeState::Synced
         {
@@ -5357,6 +5438,11 @@ impl ConsensusNetwork {
 
     fn persist_known_peers(&mut self) -> Result<(), ConsensusNetworkError> {
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
+        let head_progression_needed = !bootstrap_needed
+            && live_head_progression_needed(
+                self.latest_history_sync_target(),
+                current_wall_clock_slot(),
+            );
         let mut peers = self
             .discv5
             .table_entries_enr()
@@ -5404,14 +5490,14 @@ impl ConsensusNetwork {
                 .parse::<Enr>()
                 .ok()
                 .and_then(|enr| peer_id_from_enr(&enr).ok())
-                .map(|peer| self.peer_priority(peer, bootstrap_needed))
+                .map(|peer| self.peer_priority(peer, bootstrap_needed, head_progression_needed))
                 .unwrap_or_default();
             let right_priority = right
                 .enr
                 .parse::<Enr>()
                 .ok()
                 .and_then(|enr| peer_id_from_enr(&enr).ok())
-                .map(|peer| self.peer_priority(peer, bootstrap_needed))
+                .map(|peer| self.peer_priority(peer, bootstrap_needed, head_progression_needed))
                 .unwrap_or_default();
             right_priority
                 .cmp(&left_priority)
@@ -5977,6 +6063,14 @@ fn current_wall_clock_slot() -> u64 {
     MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_slot()
 }
 
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn peer_backoff_delay(attempts: u32) -> Duration {
     let exponent = attempts.saturating_sub(1).min(6);
     let multiplier = 1u64 << exponent;
@@ -6064,11 +6158,52 @@ const MAINNET_BOOTNODES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use alloy_primitives::b256;
     use libp2p::StreamProtocol;
     use tempfile::TempDir;
+
+    #[test]
+    fn unavailable_consensus_network_invalidates_cached_head_status() {
+        let sync_status = Arc::new(Mutex::new(SyncStatus {
+            node_state: NodeState::Synced,
+            syncing: true,
+            optimistic_execution_head: Some(logex_types::ExecutionAnchor {
+                beacon_root: B256::repeat_byte(0x01),
+                beacon_slot: current_wall_clock_slot().saturating_sub(100),
+                block_number: 1_000,
+                block_hash: B256::repeat_byte(0x02),
+                receipts_root: B256::repeat_byte(0x03),
+            }),
+            consensus_head_fresh: Some(true),
+            consensus_network: Some(ConsensusNetworkStatus {
+                connected_peer_sessions: 12,
+                dialing_peer_sessions: 4,
+                pending_rpc_requests: 3,
+                p2p_download_bytes_per_sec: 1_000,
+                p2p_upload_bytes_per_sec: 500,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+
+        mark_consensus_network_unavailable(&sync_status);
+
+        let status = sync_status.lock().unwrap();
+        assert_eq!(status.node_state, NodeState::WaitingForConsensus);
+        assert!(!status.syncing);
+        assert_eq!(status.consensus_head_fresh, Some(false));
+        assert!(status.consensus_status_updated_at_unix_ms.is_some());
+        let network = status.consensus_network.as_ref().unwrap();
+        assert!(network.head_recovery_active);
+        assert_eq!(network.connected_peer_sessions, 0);
+        assert_eq!(network.dialing_peer_sessions, 0);
+        assert_eq!(network.pending_rpc_requests, 0);
+        assert_eq!(network.p2p_download_bytes_per_sec, 0);
+        assert_eq!(network.p2p_upload_bytes_per_sec, 0);
+    }
 
     #[test]
     fn discovery_secret_is_stable_after_first_write() {

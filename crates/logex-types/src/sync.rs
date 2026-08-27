@@ -471,6 +471,9 @@ pub struct SyncStatus {
     /// Whether the optimistic CL head is recent enough to represent the live chain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consensus_head_fresh: Option<bool>,
+    /// Wall-clock time when the consensus network last published live status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_status_updated_at_unix_ms: Option<u64>,
     /// Highest finalized execution anchor known from CL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_execution_head: Option<ExecutionAnchor>,

@@ -3106,8 +3106,8 @@ function updateStatus(data) {
   var queryTo = numberOrNull(query.verified_to_block);
   var storedLogFrom = numberOrNull(query.stored_log_from_block);
   var storedLogTo = numberOrNull(query.stored_log_to_block);
-  var latestBlock = numberOrNull(query.latest_block) || numberOrNull(data.head_block) || numberOrNull(data.target_block);
-  var latestTime = numberOrNull(query.latest_timestamp) || numberOrNull(data.head_timestamp);
+  var latestBlock = numberOrNull(query.latest_block);
+  var latestTime = numberOrNull(query.latest_timestamp);
   var syncedBlock = numberOrNull(data.current_block) || numberOrNull(data.head_block);
   var storedHeadBlock = numberOrNull(data.head_block);
   var syncedTime = syncedBlock === storedHeadBlock ? numberOrNull(data.head_timestamp) : null;
@@ -3115,14 +3115,15 @@ function updateStatus(data) {
   var historicalTargetBlock = numberOrNull(data.historical_target_block);
   if (historicalTargetBlock == null) historicalTargetBlock = 0;
   var historicalComplete = historicalSyncDisabled || (floorBlock != null && floorBlock <= historicalTargetBlock);
-  var liveTargetBlock = numberOrNull(data.target_block) || latestBlock;
+  var consensusStatusStale = data.consensus_status_stale === true;
+  var liveTargetBlock = numberOrNull(data.target_block);
   var liveRemaining = syncedBlock == null || liveTargetBlock == null ? null : Math.max(0, liveTargetBlock - syncedBlock);
   var historicalTotal = anchorBlockNumber == null ? 0 : Math.max(0, anchorBlockNumber - historicalTargetBlock);
   var historicalRemaining = floorBlock == null ? null : Math.max(0, floorBlock - historicalTargetBlock);
   var historicalDone = historicalRemaining == null ? 0 : Math.max(0, historicalTotal - historicalRemaining);
   var livePct = numberOrNull(data.progress_pct);
   var pct = historicalComplete
-    ? (livePct == null ? (liveRemaining === 0 ? 100 : 0) : livePct)
+    ? (consensusStatusStale ? null : livePct)
     : (historicalTotal <= 0 ? (floorBlock === historicalTargetBlock ? 100 : 0) : historicalDone / historicalTotal * 100);
   var barPct = historicalSyncDisabled ? pct : (historicalComplete ? 100 : pct);
   var active = historicalSyncDisabled
@@ -3134,8 +3135,8 @@ function updateStatus(data) {
   var optimisticTime = anchorTime(data.optimistic_execution_head);
   var materializedBlock = anchorBlock(data.materialized_execution_ceiling);
   var materializedTime = anchorTime(data.materialized_execution_ceiling);
-  var consensusHeadBlock = optimisticBlock || latestBlock;
-  var consensusHeadTime = optimisticTime || latestTime;
+  var consensusHeadBlock = consensusStatusStale ? null : (optimisticBlock || latestBlock);
+  var consensusHeadTime = consensusStatusStale ? null : (optimisticTime || latestTime);
   var consensusHeadLag = materializedBlock == null || consensusHeadBlock == null
     ? null
     : Math.max(0, consensusHeadBlock - materializedBlock);
@@ -3154,7 +3155,7 @@ function updateStatus(data) {
   var consensusPeers = numberOrNull(consensusNetwork.connected_peer_sessions);
   var consensusMaxPeers = numberOrNull(consensusNetwork.max_peers);
   var checkpointSlot = numberOrNull(data.checkpoint_slot);
-  var consensusHeadFresh = data.consensus_head_fresh === true;
+  var consensusHeadFresh = !consensusStatusStale && data.consensus_head_fresh === true;
   var consensusHeadLagSlots = numberOrNull(data.consensus_head_lag_slots);
 
   var displayState = state;
@@ -3189,7 +3190,7 @@ function updateStatus(data) {
     : (historicalComplete
       ? (liveTargetBlock == null
         ? 'Head block --'
-        : (consensusHeadFresh ? 'Head ' : 'Known head ') + blockWithAge(liveTargetBlock, liveTargetBlock === storedHeadBlock ? latestTime : null))
+        : 'Head ' + blockWithAge(liveTargetBlock, liveTargetBlock === storedHeadBlock ? latestTime : null))
       : 'Genesis block ' + fmt(historicalTargetBlock)));
   setWidth('executionBar', barPct);
   setExecutionBarState(active, false);
@@ -3213,12 +3214,16 @@ function updateStatus(data) {
   setText('consensusStatus', consensusStatus);
   setText('consensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
-    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.');
+    : (consensusStatusStale
+      ? 'Last verified ' + blockWithAge(materializedBlock, materializedTime) + '; live head unavailable.'
+      : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.'));
 
   setText('logRange', blockRange(queryFrom, queryTo));
   setText('logRangeDetail', queryFrom == null
     ? 'No verified local log range yet.'
-    : fmt(query.stored_rows) + ' rows; latest query tag resolves to ' + blockWithAge(latestBlock, latestTime) + '.');
+    : (latestBlock == null
+      ? fmt(query.stored_rows) + ' rows; live head unavailable.'
+      : fmt(query.stored_rows) + ' rows; latest query tag resolves to ' + blockWithAge(latestBlock, latestTime) + '.'));
 
   var diskFree = data.disk_free_bytes;
   var rawSegmentBacklog = numberOrNull(data.raw_log_segment_backlog);
@@ -3305,8 +3310,12 @@ function updateStatus(data) {
   setText('debugConsensusStatus', consensusStatus);
   setText('debugConsensusDetail', materializedBlock == null
     ? 'Checkpoint ' + shortHash(data.checkpoint_root)
-    : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.');
-  setText('debugConsensusFreshness', data.consensus_head_fresh == null
+    : (consensusStatusStale
+      ? 'Last verified ' + blockWithAge(materializedBlock, materializedTime) + '; live head unavailable.'
+      : 'Verified ' + blockWithAge(materializedBlock, materializedTime) + '; head ' + blockWithAge(consensusHeadBlock, consensusHeadTime) + '.'));
+  setText('debugConsensusFreshness', consensusStatusStale
+    ? 'Status updates stale; recovery required'
+    : data.consensus_head_fresh == null
     ? '--'
     : (consensusHeadFresh
       ? 'Fresh; ' + fmt(consensusHeadLagSlots) + ' slots behind'
@@ -3324,7 +3333,7 @@ function updateStatus(data) {
   setText('debugProfileBacklog', fmt(profileRewriteBacklog));
   setText('debugHistoricalFloor', blockWithAge(floorBlock, floorTime));
   setText('debugHistoricalAnchor', blockWithAge(anchorBlockNumber, anchorTimeValue));
-  setText('debugLatestBlock', blockWithAge(optimisticBlock || latestBlock, optimisticTime || latestTime));
+  setText('debugLatestBlock', blockWithAge(consensusHeadBlock, consensusHeadTime));
   setText('debugFinalizedBlock', blockWithAge(finalizedBlock, finalizedTime));
   setText('debugCheckpoint', data.checkpoint_root ? 'slot ' + fmt(checkpointSlot) + '; ' + shortHash(data.checkpoint_root) : '--');
   setText('debugConsensusPeers', consensusPeers == null
