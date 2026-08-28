@@ -183,15 +183,6 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         sync.consensus_head_fresh
     };
     let live_head_available = consensus_head_fresh == Some(true);
-    let reported_node_state = if sync.node_state == logex_types::NodeState::Synced
-        && (consensus_head_fresh == Some(false)
-            || (sync.checkpoint.is_some() && consensus_head_fresh.is_none()))
-    {
-        logex_types::NodeState::WaitingForConsensus
-    } else {
-        sync.node_state
-    };
-    let reported_syncing = sync.syncing && !consensus_status_stale;
     let (
         total_rows,
         sealed_partitions,
@@ -250,6 +241,15 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let historical_anchor = historical_anchor.or(sync.historical_execution_anchor);
     let historical_incomplete = !historical_sync_disabled
         && historical_floor.is_some_and(|floor| floor.block_number > sync.historical_target_block);
+    let waiting_for_consensus = !historical_incomplete
+        && !live_head_available
+        && (sync.checkpoint.is_some() || sync.node_state == logex_types::NodeState::Synced);
+    let reported_node_state = if waiting_for_consensus {
+        logex_types::NodeState::WaitingForConsensus
+    } else {
+        sync.node_state
+    };
+    let reported_syncing = sync.syncing && !waiting_for_consensus && !consensus_status_stale;
     let logs_per_sec =
         effective_historical_rate(sync.logs_per_sec, sync.logs_rate_updated_at_unix_ms);
     let historical_blocks_per_sec = if historical_incomplete {
@@ -1948,7 +1948,7 @@ mod tests {
             storage,
             None,
             SyncStatus {
-                node_state: NodeState::Synced,
+                node_state: NodeState::Syncing,
                 syncing: true,
                 current_block: 100,
                 target_block: 100,
