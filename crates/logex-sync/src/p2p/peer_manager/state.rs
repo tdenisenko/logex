@@ -546,9 +546,7 @@ impl PeerManager {
         peer_ids.sort_by(|left, right| {
             let left_score = self.peer_request_score(*left, kind);
             let right_score = self.peer_request_score(*right, kind);
-            right_score
-                .partial_cmp(&left_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            super::compare_peer_scores_desc(left_score, right_score)
         });
     }
 

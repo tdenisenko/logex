@@ -5076,9 +5076,7 @@ fn body_receipt_attempt_peer_ids(
             kind,
             in_flight_peers.get(right).copied().unwrap_or_default(),
         );
-        right_score
-            .partial_cmp(&left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        super::compare_peer_scores_desc(left_score, right_score)
     });
 
     let primary_peer = eligible.first().copied();

@@ -116,6 +116,10 @@ const DIAL_BACKOFF_DURATIONS: PeerBackoffDurations = PeerBackoffDurations {
 static MAINNET_BOOTNODE_IDS: LazyLock<HashSet<PeerId>> =
     LazyLock::new(|| mainnet_nodes().into_iter().map(|node| node.id).collect());
 
+pub(super) fn compare_peer_scores_desc(left: f64, right: f64) -> std::cmp::Ordering {
+    right.total_cmp(&left)
+}
+
 type NetworkEvents =
     Pin<Box<dyn Stream<Item = NetworkEvent<PeerRequest<LogexNetworkPrimitives>>> + Send>>;
 type DiscoveryEvents = Pin<Box<dyn Stream<Item = DiscoveryEvent> + Send>>;
@@ -1370,6 +1374,17 @@ fn dns_ipv6_udp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_score_ordering_is_total_for_non_finite_values() {
+        let mut scores = [f64::NAN, f64::INFINITY, 1.0, f64::NEG_INFINITY];
+        scores.sort_by(|left, right| compare_peer_scores_desc(*left, *right));
+
+        assert!(scores[0].is_nan());
+        assert_eq!(scores[1], f64::INFINITY);
+        assert_eq!(scores[2], 1.0);
+        assert_eq!(scores[3], f64::NEG_INFINITY);
+    }
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn dns_update(
