@@ -67,6 +67,7 @@ const RPC_REQUEST_INTERVAL: Duration = Duration::from_secs(5);
 const STATUS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 const PING_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15);
 const FINALITY_UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const CURRENT_PERIOD_UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_CONCURRENT_DEFAULT_RPC_REQUESTS: usize = 2;
 const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
 const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 8;
@@ -816,10 +817,10 @@ fn select_live_head_progression_request_kind(
     optimistic_ready: bool,
     finality_ready: bool,
 ) -> Option<RpcRequestKind> {
-    if updates_ready {
-        Some(RpcRequestKind::LightClientUpdatesByRange)
-    } else if optimistic_ready {
+    if optimistic_ready {
         Some(RpcRequestKind::LightClientOptimisticUpdate)
+    } else if updates_ready {
+        Some(RpcRequestKind::LightClientUpdatesByRange)
     } else if finality_ready {
         Some(RpcRequestKind::LightClientFinalityUpdate)
     } else {
@@ -4303,7 +4304,9 @@ impl ConsensusNetwork {
         self.pending_peer_kinds.insert((peer, kind));
         if matches!(
             kind,
-            RpcRequestKind::LightClientFinalityUpdate | RpcRequestKind::LightClientOptimisticUpdate
+            RpcRequestKind::LightClientUpdatesByRange
+                | RpcRequestKind::LightClientFinalityUpdate
+                | RpcRequestKind::LightClientOptimisticUpdate
         ) {
             self.last_light_client_request_at
                 .insert(kind, Instant::now());
@@ -4358,7 +4361,7 @@ impl ConsensusNetwork {
             && let Some(kind) = select_live_head_progression_request_kind(
                 support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
                     && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
-                    && self.next_updates_by_range_request().is_some(),
+                    && self.updates_by_range_request_due(now),
                 support.supports_request(RpcRequestKind::LightClientOptimisticUpdate)
                     && self.can_issue_request(RpcRequestKind::LightClientOptimisticUpdate)
                     && self.light_client_request_due(
@@ -4397,7 +4400,7 @@ impl ConsensusNetwork {
             deferred_root_ready,
             updates_ready: support.supports_request(RpcRequestKind::LightClientUpdatesByRange)
                 && self.can_issue_request(RpcRequestKind::LightClientUpdatesByRange)
-                && self.next_updates_by_range_request().is_some(),
+                && self.updates_by_range_request_due(now),
             finality_ready: support.supports_request(RpcRequestKind::LightClientFinalityUpdate)
                 && self.can_issue_request(RpcRequestKind::LightClientFinalityUpdate)
                 && self.light_client_request_due(
@@ -4422,6 +4425,21 @@ impl ConsensusNetwork {
             self.last_light_client_request_at.get(&kind).copied(),
             now,
             interval,
+        )
+    }
+
+    fn updates_by_range_request_due(&self, now: Instant) -> bool {
+        let request = match self.next_updates_by_range_request() {
+            Some(request) => request,
+            None => return false,
+        };
+        updates_by_range_request_due(
+            request,
+            sync_committee_period_for_slot(current_wall_clock_slot()),
+            self.last_light_client_request_at
+                .get(&RpcRequestKind::LightClientUpdatesByRange)
+                .copied(),
+            now,
         )
     }
 
@@ -6109,6 +6127,16 @@ fn light_client_request_due(
     last_request.is_none_or(|last_request| now.duration_since(last_request) >= interval)
 }
 
+fn updates_by_range_request_due(
+    request: LightClientUpdatesByRangeRequest,
+    current_period: u64,
+    last_request: Option<Instant>,
+    now: Instant,
+) -> bool {
+    request.start_period < current_period
+        || light_client_request_due(last_request, now, CURRENT_PERIOD_UPDATE_POLL_INTERVAL)
+}
+
 fn head_recovery_connection_slots_to_reclaim(
     max_peers: usize,
     active_targets: usize,
@@ -6535,6 +6563,34 @@ mod tests {
             Some(now),
             now + FINALITY_UPDATE_POLL_INTERVAL,
             FINALITY_UPDATE_POLL_INTERVAL
+        ));
+
+        let current_period_request = LightClientUpdatesByRangeRequest {
+            start_period: 100,
+            count: 1,
+        };
+        assert!(!updates_by_range_request_due(
+            current_period_request,
+            100,
+            Some(now),
+            now + Duration::from_secs(59),
+        ));
+        assert!(updates_by_range_request_due(
+            current_period_request,
+            100,
+            Some(now),
+            now + CURRENT_PERIOD_UPDATE_POLL_INTERVAL,
+        ));
+
+        let historical_period_request = LightClientUpdatesByRangeRequest {
+            start_period: 99,
+            count: 1,
+        };
+        assert!(updates_by_range_request_due(
+            historical_period_request,
+            100,
+            Some(now),
+            now,
         ));
     }
 
@@ -7195,13 +7251,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_head_recovery_prioritizes_optimistic_progress_over_finality() {
+    fn stale_head_recovery_prioritizes_optimistic_progress_over_period_maintenance() {
         assert_eq!(
-            select_live_head_progression_request_kind(false, true, true),
+            select_live_head_progression_request_kind(true, true, true),
             Some(RpcRequestKind::LightClientOptimisticUpdate)
         );
         assert_eq!(
-            select_live_head_progression_request_kind(true, true, true),
+            select_live_head_progression_request_kind(true, false, true),
             Some(RpcRequestKind::LightClientUpdatesByRange)
         );
         assert_eq!(
