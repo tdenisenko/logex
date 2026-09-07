@@ -569,13 +569,9 @@ fn weak_subjectivity_trusted_slot(snapshot: &ConsensusSnapshot) -> Option<u64> {
     snapshot
         .verified_light_client_store
         .as_ref()
-        .map(|store| {
-            store
-                .finalized_header
-                .beacon
-                .slot
-                .max(store.bootstrap_slot())
-        })
+        // Bootstrap slot metadata from older stores may have come from a
+        // caller-supplied hint. Only the verified header establishes freshness.
+        .map(|store| store.finalized_header.beacon.slot)
         .or(snapshot.checkpoint.beacon_slot)
 }
 
@@ -803,7 +799,7 @@ mod tests {
 
     #[test]
     fn weak_subjectivity_freshness_uses_verified_finalized_slot_on_restart() {
-        let snapshot = ConsensusSnapshot {
+        let mut snapshot = ConsensusSnapshot {
             checkpoint: WeakSubjectivityCheckpoint {
                 beacon_root: B256::repeat_byte(0x10),
                 beacon_slot: Some(32),
@@ -835,6 +831,16 @@ mod tests {
                 .map(|staleness| staleness.trusted_slot),
             Some(3_200)
         );
+        for unverified_slot in [0, 32, 1_000_000, u64::MAX] {
+            snapshot.checkpoint.beacon_slot = Some(unverified_slot);
+            snapshot
+                .verified_light_client_store
+                .as_mut()
+                .unwrap()
+                .bootstrap_slot = unverified_slot;
+            assert_eq!(weak_subjectivity_trusted_slot(&snapshot), Some(3_200));
+            assert!(weak_subjectivity_staleness_for_epoch(&snapshot, 111, 10).is_some());
+        }
     }
 
     #[test]

@@ -22,6 +22,7 @@ const SYNC_COMMITTEE_PUBKEYS: usize = 512;
 const BLS_PUBKEY_BYTES: usize = 48;
 const SYNC_COMMITTEE_BITS_BYTES: usize = 64;
 const LOGS_BLOOM_BYTES: usize = 256;
+const MAX_EXTRA_DATA_BYTES: usize = 32;
 const EXECUTION_BRANCH_DEPTH: usize = 4;
 const PRE_ELECTRA_FINALITY_BRANCH_DEPTH: usize = 6;
 const PRE_ELECTRA_SYNC_COMMITTEE_BRANCH_DEPTH: usize = 5;
@@ -68,6 +69,12 @@ pub enum LightClientVerificationError {
         "trusted checkpoint root mismatch: expected {expected}, bootstrap beacon root was {actual}"
     )]
     TrustedCheckpointMismatch { expected: B256, actual: B256 },
+    #[error(
+        "trusted checkpoint slot mismatch: expected {expected}, bootstrap beacon slot was {actual}"
+    )]
+    TrustedCheckpointSlotMismatch { expected: u64, actual: u64 },
+    #[error("invalid execution header for beacon slot {slot}: {reason}")]
+    InvalidExecutionHeader { slot: u64, reason: &'static str },
     #[error("invalid execution proof for beacon slot {slot}")]
     InvalidExecutionProof { slot: u64 },
     #[error("invalid current sync committee proof for beacon slot {slot}")]
@@ -482,6 +489,16 @@ pub(crate) fn verify_bootstrap_payload(
     }
 
     let slot = header.beacon.slot;
+    if let Some(expected) = checkpoint.beacon_slot
+        && expected != slot
+    {
+        return Err(
+            LightClientVerificationError::TrustedCheckpointSlotMismatch {
+                expected,
+                actual: slot,
+            },
+        );
+    }
     let leaf = decoded.current_sync_committee().tree_hash_root();
     let branch = decoded.current_sync_committee_branch();
     let gindex = current_sync_committee_gindex_at_slot(slot);
@@ -492,7 +509,7 @@ pub(crate) fn verify_bootstrap_payload(
     let status = decoded.status();
     let store = VerifiedLightClientStore {
         checkpoint_root: checkpoint.beacon_root,
-        bootstrap_slot: checkpoint.beacon_slot.unwrap_or(slot),
+        bootstrap_slot: slot,
         current_sync_committee: decoded.current_sync_committee().to_persisted(),
         next_sync_committee: None,
         finalized_header: header.clone(),
@@ -1017,6 +1034,36 @@ fn decode_update_payload(bytes: &[u8]) -> Result<DecodedUpdate, LightClientDecod
 fn verify_capella_header(
     header: &LightClientHeaderCapella,
 ) -> Result<VerifiedLightClientHeader, LightClientVerificationError> {
+    let slot = header.beacon.slot;
+    let fork_version = fork_version_at_slot(slot);
+    if header.execution.extra_data.len() > MAX_EXTRA_DATA_BYTES {
+        return Err(LightClientVerificationError::InvalidExecutionHeader {
+            slot,
+            reason: "extra data exceeds 32 bytes",
+        });
+    }
+    if fork_version >= DENEB_FORK_VERSION {
+        return Err(LightClientVerificationError::InvalidExecutionHeader {
+            slot,
+            reason: "Capella encoding cannot represent a Deneb or later header",
+        });
+    }
+    if fork_version < CAPELLA_FORK_VERSION {
+        if header.execution != ExecutionPayloadHeaderCapella::default()
+            || header.execution_branch != ExecutionBranch::ZERO
+        {
+            return Err(LightClientVerificationError::InvalidExecutionHeader {
+                slot,
+                reason: "pre-Capella execution fields and branch must be empty",
+            });
+        }
+        return Ok(VerifiedLightClientHeader {
+            fork: ConsensusDataFork::Capella,
+            beacon: header.beacon.clone(),
+            execution: None,
+        });
+    }
+
     let execution_root = execution_payload_header_capella_root(&header.execution);
     let branch = branch_from_fixed(&header.execution_branch);
     if !is_valid_merkle_branch(
@@ -1048,7 +1095,47 @@ fn verify_deneb_header(
     header: &LightClientHeaderDeneb,
     fork: ConsensusDataFork,
 ) -> Result<VerifiedLightClientHeader, LightClientVerificationError> {
-    let execution_root = execution_payload_header_deneb_root(&header.execution);
+    let slot = header.beacon.slot;
+    let fork_version = fork_version_at_slot(slot);
+    if header.execution.extra_data.len() > MAX_EXTRA_DATA_BYTES {
+        return Err(LightClientVerificationError::InvalidExecutionHeader {
+            slot,
+            reason: "extra data exceeds 32 bytes",
+        });
+    }
+    if fork_version < DENEB_FORK_VERSION
+        && (header.execution.blob_gas_used != 0 || header.execution.excess_blob_gas != 0)
+    {
+        return Err(LightClientVerificationError::InvalidExecutionHeader {
+            slot,
+            reason: "pre-Deneb blob gas fields must be zero",
+        });
+    }
+    if fork_version < CAPELLA_FORK_VERSION {
+        if header.execution != ExecutionPayloadHeaderDeneb::default()
+            || header.execution_branch != ExecutionBranch::ZERO
+        {
+            return Err(LightClientVerificationError::InvalidExecutionHeader {
+                slot,
+                reason: "pre-Capella execution fields and branch must be empty",
+            });
+        }
+        return Ok(VerifiedLightClientHeader {
+            fork,
+            beacon: header.beacon.clone(),
+            execution: None,
+        });
+    }
+
+    let execution_root = if fork_version < DENEB_FORK_VERSION {
+        // Upgraded Capella headers retain their original 15-field commitment.
+        // Zero-valued Deneb fields still change the tree shape if included.
+        container_root_from_roots(
+            &execution_payload_header_deneb_field_roots(&header.execution)[..15],
+        )
+    } else {
+        execution_payload_header_deneb_root(&header.execution)
+    };
     let branch = branch_from_fixed(&header.execution_branch);
     if !is_valid_merkle_branch(
         execution_root,
@@ -1499,7 +1586,6 @@ fn finality_branch_depth_at_slot(slot: u64) -> usize {
     }
 }
 
-#[allow(dead_code)]
 fn next_sync_committee_gindex_at_slot(slot: u64) -> u64 {
     if uses_electra_light_client_layout(slot) {
         ELECTRA_NEXT_SYNC_COMMITTEE_GINDEX
@@ -1508,14 +1594,17 @@ fn next_sync_committee_gindex_at_slot(slot: u64) -> u64 {
     }
 }
 
-fn uses_electra_light_client_layout(slot: u64) -> bool {
+fn fork_version_at_slot(slot: u64) -> u8 {
     let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot);
-    MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_epoch(epoch)[0] >= ELECTRA_FORK_VERSION
+    MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_epoch(epoch)[0]
+}
+
+fn uses_electra_light_client_layout(slot: u64) -> bool {
+    fork_version_at_slot(slot) >= ELECTRA_FORK_VERSION
 }
 
 fn fork_for_slot(slot: u64) -> ConsensusDataFork {
-    let epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot);
-    match MAINNET_CONSENSUS_CHAIN_SPEC.fork_version_for_epoch(epoch)[0] {
+    match fork_version_at_slot(slot) {
         version if version >= ELECTRA_FORK_VERSION => ConsensusDataFork::Electra,
         DENEB_FORK_VERSION => ConsensusDataFork::Deneb,
         CAPELLA_FORK_VERSION => ConsensusDataFork::Capella,
@@ -1601,7 +1690,11 @@ fn execution_payload_header_capella_root(header: &ExecutionPayloadHeaderCapella)
 }
 
 fn execution_payload_header_deneb_root(header: &ExecutionPayloadHeaderDeneb) -> B256 {
-    container_root_from_roots(&[
+    container_root_from_roots(&execution_payload_header_deneb_field_roots(header))
+}
+
+fn execution_payload_header_deneb_field_roots(header: &ExecutionPayloadHeaderDeneb) -> [B256; 17] {
+    [
         header.parent_hash.tree_hash_root(),
         header.fee_recipient.tree_hash_root(),
         header.state_root.tree_hash_root(),
@@ -1619,7 +1712,7 @@ fn execution_payload_header_deneb_root(header: &ExecutionPayloadHeaderDeneb) -> 
         header.withdrawals_root.tree_hash_root(),
         header.blob_gas_used.tree_hash_root(),
         header.excess_blob_gas.tree_hash_root(),
-    ])
+    ]
 }
 
 fn container_root_from_roots(field_roots: &[B256]) -> B256 {
@@ -1835,8 +1928,14 @@ mod tests {
             subtree_index(current_sync_committee_gindex_at_slot(slot)),
         );
 
-        let execution = deneb_execution(19_000_001, 0x21);
-        let execution_root = execution_payload_header_deneb_root(&execution);
+        let mut execution = deneb_execution(19_000_001, 0x21);
+        let execution_root = if fork_version_at_slot(slot) < DENEB_FORK_VERSION {
+            execution.blob_gas_used = 0;
+            execution.excess_blob_gas = 0;
+            container_root_from_roots(&execution_payload_header_deneb_field_roots(&execution)[..15])
+        } else {
+            execution_payload_header_deneb_root(&execution)
+        };
         let execution_siblings = [
             B256::repeat_byte(0xb1),
             B256::repeat_byte(0xb2),
@@ -1945,6 +2044,256 @@ mod tests {
             signature_slot,
         };
         (payload.as_ssz_bytes(), next_sk)
+    }
+
+    const CAPELLA_START_SLOT: u64 = 194_048 * SLOTS_PER_EPOCH;
+    const DENEB_START_SLOT: u64 = 269_568 * SLOTS_PER_EPOCH;
+
+    fn capella_header(slot: u64) -> LightClientHeaderCapella {
+        let execution = ExecutionPayloadHeaderCapella {
+            block_number: 17_000_000,
+            block_hash: B256::repeat_byte(0x91),
+            receipts_root: B256::repeat_byte(0x92),
+            extra_data: vec![0x93; 32],
+            ..Default::default()
+        };
+        let execution_branch = ExecutionBranch::ZERO;
+        let body_root = branch_root(
+            execution_payload_header_capella_root(&execution),
+            &branch_from_fixed(&execution_branch),
+            subtree_index(EXECUTION_PAYLOAD_GINDEX),
+        );
+        LightClientHeaderCapella {
+            beacon: beacon_header(slot, B256::repeat_byte(0x94), body_root, 0x95),
+            execution,
+            execution_branch,
+        }
+    }
+
+    // Construct the Deneb wire representation independently of verification.
+    fn upgrade_capella_header(header: LightClientHeaderCapella) -> LightClientHeaderDeneb {
+        let execution = header.execution;
+        LightClientHeaderDeneb {
+            beacon: header.beacon,
+            execution_branch: header.execution_branch,
+            execution: ExecutionPayloadHeaderDeneb {
+                parent_hash: execution.parent_hash,
+                fee_recipient: execution.fee_recipient,
+                state_root: execution.state_root,
+                receipts_root: execution.receipts_root,
+                logs_bloom: execution.logs_bloom,
+                prev_randao: execution.prev_randao,
+                block_number: execution.block_number,
+                gas_limit: execution.gas_limit,
+                gas_used: execution.gas_used,
+                timestamp: execution.timestamp,
+                extra_data: execution.extra_data,
+                base_fee_per_gas: execution.base_fee_per_gas,
+                block_hash: execution.block_hash,
+                transactions_root: execution.transactions_root,
+                withdrawals_root: execution.withdrawals_root,
+                blob_gas_used: 0,
+                excess_blob_gas: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn verifies_capella_execution_proof_in_deneb_header() {
+        for slot in [CAPELLA_START_SLOT, DENEB_START_SLOT - 1] {
+            let capella = capella_header(slot);
+            let expected = verify_capella_header(&capella).unwrap().execution_anchor();
+            let upgraded = upgrade_capella_header(capella);
+            let verified = verify_deneb_header(&upgraded, ConsensusDataFork::Deneb).unwrap();
+            assert_eq!(verified.execution_anchor(), expected);
+        }
+    }
+
+    #[test]
+    fn pre_capella_headers_require_empty_execution_fields_and_branch() {
+        let beacon = beacon_header(
+            CAPELLA_START_SLOT - 1,
+            B256::repeat_byte(0x31),
+            B256::repeat_byte(0x32),
+            0x33,
+        );
+        let capella = LightClientHeaderCapella {
+            beacon,
+            ..Default::default()
+        };
+        assert!(
+            verify_capella_header(&capella)
+                .unwrap()
+                .execution_anchor()
+                .is_none()
+        );
+        let deneb = upgrade_capella_header(capella.clone());
+        assert!(
+            verify_deneb_header(&deneb, ConsensusDataFork::Deneb)
+                .unwrap()
+                .execution_anchor()
+                .is_none()
+        );
+
+        let invalid = capella_header(CAPELLA_START_SLOT - 1);
+        assert!(verify_capella_header(&invalid).is_err());
+        assert!(
+            verify_deneb_header(&upgrade_capella_header(invalid), ConsensusDataFork::Deneb)
+                .is_err()
+        );
+        let mut invalid = capella;
+        invalid.execution_branch[0] = 1;
+        assert!(verify_capella_header(&invalid).is_err());
+        let mut invalid = deneb;
+        invalid.execution_branch[0] = 1;
+        assert!(verify_deneb_header(&invalid, ConsensusDataFork::Deneb).is_err());
+    }
+
+    #[test]
+    fn rejects_nonzero_blob_gas_before_deneb_even_with_matching_deneb_proof() {
+        for excess in [false, true] {
+            let mut header = upgrade_capella_header(capella_header(DENEB_START_SLOT - 1));
+            if excess {
+                header.execution.excess_blob_gas = 1;
+            } else {
+                header.execution.blob_gas_used = 1;
+            }
+            header.beacon.body_root = branch_root(
+                execution_payload_header_deneb_root(&header.execution),
+                &branch_from_fixed(&header.execution_branch),
+                subtree_index(EXECUTION_PAYLOAD_GINDEX),
+            );
+            assert!(verify_deneb_header(&header, ConsensusDataFork::Deneb).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_execution_extra_data_even_with_matching_proof() {
+        for len in [0, 1, 31, 32, 33, 64] {
+            let mut capella = capella_header(DENEB_START_SLOT - 1);
+            capella.execution.extra_data = vec![0xa5; len];
+            capella.beacon.body_root = branch_root(
+                execution_payload_header_capella_root(&capella.execution),
+                &branch_from_fixed(&capella.execution_branch),
+                subtree_index(EXECUTION_PAYLOAD_GINDEX),
+            );
+            assert_eq!(verify_capella_header(&capella).is_ok(), len <= 32);
+            let mut deneb = upgrade_capella_header(capella);
+            assert_eq!(
+                verify_deneb_header(&deneb, ConsensusDataFork::Deneb).is_ok(),
+                len <= 32
+            );
+            deneb.beacon.slot = DENEB_START_SLOT;
+            deneb.beacon.body_root = branch_root(
+                execution_payload_header_deneb_root(&deneb.execution),
+                &branch_from_fixed(&deneb.execution_branch),
+                subtree_index(EXECUTION_PAYLOAD_GINDEX),
+            );
+            assert_eq!(
+                verify_deneb_header(&deneb, ConsensusDataFork::Deneb).is_ok(),
+                len <= 32
+            );
+        }
+        assert!(verify_capella_header(&capella_header(DENEB_START_SLOT)).is_err());
+    }
+
+    #[test]
+    fn signed_deneb_finality_update_verifies_capella_finalized_header() {
+        let (checkpoint, bootstrap, sk) = bootstrap_payload(DENEB_START_SLOT - 64);
+        let (_, store) = verify_bootstrap_payload(&bootstrap, checkpoint).unwrap();
+        let finalized = upgrade_capella_header(capella_header(DENEB_START_SLOT - 32));
+        let finality_branch = PreElectraFinalityBranch::repeat_byte(0xb7);
+        let state_root = branch_root(
+            beacon_block_header_root(&finalized.beacon),
+            &branch_from_fixed(&finality_branch),
+            subtree_index(PRE_ELECTRA_FINALIZED_ROOT_GINDEX),
+        );
+        let execution = deneb_execution(19_000_002, 0x44);
+        let execution_branch = ExecutionBranch::repeat_byte(0xc7);
+        let body_root = branch_root(
+            execution_payload_header_deneb_root(&execution),
+            &branch_from_fixed(&execution_branch),
+            subtree_index(EXECUTION_PAYLOAD_GINDEX),
+        );
+        let attested_header = LightClientHeaderDeneb {
+            beacon: beacon_header(DENEB_START_SLOT + 1, state_root, body_root, 0x55),
+            execution,
+            execution_branch,
+        };
+        let signature_slot = DENEB_START_SLOT + 2;
+        let mut payload = LightClientFinalityUpdateDeneb {
+            sync_aggregate: signed_sync_aggregate(&sk, &attested_header.beacon, signature_slot),
+            attested_header,
+            finalized_header: finalized,
+            finality_branch,
+            signature_slot,
+        };
+        // The fork starts a new committee period. Use the same synthetic
+        // committee as the already-known next committee for this fixture.
+        let mut store = store;
+        store.next_sync_committee = Some(store.current_sync_committee.clone());
+        let original_store = store.clone();
+        let (_, next_store, _, verified_finalized) =
+            apply_finality_update_payload(&payload.as_ssz_bytes(), &store).unwrap();
+        assert_eq!(verified_finalized.beacon.slot, DENEB_START_SLOT - 32);
+        assert_eq!(
+            verified_finalized.execution_anchor().unwrap().block_hash,
+            payload.finalized_header.execution.block_hash
+        );
+        assert_eq!(
+            next_store.optimistic_header.beacon.slot,
+            DENEB_START_SLOT + 1
+        );
+        // One valid participant may advance optimism, not supermajority finality.
+        assert_eq!(next_store.finalized_header, store.finalized_header);
+
+        for index in 0..EXECUTION_BRANCH_DEPTH {
+            payload.finalized_header.execution_branch[index * 32] ^= 1;
+            assert!(matches!(
+                apply_finality_update_payload(&payload.as_ssz_bytes(), &store),
+                Err(LightClientVerificationError::InvalidExecutionProof { .. })
+            ));
+            payload.finalized_header.execution_branch[index * 32] ^= 1;
+        }
+        for index in 0..PRE_ELECTRA_FINALITY_BRANCH_DEPTH {
+            payload.finality_branch[index * 32] ^= 1;
+            assert!(matches!(
+                apply_finality_update_payload(&payload.as_ssz_bytes(), &store),
+                Err(LightClientVerificationError::InvalidFinalityProof { .. })
+            ));
+            payload.finality_branch[index * 32] ^= 1;
+        }
+        let other_key = SecretKey::key_gen(&[0x88; 32], &[]).unwrap();
+        payload.sync_aggregate =
+            signed_sync_aggregate(&other_key, &payload.attested_header.beacon, signature_slot);
+        assert!(matches!(
+            apply_finality_update_payload(&payload.as_ssz_bytes(), &store),
+            Err(LightClientVerificationError::InvalidSyncCommitteeSignature)
+        ));
+        assert_eq!(store, original_store);
+    }
+
+    #[test]
+    fn rejects_bootstrap_with_mismatched_checkpoint_slot() {
+        let (mut checkpoint, bytes, _) = bootstrap_payload(10_000_000);
+        checkpoint.beacon_slot = Some(10_000_001);
+        assert!(matches!(
+            verify_bootstrap_payload(&bytes, checkpoint),
+            Err(
+                LightClientVerificationError::TrustedCheckpointSlotMismatch {
+                    expected: 10_000_001,
+                    actual: 10_000_000,
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn root_only_bootstrap_records_the_proven_slot() {
+        let (mut checkpoint, bytes, _) = bootstrap_payload(10_000_000);
+        checkpoint.beacon_slot = None;
+        let (_, store) = verify_bootstrap_payload(&bytes, checkpoint).unwrap();
+        assert_eq!(store.bootstrap_slot(), 10_000_000);
     }
 
     #[test]
