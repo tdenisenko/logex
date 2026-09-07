@@ -65,6 +65,16 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
   incompatibilities in discv5 0.10.4, proc-macro-error2 2.0.1, quinn 0.11.9, and
   quinn-udp 0.5.14. These are dependency warnings, not failed workspace Clippy.
   Keep the current pin until replacements pass protocol and platform tests.
+- **B0-05 — compacted page selection (P1, fixed by this batch):** the full-size
+  benchmark reproduced `requested row is before the current page range` on
+  descending SQL across compressed pages. The page selector advanced only
+  forward through an unsorted request. Sort output positions by physical row
+  only for unordered requests, decode each selected page once, and scatter back
+  into the original order. Preserve the existing ascending path without an
+  extra ordering allocation. A focused regression failed before the fix;
+  descending/shuffled/duplicate selections, full log columns, and a SQL query
+  crossing the 16,384-row boundary are now covered in ordinary CI. This is a
+  correctness fix required to finish the baseline, not a claimed speedup.
 
 ## Decisions
 

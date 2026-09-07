@@ -174,7 +174,10 @@ fn file_bytes(path: &Path) -> u64 {
 }
 
 #[derive(Default)]
-struct Samples(BTreeMap<&'static str, Vec<Duration>>, bool);
+struct Samples {
+    values: BTreeMap<&'static str, Vec<Duration>>,
+    enabled: bool,
+}
 
 impl Samples {
     fn record(
@@ -184,10 +187,10 @@ impl Samples {
         elapsed: Duration,
         work_rows: usize,
     ) {
-        if !self.1 {
+        if !self.enabled {
             return;
         }
-        self.0.entry(name).or_default().push(elapsed);
+        self.values.entry(name).or_default().push(elapsed);
         println!(
             "{}",
             json!({
@@ -199,7 +202,7 @@ impl Samples {
     }
 
     fn summarize(&mut self) {
-        for (name, values) in &mut self.0 {
+        for (name, values) in &mut self.values {
             values.sort();
             let middle = values.len() / 2;
             let median = if values.len() % 2 == 0 {
@@ -272,7 +275,10 @@ async fn run(config: Config) {
             "cache": "fresh directories for writes; OS cache not evicted; queries warmed once",
         })
     );
-    let mut samples = Samples(BTreeMap::new(), true);
+    let mut samples = Samples {
+        enabled: true,
+        ..Default::default()
+    };
     for iteration in 0..config.repeats {
         let tmp = tempfile::tempdir().unwrap();
         let mut storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
@@ -403,4 +409,21 @@ async fn audit_fixture_round_trips_through_live_and_historical_storage() {
         })
         .await;
     }
+}
+
+#[tokio::test]
+async fn ordered_sql_crosses_compacted_page_boundaries() {
+    let rows = fixture(17_000, Profile::Dense);
+    let expected = expected_matches(&rows);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_path_buf(),
+        partition_target_rows: 50_000,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    storage.write_historical_batch(&rows).unwrap();
+    storage.finalize_historical_segment().unwrap();
+    // LIMIT 1000 spans the tail page and the previous 16,384-row page.
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
 }

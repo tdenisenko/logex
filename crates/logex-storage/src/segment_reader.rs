@@ -456,7 +456,23 @@ fn build_selections(
     let mut selections: Vec<PageSelection> = Vec::new();
     let mut page_cursor = 0usize;
 
-    for (output_position, row_id) in row_ids.iter().copied().enumerate() {
+    // Scan pages in physical order, then scatter into the caller's order. SQL
+    // ORDER BY can select descending or arbitrary rows; a forward-only cursor
+    // cannot follow those IDs directly. The usual ascending index scan keeps
+    // its allocation-free ordering path, and every selected page decodes once.
+    let sorted_positions = if row_ids.is_sorted() {
+        None
+    } else {
+        let mut positions: Vec<_> = (0..row_ids.len()).collect();
+        positions.sort_unstable_by_key(|position| row_ids[*position]);
+        Some(positions)
+    };
+
+    for position in 0..row_ids.len() {
+        let output_position = sorted_positions
+            .as_ref()
+            .map_or(position, |positions| positions[position]);
+        let row_id = row_ids[output_position];
         while page_cursor < page_index.len()
             && row_id as u64
                 >= page_index[page_cursor].first_row + page_index[page_cursor].row_count as u64
@@ -619,6 +635,72 @@ mod tests {
         assert_eq!(selected[0], rows[1]);
         assert_eq!(selected[1], rows[7]);
         assert_eq!(selected[2], rows[12]);
+    }
+
+    #[test]
+    fn selected_pages_preserve_arbitrary_order_and_duplicates() {
+        let index: Vec<_> = (0..3)
+            .map(|page| PageIndexEntry {
+                first_row: page * 2,
+                row_count: 2,
+                offset: 0,
+                encoded_len: 0,
+            })
+            .collect();
+        for ids in [
+            &[5, 4, 3, 2, 1, 0][..],
+            &[4, 0, 4, 3, 1, 5],
+            &[0, 1, 1, 5],
+            &[],
+        ] {
+            let mut decoded_pages = Vec::new();
+            let actual = read_selected_pages(Some(ids), &index, |entry| {
+                decoded_pages.push(entry.first_row);
+                Ok(vec![entry.first_row + 100, entry.first_row + 101])
+            })
+            .unwrap();
+            assert_eq!(
+                actual,
+                ids.iter()
+                    .map(|id| u64::from(*id) + 100)
+                    .collect::<Vec<_>>()
+            );
+            let mut expected_pages: Vec<_> = ids.iter().map(|id| u64::from(*id / 2) * 2).collect();
+            expected_pages.sort_unstable();
+            expected_pages.dedup();
+            assert_eq!(
+                decoded_pages, expected_pages,
+                "each selected page decodes once"
+            );
+        }
+        assert!(build_selections(&[6, 0], &index).is_err());
+    }
+
+    #[test]
+    fn compacted_log_rows_support_descending_page_crossings() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = crate::PartitionManager::open(crate::PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 100_000,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let prototypes = make_rows();
+        let rows: Vec<_> = (0..32_769)
+            .map(|index| {
+                let mut row = prototypes[index % prototypes.len()].clone();
+                row.block_number = index as u64;
+                row.timestamp = 1_700_000_000 + index as u64 * 12;
+                row
+            })
+            .collect();
+        storage.write_historical_batch(&rows).unwrap();
+        storage.finalize_historical_segment().unwrap();
+        let partition = &storage.sealed_partitions()[0];
+        let reader = SegmentReader::open(&partition.meta.path).unwrap();
+        let ids = [32_768, 16_384, 1, 16_383, 0, 32_768];
+        let expected: Vec<_> = ids.iter().map(|id| rows[*id as usize].clone()).collect();
+        assert_eq!(reader.read_log_rows(Some(&ids)).unwrap(), expected);
     }
 
     #[test]
