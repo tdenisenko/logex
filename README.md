@@ -534,9 +534,12 @@ WHERE topic0 = event'Transfer(address,address,uint256)'
 Common checks:
 
 ```bash
-cargo fmt --all --check
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked
+cargo build -p logex-node --release --locked
 ```
 
 Focused examples:
@@ -547,6 +550,10 @@ cargo test -p logex-query
 cargo test -p logex-server
 cargo run -p logex-node -- --help
 ```
+
+The staged [code audit](docs/audit/README.md) records subsystem coverage and
+open findings. See [benchmark instructions](docs/audit/benchmarks.md) for
+deterministic storage, indexing, and query performance comparisons.
 
 Workspace layout:
 
