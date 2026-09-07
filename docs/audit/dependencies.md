@@ -1,5 +1,8 @@
 # Dependency baseline
 
+This is the original-lockfile report. See [compatible remediation](dependency-remediation.md)
+for updates and current dispositions.
+
 Audit date: 2026-09-07. Base revision: `572d4f61`.
 
 `cargo-audit 0.22.2` examined 847 packages in the original lockfile using

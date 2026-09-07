@@ -8,7 +8,8 @@ data and running deployments are not modified by the benchmark suite.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |
-| 0 | Baseline, dependency inventory, CI, benchmarks | Implemented; local gates and both release profiles pass. Includes compacted-page ordering fix B0-05. PR/CI merge pending. |
+| 0 | Baseline, dependency inventory, CI, benchmarks | Complete: PR #120 merged as `afe5939c`; all six CI jobs passed. Includes compacted-page ordering fix B0-05. |
+| 0a | Compatible dependency security remediation | In progress; seven vulnerability matches removed and yanked core2 eliminated. See dependency remediation for remaining reachability findings and validation. |
 | 1 | Shared types, checkpoints, CL proofs, EL validation, extraction | Pending; invalid input cannot advance trusted state or publish logs. |
 | 2 | WAL, catalogs, segments, codecs, readers, durability | Pending; recover interrupted commits without hiding lost data. |
 | 3 | CL RPC, gossip, discovery, scheduling, supervision | Pending; bounded requests and recovery across stale heads and committee transitions. |
@@ -61,6 +62,8 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
 - **B0-03 — dependency advisories (open):** the original lockfile has RustSec
   findings. See [dependency review](dependencies.md). Review reachability and
   dependency-compatible remediation before claiming production readiness.
+  [Compatible remediation](dependency-remediation.md) records subsequent fixes
+  and remaining constraints; the initial report is retained as historical evidence.
 - **B0-04 — compiler compatibility (open):** the pinned compiler reports future
   incompatibilities in discv5 0.10.4, proc-macro-error2 2.0.1, quinn 0.11.9, and
   quinn-udp 0.5.14. These are dependency warnings, not failed workspace Clippy.
