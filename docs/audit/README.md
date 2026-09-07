@@ -10,7 +10,7 @@ data and running deployments are not modified by the benchmark suite.
 | --- | --- | --- |
 | 0 | Baseline, dependency inventory, CI, benchmarks | Complete: PR #120 merged as `afe5939c`; all six CI jobs passed. Includes compacted-page ordering fix B0-05. |
 | 0a | Compatible dependency security remediation | Complete: PR #121 merged as `bf4b97ab`; all six CI jobs passed. Seven vulnerability matches removed; remaining advisories and measured tradeoffs documented. |
-| 1 | Shared types, checkpoints, CL proofs, EL validation, extraction | In progress: [header/checkpoint milestone](consensus-header-trust.md) fixes fork-specific execution proof validation and unverified slot freshness. Other trust paths remain pending. |
+| 1 | Shared types, checkpoints, CL proofs, EL validation, extraction | In progress: [header/checkpoint fixes](consensus-header-trust.md) merged in PR #122 as `5bcf325f`. [HTTP checkpoint resolution](checkpoint-resolution.md) implemented with all local gates passing; PR/CI pending. Other trust paths remain pending. |
 | 2 | WAL, catalogs, segments, codecs, readers, durability | Pending; recover interrupted commits without hiding lost data. |
 | 3 | CL RPC, gossip, discovery, scheduling, supervision | Pending; bounded requests and recovery across stale heads and committee transitions. |
 | 4 | EL discovery, peer management, requests, serving cache | Pending; bounded accounting, correct response attribution and cancellation. |
