@@ -8,7 +8,7 @@ data and running deployments are not modified by the benchmark suite.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |
-| 0 | Baseline, dependency inventory, CI, benchmarks | In progress; capture release results and merge infrastructure. |
+| 0 | Baseline, dependency inventory, CI, benchmarks | Implemented; local gates and both release profiles pass. Includes compacted-page ordering fix B0-05. PR/CI merge pending. |
 | 1 | Shared types, checkpoints, CL proofs, EL validation, extraction | Pending; invalid input cannot advance trusted state or publish logs. |
 | 2 | WAL, catalogs, segments, codecs, readers, durability | Pending; recover interrupted commits without hiding lost data. |
 | 3 | CL RPC, gossip, discovery, scheduling, supervision | Pending; bounded requests and recovery across stale heads and committee transitions. |
@@ -91,4 +91,5 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
 - Public formats stay compatible by default. Any unavoidable migration requires
   an explicit design decision and recovery/rollback instructions.
 
-See [benchmark instructions](benchmarks.md) for commands and measurement limits.
+See [benchmark instructions](benchmarks.md) for commands and measurement limits,
+and the [initial results](baselines/2026-09-07.md) for raw samples and validation.
