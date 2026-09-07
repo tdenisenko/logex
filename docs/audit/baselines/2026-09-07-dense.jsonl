@@ -1,3 +1,4 @@
+{"batch_rows": 8192, "cache": "fresh directories for writes; OS cache not evicted; queries warmed once", "fixture_digest": "0xabc9bb8095eaaaa4facb4b2828783893840b564470e02eee1e3859c04ebfe701", "fixture_version": 1, "kind": "config", "profile": "dense", "repeats": 5, "rows": 200000, "segment_rows": 50000, "workers": 4}
 {"elapsed_ms": 479.51716700000003, "iteration": 0, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 417086.214558821, "work_rows": 200000}
 {"elapsed_ms": 240.144667, "iteration": 0, "kind": "sample", "metric": "index_build", "rows_per_second": 832831.3199643113, "work_rows": 200000}
 {"elapsed_ms": 85.424667, "iteration": 0, "kind": "sample", "metric": "compaction", "rows_per_second": 2341244.1279987665, "work_rows": 200000}

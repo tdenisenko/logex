@@ -50,8 +50,9 @@ Skewed addresses, optional topics, and mixed payload sizes exercise compression
 and selection. The sparse profile has absent block numbers, but does not claim
 to test validation or coverage publication of empty Ethereum blocks.
 
-Lines starting with `{` are JSON records: `config`, `sample`, `storage`, or
-`summary`. Summaries contain median and nearest-rank p95; with five samples p95
+Output contains JSON records: `config`, `sample`, `storage`, or `summary`.
+Libtest may prefix the first config record with the test name; strip text
+before its opening `{` when extracting JSON rather than dropping that record. Summaries contain median and nearest-rank p95; with five samples p95
 is the maximum and is not a production latency estimate. Warmups do not emit
 sample records. `work_rows` is the input dataset size for storage lifecycle
 operations and matched/output rows for queries; it is not bytes read or a

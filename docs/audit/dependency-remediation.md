@@ -49,9 +49,12 @@ possible feature combination. The CL/EL batches must recheck DNS input paths.
 
 ## Verification
 
-Run all agreed merge gates, repeat the exact fixture benchmarks against the
-preserved baseline executable, and record results before merging this batch.
-The advisory tool's nonzero exit remains expected and explicitly reported.
+All six agreed local merge gates passed, including 720 tests and release node
+linking. Sixty alternating release fixture runs passed exact result checks; see
+[comparison and accepted performance costs](baselines/2026-09-08-dependencies.md).
+Dense historical writes show a +5.84% combined median increase requiring later
+write-path profiling. These security fixes are retained with that disclosed
+tradeoff. The advisory tool's nonzero exit remains expected and explicitly reported.
 
 Useful evidence commands:
 
