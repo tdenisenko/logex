@@ -1,5 +1,8 @@
 # Reproducible audit benchmarks
 
+For beacon SSZ decode/root cost, see the [focused release comparison](baselines/2026-09-09-beacon.md)
+and its explicit ignored benchmark, including build-cache isolation precautions.
+
 The ignored integration benchmark in `crates/logex-query/tests/audit_harness.rs`
 uses only existing dependencies. A small, non-ignored version runs in ordinary
 CI and verifies the same paths for both fixture profiles.
