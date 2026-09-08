@@ -141,6 +141,70 @@ mod tests {
     }
 
     #[test]
+    fn body_receipt_extraction_preserves_empty_transactions_and_topic_presence() {
+        use crate::primitives::LogexReceipt;
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::{Signature, U256};
+
+        let mut body = reth_ethereum_primitives::BlockBody::default();
+        let mut receipts = Vec::new();
+        let mut txs = Vec::new();
+        for tx_index in 0..11 {
+            let tx = TxLegacy {
+                nonce: tx_index,
+                ..Default::default()
+            }
+            .into_signed(Signature::new(U256::from(1), U256::from(2), false));
+            body.transactions.push(tx.into());
+            let logs = if tx_index % 2 == 1 {
+                vec![make_log(
+                    Address::repeat_byte(tx_index as u8),
+                    vec![B256::ZERO; (tx_index / 2) as usize],
+                    bytes!("0001"),
+                )]
+            } else {
+                Vec::new()
+            };
+            txs.push((*body.transactions.last().unwrap().tx_hash(), logs.clone()));
+            receipts.push(LogexReceipt {
+                logs,
+                ..Default::default()
+            });
+        }
+        let ctx = BlockContext {
+            block_number: 100,
+            block_hash: B256::repeat_byte(0x12),
+            timestamp: 1_000,
+        };
+        let expected = extract_logs(&ctx, &txs);
+        let mut rows = expected[..1].to_vec(); // appending must preserve an existing batch
+        append_from_body_receipts(
+            &mut rows,
+            ctx.block_number,
+            ctx.block_hash,
+            ctx.timestamp,
+            &body,
+            &receipts,
+        );
+        assert_eq!(&rows[1..], expected);
+        assert_eq!(rows[0], expected[0]);
+        assert_eq!(expected.len(), 5);
+        for (index, row) in expected.iter().enumerate() {
+            assert_eq!(row.tx_index, (index * 2 + 1) as u32);
+            assert_eq!(row.log_index, index as u32);
+            assert_eq!(row.tx_hash, txs[index * 2 + 1].0);
+            assert_eq!(row.address, Address::repeat_byte((index * 2 + 1) as u8));
+            assert_eq!(
+                [row.topic0, row.topic1, row.topic2, row.topic3],
+                std::array::from_fn(|topic| (topic < index).then_some(B256::ZERO))
+            );
+            assert_eq!(row.data, bytes!("0001"));
+            assert_eq!(row.data_len, 2);
+            assert_eq!(row.source, logex_types::Source::Receipt);
+        }
+    }
+
+    #[test]
     fn extract_from_block_builds_block_context() {
         let topic0 = B256::repeat_byte(0xDD);
         let txs = vec![(

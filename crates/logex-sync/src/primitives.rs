@@ -3,7 +3,7 @@ use alloy_consensus::{
     RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt, TxType,
 };
 use alloy_eips::Typed2718;
-use alloy_eips::eip2718::Eip2718Result;
+use alloy_eips::eip2718::{Eip2718Error, Eip2718Result};
 use alloy_primitives::{Address, B256, Bloom, Log};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_eth_wire::BasicNetworkPrimitives;
@@ -131,6 +131,47 @@ fn bloom_for_bytes(bytes: &[u8]) -> Bloom {
     bloom
 }
 
+fn decode_receipt_status(buf: &mut &[u8]) -> alloy_rlp::Result<Eip658Value> {
+    // Eip658Value's general-purpose decoder coerces other one-byte values to
+    // true. The wire must preserve canonical status/root bytes before hashing.
+    match Header::decode_bytes(buf, false)? {
+        [] => Ok(Eip658Value::Eip658(false)),
+        [1] => Ok(Eip658Value::Eip658(true)),
+        bytes if bytes.len() == 32 => Ok(Eip658Value::PostState(B256::from_slice(bytes))),
+        _ => Err(alloy_rlp::Error::Custom(
+            "invalid receipt status or post-state",
+        )),
+    }
+}
+
+fn decode_receipt_logs(buf: &mut &[u8]) -> alloy_rlp::Result<Vec<Log>> {
+    let mut payload = Header::decode_bytes(buf, true)?;
+    let mut logs = Vec::new();
+    while !payload.is_empty() {
+        // Bound every nested structure before decoding fields. The generic
+        // Log decoder does not enforce list headers or the four-topic limit.
+        let mut fields = Header::decode_bytes(&mut payload, true)?;
+        let address = Address::decode(&mut fields)?;
+        let mut topic_bytes = Header::decode_bytes(&mut fields, true)?;
+        let mut topics = Vec::new();
+        while !topic_bytes.is_empty() {
+            if topics.len() == 4 {
+                return Err(alloy_rlp::Error::Custom(
+                    "receipt log has more than four topics",
+                ));
+            }
+            topics.push(B256::decode(&mut topic_bytes)?);
+        }
+        let data = Decodable::decode(&mut fields)?;
+        if !fields.is_empty() {
+            return Err(alloy_rlp::Error::UnexpectedLength);
+        }
+        // Cardinality was checked before growing the topic vector.
+        logs.push(Log::new_unchecked(address, topics, data));
+    }
+    Ok(logs)
+}
+
 impl LogexReceipt {
     fn network_encoded_fields_length(&self) -> usize {
         self.tx_type.ty().length()
@@ -154,19 +195,14 @@ impl LogexReceipt {
     }
 
     fn network_decode_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let header = Header::decode(buf)?;
-        if !header.list {
-            return Err(alloy_rlp::Error::UnexpectedString);
-        }
-
-        let remaining = buf.len();
-        let tx_type = TxType::try_from(u8::decode(buf)?)
+        let mut fields = Header::decode_bytes(buf, true)?;
+        let tx_type = TxType::try_from(u8::decode(&mut fields)?)
             .map_err(|_| alloy_rlp::Error::Custom("invalid receipt tx type"))?;
-        let status = Decodable::decode(buf)?;
-        let cumulative_gas_used = Decodable::decode(buf)?;
-        let logs = Decodable::decode(buf)?;
+        let status = decode_receipt_status(&mut fields)?;
+        let cumulative_gas_used = Decodable::decode(&mut fields)?;
+        let logs = decode_receipt_logs(&mut fields)?;
 
-        if buf.len() + header.payload_length != remaining {
+        if !fields.is_empty() {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
@@ -203,18 +239,13 @@ impl LogexReceipt {
         buf: &mut &[u8],
         tx_type: TxType,
     ) -> alloy_rlp::Result<ReceiptWithBloom<Self>> {
-        let header = Header::decode(buf)?;
-        if !header.list {
-            return Err(alloy_rlp::Error::UnexpectedString);
-        }
+        let mut fields = Header::decode_bytes(buf, true)?;
+        let status = decode_receipt_status(&mut fields)?;
+        let cumulative_gas_used = Decodable::decode(&mut fields)?;
+        let logs_bloom = Decodable::decode(&mut fields)?;
+        let logs = decode_receipt_logs(&mut fields)?;
 
-        let remaining = buf.len();
-        let status = Decodable::decode(buf)?;
-        let cumulative_gas_used = Decodable::decode(buf)?;
-        let logs_bloom = Decodable::decode(buf)?;
-        let logs = Decodable::decode(buf)?;
-
-        if buf.len() + header.payload_length != remaining {
+        if !fields.is_empty() {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
@@ -326,12 +357,13 @@ impl RlpDecodableReceipt for LogexReceipt {
             return Self::rlp_decode_inner_with_bloom(buf, TxType::Legacy);
         }
 
-        *buf = *header_buf;
-        let remaining = buf.len();
-        let tx_type = TxType::decode(buf)?;
-        let this = Self::rlp_decode_inner_with_bloom(buf, tx_type)?;
+        let payload = Header::decode_bytes(buf, false)?;
+        let (&ty, mut fields) = payload
+            .split_first()
+            .ok_or(alloy_rlp::Error::InputTooShort)?;
+        let this = Self::typed_decode_with_bloom(ty, &mut fields)?;
 
-        if buf.len() + header.payload_length != remaining {
+        if !fields.is_empty() {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
@@ -355,10 +387,11 @@ impl Eip2718EncodableReceipt for LogexReceipt {
 
 impl Eip2718DecodableReceipt for LogexReceipt {
     fn typed_decode_with_bloom(ty: u8, buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
-        Ok(Self::rlp_decode_inner_with_bloom(
-            buf,
-            TxType::try_from(ty)?,
-        )?)
+        let tx_type = TxType::try_from(ty)?;
+        if tx_type.is_legacy() {
+            return Err(Eip2718Error::UnexpectedType(ty));
+        }
+        Ok(Self::rlp_decode_inner_with_bloom(buf, tx_type)?)
     }
 
     fn fallback_decode_with_bloom(buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
@@ -375,6 +408,285 @@ mod tests {
         Log {
             address: Address::repeat_byte(0x11),
             data: LogData::new_unchecked(vec![B256::repeat_byte(0x22)], Bytes::from_static(b"log")),
+        }
+    }
+
+    #[test]
+    fn receipt_decode_rejects_noncanonical_status_values() {
+        let mut statuses = vec![
+            vec![0x00],
+            vec![0x02],
+            vec![0x7f],
+            vec![0xc0],
+            vec![0xc1, 0x01],
+        ];
+        statuses.push([vec![0xe0], vec![0x11; 32]].concat()); // list masquerading as post-state
+        statuses.push(vec![0x81, 0x01]); // noncanonical single byte
+        statuses.push(vec![0x82, 0x00, 0x01]); // padded status
+        for status in statuses {
+            for with_bloom in [false, true] {
+                let mut fields = Vec::new();
+                if !with_bloom {
+                    0u8.encode(&mut fields);
+                }
+                fields.extend_from_slice(&status);
+                1u64.encode(&mut fields);
+                if with_bloom {
+                    Bloom::ZERO.encode(&mut fields);
+                }
+                fields.push(0xc0); // logs
+                let mut encoded = Vec::new();
+                Header {
+                    list: true,
+                    payload_length: fields.len(),
+                }
+                .encode(&mut encoded);
+                encoded.extend_from_slice(&fields);
+                let rejected = if with_bloom {
+                    LogexReceipt::rlp_decode_with_bloom(&mut encoded.as_slice()).is_err()
+                } else {
+                    LogexReceipt::decode(&mut encoded.as_slice()).is_err()
+                };
+                assert!(rejected, "status={status:02x?}, with_bloom={with_bloom}");
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_decode_rejects_string_wrapped_logs() {
+        let log = test_log();
+        let encoded_log = alloy_rlp::encode(&log);
+        let mut fields = encoded_log.as_slice();
+        let header = Header::decode(&mut fields).unwrap();
+        let mut malformed = Vec::new();
+        Header {
+            list: false,
+            ..header
+        }
+        .encode(&mut malformed);
+        malformed.extend_from_slice(fields);
+        let encoded = network_receipt_with_encoded_log(&malformed);
+        assert!(LogexReceipt::decode(&mut encoded.as_slice()).is_err());
+    }
+
+    #[test]
+    fn receipt_decode_rejects_more_than_four_topics() {
+        let mut log = test_log();
+        log.data.set_topics_unchecked(vec![B256::ZERO; 5]);
+        let encoded = network_receipt_with_encoded_log(&alloy_rlp::encode(&log));
+        assert!(LogexReceipt::decode(&mut encoded.as_slice()).is_err());
+    }
+
+    #[test]
+    fn receipt_decode_does_not_consume_fields_outside_declared_list() {
+        let receipt = LogexReceipt {
+            logs: vec![test_log()],
+            ..Default::default()
+        };
+        let encoded = alloy_rlp::encode(&receipt);
+        let mut fields = encoded.as_slice();
+        Header::decode(&mut fields).unwrap();
+        let mut malformed = vec![0xc0]; // empty receipt, followed by unrelated bytes
+        malformed.extend_from_slice(fields);
+        let mut input = malformed.as_slice();
+        assert!(LogexReceipt::decode(&mut input).is_err());
+        assert_eq!(input, fields);
+    }
+
+    #[test]
+    fn typed_receipt_decode_rejects_legacy_type_envelope() {
+        let receipt = LogexReceipt::default();
+        let mut encoded = Vec::new();
+        receipt.eip2718_encode_with_bloom(&Bloom::ZERO, &mut encoded);
+        assert!(LogexReceipt::typed_decode_with_bloom(0, &mut encoded.as_slice()).is_err());
+    }
+
+    fn network_receipt_with_encoded_log(log: &[u8]) -> Vec<u8> {
+        let mut fields = vec![0x80, 0x01, 0x01]; // legacy type, success, gas
+        Header {
+            list: true,
+            payload_length: log.len(),
+        }
+        .encode(&mut fields);
+        fields.extend_from_slice(log);
+        let mut encoded = Vec::new();
+        Header {
+            list: true,
+            payload_length: fields.len(),
+        }
+        .encode(&mut encoded);
+        encoded.extend_from_slice(&fields);
+        encoded
+    }
+
+    #[test]
+    fn receipt_codecs_match_alloy_for_valid_statuses_types_and_logs() {
+        use alloy_consensus::{Receipt, ReceiptEnvelope};
+        use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+
+        for tx_type in [
+            TxType::Legacy,
+            TxType::Eip2930,
+            TxType::Eip1559,
+            TxType::Eip4844,
+            TxType::Eip7702,
+        ] {
+            let mut statuses = vec![Eip658Value::Eip658(false), Eip658Value::Eip658(true)];
+            if tx_type.is_legacy() {
+                statuses.push(Eip658Value::PostState(B256::ZERO));
+            }
+            for status in statuses {
+                for topic_count in 0..=4 {
+                    for data_len in [0, 1, 55, 56, 256] {
+                        let log = Log::new(
+                            Address::repeat_byte(0x11),
+                            (0..topic_count)
+                                .map(|topic| B256::repeat_byte(topic + 1))
+                                .collect(),
+                            Bytes::from(vec![0xa5; data_len]),
+                        )
+                        .unwrap();
+                        let receipt = LogexReceipt {
+                            tx_type,
+                            status,
+                            cumulative_gas_used: u64::MAX,
+                            logs: vec![log],
+                        };
+                        let logs_bloom = receipt.bloom();
+                        let alloy_receipt = ReceiptWithBloom {
+                            receipt: Receipt {
+                                status,
+                                cumulative_gas_used: receipt.cumulative_gas_used,
+                                logs: receipt.logs.clone(),
+                            },
+                            logs_bloom,
+                        };
+                        let envelope = match tx_type {
+                            TxType::Legacy => ReceiptEnvelope::Legacy(alloy_receipt),
+                            TxType::Eip2930 => ReceiptEnvelope::Eip2930(alloy_receipt),
+                            TxType::Eip1559 => ReceiptEnvelope::Eip1559(alloy_receipt),
+                            TxType::Eip4844 => ReceiptEnvelope::Eip4844(alloy_receipt),
+                            TxType::Eip7702 => ReceiptEnvelope::Eip7702(alloy_receipt),
+                        };
+                        let expected = ReceiptWithBloom {
+                            receipt: receipt.clone(),
+                            logs_bloom,
+                        };
+                        let canonical = alloy_rlp::encode(&envelope);
+                        assert_eq!(canonical, alloy_rlp::encode(&expected));
+                        let mut input = canonical.as_slice();
+                        assert_eq!(
+                            ReceiptWithBloom::<LogexReceipt>::decode(&mut input).unwrap(),
+                            expected
+                        );
+                        assert!(input.is_empty());
+                        let encoded_2718 = envelope.encoded_2718();
+                        let mut input = encoded_2718.as_slice();
+                        assert_eq!(
+                            ReceiptWithBloom::<LogexReceipt>::decode_2718(&mut input).unwrap(),
+                            expected
+                        );
+                        assert!(input.is_empty());
+
+                        let encoded = alloy_rlp::encode(&receipt);
+                        let mut input = encoded.as_slice();
+                        assert_eq!(LogexReceipt::decode(&mut input).unwrap(), receipt);
+                        assert!(input.is_empty());
+                        for end in 0..encoded.len() {
+                            assert!(LogexReceipt::decode(&mut &encoded[..end]).is_err());
+                        }
+                        for end in 0..canonical.len() {
+                            assert!(
+                                ReceiptWithBloom::<LogexReceipt>::decode(&mut &canonical[..end])
+                                    .is_err()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_decode_mutations_never_normalize_accepted_bytes() {
+        for tx_type in [TxType::Legacy, TxType::Eip1559] {
+            let receipt = LogexReceipt {
+                tx_type,
+                logs: vec![test_log()],
+                ..Default::default()
+            };
+            for with_bloom in [false, true] {
+                let encoded = if with_bloom {
+                    alloy_rlp::encode(ReceiptWithBloom {
+                        receipt: receipt.clone(),
+                        logs_bloom: receipt.bloom(),
+                    })
+                } else {
+                    alloy_rlp::encode(&receipt)
+                };
+                for index in 0..encoded.len() {
+                    for byte in [
+                        0x00, 0x01, 0x02, 0x7f, 0x80, 0x81, 0xb8, 0xc0, 0xc1, 0xf8, 0xff,
+                    ] {
+                        let mut mutated = encoded.clone();
+                        mutated[index] = byte;
+                        let mut input = mutated.as_slice();
+                        let decoded = if with_bloom {
+                            LogexReceipt::rlp_decode_with_bloom(&mut input).map(alloy_rlp::encode)
+                        } else {
+                            LogexReceipt::decode(&mut input).map(alloy_rlp::encode)
+                        };
+                        if let Ok(canonical) = decoded {
+                            assert_eq!(
+                                canonical,
+                                mutated[..mutated.len() - input.len()],
+                                "index={index}, byte={byte}, with_bloom={with_bloom}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_codecs_preserve_siblings_and_reject_extra_fields() {
+        let receipt = LogexReceipt {
+            tx_type: TxType::Eip1559,
+            logs: vec![test_log()],
+            ..Default::default()
+        };
+        for with_bloom in [false, true] {
+            let encoded = if with_bloom {
+                alloy_rlp::encode(ReceiptWithBloom {
+                    receipt: receipt.clone(),
+                    logs_bloom: receipt.bloom(),
+                })
+            } else {
+                alloy_rlp::encode(&receipt)
+            };
+            let mut siblings = encoded.clone();
+            siblings.extend_from_slice(&encoded);
+            let mut input = siblings.as_slice();
+            if with_bloom {
+                LogexReceipt::rlp_decode_with_bloom(&mut input).unwrap();
+            } else {
+                LogexReceipt::decode(&mut input).unwrap();
+            }
+            assert_eq!(input, encoded);
+
+            let mut fields = encoded.as_slice();
+            let mut header = Header::decode(&mut fields).unwrap();
+            header.payload_length += 1;
+            let mut trailing = Vec::new();
+            header.encode(&mut trailing);
+            trailing.extend_from_slice(fields);
+            trailing.push(0x80);
+            if with_bloom {
+                assert!(LogexReceipt::rlp_decode_with_bloom(&mut trailing.as_slice()).is_err());
+            } else {
+                assert!(LogexReceipt::decode(&mut trailing.as_slice()).is_err());
+            }
         }
     }
 

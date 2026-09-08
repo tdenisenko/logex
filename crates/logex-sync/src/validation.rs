@@ -473,6 +473,39 @@ mod tests {
     }
 
     #[test]
+    fn receipt_root_binds_each_log_field_status_type_and_transaction_order() {
+        let mut second = fake_receipt();
+        second.receipt.cumulative_gas_used = 42_000;
+        let receipts = vec![fake_receipt(), second];
+        let header = Header {
+            number: 20_000_000,
+            gas_used: 42_000,
+            receipts_root: proofs::calculate_receipt_root(&receipts),
+            logs_bloom: receipts[0].logs_bloom | receipts[1].logs_bloom,
+            ..Default::default()
+        };
+        assert_eq!(validate_receipts_for_header(&header, &receipts), Ok(()));
+        for mutation in 0..8 {
+            let mut tampered = receipts.clone();
+            let receipt = &mut tampered[0].receipt;
+            match mutation {
+                0 => receipt.logs[0].address = Address::ZERO,
+                1 => receipt.logs[0].data.topics_mut()[0] = B256::ZERO,
+                2 => receipt.logs[0].data.data = alloy_primitives::Bytes::new(),
+                3 => receipt.logs.clear(),
+                4 => receipt.success = false,
+                5 => receipt.tx_type = TxType::Legacy,
+                6 => receipt.cumulative_gas_used = 20_999,
+                _ => tampered.swap(0, 1),
+            }
+            assert!(
+                validate_receipts_for_header(&header, &tampered).is_err(),
+                "mutation={mutation}"
+            );
+        }
+    }
+
+    #[test]
     fn anchored_header_must_match_consensus_anchor() {
         let header = Header {
             number: 11,
