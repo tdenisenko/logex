@@ -1,54 +1,69 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{B256, Log};
+use eyre::{Result, WrapErr, ensure};
 use reth_primitives_traits::BlockBody;
 
 use logex_types::{BlockContext, LogRow};
 
-/// Extract `LogRow`s from a block's receipts.
-///
-/// Takes the block context (number, hash, timestamp), a list of `(tx_hash,
-/// receipt_logs)` pairs, and produces a flat list of `LogRow`s with correct
-/// per-transaction and global block log indexing.
-pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Vec<LogRow> {
-    let total_logs = txs.iter().map(|(_, logs)| logs.len()).sum();
-    let mut rows = Vec::with_capacity(total_logs);
-    let mut global_log_index = 0u32;
-
-    for (tx_index, (tx_hash, logs)) in txs.iter().enumerate() {
-        for log in logs {
-            rows.push(LogRow::from_primitives_log(
-                log,
-                ctx,
-                *tx_hash,
-                tx_index as u32,
-                global_log_index,
-            ));
-            global_log_index += 1;
-        }
-    }
-
-    rows
+/// Count rows before allocation, including across blocks in a historical batch.
+pub(crate) fn checked_row_count(counts: impl IntoIterator<Item = usize>) -> Result<usize> {
+    counts.into_iter().try_fold(0usize, |total, count| {
+        total
+            .checked_add(count)
+            .ok_or_else(|| eyre::eyre!("log row count exceeds usize"))
+    })
 }
 
-/// Convenience wrapper for the primary sync path where block context and
-/// transaction receipts are handled separately by the engine.
+fn checked_log_count(counts: impl IntoIterator<Item = usize>) -> Result<usize> {
+    let total = checked_row_count(counts)?;
+    check_indexed_count(total, "block log")?;
+    Ok(total)
+}
+
+// Check the last index rather than the count: u32::MAX is a valid row index.
+fn check_indexed_count(count: usize, field: &str) -> Result<()> {
+    if let Some(last) = count.checked_sub(1) {
+        u32::try_from(last).wrap_err_with(|| format!("{field} index exceeds u32"))?;
+    }
+    Ok(())
+}
+
+/// Extract authenticated receipt logs using caller-supplied block/tx metadata.
+/// Returns an error if the logs cannot be represented without truncation.
+pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Result<Vec<LogRow>> {
+    check_indexed_count(txs.len(), "transaction")?;
+    let total = checked_log_count(txs.iter().map(|(_, logs)| logs.len()))?;
+    let mut rows = Vec::new();
+    rows.try_reserve(total)
+        .wrap_err("reserve extracted log rows")?;
+    append_logs(
+        &mut rows,
+        ctx,
+        txs.iter().map(|(hash, logs)| (*hash, logs.as_slice())),
+    )?;
+    Ok(rows)
+}
+
+/// Convenience wrapper for the primary sync path.
 pub fn extract_from_block(
     block_number: u64,
     block_hash: B256,
     timestamp: u64,
     txs: &[(B256, Vec<Log>)],
-) -> Vec<LogRow> {
-    let ctx = BlockContext {
-        block_number,
-        block_hash,
-        timestamp,
-    };
-    extract_logs(&ctx, txs)
+) -> Result<Vec<LogRow>> {
+    extract_logs(
+        &BlockContext {
+            block_number,
+            block_hash,
+            timestamp,
+        },
+        txs,
+    )
 }
 
-/// Append `LogRow`s directly from a block body and receipts into an existing
-/// buffer. This is used by historical batch ingestion to avoid per-block
-/// temporary vectors while preserving transaction and log ordering.
+/// Append a complete block's authenticated receipts to an existing batch.
+/// On error, existing rows are unchanged and no rows from this block remain.
+/// Allocation capacity may grow. This checks shape, not receipt provenance.
 pub fn append_from_body_receipts<B, R>(
     rows: &mut Vec<LogRow>,
     block_number: u64,
@@ -56,31 +71,82 @@ pub fn append_from_body_receipts<B, R>(
     timestamp: u64,
     body: &B,
     receipts: &[R],
-) where
+) -> Result<()>
+where
     B: BlockBody,
     B::Transaction: TxHashRef,
     R: alloy_consensus::TxReceipt<Log = Log>,
 {
-    let ctx = BlockContext {
-        block_number,
-        block_hash,
-        timestamp,
-    };
-    let mut global_log_index = 0u32;
+    ensure!(
+        body.transactions().len() == receipts.len(),
+        "transaction/receipt count mismatch: transactions={}, receipts={}",
+        body.transactions().len(),
+        receipts.len()
+    );
+    check_indexed_count(receipts.len(), "transaction")?;
+    let total = checked_log_count(receipts.iter().map(|receipt| receipt.logs().len()))?;
+    rows.try_reserve(total)
+        .wrap_err("reserve extracted log rows")?;
+    append_logs(
+        rows,
+        &BlockContext {
+            block_number,
+            block_hash,
+            timestamp,
+        },
+        body.transactions()
+            .iter()
+            .zip(receipts)
+            .map(|(tx, receipt)| (*tx.tx_hash(), receipt.logs())),
+    )
+}
 
-    for (tx_index, (tx, receipt)) in body.transactions().iter().zip(receipts.iter()).enumerate() {
-        let tx_hash = *tx.tx_hash();
-        for log in receipt.logs() {
-            rows.push(LogRow::from_primitives_log(
-                log,
-                &ctx,
-                tx_hash,
-                tx_index as u32,
-                global_log_index,
-            ));
-            global_log_index += 1;
+fn append_logs<'a>(
+    rows: &mut Vec<LogRow>,
+    ctx: &BlockContext,
+    txs: impl Iterator<Item = (B256, &'a [Log])>,
+) -> Result<()> {
+    let start = rows.len();
+    let result = (|| -> Result<()> {
+        for (tx_index, (tx_hash, logs)) in txs.enumerate() {
+            let tx_index = u32::try_from(tx_index)
+                .map_err(|_| eyre::eyre!("transaction index exceeds u32"))?;
+            for log in logs {
+                let log_index = u32::try_from(rows.len() - start)
+                    .map_err(|_| eyre::eyre!("block log index exceeds u32"))?;
+                let row =
+                    match LogRow::try_from_primitives_log(log, ctx, tx_hash, tx_index, log_index) {
+                        Ok(row) => row,
+                        Err(error) => {
+                            return Err(row_conversion_error(
+                                error,
+                                ctx.block_number,
+                                tx_index,
+                                log_index,
+                            ));
+                        }
+                    };
+                rows.push(row);
+            }
         }
+        Ok(())
+    })();
+    if result.is_err() {
+        rows.truncate(start);
     }
+    result
+}
+
+#[cold]
+fn row_conversion_error(
+    error: logex_types::LogRowConversionError,
+    block_number: u64,
+    tx_index: u32,
+    log_index: u32,
+) -> eyre::Report {
+    eyre::Report::new(error).wrap_err(format!(
+        "block {block_number} transaction {tx_index} log {log_index}"
+    ))
 }
 
 #[cfg(test)]
@@ -93,13 +159,98 @@ mod tests {
     }
 
     #[test]
+    fn extraction_rejects_receipt_count_mismatch_without_changing_rows() {
+        let body = reth_ethereum_primitives::BlockBody::default();
+        let receipts = vec![crate::primitives::LogexReceipt::default()];
+        let mut rows = Vec::new();
+        let result = append_from_body_receipts(&mut rows, 0, B256::ZERO, 0, &body, &receipts);
+        assert!(result.is_err());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn extraction_count_boundaries_do_not_require_large_allocations() {
+        assert_eq!(checked_log_count([]).unwrap(), 0);
+        assert_eq!(checked_log_count([0, 1, 4]).unwrap(), 5);
+        assert!(checked_log_count([usize::MAX, 1]).is_err());
+        let max = u32::MAX as usize;
+        assert_eq!(checked_log_count([max]).unwrap(), max);
+        if let Some(count) = max.checked_add(1) {
+            assert_eq!(checked_log_count([max, 1]).unwrap(), count);
+            assert!(check_indexed_count(count, "transaction").is_ok());
+            assert!(checked_log_count([max, 2]).is_err());
+            assert!(check_indexed_count(count + 1, "transaction").is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_later_log_rolls_back_the_entire_appended_block() {
+        use crate::primitives::LogexReceipt;
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::{LogData, Signature, U256};
+        let good = make_log(Address::ZERO, vec![], bytes!("1234"));
+        let bad = Log {
+            address: Address::ZERO,
+            data: LogData::new_unchecked(vec![B256::ZERO; 5], ABytes::new()),
+        };
+        let ctx = BlockContext {
+            block_number: 9,
+            block_hash: B256::ZERO,
+            timestamp: 0,
+        };
+        let original = extract_logs(&ctx, &[(B256::ZERO, vec![good.clone()])]).unwrap();
+        let mut body = reth_ethereum_primitives::BlockBody::default();
+        for nonce in 0..3 {
+            body.transactions.push(
+                TxLegacy {
+                    nonce,
+                    ..Default::default()
+                }
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+            );
+        }
+        let mut receipts = vec![
+            LogexReceipt {
+                logs: vec![good.clone()],
+                ..Default::default()
+            },
+            LogexReceipt::default(),
+            LogexReceipt {
+                logs: vec![good, bad],
+                ..Default::default()
+            },
+        ];
+        let mut rows = original.clone();
+        let error =
+            append_from_body_receipts(&mut rows, 10, B256::ZERO, 0, &body, &receipts).unwrap_err();
+        assert!(format!("{error:#}").contains("block 10 transaction 2 log 2"));
+        assert_eq!(rows, original);
+        let txs: Vec<_> = body
+            .transactions
+            .iter()
+            .zip(&receipts)
+            .map(|(tx, receipt)| (*tx.tx_hash(), receipt.logs.clone()))
+            .collect();
+        assert!(extract_logs(&ctx, &txs).is_err());
+        // Too few and too many receipts both fail before appending.
+        for count in [2, 4] {
+            receipts.resize_with(count, Default::default);
+            assert!(
+                append_from_body_receipts(&mut rows, 10, B256::ZERO, 0, &body, &receipts).is_err()
+            );
+            assert_eq!(rows, original);
+        }
+    }
+
+    #[test]
     fn extract_logs_handles_empty_blocks() {
         let ctx = BlockContext {
             block_number: 100,
             block_hash: B256::repeat_byte(0x01),
             timestamp: 1_700_000_000,
         };
-        let rows = extract_logs(&ctx, &[]);
+        let rows = extract_logs(&ctx, &[]).unwrap();
         assert!(rows.is_empty());
     }
 
@@ -130,7 +281,7 @@ mod tests {
             ),
         ];
 
-        let rows = extract_logs(&ctx, &txs);
+        let rows = extract_logs(&ctx, &txs).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].tx_index, 0);
         assert_eq!(rows[0].log_index, 0);
@@ -176,7 +327,7 @@ mod tests {
             block_hash: B256::repeat_byte(0x12),
             timestamp: 1_000,
         };
-        let expected = extract_logs(&ctx, &txs);
+        let expected = extract_logs(&ctx, &txs).unwrap();
         let mut rows = expected[..1].to_vec(); // appending must preserve an existing batch
         append_from_body_receipts(
             &mut rows,
@@ -185,7 +336,8 @@ mod tests {
             ctx.timestamp,
             &body,
             &receipts,
-        );
+        )
+        .unwrap();
         assert_eq!(&rows[1..], expected);
         assert_eq!(rows[0], expected[0]);
         assert_eq!(expected.len(), 5);
@@ -216,10 +368,112 @@ mod tests {
             )],
         )];
 
-        let rows = extract_from_block(500, B256::repeat_byte(0x05), 1_700_005_000, &txs);
+        let rows = extract_from_block(500, B256::repeat_byte(0x05), 1_700_005_000, &txs).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].block_number, 500);
         assert_eq!(rows[0].block_hash, B256::repeat_byte(0x05));
         assert_eq!(rows[0].topic0, Some(topic0));
+    }
+    #[test]
+    #[ignore = "release comparison; see docs/audit/extraction-boundaries.md"]
+    fn extraction_release_baseline() {
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::{Signature, U256};
+        use std::{hint::black_box, time::Instant};
+        let ctx = BlockContext {
+            block_number: 20_000_000,
+            block_hash: B256::repeat_byte(3),
+            timestamp: 1_800_000_000,
+        };
+        let mut body = reth_ethereum_primitives::BlockBody::default();
+        let mut receipts = Vec::new();
+        let mut txs = Vec::new();
+        for nonce in 0..4096 {
+            body.transactions.push(
+                TxLegacy {
+                    nonce,
+                    ..Default::default()
+                }
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+            );
+            let logs: Vec<_> = (0..nonce % 5)
+                .map(|index| {
+                    make_log(
+                        Address::repeat_byte(index as u8),
+                        vec![B256::repeat_byte(index as u8); index as usize],
+                        ABytes::from(vec![7; 256]),
+                    )
+                })
+                .collect();
+            txs.push((*body.transactions.last().unwrap().tx_hash(), logs.clone()));
+            receipts.push(crate::primitives::LogexReceipt {
+                logs,
+                ..Default::default()
+            });
+        }
+        let expected: Vec<_> = txs
+            .iter()
+            .enumerate()
+            .flat_map(|(tx, (hash, logs))| logs.iter().map(move |log| (tx, *hash, log)))
+            .enumerate()
+            .map(|(index, (tx, hash, log))| LogRow {
+                block_number: ctx.block_number,
+                block_hash: ctx.block_hash,
+                timestamp: ctx.timestamp,
+                tx_hash: hash,
+                tx_index: tx as u32,
+                log_index: index as u32,
+                address: log.address,
+                topic0: log.topics().first().copied(),
+                topic1: log.topics().get(1).copied(),
+                topic2: log.topics().get(2).copied(),
+                topic3: log.topics().get(3).copied(),
+                data: log.data.data.clone(),
+                data_len: 256,
+                source: logex_types::Source::Receipt,
+            })
+            .collect();
+        assert_eq!(extract_logs(&ctx, &txs).unwrap(), expected);
+        let mut reused = Vec::new();
+        append_from_body_receipts(
+            &mut reused,
+            ctx.block_number,
+            ctx.block_hash,
+            ctx.timestamp,
+            &body,
+            &receipts,
+        )
+        .unwrap();
+        assert_eq!(reused, expected);
+        for path in ["owned", "append"] {
+            for sample in 0..6 {
+                let started = Instant::now();
+                for _ in 0..100 {
+                    if path == "owned" {
+                        black_box(extract_logs(black_box(&ctx), black_box(&txs)).unwrap());
+                    } else {
+                        reused.clear();
+                        append_from_body_receipts(
+                            &mut reused,
+                            ctx.block_number,
+                            ctx.block_hash,
+                            ctx.timestamp,
+                            black_box(&body),
+                            black_box(&receipts),
+                        )
+                        .unwrap();
+                        black_box(&reused);
+                    }
+                }
+                if sample != 0 {
+                    eprintln!(
+                        "EXTRACTION_BENCH {{\"path\":\"{path}\",\"sample\":{sample},\"iterations\":100,\"rows\":{},\"elapsed_ns\":{}}}",
+                        expected.len(),
+                        started.elapsed().as_nanos()
+                    );
+                }
+            }
+        }
     }
 }
