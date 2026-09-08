@@ -36,13 +36,14 @@ pub struct LogRow {
     pub log_index: u32,
     /// The emitting contract address (20 bytes).
     pub address: Address,
-    /// Event signature hash (topic0). `None` for anonymous events.
+    /// First log topic; often the event signature for non-anonymous Solidity
+    /// events. Anonymous events may also have topics. `None` means no topics.
     pub topic0: Option<B256>,
-    /// First indexed parameter.
+    /// Second log topic; often the first indexed parameter.
     pub topic1: Option<B256>,
-    /// Second indexed parameter.
+    /// Third log topic; often the second indexed parameter.
     pub topic2: Option<B256>,
-    /// Third indexed parameter.
+    /// Fourth log topic; often the third indexed parameter.
     pub topic3: Option<B256>,
     /// Non-indexed ABI-encoded parameters.
     pub data: Bytes,
@@ -81,6 +82,8 @@ impl LogRow {
     /// This is the lower-level constructor used during P2P sync where
     /// we get `alloy_primitives::Log` directly from receipts rather than
     /// the RPC-wrapped `alloy_rpc_types::Log`.
+    /// The caller must validate receipt provenance and supply block/transaction
+    /// metadata; this conversion assigns `Source::Receipt` without verifying it.
     pub fn from_primitives_log(
         log: &alloy_primitives::Log,
         ctx: &BlockContext,
