@@ -121,6 +121,8 @@ pub enum LightClientVerificationError {
     InvalidNextSyncCommitteeProof { attested_slot: u64 },
     #[error("finality update did not include a finalized header")]
     MissingFinalizedHeader,
+    #[error("invalid sync committee length: expected {SYNC_COMMITTEE_PUBKEYS}, got {actual}")]
+    InvalidCommitteeLength { actual: usize },
     #[error("invalid sync committee public key at index {index}: {details}")]
     InvalidCommitteePublicKey { index: usize, details: String },
     #[error("invalid sync committee signature: {0}")]
@@ -1804,6 +1806,11 @@ impl SyncCommitteeData {
         &self,
         bits: &FixedBytes<SYNC_COMMITTEE_BITS_BYTES>,
     ) -> Result<Vec<BlstPublicKey>, LightClientVerificationError> {
+        if self.pubkeys.len() != SYNC_COMMITTEE_PUBKEYS {
+            return Err(LightClientVerificationError::InvalidCommitteeLength {
+                actual: self.pubkeys.len(),
+            });
+        }
         let mut active = Vec::new();
         for (index, pubkey) in self.pubkeys.iter().enumerate() {
             let selected = bits.as_slice()[index / 8] & (1 << (index % 8)) != 0;
@@ -2378,6 +2385,81 @@ mod tests {
                 .optimistic_anchor()
                 .map(|anchor| anchor.block_number),
             Some(19_000_010)
+        );
+    }
+
+    #[test]
+    fn malformed_committee_cannot_inflate_signed_update_participation() {
+        let slot = 10_000_000;
+        let (checkpoint, bootstrap_bytes, _) = bootstrap_payload(slot);
+        let (_, mut store) = verify_bootstrap_payload(&bootstrap_bytes, checkpoint).unwrap();
+        let (bytes, _) = update_payload_with_next_sync_committee(slot);
+        let mut update = LightClientUpdateDeneb::from_ssz_bytes(&bytes).unwrap();
+        // Only the first key signed, but a truncated persisted committee used to
+        // let all 512 bits count while verifying just that one key.
+        store.current_sync_committee.pubkeys.truncate(1);
+        update.sync_aggregate.sync_committee_bits = FixedBytes::repeat_byte(0xff);
+        let before = store.clone();
+        assert!(matches!(
+            apply_light_client_update_payload(&update.as_ssz_bytes(), &store),
+            Err(LightClientVerificationError::InvalidCommitteeLength { actual: 1 }),
+        ));
+        assert_eq!(store, before);
+
+        // The same check must apply when signatures use the next period's
+        // persisted committee rather than the current one.
+        store.next_sync_committee = Some(store.current_sync_committee.clone());
+        store.current_sync_committee =
+            sync_committee_from_secret_key(&SecretKey::key_gen(&[7u8; 32], &[]).unwrap())
+                .to_persisted();
+        store.finalized_header.beacon.slot -= UPDATE_TIMEOUT;
+        let before = store.clone();
+        assert!(matches!(
+            apply_light_client_update_payload(&update.as_ssz_bytes(), &store),
+            Err(LightClientVerificationError::InvalidCommitteeLength { actual: 1 }),
+        ));
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn malformed_committee_lengths_are_rejected_without_panicking() {
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let committee = sync_committee_from_secret_key(&sk).to_persisted();
+        let bits = FixedBytes::ZERO;
+        for length in [513, 0, 1, 511] {
+            let mut malformed = committee.clone();
+            malformed.pubkeys.resize(length, BlsPublicKey::ZERO);
+            assert!(matches!(
+                malformed.participant_public_keys(&bits),
+                Err(LightClientVerificationError::InvalidCommitteeLength { actual }) if actual == length,
+            ));
+        }
+    }
+
+    #[test]
+    fn valid_committee_selects_every_bit_including_last_key() {
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let mut committee = sync_committee_from_secret_key(&sk).to_persisted();
+        committee.pubkeys.fill(committee.aggregate_pubkey);
+        for index in 0..SYNC_COMMITTEE_PUBKEYS {
+            let mut bits = FixedBytes::ZERO;
+            bits[index / 8] = 1 << (index % 8);
+            let participants = committee.participant_public_keys(&bits).unwrap();
+            assert_eq!(participants.len(), 1);
+            assert_eq!(participants[0].compress(), sk.sk_to_pk().compress());
+        }
+        assert!(
+            committee
+                .participant_public_keys(&FixedBytes::ZERO)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            committee
+                .participant_public_keys(&FixedBytes::repeat_byte(0xff))
+                .unwrap()
+                .len(),
+            SYNC_COMMITTEE_PUBKEYS
         );
     }
 

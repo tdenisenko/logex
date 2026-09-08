@@ -937,20 +937,22 @@ fn extend_missing_history_lineage(
     pending_roots: &HashSet<B256>,
 ) {
     let mut current_root = start_root;
+    let mut child_slot = None;
     loop {
         if roots.len() >= MAX_BEACON_BLOCKS_BY_ROOT_REQUEST {
             return;
         }
-        if !verified_beacon_blocks.contains_key(&current_root) {
+        let Some(block) = verified_beacon_blocks.get(&current_root) else {
             push_missing_history_root(roots, current_root, verified_beacon_blocks, pending_roots);
+            return;
+        };
+        if block.beacon_root != current_root || child_slot.is_some_and(|slot| block.slot >= slot) {
             return;
         }
         if current_root == checkpoint_root {
             return;
         }
-        let Some(block) = verified_beacon_blocks.get(&current_root) else {
-            return;
-        };
+        child_slot = Some(block.slot);
         current_root = block.parent_root;
     }
 }
@@ -1039,6 +1041,7 @@ fn canonical_chain_blocks_to_root(
     }
 
     let mut current_root = target_root;
+    let mut child_slot = None;
     let mut reverse_chain = Vec::new();
     loop {
         let block = if current_root == checkpoint_root {
@@ -1046,14 +1049,48 @@ fn canonical_chain_blocks_to_root(
         } else {
             *verified_beacon_blocks.get(&current_root)?
         };
+        // Beacon parents must have smaller slots, including across skipped
+        // slots. This also bounds traversal if imported/cached links cycle.
+        if block.beacon_root != current_root || child_slot.is_some_and(|slot| block.slot >= slot) {
+            return None;
+        }
         reverse_chain.push(block);
         if current_root == checkpoint_root {
             break;
         }
+        child_slot = Some(block.slot);
         current_root = block.parent_root;
     }
     reverse_chain.reverse();
     Some(reverse_chain)
+}
+
+fn cached_target_lineage_roots(
+    verified_beacon_blocks: &HashMap<B256, VerifiedBeaconBlock>,
+    target: HistorySyncTarget,
+) -> HashSet<B256> {
+    let mut roots = HashSet::new();
+    for root in [target.finalized_root, target.optimistic_root] {
+        let mut current_root = root;
+        let mut child_slot = None;
+        loop {
+            let Some(block) = verified_beacon_blocks.get(&current_root) else {
+                roots.insert(current_root);
+                break;
+            };
+            if block.beacon_root != current_root
+                || child_slot.is_some_and(|slot| block.slot >= slot)
+            {
+                break;
+            }
+            if !roots.insert(current_root) || current_root == target.checkpoint_root {
+                break;
+            }
+            child_slot = Some(block.slot);
+            current_root = block.parent_root;
+        }
+    }
+    roots
 }
 
 fn cached_beacon_block_payloads_by_root(
@@ -4750,7 +4787,7 @@ impl ConsensusNetwork {
             return None;
         }
 
-        let preferred_roots = self.cached_target_lineage_roots(target);
+        let preferred_roots = cached_target_lineage_roots(&self.verified_beacon_blocks, target);
         let mut current = checkpoint_block;
         while let Some(child) = self.next_checkpoint_forward_child(
             current.beacon_root,
@@ -4785,24 +4822,6 @@ impl ConsensusNetwork {
         blocks.sort_by_key(|block| (block.slot, block.beacon_root));
         blocks.dedup_by_key(|block| block.beacon_root);
         blocks
-    }
-
-    fn cached_target_lineage_roots(&self, target: HistorySyncTarget) -> HashSet<B256> {
-        let mut roots = HashSet::new();
-        for root in [target.finalized_root, target.optimistic_root] {
-            let mut current_root = root;
-            loop {
-                roots.insert(current_root);
-                if current_root == target.checkpoint_root {
-                    break;
-                }
-                let Some(block) = self.verified_beacon_blocks.get(&current_root) else {
-                    break;
-                };
-                current_root = block.parent_root;
-            }
-        }
-        roots
     }
 
     fn next_checkpoint_forward_child(
@@ -7609,6 +7628,214 @@ mod tests {
             next_forward_history_root_request_for_target_excluding(target, &verified, &pending),
             None
         );
+    }
+
+    #[test]
+    fn cached_ancestry_rejects_non_decreasing_parent_slots() {
+        let checkpoint = ancestry_test_block(100, 1, 0);
+        for parent_slot in [102, 103] {
+            let parent = ancestry_test_block(parent_slot, 2, 1);
+            let head = ancestry_test_block(102, 3, 2);
+            let cached = HashMap::from([
+                (checkpoint.beacon_root, checkpoint),
+                (parent.beacon_root, parent),
+                (head.beacon_root, head),
+            ]);
+            assert!(
+                canonical_chain_blocks_to_root(
+                    &cached,
+                    checkpoint.beacon_root,
+                    checkpoint.slot,
+                    head.beacon_root,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn cached_ancestry_does_not_request_parents_of_invalid_lineage() {
+        let parent = ancestry_test_block(103, 2, 1);
+        let head = ancestry_test_block(102, 3, 2);
+        let cached = HashMap::from([(parent.beacon_root, parent), (head.beacon_root, head)]);
+        let mut missing = Vec::new();
+        extend_missing_history_lineage(
+            &mut missing,
+            head.beacon_root,
+            B256::repeat_byte(0x10),
+            &cached,
+            &HashSet::new(),
+        );
+        assert!(missing.is_empty());
+    }
+
+    fn ancestry_test_block(slot: u64, root: u8, parent: u8) -> VerifiedBeaconBlock {
+        let beacon_root = B256::repeat_byte(root);
+        let parent_root = B256::repeat_byte(parent);
+        VerifiedBeaconBlock {
+            fork: logex_types::ConsensusDataFork::Electra,
+            beacon_root,
+            parent_root,
+            slot,
+            execution_anchor: logex_types::ExecutionAnchor {
+                beacon_root,
+                beacon_slot: slot,
+                block_number: slot,
+                block_hash: beacon_root,
+                receipts_root: parent_root,
+            },
+        }
+    }
+
+    #[test]
+    fn cached_ancestry_cycles_terminate_without_publication_or_requests() {
+        let checkpoint = ancestry_test_block(100, 1, 0);
+        let parent = ancestry_test_block(101, 2, 3);
+        for head in [
+            ancestry_test_block(102, 3, 3),
+            ancestry_test_block(102, 3, 2),
+        ] {
+            let target = HistorySyncTarget {
+                checkpoint_root: checkpoint.beacon_root,
+                checkpoint_slot: checkpoint.slot,
+                finalized_root: head.beacon_root,
+                optimistic_root: head.beacon_root,
+                optimistic_slot: head.slot,
+            };
+            let cached = HashMap::from([
+                (checkpoint.beacon_root, checkpoint),
+                (parent.beacon_root, parent),
+                (head.beacon_root, head),
+            ]);
+            assert!(materializable_history_chain(&cached, target).is_none());
+            assert!(next_forward_history_root_request_for_target(target, &cached).is_none());
+            let roots = cached_target_lineage_roots(&cached, target);
+            assert!(roots.contains(&head.beacon_root));
+            assert!(!roots.contains(&checkpoint.beacon_root));
+            assert!(roots.len() <= 2);
+        }
+    }
+
+    #[test]
+    fn cached_ancestry_preserves_gaps_shared_tails_and_slot_boundaries() {
+        let checkpoint = ancestry_test_block(0, 1, 0);
+        let parent = ancestry_test_block(42, 2, 1);
+        let head = ancestry_test_block(u64::MAX, 3, 2);
+        let target = HistorySyncTarget {
+            checkpoint_root: checkpoint.beacon_root,
+            checkpoint_slot: checkpoint.slot,
+            finalized_root: parent.beacon_root,
+            optimistic_root: head.beacon_root,
+            optimistic_slot: head.slot,
+        };
+        let mut cached = HashMap::from([
+            (checkpoint.beacon_root, checkpoint),
+            (parent.beacon_root, parent),
+            (head.beacon_root, head),
+        ]);
+        assert_eq!(
+            materializable_history_chain(&cached, target)
+                .unwrap()
+                .blocks,
+            vec![checkpoint, parent, head],
+        );
+        let roots = HashSet::from([checkpoint.beacon_root, parent.beacon_root, head.beacon_root]);
+        assert_eq!(cached_target_lineage_roots(&cached, target), roots);
+        assert!(next_forward_history_root_request_for_target(target, &cached).is_none());
+        assert_eq!(
+            canonical_chain_blocks_to_root(
+                &cached,
+                checkpoint.beacon_root,
+                0,
+                checkpoint.beacon_root,
+            ),
+            Some(vec![checkpoint])
+        );
+        assert!(
+            canonical_chain_blocks_to_root(&cached, checkpoint.beacon_root, 1, head.beacon_root,)
+                .is_none()
+        );
+
+        cached.remove(&parent.beacon_root);
+        assert!(materializable_history_chain(&cached, target).is_none());
+        assert_eq!(
+            next_forward_history_root_request_for_target(target, &cached),
+            Some(vec![parent.beacon_root])
+        );
+        assert_eq!(
+            cached_target_lineage_roots(&cached, target),
+            HashSet::from([parent.beacon_root, head.beacon_root])
+        );
+    }
+
+    #[test]
+    fn cached_ancestry_matches_cycle_detecting_reference_for_small_graphs() {
+        let checkpoint = ancestry_test_block(0, 1, 0);
+        for slots in [[1, 2, 3], [3, 2, 1], [1, 1, 2], [0, 1, u64::MAX]] {
+            for parents in 0..125u16 {
+                let blocks = [
+                    checkpoint,
+                    ancestry_test_block(slots[0], 2, (parents % 5) as u8),
+                    ancestry_test_block(slots[1], 3, ((parents / 5) % 5) as u8),
+                    ancestry_test_block(slots[2], 4, (parents / 25) as u8),
+                ];
+                let cached = blocks
+                    .iter()
+                    .map(|block| (block.beacon_root, *block))
+                    .collect();
+                // The reference bounds traversal by visited roots, then checks
+                // slot ordering on the completed path independently.
+                let mut visited = HashSet::new();
+                let mut root = blocks[3].beacon_root;
+                let mut path = Vec::new();
+                let mut expected = None;
+                while visited.insert(root) {
+                    let Some(block) = blocks.iter().find(|block| block.beacon_root == root) else {
+                        break;
+                    };
+                    path.push(*block);
+                    if root == checkpoint.beacon_root {
+                        path.reverse();
+                        if path.windows(2).all(|pair| pair[0].slot < pair[1].slot) {
+                            expected = Some(path);
+                        }
+                        break;
+                    }
+                    root = block.parent_root;
+                }
+                assert_eq!(
+                    canonical_chain_blocks_to_root(
+                        &cached,
+                        checkpoint.beacon_root,
+                        0,
+                        blocks[3].beacon_root,
+                    ),
+                    expected,
+                    "slots={slots:?}, parents={parents}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_ancestry_rejects_mismatched_root_metadata() {
+        let checkpoint = ancestry_test_block(100, 1, 0);
+        let head = ancestry_test_block(101, 2, 1);
+        let target = HistorySyncTarget {
+            checkpoint_root: checkpoint.beacon_root,
+            checkpoint_slot: checkpoint.slot,
+            finalized_root: head.beacon_root,
+            optimistic_root: head.beacon_root,
+            optimistic_slot: head.slot,
+        };
+        let mut cached = HashMap::from([
+            (checkpoint.beacon_root, checkpoint),
+            (head.beacon_root, head),
+        ]);
+        cached.get_mut(&head.beacon_root).unwrap().beacon_root = B256::repeat_byte(3);
+        assert!(materializable_history_chain(&cached, target).is_none());
+        assert!(next_forward_history_root_request_for_target(target, &cached).is_none());
+        assert!(cached_target_lineage_roots(&cached, target).is_empty());
     }
 
     #[test]
