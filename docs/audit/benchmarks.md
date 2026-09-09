@@ -88,3 +88,7 @@ This baseline does not measure P2P throughput, cryptographic validation,
 concurrent ingestion with queries, HTTP/WS backpressure, or the production API's
 query admission policy. Those require the later subsystem and integrated
 batches. No speedup is claimed by adding this harness.
+
+Checked extraction fixtures and release comparisons are documented in the
+[extraction audit](extraction-boundaries.md) and its
+[baseline report](baselines/2026-09-09-extraction.md).

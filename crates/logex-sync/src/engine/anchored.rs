@@ -326,9 +326,11 @@ async fn validate_and_extract_historical_blocks_streaming(
             let queued_at = std::time::Instant::now();
             tasks.spawn_blocking(move || {
                 let blocking_queue_elapsed = queued_at.elapsed();
-                let mut extracted = validate_and_extract_historical_block_chunk(chunk)?;
-                extracted.blocking_queue_elapsed = blocking_queue_elapsed;
-                Ok(extracted)
+                let extracted = validate_and_extract_historical_block_chunk(chunk)?;
+                Ok::<_, eyre::Report>(extracted.map(|mut chunk| {
+                    chunk.blocking_queue_elapsed = blocking_queue_elapsed;
+                    chunk
+                }))
             });
         }
     }
@@ -345,7 +347,7 @@ async fn validate_and_extract_historical_blocks_streaming(
 
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(chunk)) => {
+            Ok(Ok(Ok(chunk))) => {
                 pending_chunks.insert(chunk.start_index, chunk);
                 while let Some(chunk) = pending_chunks.remove(&next_chunk_index) {
                     next_chunk_index = next_chunk_index.saturating_add(chunk.extracted.block_count);
@@ -359,9 +361,13 @@ async fn validate_and_extract_historical_blocks_streaming(
                     extracted_chunks.push(chunk.extracted);
                 }
             }
-            Ok(Err(failure)) => {
+            Ok(Ok(Err(failure))) => {
                 tasks.abort_all();
                 return Ok(Err(failure));
+            }
+            Ok(Err(error)) => {
+                tasks.abort_all();
+                return Err(error);
             }
             Err(error) => {
                 tasks.abort_all();
@@ -1494,20 +1500,19 @@ fn read_darwin_available_memory_bytes() -> Option<u64> {
 
 fn validate_and_extract_historical_block_chunk(
     jobs: Vec<HistoricalValidationJob>,
-) -> std::result::Result<HistoricalValidationExtractedChunk, Box<HistoricalValidationFailure>> {
+) -> Result<std::result::Result<HistoricalValidationExtractedChunk, Box<HistoricalValidationFailure>>>
+{
     let validation_started = std::time::Instant::now();
     let start_index = jobs.first().map_or(0, |job| job.index);
     let block_count = jobs.len();
-    let total_log_capacity = jobs
-        .iter()
-        .map(|job| {
-            job.receipts
-                .iter()
-                .map(|receipt| receipt.logs().len())
-                .sum::<usize>()
-        })
-        .sum();
-    let mut rows = Vec::with_capacity(total_log_capacity);
+    let total_log_capacity = extract::checked_row_count(
+        jobs.iter()
+            .flat_map(|job| &job.receipts)
+            .map(|receipt| receipt.logs().len()),
+    )?;
+    let mut rows = Vec::new();
+    rows.try_reserve(total_log_capacity)
+        .map_err(|error| eyre::eyre!("reserve historical log rows: {error}"))?;
     let mut peer_notes = Vec::new();
     let mut lowest_header = None;
     let mut lowest_block = u64::MAX;
@@ -1517,17 +1522,17 @@ fn validate_and_extract_historical_block_chunk(
     for job in jobs {
         let block_number = job.header.number();
         if let Err(error) = validate_block_pre_execution(&job.header, job.block_hash, &job.body) {
-            return Err(Box::new(HistoricalValidationFailure {
+            return Ok(Err(Box::new(HistoricalValidationFailure {
                 peer: job.body_peer,
                 response_kind: "block bodies",
                 block_number,
                 block_hash: job.block_hash,
                 message: error.to_string(),
-            }));
+            })));
         }
 
         if !receipts_match_transaction_count(&job.body, &job.receipts) {
-            return Err(Box::new(HistoricalValidationFailure {
+            return Ok(Err(Box::new(HistoricalValidationFailure {
                 peer: job.receipt_peer,
                 response_kind: "receipts",
                 block_number,
@@ -1537,17 +1542,17 @@ fn validate_and_extract_historical_block_chunk(
                     job.body.transaction_count(),
                     job.receipts.len()
                 ),
-            }));
+            })));
         }
 
         if let Err(error) = validate_receipts_for_header(&job.header, &job.receipts) {
-            return Err(Box::new(HistoricalValidationFailure {
+            return Ok(Err(Box::new(HistoricalValidationFailure {
                 peer: job.receipt_peer,
                 response_kind: "receipts",
                 block_number,
                 block_hash: job.block_hash,
                 message: error.to_string(),
-            }));
+            })));
         }
 
         let extraction_started = std::time::Instant::now();
@@ -1558,7 +1563,7 @@ fn validate_and_extract_historical_block_chunk(
             job.header.timestamp(),
             &job.body,
             &job.receipts,
-        );
+        )?;
         extraction_elapsed += extraction_started.elapsed();
 
         push_unique_peer_note(&mut peer_notes, job.body_peer);
@@ -1578,7 +1583,7 @@ fn validate_and_extract_historical_block_chunk(
         ..Default::default()
     });
     let row_count = rows.len() as u64;
-    Ok(HistoricalValidationExtractedChunk {
+    Ok(Ok(HistoricalValidationExtractedChunk {
         start_index,
         peer_notes,
         extracted: super::ingest::HistoricalExtractedChunk {
@@ -1592,7 +1597,7 @@ fn validate_and_extract_historical_block_chunk(
         highest_block,
         blocking_queue_elapsed: Duration::ZERO,
         validation_elapsed: validation_started.elapsed(),
-    })
+    }))
 }
 
 fn push_unique_peer_note(peer_notes: &mut Vec<PeerId>, peer_id: PeerId) {
@@ -2986,13 +2991,6 @@ impl SyncEngine {
                 ..
             } = block;
             let block_number = header.number();
-            if let Some(reorg) = self.head_tracker.track(header.clone()) {
-                self.handle_reorg(reorg).await?;
-            }
-
-            let recent_headers = self.head_tracker.snapshot();
-            self.peers
-                .cache_canonical_block(header.clone(), body.clone(), &receipts);
             extract::append_from_body_receipts(
                 &mut rows,
                 block_number,
@@ -3000,7 +2998,14 @@ impl SyncEngine {
                 header.timestamp(),
                 &body,
                 &receipts,
-            );
+            )?;
+            if let Some(reorg) = self.head_tracker.track(header.clone()) {
+                self.handle_reorg(reorg).await?;
+            }
+
+            let recent_headers = self.head_tracker.snapshot();
+            self.peers
+                .cache_canonical_block(header.clone(), body.clone(), &receipts);
             self.note_serving_peer(header_peer, &mut newly_serving_peers);
             self.note_serving_peer(body_peer, &mut newly_serving_peers);
             self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
@@ -6981,6 +6986,53 @@ mod tests {
             finalized: false,
             parent_beacon_root: None,
         }
+    }
+
+    #[test]
+    fn extraction_failure_is_local_after_authenticated_receipt_validation() {
+        use alloy_consensus::{SignableTransaction, TxLegacy, proofs};
+        use alloy_primitives::{LogData, Signature, U256};
+        let mut body = reth_ethereum_primitives::BlockBody::default();
+        body.transactions.push(
+            TxLegacy::default()
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+        );
+        // Deliberately inconsistent with EVM log rules, but self-consistent
+        // commitments let us test the local extraction error channel separately.
+        let receipt = crate::primitives::LogexReceipt {
+            logs: vec![Log {
+                address: Address::ZERO,
+                data: LogData::new_unchecked(vec![B256::ZERO; 5], Bytes::new()),
+            }],
+            ..Default::default()
+        };
+        let receipt = ReceiptWithBloom {
+            logs_bloom: receipt.bloom(),
+            receipt,
+        };
+        let header = Header {
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            receipts_root: proofs::calculate_receipt_root(std::slice::from_ref(&receipt)),
+            logs_bloom: receipt.logs_bloom,
+            ..Default::default()
+        };
+        let job = HistoricalValidationJob {
+            index: 0,
+            block_hash: header.hash_slow(),
+            header,
+            body_peer: PeerId::ZERO,
+            body,
+            receipt_peer: PeerId::ZERO,
+            receipts: vec![receipt],
+        };
+        let result = validate_and_extract_historical_block_chunk(vec![job]);
+        let Err(error) = result else {
+            panic!("extraction must return a local error, without peer attribution")
+        };
+        assert!(format!("{error:#}").contains("5 topics"));
     }
 
     fn log_row(block_number: u64, marker: u8) -> LogRow {

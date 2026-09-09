@@ -212,7 +212,7 @@ impl SyncEngine {
     ) -> Result<u64> {
         let block_number = header.number();
         let timestamp = header.timestamp();
-        let rows = extract::extract_from_block(block_number, block_hash, timestamp, txs);
+        let rows = extract::extract_from_block(block_number, block_hash, timestamp, txs)?;
         let count = rows.len() as u64;
 
         let mut storage = self.storage.write().await;
@@ -408,7 +408,7 @@ fn next_historical_extract_task(
 
             let extraction_started = std::time::Instant::now();
             let block_count = chunk.len();
-            let rows = collect_validated_historical_rows(chunk);
+            let rows = collect_validated_historical_rows(chunk)?;
             let extraction_elapsed = extraction_started.elapsed();
             let row_count = rows.len() as u64;
 
@@ -595,20 +595,20 @@ fn read_darwin_available_memory_bytes() -> Option<u64> {
     reclaimable_pages.checked_mul(page_size as u64)
 }
 
-fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) -> Vec<LogRow> {
+fn collect_validated_historical_rows(
+    mut blocks: Vec<HistoricalValidatedBlock>,
+) -> Result<Vec<LogRow>> {
     blocks.sort_unstable_by_key(|block| block.header.number());
 
-    let total_rows = blocks
-        .iter()
-        .map(|block| {
-            block
-                .receipts
-                .iter()
-                .map(|receipt| receipt.logs().len())
-                .sum::<usize>()
-        })
-        .sum();
-    let mut rows = Vec::with_capacity(total_rows);
+    let total_rows = extract::checked_row_count(
+        blocks
+            .iter()
+            .flat_map(|block| &block.receipts)
+            .map(|receipt| receipt.logs().len()),
+    )?;
+    let mut rows = Vec::new();
+    rows.try_reserve(total_rows)
+        .map_err(|error| eyre::eyre!("reserve historical log rows: {error}"))?;
     for block in blocks {
         extract::append_from_body_receipts(
             &mut rows,
@@ -617,9 +617,9 @@ fn collect_validated_historical_rows(mut blocks: Vec<HistoricalValidatedBlock>) 
             block.header.timestamp(),
             &block.body,
             &block.receipts,
-        );
+        )?;
     }
-    rows
+    Ok(rows)
 }
 
 pub(super) fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {

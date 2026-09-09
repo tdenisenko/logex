@@ -9,7 +9,7 @@ pub use consensus::{
     LightClientFinalityUpdateStatus, LightClientHeaderSummary, LightClientOptimisticUpdateStatus,
     WeakSubjectivityCheckpoint,
 };
-pub use log_row::{BlockContext, LogRow, Source};
+pub use log_row::{BlockContext, LogRow, LogRowConversionError, Source};
 pub use partition::PartitionMeta;
 pub use sync::{ConsensusNetworkStatus, ExecutionNetworkStatus, NodeState, SyncStatus};
 

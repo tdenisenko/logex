@@ -61,12 +61,47 @@ pub struct BlockContext {
     pub timestamp: u64,
 }
 
+/// A primitive log cannot be represented by the persisted row schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRowConversionError {
+    TooManyTopics { count: usize },
+    DataTooLong { length: usize },
+}
+
+impl std::fmt::Display for LogRowConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyTopics { count } => {
+                write!(f, "log has {count} topics; at most 4 are supported")
+            }
+            Self::DataTooLong { length } => {
+                write!(f, "log data length {length} exceeds the u32 row limit")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LogRowConversionError {}
+
+fn checked_log_shape(topic_count: usize, data_length: usize) -> Result<u32, LogRowConversionError> {
+    if topic_count > 4 {
+        return Err(LogRowConversionError::TooManyTopics { count: topic_count });
+    }
+    u32::try_from(data_length).map_err(|_| LogRowConversionError::DataTooLong {
+        length: data_length,
+    })
+}
+
 impl LogRow {
     /// Convert an alloy RPC log into a `LogRow`.
     ///
     /// The alloy `Log` type already carries block/tx metadata when returned
     /// from an RPC response, but during P2P sync we have the block
     /// context separately, so this constructor accepts both.
+    ///
+    /// # Panics
+    /// Panics if the log exceeds the row's topic or data-length limits. Use
+    /// [`Self::try_from_alloy_log`] for input that has not been checked.
     pub fn from_alloy_log(
         log: &alloy_rpc_types::Log,
         ctx: &BlockContext,
@@ -77,6 +112,18 @@ impl LogRow {
         Self::from_primitives_log(&log.inner, ctx, tx_hash, tx_index, log_index)
     }
 
+    /// Checked RPC conversion using the caller's context and receipt provenance.
+    /// This does not authenticate the log or its RPC metadata.
+    pub fn try_from_alloy_log(
+        log: &alloy_rpc_types::Log,
+        ctx: &BlockContext,
+        tx_hash: B256,
+        tx_index: u32,
+        log_index: u32,
+    ) -> Result<Self, LogRowConversionError> {
+        Self::try_from_primitives_log(&log.inner, ctx, tx_hash, tx_index, log_index)
+    }
+
     /// Convert a primitive log (as found in receipts) into a `LogRow`.
     ///
     /// This is the lower-level constructor used during P2P sync where
@@ -84,6 +131,10 @@ impl LogRow {
     /// the RPC-wrapped `alloy_rpc_types::Log`.
     /// The caller must validate receipt provenance and supply block/transaction
     /// metadata; this conversion assigns `Source::Receipt` without verifying it.
+    ///
+    /// # Panics
+    /// Panics if the log exceeds the row's topic or data-length limits. Use
+    /// [`Self::try_from_primitives_log`] for input that has not been checked.
     pub fn from_primitives_log(
         log: &alloy_primitives::Log,
         ctx: &BlockContext,
@@ -91,8 +142,23 @@ impl LogRow {
         tx_index: u32,
         log_index: u32,
     ) -> Self {
+        Self::try_from_primitives_log(log, ctx, tx_hash, tx_index, log_index)
+            .expect("primitive log must fit the LogRow schema")
+    }
+
+    /// Convert without truncating topics or data length. The caller must still
+    /// authenticate receipts and supply their block/transaction metadata.
+    #[inline]
+    pub fn try_from_primitives_log(
+        log: &alloy_primitives::Log,
+        ctx: &BlockContext,
+        tx_hash: B256,
+        tx_index: u32,
+        log_index: u32,
+    ) -> Result<Self, LogRowConversionError> {
         let topics = log.data.topics();
-        Self {
+        let data_len = checked_log_shape(topics.len(), log.data.data.len())?;
+        Ok(Self {
             block_number: ctx.block_number,
             block_hash: ctx.block_hash,
             timestamp: ctx.timestamp,
@@ -104,10 +170,10 @@ impl LogRow {
             topic1: topics.get(1).copied(),
             topic2: topics.get(2).copied(),
             topic3: topics.get(3).copied(),
-            data_len: log.data.data.len() as u32,
+            data_len,
             data: log.data.data.clone(),
             source: Source::Receipt,
-        }
+        })
     }
 }
 
@@ -132,6 +198,63 @@ mod tests {
             data: bytes!("deadbeef"),
             data_len: 4,
             source: Source::Receipt,
+        }
+    }
+
+    #[test]
+    fn primitive_conversion_rejects_excess_topics() {
+        let log = alloy_primitives::Log {
+            address: Address::ZERO,
+            data: LogData::new_unchecked(vec![B256::ZERO; 5], Bytes::new()),
+        };
+        let ctx = BlockContext {
+            block_number: 0,
+            block_hash: B256::ZERO,
+            timestamp: 0,
+        };
+        assert!(
+            std::panic::catch_unwind(|| LogRow::from_primitives_log(&log, &ctx, B256::ZERO, 0, 0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn checked_conversion_validates_shape_and_preserves_topic_presence() {
+        let ctx = BlockContext {
+            block_number: u64::MAX,
+            block_hash: B256::ZERO,
+            timestamp: u64::MAX,
+        };
+        for count in 0..=5 {
+            let log = alloy_primitives::Log {
+                address: Address::ZERO,
+                data: LogData::new_unchecked(vec![B256::ZERO; count], bytes!("0001")),
+            };
+            let result =
+                LogRow::try_from_primitives_log(&log, &ctx, B256::ZERO, u32::MAX, u32::MAX);
+            if count > 4 {
+                assert_eq!(result, Err(LogRowConversionError::TooManyTopics { count }));
+            } else {
+                let row = result.unwrap();
+                assert_eq!(
+                    [row.topic0, row.topic1, row.topic2, row.topic3],
+                    std::array::from_fn(|i| (i < count).then_some(B256::ZERO))
+                );
+                assert_eq!(row.data_len, 2);
+                assert_eq!(row.data, bytes!("0001"));
+                assert_eq!(row.tx_index, u32::MAX);
+                assert_eq!(row.log_index, u32::MAX);
+                assert_eq!(row.block_number, u64::MAX);
+                assert_eq!(row.timestamp, u64::MAX);
+            }
+        }
+        assert_eq!(checked_log_shape(0, 0), Ok(0));
+        assert_eq!(checked_log_shape(4, u32::MAX as usize), Ok(u32::MAX));
+        if let Some(length) = (u32::MAX as usize).checked_add(1) {
+            assert_eq!(
+                checked_log_shape(4, length),
+                Err(LogRowConversionError::DataTooLong { length })
+            );
         }
     }
 
@@ -178,6 +301,10 @@ mod tests {
         };
 
         let row = LogRow::from_alloy_log(&alloy_log, &ctx, B256::repeat_byte(0x22), 5, 10);
+        assert_eq!(
+            LogRow::try_from_alloy_log(&alloy_log, &ctx, B256::repeat_byte(0x22), 5, 10).unwrap(),
+            row
+        );
 
         assert_eq!(row.block_number, 100);
         assert_eq!(row.block_hash, B256::repeat_byte(0x11));
