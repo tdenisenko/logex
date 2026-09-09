@@ -1,0 +1,170 @@
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 0, "label": "base"}
+{"append_ms": 6.0981250000000005, "decode_ms": 0.26500840000000003, "encode_ms": 0.0956666, "kind": "sample", "read_ms": 0.62, "sample": 0, "pair": 0, "label": "base"}
+{"append_ms": 5.532083, "decode_ms": 0.2649833, "encode_ms": 0.0739958, "kind": "sample", "read_ms": 0.636375, "sample": 1, "pair": 0, "label": "base"}
+{"append_ms": 12.299, "decode_ms": 0.313225, "encode_ms": 0.07272500000000001, "kind": "sample", "read_ms": 0.658125, "sample": 2, "pair": 0, "label": "base"}
+{"append_ms": 5.4058329999999994, "decode_ms": 0.30435, "encode_ms": 0.0737083, "kind": "sample", "read_ms": 0.662333, "sample": 3, "pair": 0, "label": "base"}
+{"append_ms": 5.82475, "decode_ms": 1.0404584, "encode_ms": 0.0790375, "kind": "sample", "read_ms": 1.042708, "sample": 4, "pair": 0, "label": "base"}
+{"append_ms": 5.877083, "decode_ms": 0.5409458, "encode_ms": 0.0952375, "kind": "sample", "read_ms": 0.6329159999999999, "sample": 5, "pair": 0, "label": "base"}
+{"append_ms": 4.918958, "decode_ms": 0.2576, "encode_ms": 0.07067920000000001, "kind": "sample", "read_ms": 0.5670000000000001, "sample": 6, "pair": 0, "label": "base"}
+{"append_ms": 5.904166, "decode_ms": 0.2676791, "encode_ms": 0.0757583, "kind": "sample", "read_ms": 0.627, "sample": 7, "pair": 0, "label": "base"}
+{"append_ms": 5.857583, "decode_ms": 0.25698750000000004, "encode_ms": 0.0698917, "kind": "sample", "read_ms": 0.622166, "sample": 8, "pair": 0, "label": "base"}
+{"append_ms": 4.776917, "decode_ms": 0.255925, "encode_ms": 0.0723959, "kind": "sample", "read_ms": 0.5843750000000001, "sample": 9, "pair": 0, "label": "base"}
+{"append_ms": 4.826792, "decode_ms": 0.2582792, "encode_ms": 0.07204580000000001, "kind": "sample", "read_ms": 0.54225, "sample": 10, "pair": 0, "label": "base"}
+{"append_ms": 4.955584, "decode_ms": 0.2654875, "encode_ms": 0.0716166, "kind": "sample", "read_ms": 0.5609999999999999, "sample": 11, "pair": 0, "label": "base"}
+{"append_ms": 5.798333, "decode_ms": 0.2672292, "encode_ms": 0.0738583, "kind": "sample", "read_ms": 0.536208, "sample": 12, "pair": 0, "label": "base"}
+{"append_ms": 5.789667, "decode_ms": 0.2649166, "encode_ms": 0.078225, "kind": "sample", "read_ms": 0.5461659999999999, "sample": 13, "pair": 0, "label": "base"}
+{"append_ms": 5.735584, "decode_ms": 0.2680042, "encode_ms": 0.07800409999999999, "kind": "sample", "read_ms": 0.536833, "sample": 14, "pair": 0, "label": "base"}
+{"kind": "process", "pair": 0, "label": "base", "rss_bytes": 11747328, "executable_sha256": "f32b4fff99e6dbf71bf3274db409327cdc76f417abd76d39b66b900fe11c01bf"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 0, "label": "candidate"}
+{"append_ms": 5.5915, "decode_ms": 0.24394590000000002, "encode_ms": 0.0727708, "kind": "sample", "read_ms": 0.49808299999999994, "sample": 0, "pair": 0, "label": "candidate"}
+{"append_ms": 5.280125, "decode_ms": 0.2408458, "encode_ms": 0.0743541, "kind": "sample", "read_ms": 0.495167, "sample": 1, "pair": 0, "label": "candidate"}
+{"append_ms": 6.2244589999999995, "decode_ms": 0.24228750000000004, "encode_ms": 0.077425, "kind": "sample", "read_ms": 0.497459, "sample": 2, "pair": 0, "label": "candidate"}
+{"append_ms": 9.732958, "decode_ms": 0.2595208, "encode_ms": 0.0862583, "kind": "sample", "read_ms": 0.5156660000000001, "sample": 3, "pair": 0, "label": "candidate"}
+{"append_ms": 5.5275419999999995, "decode_ms": 0.2644625, "encode_ms": 0.07725, "kind": "sample", "read_ms": 0.528125, "sample": 4, "pair": 0, "label": "candidate"}
+{"append_ms": 5.858040999999999, "decode_ms": 0.2578125, "encode_ms": 0.07735410000000001, "kind": "sample", "read_ms": 0.5274169999999999, "sample": 5, "pair": 0, "label": "candidate"}
+{"append_ms": 5.117, "decode_ms": 0.2601375, "encode_ms": 0.07695830000000001, "kind": "sample", "read_ms": 0.548708, "sample": 6, "pair": 0, "label": "candidate"}
+{"append_ms": 5.785375, "decode_ms": 0.2593125, "encode_ms": 0.08130420000000001, "kind": "sample", "read_ms": 0.541625, "sample": 7, "pair": 0, "label": "candidate"}
+{"append_ms": 5.714625, "decode_ms": 0.2610375, "encode_ms": 0.0771, "kind": "sample", "read_ms": 0.526208, "sample": 8, "pair": 0, "label": "candidate"}
+{"append_ms": 4.989333, "decode_ms": 0.25440830000000003, "encode_ms": 0.07465, "kind": "sample", "read_ms": 0.547084, "sample": 9, "pair": 0, "label": "candidate"}
+{"append_ms": 5.909083, "decode_ms": 0.260775, "encode_ms": 0.0777417, "kind": "sample", "read_ms": 0.536166, "sample": 10, "pair": 0, "label": "candidate"}
+{"append_ms": 5.932166, "decode_ms": 0.2621125, "encode_ms": 0.0770042, "kind": "sample", "read_ms": 0.585583, "sample": 11, "pair": 0, "label": "candidate"}
+{"append_ms": 5.394417000000001, "decode_ms": 0.2671375, "encode_ms": 0.0809, "kind": "sample", "read_ms": 0.5584169999999999, "sample": 12, "pair": 0, "label": "candidate"}
+{"append_ms": 4.824125, "decode_ms": 0.2664416, "encode_ms": 0.0821792, "kind": "sample", "read_ms": 0.5560419999999999, "sample": 13, "pair": 0, "label": "candidate"}
+{"append_ms": 4.944541999999999, "decode_ms": 0.2679292, "encode_ms": 0.080275, "kind": "sample", "read_ms": 0.543167, "sample": 14, "pair": 0, "label": "candidate"}
+{"kind": "process", "pair": 0, "label": "candidate", "rss_bytes": 9404416, "executable_sha256": "a69375c4b786edd46e45e6073e28f83079f3cd7356156afe2bbabadf62ac6072"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 1, "label": "candidate"}
+{"append_ms": 5.483708, "decode_ms": 0.25837089999999996, "encode_ms": 0.077525, "kind": "sample", "read_ms": 0.52325, "sample": 0, "pair": 1, "label": "candidate"}
+{"append_ms": 5.842708, "decode_ms": 0.2669667, "encode_ms": 0.0770084, "kind": "sample", "read_ms": 0.552958, "sample": 1, "pair": 1, "label": "candidate"}
+{"append_ms": 5.798, "decode_ms": 0.2651375, "encode_ms": 0.08214579999999999, "kind": "sample", "read_ms": 0.557041, "sample": 2, "pair": 1, "label": "candidate"}
+{"append_ms": 4.915084, "decode_ms": 0.2669958, "encode_ms": 0.0802458, "kind": "sample", "read_ms": 0.553083, "sample": 3, "pair": 1, "label": "candidate"}
+{"append_ms": 5.456083, "decode_ms": 0.26800830000000003, "encode_ms": 0.0831083, "kind": "sample", "read_ms": 0.5550839999999999, "sample": 4, "pair": 1, "label": "candidate"}
+{"append_ms": 4.750125, "decode_ms": 0.2682916, "encode_ms": 0.08009999999999999, "kind": "sample", "read_ms": 0.647042, "sample": 5, "pair": 1, "label": "candidate"}
+{"append_ms": 5.810917, "decode_ms": 0.2662625, "encode_ms": 0.08072090000000001, "kind": "sample", "read_ms": 0.6402909999999999, "sample": 6, "pair": 1, "label": "candidate"}
+{"append_ms": 5.386291, "decode_ms": 0.2867541, "encode_ms": 0.0819, "kind": "sample", "read_ms": 0.538875, "sample": 7, "pair": 1, "label": "candidate"}
+{"append_ms": 4.814792, "decode_ms": 0.2578916, "encode_ms": 0.0806292, "kind": "sample", "read_ms": 0.541791, "sample": 8, "pair": 1, "label": "candidate"}
+{"append_ms": 5.839416, "decode_ms": 0.2653375, "encode_ms": 0.0775042, "kind": "sample", "read_ms": 0.55825, "sample": 9, "pair": 1, "label": "candidate"}
+{"append_ms": 5.884708, "decode_ms": 0.26246669999999994, "encode_ms": 0.08006250000000001, "kind": "sample", "read_ms": 0.569542, "sample": 10, "pair": 1, "label": "candidate"}
+{"append_ms": 5.712292, "decode_ms": 0.2734875, "encode_ms": 0.0801583, "kind": "sample", "read_ms": 0.574375, "sample": 11, "pair": 1, "label": "candidate"}
+{"append_ms": 4.52075, "decode_ms": 0.27015, "encode_ms": 0.0810459, "kind": "sample", "read_ms": 0.5322089999999999, "sample": 12, "pair": 1, "label": "candidate"}
+{"append_ms": 4.862458, "decode_ms": 0.2675958, "encode_ms": 0.08027909999999999, "kind": "sample", "read_ms": 0.572375, "sample": 13, "pair": 1, "label": "candidate"}
+{"append_ms": 4.813292000000001, "decode_ms": 0.26870420000000006, "encode_ms": 0.0842083, "kind": "sample", "read_ms": 0.5635, "sample": 14, "pair": 1, "label": "candidate"}
+{"kind": "process", "pair": 1, "label": "candidate", "rss_bytes": 9404416, "executable_sha256": "a69375c4b786edd46e45e6073e28f83079f3cd7356156afe2bbabadf62ac6072"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 1, "label": "base"}
+{"append_ms": 4.593167, "decode_ms": 0.2767917, "encode_ms": 0.0786583, "kind": "sample", "read_ms": 0.584416, "sample": 0, "pair": 1, "label": "base"}
+{"append_ms": 4.69775, "decode_ms": 0.2801, "encode_ms": 0.07805419999999999, "kind": "sample", "read_ms": 0.578, "sample": 1, "pair": 1, "label": "base"}
+{"append_ms": 5.599458, "decode_ms": 0.2874166, "encode_ms": 0.0811208, "kind": "sample", "read_ms": 0.590875, "sample": 2, "pair": 1, "label": "base"}
+{"append_ms": 5.638790999999999, "decode_ms": 0.279875, "encode_ms": 0.07837910000000001, "kind": "sample", "read_ms": 0.61775, "sample": 3, "pair": 1, "label": "base"}
+{"append_ms": 4.9923329999999995, "decode_ms": 0.2831916, "encode_ms": 0.077925, "kind": "sample", "read_ms": 0.603209, "sample": 4, "pair": 1, "label": "base"}
+{"append_ms": 5.028084000000001, "decode_ms": 0.2723959, "encode_ms": 0.078, "kind": "sample", "read_ms": 0.5607500000000001, "sample": 5, "pair": 1, "label": "base"}
+{"append_ms": 5.790959, "decode_ms": 0.28397079999999997, "encode_ms": 0.08057500000000001, "kind": "sample", "read_ms": 0.58775, "sample": 6, "pair": 1, "label": "base"}
+{"append_ms": 4.6315, "decode_ms": 0.2816083, "encode_ms": 0.08058749999999999, "kind": "sample", "read_ms": 0.5934999999999999, "sample": 7, "pair": 1, "label": "base"}
+{"append_ms": 5.390292, "decode_ms": 0.2793291, "encode_ms": 0.07784579999999999, "kind": "sample", "read_ms": 0.571541, "sample": 8, "pair": 1, "label": "base"}
+{"append_ms": 8.912208, "decode_ms": 0.2761417, "encode_ms": 0.0775833, "kind": "sample", "read_ms": 0.571417, "sample": 9, "pair": 1, "label": "base"}
+{"append_ms": 4.873833, "decode_ms": 0.281225, "encode_ms": 0.0805041, "kind": "sample", "read_ms": 0.579375, "sample": 10, "pair": 1, "label": "base"}
+{"append_ms": 5.379167, "decode_ms": 0.4150583, "encode_ms": 0.0812917, "kind": "sample", "read_ms": 0.582959, "sample": 11, "pair": 1, "label": "base"}
+{"append_ms": 5.639667, "decode_ms": 0.2807959, "encode_ms": 0.0792958, "kind": "sample", "read_ms": 0.584, "sample": 12, "pair": 1, "label": "base"}
+{"append_ms": 5.438167, "decode_ms": 0.2771833, "encode_ms": 0.078, "kind": "sample", "read_ms": 0.571125, "sample": 13, "pair": 1, "label": "base"}
+{"append_ms": 4.705958, "decode_ms": 0.2768958, "encode_ms": 0.0777041, "kind": "sample", "read_ms": 0.563583, "sample": 14, "pair": 1, "label": "base"}
+{"kind": "process", "pair": 1, "label": "base", "rss_bytes": 10567680, "executable_sha256": "f32b4fff99e6dbf71bf3274db409327cdc76f417abd76d39b66b900fe11c01bf"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 2, "label": "base"}
+{"append_ms": 5.161916, "decode_ms": 0.2715125, "encode_ms": 0.0754417, "kind": "sample", "read_ms": 0.607375, "sample": 0, "pair": 2, "label": "base"}
+{"append_ms": 5.838709, "decode_ms": 0.2679583, "encode_ms": 0.07443330000000001, "kind": "sample", "read_ms": 0.5381659999999999, "sample": 1, "pair": 2, "label": "base"}
+{"append_ms": 6.936333, "decode_ms": 0.2694833, "encode_ms": 0.07711670000000001, "kind": "sample", "read_ms": 0.589875, "sample": 2, "pair": 2, "label": "base"}
+{"append_ms": 5.637416999999999, "decode_ms": 0.2783417, "encode_ms": 0.076625, "kind": "sample", "read_ms": 0.5706249999999999, "sample": 3, "pair": 2, "label": "base"}
+{"append_ms": 5.4197500000000005, "decode_ms": 0.2783083, "encode_ms": 0.079575, "kind": "sample", "read_ms": 0.561333, "sample": 4, "pair": 2, "label": "base"}
+{"append_ms": 4.791, "decode_ms": 0.2784, "encode_ms": 0.07673340000000001, "kind": "sample", "read_ms": 0.555875, "sample": 5, "pair": 2, "label": "base"}
+{"append_ms": 4.7395830000000005, "decode_ms": 0.2802666, "encode_ms": 0.0768084, "kind": "sample", "read_ms": 0.5615, "sample": 6, "pair": 2, "label": "base"}
+{"append_ms": 4.879042, "decode_ms": 0.275475, "encode_ms": 0.0767, "kind": "sample", "read_ms": 0.602917, "sample": 7, "pair": 2, "label": "base"}
+{"append_ms": 5.257916, "decode_ms": 0.28501659999999995, "encode_ms": 0.0804083, "kind": "sample", "read_ms": 0.5616669999999999, "sample": 8, "pair": 2, "label": "base"}
+{"append_ms": 5.6772089999999995, "decode_ms": 0.2782042, "encode_ms": 0.0768084, "kind": "sample", "read_ms": 0.54225, "sample": 9, "pair": 2, "label": "base"}
+{"append_ms": 5.7785, "decode_ms": 0.2821042, "encode_ms": 0.07680000000000001, "kind": "sample", "read_ms": 0.568167, "sample": 10, "pair": 2, "label": "base"}
+{"append_ms": 5.711250000000001, "decode_ms": 0.2808125, "encode_ms": 0.07665839999999999, "kind": "sample", "read_ms": 0.5467500000000001, "sample": 11, "pair": 2, "label": "base"}
+{"append_ms": 5.413208, "decode_ms": 0.2795917, "encode_ms": 0.076725, "kind": "sample", "read_ms": 0.583167, "sample": 12, "pair": 2, "label": "base"}
+{"append_ms": 4.7995, "decode_ms": 0.2780333, "encode_ms": 0.076475, "kind": "sample", "read_ms": 0.5617909999999999, "sample": 13, "pair": 2, "label": "base"}
+{"append_ms": 5.728333, "decode_ms": 0.2796292, "encode_ms": 0.0809167, "kind": "sample", "read_ms": 0.541958, "sample": 14, "pair": 2, "label": "base"}
+{"kind": "process", "pair": 2, "label": "base", "rss_bytes": 9420800, "executable_sha256": "f32b4fff99e6dbf71bf3274db409327cdc76f417abd76d39b66b900fe11c01bf"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 2, "label": "candidate"}
+{"append_ms": 4.365125, "decode_ms": 0.2539917, "encode_ms": 0.0798292, "kind": "sample", "read_ms": 0.5395000000000001, "sample": 0, "pair": 2, "label": "candidate"}
+{"append_ms": 4.864625, "decode_ms": 0.2660625, "encode_ms": 0.0750375, "kind": "sample", "read_ms": 0.520125, "sample": 1, "pair": 2, "label": "candidate"}
+{"append_ms": 5.05225, "decode_ms": 0.251525, "encode_ms": 0.0741417, "kind": "sample", "read_ms": 0.5259159999999999, "sample": 2, "pair": 2, "label": "candidate"}
+{"append_ms": 5.047458000000001, "decode_ms": 0.25098750000000003, "encode_ms": 0.0800709, "kind": "sample", "read_ms": 0.536667, "sample": 3, "pair": 2, "label": "candidate"}
+{"append_ms": 4.7024170000000005, "decode_ms": 0.2509708, "encode_ms": 0.07412919999999999, "kind": "sample", "read_ms": 0.521708, "sample": 4, "pair": 2, "label": "candidate"}
+{"append_ms": 5.061249999999999, "decode_ms": 0.2564209, "encode_ms": 0.076725, "kind": "sample", "read_ms": 0.516083, "sample": 5, "pair": 2, "label": "candidate"}
+{"append_ms": 4.979667, "decode_ms": 0.25666669999999997, "encode_ms": 0.0795791, "kind": "sample", "read_ms": 0.552917, "sample": 6, "pair": 2, "label": "candidate"}
+{"append_ms": 5.882334, "decode_ms": 0.26055, "encode_ms": 0.0771625, "kind": "sample", "read_ms": 0.542458, "sample": 7, "pair": 2, "label": "candidate"}
+{"append_ms": 4.694834, "decode_ms": 0.26085420000000004, "encode_ms": 0.07675839999999999, "kind": "sample", "read_ms": 0.539375, "sample": 8, "pair": 2, "label": "candidate"}
+{"append_ms": 5.855792, "decode_ms": 0.25782499999999997, "encode_ms": 0.07672090000000001, "kind": "sample", "read_ms": 0.5886659999999999, "sample": 9, "pair": 2, "label": "candidate"}
+{"append_ms": 4.963208, "decode_ms": 0.25767090000000004, "encode_ms": 0.07699589999999999, "kind": "sample", "read_ms": 0.536709, "sample": 10, "pair": 2, "label": "candidate"}
+{"append_ms": 4.898208, "decode_ms": 0.26026249999999995, "encode_ms": 0.07676659999999999, "kind": "sample", "read_ms": 0.572833, "sample": 11, "pair": 2, "label": "candidate"}
+{"append_ms": 5.751042, "decode_ms": 0.2603584, "encode_ms": 0.0766458, "kind": "sample", "read_ms": 0.533292, "sample": 12, "pair": 2, "label": "candidate"}
+{"append_ms": 4.785, "decode_ms": 0.2629416, "encode_ms": 0.076575, "kind": "sample", "read_ms": 0.545792, "sample": 13, "pair": 2, "label": "candidate"}
+{"append_ms": 5.966708000000001, "decode_ms": 0.26220000000000004, "encode_ms": 0.0824375, "kind": "sample", "read_ms": 0.529584, "sample": 14, "pair": 2, "label": "candidate"}
+{"kind": "process", "pair": 2, "label": "candidate", "rss_bytes": 9404416, "executable_sha256": "a69375c4b786edd46e45e6073e28f83079f3cd7356156afe2bbabadf62ac6072"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 3, "label": "candidate"}
+{"append_ms": 5.335959000000001, "decode_ms": 0.25065, "encode_ms": 0.0800792, "kind": "sample", "read_ms": 0.5746669999999999, "sample": 0, "pair": 3, "label": "candidate"}
+{"append_ms": 5.887333, "decode_ms": 0.261175, "encode_ms": 0.0743833, "kind": "sample", "read_ms": 0.61025, "sample": 1, "pair": 3, "label": "candidate"}
+{"append_ms": 6.0807910000000005, "decode_ms": 0.2509042, "encode_ms": 0.0735791, "kind": "sample", "read_ms": 0.490292, "sample": 2, "pair": 3, "label": "candidate"}
+{"append_ms": 6.138249999999999, "decode_ms": 0.24471250000000003, "encode_ms": 0.0716542, "kind": "sample", "read_ms": 0.515875, "sample": 3, "pair": 3, "label": "candidate"}
+{"append_ms": 4.968667000000001, "decode_ms": 0.23992909999999998, "encode_ms": 0.0716834, "kind": "sample", "read_ms": 0.530458, "sample": 4, "pair": 3, "label": "candidate"}
+{"append_ms": 5.264708, "decode_ms": 0.239575, "encode_ms": 0.07175000000000001, "kind": "sample", "read_ms": 0.523833, "sample": 5, "pair": 3, "label": "candidate"}
+{"append_ms": 5.228834, "decode_ms": 0.2427667, "encode_ms": 0.0715833, "kind": "sample", "read_ms": 0.511833, "sample": 6, "pair": 3, "label": "candidate"}
+{"append_ms": 5.231999999999999, "decode_ms": 0.261975, "encode_ms": 0.0738625, "kind": "sample", "read_ms": 0.540834, "sample": 7, "pair": 3, "label": "candidate"}
+{"append_ms": 5.402375, "decode_ms": 0.24615, "encode_ms": 0.0741875, "kind": "sample", "read_ms": 0.527834, "sample": 8, "pair": 3, "label": "candidate"}
+{"append_ms": 6.121666, "decode_ms": 0.2487791, "encode_ms": 0.0766, "kind": "sample", "read_ms": 0.525, "sample": 9, "pair": 3, "label": "candidate"}
+{"append_ms": 5.1067919999999996, "decode_ms": 0.249875, "encode_ms": 0.07522090000000001, "kind": "sample", "read_ms": 0.5215839999999999, "sample": 10, "pair": 3, "label": "candidate"}
+{"append_ms": 4.989583, "decode_ms": 0.25495829999999997, "encode_ms": 0.07408329999999999, "kind": "sample", "read_ms": 0.511917, "sample": 11, "pair": 3, "label": "candidate"}
+{"append_ms": 4.909709, "decode_ms": 0.24769999999999998, "encode_ms": 0.0740792, "kind": "sample", "read_ms": 0.52925, "sample": 12, "pair": 3, "label": "candidate"}
+{"append_ms": 6.061541999999999, "decode_ms": 0.25253749999999997, "encode_ms": 0.0792875, "kind": "sample", "read_ms": 0.538333, "sample": 13, "pair": 3, "label": "candidate"}
+{"append_ms": 6.077542, "decode_ms": 0.25958749999999997, "encode_ms": 0.0766625, "kind": "sample", "read_ms": 0.527875, "sample": 14, "pair": 3, "label": "candidate"}
+{"kind": "process", "pair": 3, "label": "candidate", "rss_bytes": 9404416, "executable_sha256": "a69375c4b786edd46e45e6073e28f83079f3cd7356156afe2bbabadf62ac6072"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 3, "label": "base"}
+{"append_ms": 5.089084, "decode_ms": 0.2638125, "encode_ms": 0.0780333, "kind": "sample", "read_ms": 0.5491670000000001, "sample": 0, "pair": 3, "label": "base"}
+{"append_ms": 4.947083, "decode_ms": 0.2693875, "encode_ms": 0.0748333, "kind": "sample", "read_ms": 0.530917, "sample": 1, "pair": 3, "label": "base"}
+{"append_ms": 5.850041, "decode_ms": 0.269475, "encode_ms": 0.07442499999999999, "kind": "sample", "read_ms": 0.530042, "sample": 2, "pair": 3, "label": "base"}
+{"append_ms": 5.938792, "decode_ms": 0.2689209, "encode_ms": 0.0742542, "kind": "sample", "read_ms": 0.52725, "sample": 3, "pair": 3, "label": "base"}
+{"append_ms": 5.628292, "decode_ms": 0.2739375, "encode_ms": 0.0774708, "kind": "sample", "read_ms": 0.5788329999999999, "sample": 4, "pair": 3, "label": "base"}
+{"append_ms": 5.714166, "decode_ms": 0.2752583, "encode_ms": 0.076775, "kind": "sample", "read_ms": 0.559041, "sample": 5, "pair": 3, "label": "base"}
+{"append_ms": 5.94675, "decode_ms": 0.2731042, "encode_ms": 0.0796666, "kind": "sample", "read_ms": 0.544208, "sample": 6, "pair": 3, "label": "base"}
+{"append_ms": 5.481375, "decode_ms": 0.2871458, "encode_ms": 0.0783875, "kind": "sample", "read_ms": 0.552125, "sample": 7, "pair": 3, "label": "base"}
+{"append_ms": 5.440834000000001, "decode_ms": 0.29009999999999997, "encode_ms": 0.0805792, "kind": "sample", "read_ms": 0.571125, "sample": 8, "pair": 3, "label": "base"}
+{"append_ms": 4.542625, "decode_ms": 0.28842080000000003, "encode_ms": 0.08002909999999999, "kind": "sample", "read_ms": 0.601958, "sample": 9, "pair": 3, "label": "base"}
+{"append_ms": 5.5700840000000005, "decode_ms": 0.2952541, "encode_ms": 0.0799292, "kind": "sample", "read_ms": 0.554709, "sample": 10, "pair": 3, "label": "base"}
+{"append_ms": 5.693417, "decode_ms": 0.2764084, "encode_ms": 0.0799459, "kind": "sample", "read_ms": 0.5639580000000001, "sample": 11, "pair": 3, "label": "base"}
+{"append_ms": 4.432959, "decode_ms": 0.2834625, "encode_ms": 0.07870419999999999, "kind": "sample", "read_ms": 0.558625, "sample": 12, "pair": 3, "label": "base"}
+{"append_ms": 5.522125, "decode_ms": 0.29042500000000004, "encode_ms": 0.0799708, "kind": "sample", "read_ms": 0.605833, "sample": 13, "pair": 3, "label": "base"}
+{"append_ms": 5.24675, "decode_ms": 0.31523749999999995, "encode_ms": 0.085675, "kind": "sample", "read_ms": 0.588375, "sample": 14, "pair": 3, "label": "base"}
+{"kind": "process", "pair": 3, "label": "base", "rss_bytes": 9404416, "executable_sha256": "f32b4fff99e6dbf71bf3274db409327cdc76f417abd76d39b66b900fe11c01bf"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 4, "label": "base"}
+{"append_ms": 5.802875, "decode_ms": 0.27813750000000004, "encode_ms": 0.0816917, "kind": "sample", "read_ms": 0.555542, "sample": 0, "pair": 4, "label": "base"}
+{"append_ms": 5.621083, "decode_ms": 0.28068339999999997, "encode_ms": 0.0783083, "kind": "sample", "read_ms": 0.5690409999999999, "sample": 1, "pair": 4, "label": "base"}
+{"append_ms": 5.91425, "decode_ms": 0.2796125, "encode_ms": 0.077875, "kind": "sample", "read_ms": 0.563041, "sample": 2, "pair": 4, "label": "base"}
+{"append_ms": 4.717292, "decode_ms": 0.2760583, "encode_ms": 0.07703750000000001, "kind": "sample", "read_ms": 0.5672919999999999, "sample": 3, "pair": 4, "label": "base"}
+{"append_ms": 4.4872499999999995, "decode_ms": 0.2739166, "encode_ms": 0.077375, "kind": "sample", "read_ms": 0.555833, "sample": 4, "pair": 4, "label": "base"}
+{"append_ms": 4.790208, "decode_ms": 0.2688791, "encode_ms": 0.0767667, "kind": "sample", "read_ms": 0.540542, "sample": 5, "pair": 4, "label": "base"}
+{"append_ms": 5.7198329999999995, "decode_ms": 0.2697042, "encode_ms": 0.0749167, "kind": "sample", "read_ms": 0.530833, "sample": 6, "pair": 4, "label": "base"}
+{"append_ms": 4.942417, "decode_ms": 0.2651167, "encode_ms": 0.0752292, "kind": "sample", "read_ms": 0.5632499999999999, "sample": 7, "pair": 4, "label": "base"}
+{"append_ms": 4.926625, "decode_ms": 0.2733542, "encode_ms": 0.07654999999999999, "kind": "sample", "read_ms": 0.530208, "sample": 8, "pair": 4, "label": "base"}
+{"append_ms": 5.0733749999999995, "decode_ms": 0.2658875, "encode_ms": 0.07397499999999999, "kind": "sample", "read_ms": 0.540833, "sample": 9, "pair": 4, "label": "base"}
+{"append_ms": 5.252292000000001, "decode_ms": 0.269875, "encode_ms": 0.0740584, "kind": "sample", "read_ms": 0.559708, "sample": 10, "pair": 4, "label": "base"}
+{"append_ms": 5.095292000000001, "decode_ms": 0.26942499999999997, "encode_ms": 0.0762333, "kind": "sample", "read_ms": 0.896416, "sample": 11, "pair": 4, "label": "base"}
+{"append_ms": 5.2978749999999994, "decode_ms": 0.2818792, "encode_ms": 0.0794208, "kind": "sample", "read_ms": 0.5280830000000001, "sample": 12, "pair": 4, "label": "base"}
+{"append_ms": 5.7415, "decode_ms": 0.26883749999999995, "encode_ms": 0.07770830000000001, "kind": "sample", "read_ms": 0.562708, "sample": 13, "pair": 4, "label": "base"}
+{"append_ms": 5.647082999999999, "decode_ms": 0.27545830000000004, "encode_ms": 0.0767792, "kind": "sample", "read_ms": 0.551167, "sample": 14, "pair": 4, "label": "base"}
+{"kind": "process", "pair": 4, "label": "base", "rss_bytes": 9404416, "executable_sha256": "f32b4fff99e6dbf71bf3274db409327cdc76f417abd76d39b66b900fe11c01bf"}
+{"codec_iterations": 10, "fixture": "wal-v1", "io_iterations": 1, "kind": "config", "payload_bytes": 1536328, "payload_crc32": 2746319339, "rows": 4096, "samples": 15, "pair": 4, "label": "candidate"}
+{"append_ms": 4.660542, "decode_ms": 0.2519709, "encode_ms": 0.0762417, "kind": "sample", "read_ms": 0.558625, "sample": 0, "pair": 4, "label": "candidate"}
+{"append_ms": 5.210375, "decode_ms": 0.5226708, "encode_ms": 0.0777167, "kind": "sample", "read_ms": 0.581583, "sample": 1, "pair": 4, "label": "candidate"}
+{"append_ms": 5.573209, "decode_ms": 0.2619916, "encode_ms": 0.079025, "kind": "sample", "read_ms": 0.548959, "sample": 2, "pair": 4, "label": "candidate"}
+{"append_ms": 5.996709, "decode_ms": 0.2549, "encode_ms": 0.076875, "kind": "sample", "read_ms": 0.61775, "sample": 3, "pair": 4, "label": "candidate"}
+{"append_ms": 4.787792, "decode_ms": 0.2788208, "encode_ms": 0.0810292, "kind": "sample", "read_ms": 0.6768339999999999, "sample": 4, "pair": 4, "label": "candidate"}
+{"append_ms": 5.810041999999999, "decode_ms": 0.25545, "encode_ms": 0.07536659999999999, "kind": "sample", "read_ms": 0.592458, "sample": 5, "pair": 4, "label": "candidate"}
+{"append_ms": 5.480583, "decode_ms": 0.2607833, "encode_ms": 0.0844625, "kind": "sample", "read_ms": 0.563542, "sample": 6, "pair": 4, "label": "candidate"}
+{"append_ms": 6.103333, "decode_ms": 0.25638750000000005, "encode_ms": 0.0787, "kind": "sample", "read_ms": 0.568375, "sample": 7, "pair": 4, "label": "candidate"}
+{"append_ms": 4.6594169999999995, "decode_ms": 0.2589833, "encode_ms": 0.0771, "kind": "sample", "read_ms": 0.545666, "sample": 8, "pair": 4, "label": "candidate"}
+{"append_ms": 4.786708, "decode_ms": 0.2584375, "encode_ms": 0.0771208, "kind": "sample", "read_ms": 0.5287080000000001, "sample": 9, "pair": 4, "label": "candidate"}
+{"append_ms": 5.011333, "decode_ms": 0.252325, "encode_ms": 0.0767125, "kind": "sample", "read_ms": 0.542583, "sample": 10, "pair": 4, "label": "candidate"}
+{"append_ms": 5.193166, "decode_ms": 0.2560292, "encode_ms": 0.0768167, "kind": "sample", "read_ms": 0.528459, "sample": 11, "pair": 4, "label": "candidate"}
+{"append_ms": 4.852791000000001, "decode_ms": 0.25715410000000005, "encode_ms": 0.076375, "kind": "sample", "read_ms": 0.5171250000000001, "sample": 12, "pair": 4, "label": "candidate"}
+{"append_ms": 5.761166, "decode_ms": 0.2562542, "encode_ms": 0.0763333, "kind": "sample", "read_ms": 0.605792, "sample": 13, "pair": 4, "label": "candidate"}
+{"append_ms": 4.885, "decode_ms": 0.2578042, "encode_ms": 0.0766708, "kind": "sample", "read_ms": 0.538042, "sample": 14, "pair": 4, "label": "candidate"}
+{"kind": "process", "pair": 4, "label": "candidate", "rss_bytes": 10567680, "executable_sha256": "a69375c4b786edd46e45e6073e28f83079f3cd7356156afe2bbabadf62ac6072"}

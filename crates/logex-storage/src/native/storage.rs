@@ -930,7 +930,9 @@ impl NativeStorage {
     fn replay_wal(&mut self) -> std::io::Result<()> {
         let rows = self.wal.read_all()?;
         if rows.is_empty() {
-            return Ok(());
+            // Successful recovery may have ignored a provably incomplete tail.
+            // Remove it before the next append, even when no rows were replayed.
+            return self.wal.truncate();
         }
 
         tracing::info!(rows = rows.len(), "replaying WAL entries");
@@ -2036,6 +2038,75 @@ mod tests {
             recovered.segments().last().map(|segment| segment.id),
             Some(2)
         );
+    }
+
+    #[test]
+    fn native_storage_reopen_preserves_wal_on_complete_entry_corruption() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 100,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let path = tmp.path().join("wal/pending.wal");
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage.write_batch(&make_rows(1, 50)).unwrap();
+        storage.wal.append(&make_rows(1, 100)).unwrap();
+        let first_end = fs::metadata(&path).unwrap().len() as usize;
+        storage.wal.append(&make_rows(1, 200)).unwrap();
+        storage.wal.append(&make_rows(1, 300)).unwrap();
+        drop(storage);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[first_end + 16] ^= 1;
+        fs::write(&path, &bytes).unwrap();
+        for _ in 0..2 {
+            let error = NativeStorage::open(config.clone()).err().unwrap();
+            assert!(error.to_string().contains("pending.wal"));
+            assert!(error.to_string().contains(&format!("byte {first_end}")));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let (catalog, _) = NativeStorageCatalog::open_or_create(&config).unwrap();
+            assert_eq!(
+                catalog
+                    .segments
+                    .iter()
+                    .map(|segment| segment.row_count)
+                    .sum::<u64>(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn native_storage_clears_empty_wal_recovery_tail_before_next_append() {
+        for tail in [vec![1, 0, 0], {
+            let mut frame = 0u32.to_le_bytes().to_vec();
+            frame.extend_from_slice(&8u32.to_le_bytes());
+            frame.extend_from_slice(b"LXWL");
+            frame.extend_from_slice(&1u32.to_le_bytes());
+            frame // Empty, valid payload with a missing checksum.
+        }] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 100,
+                compaction_safety_margin_blocks: 2_048,
+            };
+            drop(NativeStorage::open(config.clone()).unwrap());
+            let path = tmp.path().join("wal/pending.wal");
+            fs::write(&path, tail).unwrap();
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            assert!(fs::read(&path).unwrap().is_empty());
+            let rows = make_rows(3, 100);
+            storage.wal.append(&rows).unwrap();
+            drop(storage);
+            let storage = NativeStorage::open(config.clone()).unwrap();
+            assert_eq!(storage.total_rows(), 3);
+            let hot_id = storage.catalog.active_hot_segment.unwrap();
+            let reader = SegmentReader::open(&storage.segment_path(hot_id)).unwrap();
+            assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+            drop(storage);
+            assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
+        }
     }
 
     #[test]
