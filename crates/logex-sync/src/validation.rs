@@ -132,6 +132,29 @@ where
     Ok(())
 }
 
+/// Complete the standalone rules that the upstream validator only checks
+/// with a parent (minimum gas limit and excess blob gas) or does not reject
+/// before London (base fee).
+fn validate_execution_header(header: &SealedHeader<Header>) -> Result<(), ConsensusError> {
+    if header.gas_limit() < reth_primitives_traits::constants::MINIMUM_GAS_LIMIT {
+        return Err(ConsensusError::GasLimitInvalidMinimum {
+            child_gas_limit: header.gas_limit(),
+        });
+    }
+    if !MAINNET.is_london_active_at_block(header.number()) && header.base_fee_per_gas().is_some() {
+        return Err(ConsensusError::Other(format!(
+            "base fee present before London at block {}",
+            header.number()
+        )));
+    }
+    if MAINNET.is_cancun_active_at_timestamp(header.timestamp())
+        && header.excess_blob_gas().is_none()
+    {
+        return Err(ConsensusError::ExcessBlobGasMissing);
+    }
+    EXECUTION_CONSENSUS.validate_header(header)
+}
+
 pub fn validate_downloaded_headers(
     expected_start_block: u64,
     previous_header: Option<&Header>,
@@ -151,9 +174,7 @@ pub fn validate_downloaded_headers(
     let mut parent = previous_header.cloned().map(SealedHeader::seal_slow);
     for header in headers {
         let sealed = SealedHeader::seal_slow(header.clone());
-        EXECUTION_CONSENSUS
-            .validate_header(&sealed)
-            .map_err(HeaderValidationError::Standalone)?;
+        validate_execution_header(&sealed).map_err(HeaderValidationError::Standalone)?;
 
         if let Some(ref parent_header) = parent {
             EXECUTION_CONSENSUS
@@ -202,9 +223,7 @@ pub fn validate_reverse_downloaded_headers_with_hashes(
         }
 
         let parent = SealedHeader::new(parent_header.clone(), parent_hash);
-        EXECUTION_CONSENSUS
-            .validate_header(&parent)
-            .map_err(HeaderValidationError::Standalone)?;
+        validate_execution_header(&parent).map_err(HeaderValidationError::Standalone)?;
         EXECUTION_CONSENSUS
             .validate_header_against_parent(&child, &parent)
             .map_err(HeaderValidationError::AgainstParent)?;
@@ -352,6 +371,332 @@ mod tests {
                 logs: vec![log],
             },
             logs_bloom,
+        }
+    }
+
+    #[test]
+    fn historical_mainnet_headers_preserve_hashes_and_transition_ancestry() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/execution_headers.json")).unwrap();
+        let headers: Vec<Header> = fixture["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                let header: Header = serde_json::from_value(entry["header"].clone()).unwrap();
+                let expected: B256 = serde_json::from_value(entry["hash"].clone()).unwrap();
+                assert_eq!(header.number, entry["number"].as_u64().unwrap());
+                assert_eq!(header.hash_slow(), expected, "block {}", header.number);
+                assert!(
+                    validate_downloaded_headers(header.number, None, std::slice::from_ref(&header))
+                        .is_ok(),
+                    "block {}",
+                    header.number
+                );
+                header
+            })
+            .collect();
+        assert_eq!(headers[0], *MAINNET.genesis_header());
+        for pair in headers
+            .windows(2)
+            .filter(|pair| pair[0].number + 1 == pair[1].number)
+        {
+            assert!(
+                validate_downloaded_headers(pair[1].number, Some(&pair[0]), &pair[1..]).is_ok(),
+                "block {}",
+                pair[1].number
+            );
+            assert_eq!(
+                validate_reverse_downloaded_headers_with_hashes(&pair[1], &pair[..1]).unwrap(),
+                vec![pair[0].hash_slow()]
+            );
+        }
+        let london = headers.iter().find(|h| h.number == 12_965_000).unwrap();
+        assert_eq!(london.base_fee_per_gas, Some(1_000_000_000));
+        let merge = headers.iter().find(|h| h.number == 15_537_394).unwrap();
+        for field in 0..3 {
+            let mut bad = merge.clone();
+            match field {
+                0 => bad.difficulty = alloy_primitives::U256::from(1),
+                1 => bad.nonce = alloy_primitives::B64::repeat_byte(1),
+                2 => bad.ommers_hash = B256::ZERO,
+                _ => unreachable!(),
+            }
+            assert!(validate_downloaded_headers(bad.number, None, &[bad]).is_err());
+        }
+    }
+
+    #[test]
+    fn header_number_boundaries_do_not_wrap_or_walk_before_genesis() {
+        let genesis = MAINNET.genesis_header().clone();
+        assert!(validate_reverse_downloaded_headers(&genesis, &[]).is_ok());
+        let child = Header {
+            parent_hash: genesis.hash_slow(),
+            gas_limit: genesis.gas_limit,
+            timestamp: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[genesis]),
+            Err(HeaderValidationError::AgainstParent(
+                ConsensusError::ParentBlockNumberMismatch { .. }
+            ))
+        ));
+        let parent = Header {
+            number: u64::MAX,
+            gas_limit: 5_000,
+            base_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let wrapped_child = Header {
+            parent_hash: parent.hash_slow(),
+            gas_limit: 5_000,
+            timestamp: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_downloaded_headers(0, Some(&parent), &[wrapped_child]),
+            Err(HeaderValidationError::AgainstParent(
+                ConsensusError::ParentBlockNumberMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn london_transition_validates_in_both_directions() {
+        let before = Header {
+            number: 12_964_999,
+            gas_limit: 10_000_000,
+            timestamp: 1_628_166_810,
+            ..Default::default()
+        };
+        let london = Header {
+            number: before.number + 1,
+            parent_hash: before.hash_slow(),
+            gas_limit: 20_000_000,
+            gas_used: 20_000_000,
+            timestamp: before.timestamp + 12,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+        // A full block raises the base fee by 1/8, per the EIP-1559 formula.
+        let after = Header {
+            number: london.number + 1,
+            parent_hash: london.hash_slow(),
+            gas_limit: london.gas_limit,
+            timestamp: london.timestamp + 12,
+            base_fee_per_gas: Some(1_125_000_000),
+            ..Default::default()
+        };
+        assert!(
+            validate_downloaded_headers(
+                before.number,
+                None,
+                &[before.clone(), london.clone(), after.clone()]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_reverse_downloaded_headers_with_hashes(
+                &after,
+                &[london.clone(), before.clone()]
+            )
+            .unwrap(),
+            vec![london.hash_slow(), before.hash_slow()]
+        );
+        for base_fee in [0, 999_999_999, 1_000_000_001] {
+            let bad = Header {
+                base_fee_per_gas: Some(base_fee),
+                ..london.clone()
+            };
+            assert!(matches!(
+                validate_downloaded_headers(bad.number, Some(&before), &[bad]),
+                Err(HeaderValidationError::AgainstParent(
+                    ConsensusError::BaseFeeDiff(_)
+                ))
+            ));
+        }
+        let bad_parent = Header {
+            base_fee_per_gas: Some(0),
+            ..before.clone()
+        };
+        let child = Header {
+            parent_hash: bad_parent.hash_slow(),
+            ..london.clone()
+        };
+        assert!(matches!(
+            validate_reverse_downloaded_headers(&child, &[bad_parent]),
+            Err(HeaderValidationError::Standalone(ConsensusError::Other(_)))
+        ));
+        let missing_fee = Header {
+            base_fee_per_gas: None,
+            ..london
+        };
+        assert!(matches!(
+            validate_downloaded_headers(missing_fee.number, Some(&before), &[missing_fee]),
+            Err(HeaderValidationError::Standalone(
+                ConsensusError::BaseFeeMissing
+            ))
+        ));
+    }
+
+    #[test]
+    fn standalone_header_gas_and_extra_data_boundaries() {
+        for gas_limit in [5_000, 10_000_000, i64::MAX as u64] {
+            for extra_len in [0, 32] {
+                let header = Header {
+                    number: 1,
+                    gas_limit,
+                    gas_used: gas_limit,
+                    extra_data: vec![0; extra_len].into(),
+                    ..Default::default()
+                };
+                assert!(validate_downloaded_headers(1, None, &[header]).is_ok());
+            }
+        }
+        let header = Header {
+            number: 1,
+            gas_limit: 5_000,
+            gas_used: 5_001,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_downloaded_headers(1, None, &[header]),
+            Err(HeaderValidationError::Standalone(
+                ConsensusError::HeaderGasUsedExceedsGasLimit { .. }
+            ))
+        ));
+        let header = Header {
+            number: 1,
+            gas_limit: u64::MAX,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_downloaded_headers(1, None, &[header]),
+            Err(HeaderValidationError::Standalone(
+                ConsensusError::HeaderGasLimitExceedsMax { .. }
+            ))
+        ));
+        let header = Header {
+            number: 1,
+            gas_limit: 5_000,
+            extra_data: vec![0; 33].into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_downloaded_headers(1, None, &[header]),
+            Err(HeaderValidationError::Standalone(
+                ConsensusError::ExtraDataExceedsMax { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn timestamp_fork_fields_are_required_only_after_activation() {
+        // Mainnet activations pinned by Reth 1.11.3. These synthetic headers
+        // test field presence, not canonicality or execution validity.
+        const SHANGHAI: u64 = 1_681_338_455;
+        const CANCUN: u64 = 1_710_338_135;
+        const PRAGUE: u64 = 1_746_612_311;
+        for activation in [
+            SHANGHAI,
+            CANCUN,
+            PRAGUE,
+            1_764_798_551,
+            1_765_290_071,
+            1_767_747_671,
+        ] {
+            for timestamp in [activation - 1, activation, activation + 1] {
+                let header = Header {
+                    number: 24_000_000,
+                    gas_limit: 30_000_000,
+                    timestamp,
+                    base_fee_per_gas: Some(1),
+                    withdrawals_root: (timestamp >= SHANGHAI).then_some(B256::ZERO),
+                    blob_gas_used: (timestamp >= CANCUN).then_some(0),
+                    excess_blob_gas: (timestamp >= CANCUN).then_some(0),
+                    parent_beacon_block_root: (timestamp >= CANCUN).then_some(B256::ZERO),
+                    requests_hash: (timestamp >= PRAGUE).then_some(B256::ZERO),
+                    ..Default::default()
+                };
+                assert!(
+                    validate_downloaded_headers(header.number, None, std::slice::from_ref(&header))
+                        .is_ok(),
+                    "timestamp={timestamp}"
+                );
+                for field in 0..5 {
+                    let mut bad = header.clone();
+                    match field {
+                        0 => {
+                            bad.withdrawals_root = if bad.withdrawals_root.is_some() {
+                                None
+                            } else {
+                                Some(B256::ZERO)
+                            }
+                        }
+                        1 => {
+                            bad.blob_gas_used = if bad.blob_gas_used.is_some() {
+                                None
+                            } else {
+                                Some(0)
+                            }
+                        }
+                        2 => {
+                            bad.excess_blob_gas = if bad.excess_blob_gas.is_some() {
+                                None
+                            } else {
+                                Some(0)
+                            }
+                        }
+                        3 => {
+                            bad.parent_beacon_block_root = if bad.parent_beacon_block_root.is_some()
+                            {
+                                None
+                            } else {
+                                Some(B256::ZERO)
+                            }
+                        }
+                        4 => {
+                            bad.requests_hash = if bad.requests_hash.is_some() {
+                                None
+                            } else {
+                                Some(B256::ZERO)
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        validate_downloaded_headers(bad.number, None, &[bad]).is_err(),
+                        "timestamp={timestamp}, field={field}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_header_rejects_base_fee_before_london() {
+        let header = Header {
+            number: 12_964_999,
+            gas_limit: 10_000_000,
+            base_fee_per_gas: Some(0),
+            ..Default::default()
+        };
+        assert!(validate_downloaded_headers(header.number, None, &[header]).is_err());
+    }
+
+    #[test]
+    fn standalone_header_rejects_gas_limit_below_minimum() {
+        for gas_limit in [0, 1, 4_999] {
+            let header = Header {
+                number: 1,
+                gas_limit,
+                ..Default::default()
+            };
+            assert!(
+                validate_downloaded_headers(header.number, None, &[header]).is_err(),
+                "gas_limit={gas_limit}"
+            );
         }
     }
 
