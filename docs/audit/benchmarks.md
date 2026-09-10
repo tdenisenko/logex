@@ -100,6 +100,10 @@ Checked extraction fixtures and release comparisons are documented in the
 The separate `logex-storage` integration fixture includes the live canonical
 header/anchor writes and historical floor updates omitted by the row-only
 benchmark. See its [findings and baseline](ingestion-publication.md).
+The current fixture follows the [combined sync APIs](sync-ingestion-checkpoints.md),
+with final checkpoint cost included. Comparisons with older separate-call
+revisions must record that API/durability-strategy difference; inputs and final
+row/progress oracles remain equivalent.
 
 ```sh
 cargo test -p logex-storage --test ingestion_publication --release --locked --no-run

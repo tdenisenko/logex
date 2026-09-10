@@ -143,12 +143,6 @@ struct ForwardGapFetchedChunk {
     blocks: Vec<SourcedBodyReceipts>,
 }
 
-struct ForwardGapCanonicalUpdate {
-    header: Header,
-    recent_headers: Vec<Header>,
-    anchor: Option<ExecutionAnchor>,
-}
-
 struct HistoricalValidationExtractedChunk {
     start_index: usize,
     peer_notes: Vec<PeerId>,
@@ -2974,7 +2968,7 @@ impl SyncEngine {
         };
 
         let mut newly_serving_peers = HashSet::new();
-        let mut canonical_updates = Vec::with_capacity(validated.len());
+        let block_count = validated.len() as u64;
         let mut rows = Vec::new();
         let mut last_validated_header = None;
         let mut last_head = None;
@@ -3003,17 +2997,11 @@ impl SyncEngine {
                 self.handle_reorg(reorg).await?;
             }
 
-            let recent_headers = self.head_tracker.snapshot();
             self.peers
                 .cache_canonical_block(header.clone(), body.clone(), &receipts);
             self.note_serving_peer(header_peer, &mut newly_serving_peers);
             self.note_serving_peer(body_peer, &mut newly_serving_peers);
             self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
-            canonical_updates.push(ForwardGapCanonicalUpdate {
-                anchor: (block_number == anchor.block_number).then_some(anchor),
-                header: header.clone(),
-                recent_headers,
-            });
             last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
             last_validated_header = Some(header);
             last_progress_block = Some(block_number);
@@ -3021,47 +3009,31 @@ impl SyncEngine {
 
         {
             let mut storage = self.storage.write().await;
-            if !rows.is_empty() {
+            if let Some(header) = &last_validated_header {
+                let recent_headers = self.head_tracker.snapshot();
+                let indexed_anchor = (header.number == anchor.block_number).then_some(&anchor);
+                // The checkpoint anchor is the end of the forward gap, so only
+                // the last update can carry it. Intermediate progress is covered
+                // by the same atomic batch and the final retained header window.
                 storage
-                    .write_batch(&rows)
-                    .map_err(|error| eyre::eyre!("storage write error: {error}"))?;
-
-                if let Some(ref subs) = self.subscriptions {
+                    .ingest_canonical_batch(&rows, header, &recent_headers, indexed_anchor)
+                    .map_err(|error| eyre::eyre!("storage ingestion error: {error}"))?;
+                if !rows.is_empty()
+                    && let Some(ref subs) = self.subscriptions
+                {
                     subs.notify(&rows);
-                }
-            }
-            for update in &canonical_updates {
-                match update.anchor.as_ref() {
-                    Some(anchor) => {
-                        storage
-                            .record_verified_canonical_state(
-                                anchor,
-                                &update.header,
-                                &update.recent_headers,
-                            )
-                            .map_err(|error| eyre::eyre!("storage metadata error: {error}"))?;
-                        storage
-                            .record_historical_floor(&update.header)
-                            .map_err(|error| eyre::eyre!("historical metadata error: {error}"))?;
-                    }
-                    None => storage
-                        .record_canonical_state(&update.header, &update.recent_headers)
-                        .map_err(|error| eyre::eyre!("storage metadata error: {error}"))?,
                 }
             }
         }
 
         if let Some(block_number) = last_progress_block {
-            self.progress.record_blocks(
-                block_number,
-                canonical_updates.len() as u64,
-                rows.len() as u64,
-            );
+            self.progress
+                .record_blocks(block_number, block_count, rows.len() as u64);
         }
 
         tracing::debug!(
             sequence,
-            blocks = canonical_updates.len(),
+            blocks = block_count,
             logs = rows.len(),
             body_receipt_ms = body_receipt_elapsed.as_millis(),
             validation_ms = validation_started.elapsed().as_millis(),

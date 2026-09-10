@@ -1,8 +1,10 @@
 # Ingestion progress publication and restart boundaries
 
-**Unresolved: PR #130 must remain a draft.** Storage rows and sync progress do
-not currently form one recoverable transaction. The checkpoint prototype also
-exceeds the user's 10% performance-regression limit. These findings extend the
+**PR #130 remains a draft.** The measurements and reproducer below describe
+`09a63f55` and `ff728ea3`. A new [combined sync checkpoint prototype](sync-ingestion-checkpoints.md)
+implements bounded row/progress rewind and passes its initial regression tests.
+It still needs performance acceptance and platform validation. The prior WAL
+checkpoint prototype exceeds the user's 10% performance-regression limit. These findings extend the
 current storage milestone into the ingestion commit boundary; they do not
 establish completion of audit batch 5.
 
@@ -11,7 +13,7 @@ establish completion of audit batch 5.
 Severity: P1, duplicate queryable logs after restart. This reproduces on both
 the original `09a63f55` baseline and checkpoint candidate `ff728ea3`.
 
-The live caller in `logex-sync/src/engine/ingest.rs` writes rows, then records
+At those revisions, the live caller in `logex-sync/src/engine/ingest.rs` writes rows, then records
 canonical headers/anchors and historical coverage. Historical chunk ingestion
 writes rows, then advances its historical floor. Forward-gap ingestion likewise
 writes rows before publishing its canonical updates. The restart path in

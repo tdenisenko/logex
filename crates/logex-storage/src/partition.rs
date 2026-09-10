@@ -91,6 +91,32 @@ impl PartitionManager {
         Ok(())
     }
 
+    /// Atomically associate canonical rows with their restart progress.
+    /// Uncheckpointed work can be re-fetched after restart.
+    pub fn ingest_canonical_batch(
+        &mut self,
+        rows: &[LogRow],
+        header: &Header,
+        recent_headers: &[Header],
+        anchor: Option<&ExecutionAnchor>,
+    ) -> std::io::Result<()> {
+        self.inner
+            .ingest_canonical_batch(rows, header, recent_headers, anchor)?;
+        self.refresh_views();
+        Ok(())
+    }
+
+    /// Associate a whole historical chunk, including empty blocks, with its floor.
+    pub fn ingest_historical_batch(
+        &mut self,
+        rows: &[LogRow],
+        floor: &Header,
+    ) -> std::io::Result<()> {
+        self.inner.ingest_historical_batch(rows, floor)?;
+        self.refresh_views();
+        Ok(())
+    }
+
     /// Compact and close any sparse historical staging segment.
     pub fn finalize_historical_segment(&mut self) -> std::io::Result<bool> {
         let finalized = self.inner.finalize_active_historical_segment()?;
@@ -100,7 +126,7 @@ impl PartitionManager {
         Ok(finalized)
     }
 
-    /// Persist pending columns and retire the bounded recovery WAL.
+    /// Make current rows and sync progress durable and retire recovery metadata.
     pub fn checkpoint(&mut self) -> std::io::Result<()> {
         self.inner.checkpoint()?;
         self.refresh_views();
@@ -205,12 +231,12 @@ impl PartitionManager {
             .record_sync_head(block_number, block_hash, timestamp)
     }
 
-    /// Return the most recently persisted sync head, if any.
+    /// Return the current sync head, which may include uncheckpointed ingestion.
     pub fn sync_head(&self) -> Option<SyncHead> {
         self.inner.sync_head()
     }
 
-    /// Return the most recently persisted canonical header window.
+    /// Return the current canonical header window, including uncheckpointed work.
     pub fn recent_headers(&self) -> &[Header] {
         self.inner.recent_headers()
     }
@@ -261,7 +287,7 @@ impl PartitionManager {
         self.inner.record_historical_floor(header)
     }
 
-    /// Return the persisted chain anchors, if any.
+    /// Return current chain anchors, including uncheckpointed indexed progress.
     pub fn chain_anchors(&self) -> ChainAnchors {
         self.inner.chain_anchors()
     }
@@ -292,7 +318,7 @@ impl PartitionManager {
     }
 
     /// Current sync head, falling back to the indexed head when metadata has
-    /// not been persisted yet.
+    /// not been recorded yet.
     pub fn head_block(&self) -> Option<u64> {
         self.inner.head_block()
     }

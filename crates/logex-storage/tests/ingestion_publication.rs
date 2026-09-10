@@ -169,29 +169,23 @@ fn run(config: Config) {
             let start = Instant::now();
             if historical {
                 for (first, rows) in &history {
-                    if !rows.is_empty() {
-                        storage.write_historical_batch(rows).unwrap();
-                    }
                     storage
-                        .record_historical_floor(&measured_headers[*first])
+                        .ingest_historical_batch(rows, &measured_headers[*first])
                         .unwrap();
                 }
                 storage.finalize_historical_segment().unwrap();
             } else {
                 for (index, (header, rows)) in measured_headers.iter().zip(&blocks).enumerate() {
-                    if !rows.is_empty() {
-                        storage.write_batch(rows).unwrap();
-                    }
                     storage
-                        .record_verified_canonical_state(
-                            &anchor(header),
+                        .ingest_canonical_batch(
+                            rows,
                             header,
                             &headers[(config.warm_headers + index + 1)
                                 .saturating_sub(RECENT_HEADER_WINDOW)
-                                ..=config.warm_headers + index],
+                                ..config.warm_headers + index + 1],
+                            Some(&anchor(header)),
                         )
                         .unwrap();
-                    storage.record_historical_floor(header).unwrap();
                 }
             }
             storage.checkpoint().unwrap();

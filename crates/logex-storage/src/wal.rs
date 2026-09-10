@@ -256,7 +256,9 @@ fn validate_row_data(row: &LogRow) -> io::Result<()> {
     Ok(())
 }
 
-fn encode_rows(rows: &[LogRow]) -> io::Result<Vec<u8>> {
+pub(crate) fn validated_payload_len(rows: &[LogRow]) -> io::Result<usize> {
+    u32::try_from(rows.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many ingestion rows"))?;
     let mut payload_len = 8usize;
     for row in rows {
         validate_row_data(row)?;
@@ -272,6 +274,11 @@ fn encode_rows(rows: &[LogRow]) -> io::Result<Vec<u8>> {
                 )
             })?;
     }
+    Ok(payload_len)
+}
+
+fn encode_rows(rows: &[LogRow]) -> io::Result<Vec<u8>> {
+    let payload_len = validated_payload_len(rows)?;
     let mut out = Vec::new();
     out.try_reserve_exact(payload_len)
         .map_err(io::Error::other)?;

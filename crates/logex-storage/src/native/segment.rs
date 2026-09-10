@@ -611,7 +611,7 @@ fn existing_columns(
     Ok(Some(manifest.columns))
 }
 
-fn default_columns() -> Vec<ColumnDescriptor> {
+pub(super) fn default_columns() -> Vec<ColumnDescriptor> {
     vec![
         fixed_column("address", "address.col"),
         fixed_column("block_number", "block_number.col"),
