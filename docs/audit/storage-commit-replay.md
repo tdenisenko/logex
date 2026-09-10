@@ -127,7 +127,7 @@ compaction, warm reopen and query costs using unchanged dense/sparse fixtures.
 
 Removed the equality-based already-applied replay helper, permissive all-true
 canonical repair and duplicated temporary-file replacement logic. Full-column
-serialization writes checked offsets directly instead of allocating an unused
+serialization writes checked offsets directly instead of allocating an intermediate
 offset vector; the stale four-byte offset comment is corrected to eight bytes.
 The active hot-segment lookup no longer republishes an unchanged manifest.
 Four old restart tests now drop the first owner before reopening.
