@@ -5,7 +5,7 @@ sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.
 The user permits incompatible changes if they materially help performance and
 is willing to perform a fresh sync. The current candidate changes the catalog
-format to version 2; segment/column encodings remain version 1. No existing
+format to version 3; segment/column encodings remain version 1. No existing
 production dataset has been reset or modified.
 
 ## Behavior and invariants
@@ -34,21 +34,34 @@ it is not a hard wall-clock deadline. Route changes, generic durable writes,
 standalone metadata updates and relevant maintenance boundaries checkpoint first.
 Detached compaction plans exclude the epoch's affected segments.
 
-## Catalog version 2 recovery protocol
+## Catalog version 3 recovery protocol
 
-The checksummed `catalog.json` is the single durable authority for segment row
-counts, allocation IDs, canonical head/header window, chain anchors and historical
-progress. Its versioned envelope contains the catalog JSON and its CRC32, with a
-64 MiB read/encoding limit. The checksum detects accidental corruption, not
-malicious tampering. Segment IDs, relative paths and active ownership are checked.
-Unknown fields and unsupported versions fail explicitly.
+The checksummed catalog is the single durable authority for segment row counts,
+allocation IDs, canonical head/header window, chain anchors and historical progress.
+The legacy filename `catalog.json` is deliberately retained: older binaries must
+fail to parse the new bytes at their known path rather than create another catalog.
+Its contents are now a binary frame: eight-byte `LXCAT003` magic, two little-endian
+32-bit lengths (metadata and header list), a CRC32, JSON metadata and a canonical
+RLP list of the complete recent headers. The checksum covers the first 16 prefix
+bytes and both payloads. It detects accidental corruption, not malicious tampering.
+
+Reads/encodings are bounded to 64 MiB, the header list to 8,192 entries, and each
+header frame to 16 KiB before decoding its body. Truncation, trailing bytes, bad
+checksums, unknown metadata fields and unsupported versions fail explicitly.
+Segment IDs, relative paths and active ownership are checked. Cached headers must
+have representable RLP optional-field sequences and at most 32 bytes of extra data;
+callers reject these encoding errors before publishing rows or changing progress.
+Chain authentication and fork/ancestry validation remain separate invariants.
+The disk-size cache reads only small metadata as an untrusted hint; it never uses
+that shortcut for recovery, coverage or query state.
 
 1. Keep the durable catalog unchanged during an ingestion epoch. Update rows and
    progress in memory. Files containing a previously committed prefix still order
    complete replacements before rename; older rows cannot be sacrificed.
 2. Newly allocated segments, and an initial active segment with zero committed
    rows, can defer artifact/manifest synchronization. They contain no data the
-   catalog promises. Their filenames are published atomically for current readers.
+   catalog promises. Exclusive first creation avoids an unnecessary temporary rename; replacements
+   of existing files stay atomic for current readers.
 3. At checkpoint, submit all deferred segment trees and parent directory entries,
    order them before the catalog, and fully synchronize any other devices first.
    Publish one atomic checksummed catalog and complete its device synchronization.
@@ -76,12 +89,12 @@ JSON serialization. It intentionally drops automatic manifest adoption on startu
 
 ## Fresh-sync compatibility decision
 
-Version 1 directories are rejected with an actionable diagnostic; they are not
+Version 1 and the unmerged version 2 directories are rejected with an actionable diagnostic; they are not
 migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
 a dangling catalog alias, also fails instead of initializing an empty database.
-Older binaries cannot read the new envelope as an old catalog. A deployment must
+Older binaries fail to parse the binary frame at the original catalog path. A deployment must
 use a **new empty data directory** and verified fresh sync. Rolling back the binary
-requires its original directory or another fresh sync, not reuse of version 2.
+requires its original directory or another fresh sync, not reuse of version 3.
 Retain original directories until their owner explicitly chooses otherwise.
 The user's protected external-volume contents are outside this test scope.
 
@@ -95,9 +108,8 @@ the intended benefit.
 The preceding `aefbc0db` prototype passed all six local gates (833 tests, six
 ignored; [results](baselines/2026-09-11-sync-checkpoint-gates.jsonl)). Those results
 do **not** validate the new catalog/deferred-publication protocol. Its storage
-suite passes 129 tests with two explicitly ignored cases, including the additional
-recovery-evidence and malformed-uncommitted-artifact checks. Strict workspace
-Clippy also passes. All six [local gates](baselines/2026-09-11-catalog-v2-gates.jsonl)
+suite at that stage passed 129 tests with two explicitly ignored cases, including
+recovery-evidence and malformed-uncommitted-artifact checks. All six [local gates](baselines/2026-09-11-catalog-v2-gates.jsonl)
 pass for `adff367c`: 836 tests passed, six intentionally ignored, and the release
 build succeeds. Performance and platform validation remain pending.
 
@@ -206,3 +218,37 @@ experiment removes temporary creation/rename only when exclusive creation proves
 a wholly uncommitted destination does not exist; existing files retain atomic
 replacement. Its full storage suite passes 130 tests with two ignored, and
 strict storage Clippy passes. Its timing is pending.
+
+[Exclusive-creation measurements](baselines/2026-09-11-direct-create-comparison.jsonl)
+at `57c1e67e` use three alternating short-fixture pairs with three iterations.
+Short history is 20.299 versus 14.659 ms (+38.48%); grouped live is 491.057 versus
+2,914.074 ms (-83.15%). The small APFS change needs further confirmation against
+noise and on ExFAT before treating it as a retained optimization. Per-block live
+and large history were not remeasured for this isolated first-creation change.
+
+[Per-block live profiling](baselines/2026-09-11-live-checkpoint-profile.json)
+shows approximately 8 ms/block encoding the entire 8,192-header window and another
+7.5-8 ms/block in final synchronization. This identifies repeated large metadata
+serialization/publication as a larger target than first-file renames. The next
+format experiment will consider a compact encoding for cached headers while
+retaining one authoritative catalog and the full recent-header window; it must
+be measured before acceptance. No profiling hooks remain in production code.
+
+## Compact cached-header experiment
+
+[Encoding diagnostics](baselines/2026-09-11-cached-header-encoding.json) identify
+an existing codec that avoids repeatedly serializing multi-megabyte JSON header
+windows. With 8,192 populated synthetic headers, median RLP encoding is 1.443 ms
+and 5,365,633 bytes versus JSON 8.254 ms and 13,465,461 bytes. The minimal fixture
+is 1.017 ms / 4,153,348 bytes versus 6.067 ms / 10,067,969 bytes. All 18 samples
+pass exact RLP round-trip equality. Fixed codec ordering makes this a diagnostic,
+not a performance acceptance result. LZ4 added about 13 ms for populated headers,
+so compressing the JSON is not justified by these samples.
+
+Version 3 uses Alloy's already locked RLP implementation, retaining all headers,
+checksums and checkpoint ordering. No package versions or column encodings change.
+Removed the obsolete JSON envelope/raw-value feature and the server's duplicate
+catalog parser. New tests cover optional fields, oversized/trailing RLP, invalid
+encoding inputs before publication, and segment-ID exhaustion. The last two
+regressions failed before their fixes. Full version 3 gates and actual ingestion
+comparisons are in progress; earlier version 2 results do not validate version 3.

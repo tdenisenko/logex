@@ -19,7 +19,7 @@ use crate::{ColumnFile, ColumnFileHeader, ColumnReader, NullBitmap, SegmentReade
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
-    StorageCatalogPaths, StorageState,
+    StorageCatalogPaths, StorageState, validate_cached_headers,
 };
 use super::segment::{
     append_ingest_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor,
@@ -292,6 +292,7 @@ impl NativeStorage {
         recent_headers: &[Header],
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
+        validate_cached_headers(recent_headers)?;
         if self.pending_ingestion.is_some() {
             self.checkpoint()?;
         }
@@ -320,6 +321,7 @@ impl NativeStorage {
         recent_headers: &[Header],
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
+        validate_cached_headers(recent_headers)?;
         if self.pending_ingestion.is_some() {
             self.checkpoint()?;
         }
@@ -331,6 +333,7 @@ impl NativeStorage {
     }
 
     pub fn record_historical_floor(&mut self, header: &Header) -> std::io::Result<()> {
+        validate_cached_headers(std::slice::from_ref(header))?;
         self.ensure_writable()?;
         if self.pending_ingestion.is_some() {
             self.checkpoint()?;
@@ -371,6 +374,7 @@ impl NativeStorage {
         indexed_head: Option<ExecutionAnchor>,
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
+        validate_cached_headers(recent_headers)?;
         self.checkpoint()?;
         let next_sync_head = recent_headers.last().map(|header| SyncHead {
             block_number: header.number(),
@@ -409,6 +413,7 @@ impl NativeStorage {
         recent_headers: &[Header],
         anchor: Option<&ExecutionAnchor>,
     ) -> io::Result<()> {
+        validate_cached_headers(recent_headers)?;
         let hash = header.hash_slow();
         if recent_headers.last() != Some(header)
             || rows.iter().any(|row| row.block_number > header.number)
@@ -440,6 +445,7 @@ impl NativeStorage {
     /// Publish a complete validated historical chunk and its floor together.
     /// Uncheckpointed chunks may be re-fetched after restart, including empty blocks.
     pub fn ingest_historical_batch(&mut self, rows: &[LogRow], floor: &Header) -> io::Result<()> {
+        validate_cached_headers(std::slice::from_ref(floor))?;
         if rows.iter().any(|row| row.block_number < floor.number) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -842,7 +848,7 @@ impl NativeStorage {
     ) -> std::io::Result<Vec<PartitionMeta>> {
         let mut appended = Vec::new();
         for chunk in rows.chunks(target_rows) {
-            let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
+            let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed)?;
             let segment_dir = self.paths.segment_dir(descriptor.id);
             if segment_dir.exists() {
                 fs::remove_dir_all(&segment_dir)?;
@@ -1320,7 +1326,7 @@ impl NativeStorage {
             return Ok(active.id);
         }
 
-        let descriptor = self.catalog.register_segment(SegmentKind::Hot);
+        let descriptor = self.catalog.register_segment(SegmentKind::Hot)?;
         let path = self.paths.segment_dir(descriptor.id);
         fs::create_dir_all(&path)?;
         persist_ingest_manifest(
@@ -1352,7 +1358,7 @@ impl NativeStorage {
             self.catalog.active_historical_segment = None;
         }
 
-        let descriptor = self.catalog.allocate_segment(SegmentKind::Sealed);
+        let descriptor = self.catalog.allocate_segment(SegmentKind::Sealed)?;
         let segment_dir = self.paths.segment_dir(descriptor.id);
         if segment_dir.exists() {
             fs::remove_dir_all(&segment_dir)?;
@@ -1392,7 +1398,7 @@ impl NativeStorage {
         }
 
         self.catalog.active_hot_segment = None;
-        let new_hot = self.catalog.register_segment(SegmentKind::Hot);
+        let new_hot = self.catalog.register_segment(SegmentKind::Hot)?;
         let path = self.paths.segment_dir(new_hot.id);
         fs::create_dir_all(&path)?;
         persist_ingest_manifest(&self.paths, &new_hot, self.segment_publication(new_hot.id))?;
@@ -2746,6 +2752,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ingestion_rejects_unencodable_headers_before_publishing_rows() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let before = fs::read(storage.paths.catalog_path()).unwrap();
+        let mut header = ingestion_header(100, B256::ZERO);
+        header.extra_data = vec![0; 33].into();
+        let rows = ingestion_rows(3, &header);
+        assert!(
+            storage
+                .ingest_canonical_batch(&rows, &header, std::slice::from_ref(&header), None)
+                .is_err()
+        );
+        assert!(
+            storage
+                .record_canonical_state(&header, std::slice::from_ref(&header))
+                .is_err()
+        );
+        assert!(
+            storage
+                .rewind_canonical_state(std::slice::from_ref(&header), None)
+                .is_err()
+        );
+        assert!(storage.ingest_historical_batch(&rows, &header).is_err());
+        assert!(storage.record_historical_floor(&header).is_err());
+        assert_eq!(storage.total_rows(), 0);
+        assert!(storage.sync_head().is_none());
+        assert!(storage.pending_ingestion.is_none());
+        assert_eq!(fs::read(storage.paths.catalog_path()).unwrap(), before);
     }
 
     #[test]

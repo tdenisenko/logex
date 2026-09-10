@@ -5244,6 +5244,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rlp",
  "crc32fast",
  "libc",
  "logex-types",

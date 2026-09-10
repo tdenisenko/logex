@@ -1,0 +1,243 @@
+{
+  "prototype_base": "57c1e67e",
+  "acceptance_benchmark": false,
+  "notes": "Diagnostic fixture, 8192 headers, minimal and populated synthetic fields. Nine release iterations per profile, fixed codec order; round-trip equality checked. Captured before fixture helper refactor. No ingestion, durability, or P2P throughput claim. Mac14,15, 16 GiB, pinned nightly 2026-08-24.",
+  "samples": [
+    {
+      "headers": 8192,
+      "iteration": 0,
+      "json_bytes": 10067969,
+      "json_ms": 10.999500000000001,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 5.085667,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 1.933084
+    },
+    {
+      "headers": 8192,
+      "iteration": 1,
+      "json_bytes": 10067969,
+      "json_ms": 7.835875000000001,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 4.8935,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 1.267833
+    },
+    {
+      "headers": 8192,
+      "iteration": 2,
+      "json_bytes": 10067969,
+      "json_ms": 7.34625,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 4.613167,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 1.3091249999999999
+    },
+    {
+      "headers": 8192,
+      "iteration": 3,
+      "json_bytes": 10067969,
+      "json_ms": 6.33125,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.5575,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 0.9835
+    },
+    {
+      "headers": 8192,
+      "iteration": 4,
+      "json_bytes": 10067969,
+      "json_ms": 5.817,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.537959,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 1.0365000000000002
+    },
+    {
+      "headers": 8192,
+      "iteration": 5,
+      "json_bytes": 10067969,
+      "json_ms": 5.680417,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.399167,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 0.8779159999999999
+    },
+    {
+      "headers": 8192,
+      "iteration": 6,
+      "json_bytes": 10067969,
+      "json_ms": 5.864958,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.366583,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 0.894583
+    },
+    {
+      "headers": 8192,
+      "iteration": 7,
+      "json_bytes": 10067969,
+      "json_ms": 6.067208,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.453666,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 1.017
+    },
+    {
+      "headers": 8192,
+      "iteration": 8,
+      "json_bytes": 10067969,
+      "json_ms": 5.6867920000000005,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 3.672083,
+      "lz4_bytes": 697767,
+      "rich_fields": false,
+      "rlp_bytes": 4153348,
+      "rlp_ms": 0.896958
+    },
+    {
+      "headers": 8192,
+      "iteration": 0,
+      "json_bytes": 13465461,
+      "json_ms": 8.724124999999999,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 12.175959,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.754834
+    },
+    {
+      "headers": 8192,
+      "iteration": 1,
+      "json_bytes": 13465461,
+      "json_ms": 7.834834000000001,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 13.203875,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.336334
+    },
+    {
+      "headers": 8192,
+      "iteration": 2,
+      "json_bytes": 13465461,
+      "json_ms": 8.284708,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 12.994416,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.455875
+    },
+    {
+      "headers": 8192,
+      "iteration": 3,
+      "json_bytes": 13465461,
+      "json_ms": 8.253917,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 12.950541,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.773625
+    },
+    {
+      "headers": 8192,
+      "iteration": 4,
+      "json_bytes": 13465461,
+      "json_ms": 8.877208,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 12.84525,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.442667
+    },
+    {
+      "headers": 8192,
+      "iteration": 5,
+      "json_bytes": 13465461,
+      "json_ms": 8.108125000000001,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 13.145459,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.389625
+    },
+    {
+      "headers": 8192,
+      "iteration": 6,
+      "json_bytes": 13465461,
+      "json_ms": 8.699708000000001,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 12.990959,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.403291
+    },
+    {
+      "headers": 8192,
+      "iteration": 7,
+      "json_bytes": 13465461,
+      "json_ms": 8.047833,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 13.087333,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.645625
+    },
+    {
+      "headers": 8192,
+      "iteration": 8,
+      "json_bytes": 13465461,
+      "json_ms": 8.059541,
+      "kind": "header_encoding",
+      "lz4_additional_ms": 13.579542,
+      "lz4_bytes": 10013562,
+      "rich_fields": true,
+      "rlp_bytes": 5365633,
+      "rlp_ms": 1.362917
+    }
+  ],
+  "medians": [
+    {
+      "rich_fields": false,
+      "json_ms": 6.067208,
+      "json_bytes": 10067969,
+      "rlp_ms": 1.017,
+      "rlp_bytes": 4153348,
+      "lz4_additional_ms": 3.5575,
+      "lz4_bytes": 697767
+    },
+    {
+      "rich_fields": true,
+      "json_ms": 8.253917,
+      "json_bytes": 13465461,
+      "rlp_ms": 1.442667,
+      "rlp_bytes": 5365633,
+      "lz4_additional_ms": 12.994416,
+      "lz4_bytes": 10013562
+    }
+  ]
+}

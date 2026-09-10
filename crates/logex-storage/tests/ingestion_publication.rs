@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use alloy_consensus::Header;
-use alloy_primitives::{Address, B256, Bytes, keccak256};
+use alloy_primitives::{Address, B256, Bloom, Bytes, keccak256};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SegmentReader};
 use logex_types::{ExecutionAnchor, LogRow, Source};
 use serde_json::json;
@@ -17,6 +17,7 @@ struct Config {
     repeats: usize,
     route: Option<bool>,
     checkpoint_each_block: bool,
+    rich_headers: bool,
 }
 
 // SyncEngine's retained canonical-header window.
@@ -34,18 +35,47 @@ fn positive_env(name: &str, default: usize) -> usize {
     }
 }
 
+fn fill_header_fields(header: &mut Header, index: usize) {
+    let hash = |tag: u8| {
+        let mut seed = (index as u64).to_le_bytes().to_vec();
+        seed.push(tag);
+        keccak256(seed)
+    };
+    header.beneficiary = Address::from_slice(&hash(0).as_slice()[12..]);
+    header.state_root = hash(1);
+    header.transactions_root = hash(2);
+    header.receipts_root = hash(3);
+    header.mix_hash = hash(4);
+    header.extra_data = Bytes::copy_from_slice(hash(5).as_slice());
+    let mut bloom = [0u8; 256];
+    for (part, chunk) in bloom.as_chunks_mut::<32>().0.iter_mut().enumerate() {
+        chunk.copy_from_slice(hash(10 + part as u8).as_slice());
+    }
+    header.logs_bloom = Bloom::from(bloom);
+    header.gas_used = 15_000_000 + index as u64;
+    header.base_fee_per_gas = Some(1_000_000_000 + index as u64);
+    header.withdrawals_root = Some(hash(20));
+    header.blob_gas_used = Some(393_216);
+    header.excess_blob_gas = Some(index as u64 * 131_072);
+    header.parent_beacon_block_root = Some(hash(21));
+    header.requests_hash = Some(hash(22));
+}
+
 fn fixture(config: &Config) -> (Vec<Header>, Vec<Vec<LogRow>>) {
     let mut headers = Vec::with_capacity(config.warm_headers + config.blocks);
     let mut blocks = Vec::with_capacity(config.blocks);
     let mut parent_hash = B256::ZERO;
     for index in 0..config.warm_headers + config.blocks {
-        let header = Header {
+        let mut header = Header {
             number: 15_000_000 + index as u64,
             parent_hash,
             timestamp: 1_700_000_000 + index as u64 * 12,
             gas_limit: 30_000_000,
             ..Default::default()
         };
+        if config.rich_headers {
+            fill_header_fields(&mut header, index);
+        }
         let hash = header.hash_slow();
         parent_hash = hash;
         headers.push(header.clone());
@@ -135,7 +165,7 @@ fn run(config: Config) {
     let tip = headers.last().unwrap();
     println!(
         "{}",
-        json!({"kind":"config", "fixture_version":2, "workload":"sync_storage_publication",
+        json!({"kind":"config", "fixture_version":3, "workload":"sync_storage_publication",
             "blocks":config.blocks,"rows_per_nonempty_block":config.rows_per_block,
             "empty_every_nth_block":16,"history_batch_blocks":config.history_batch_blocks,
             "segment_rows":config.segment_rows,"repeats":config.repeats,
@@ -144,6 +174,7 @@ fn run(config: Config) {
             "warm_headers":config.warm_headers,
             "route":config.route.map(|historical| if historical {"historical"} else {"live"}),
             "checkpoint_each_block":config.checkpoint_each_block,
+            "header_fields":if config.rich_headers {"rich"} else {"minimal"},
             "cache":"fresh directories; OS cache not evicted"})
     );
     for iteration in 0..config.repeats {
@@ -243,6 +274,7 @@ fn storage_publication_preserves_rows_and_empty_block_progress() {
         repeats: 1,
         route: None,
         checkpoint_each_block: false,
+        rich_headers: false,
     });
 }
 
@@ -262,6 +294,11 @@ fn benchmark_sync_storage_publication() {
             Ok("both") | Err(std::env::VarError::NotPresent) => None,
             value => panic!("invalid LOGEX_PUBLICATION_ROUTE: {value:?}"),
         },
+        rich_headers: match std::env::var("LOGEX_PUBLICATION_HEADER_FIELDS").as_deref() {
+            Ok("rich") => true,
+            Ok("minimal") | Err(std::env::VarError::NotPresent) => false,
+            value => panic!("invalid LOGEX_PUBLICATION_HEADER_FIELDS: {value:?}"),
+        },
         checkpoint_each_block: match std::env::var("LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK")
             .as_deref()
         {
@@ -270,4 +307,46 @@ fn benchmark_sync_storage_publication() {
             value => panic!("invalid LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK: {value:?}"),
         },
     });
+}
+
+#[test]
+#[ignore = "release cached-header encoding comparison; see docs/audit/benchmarks.md"]
+fn benchmark_cached_header_encoding() {
+    use alloy_rlp::Decodable;
+
+    for rich in [false, true] {
+        let (headers, _) = fixture(&Config {
+            blocks: RECENT_HEADER_WINDOW,
+            warm_headers: 0,
+            rows_per_block: 0,
+            history_batch_blocks: 2048,
+            segment_rows: 1_000_000,
+            repeats: 1,
+            route: None,
+            checkpoint_each_block: false,
+            rich_headers: rich,
+        });
+        for iteration in 0..9 {
+            let start = Instant::now();
+            let json_bytes = serde_json::to_vec(&headers).unwrap();
+            let json_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let rlp_bytes = alloy_rlp::encode(&headers);
+            let rlp_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let compressed = lz4_flex::compress_prepend_size(&json_bytes);
+            let lz4_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let mut input = rlp_bytes.as_slice();
+            assert_eq!(Vec::<Header>::decode(&mut input).unwrap(), headers);
+            assert!(input.is_empty());
+            println!(
+                "{}",
+                json!({"kind":"header_encoding", "rich_fields":rich,
+                "iteration":iteration,"headers":headers.len(),
+                "json_ms":json_ms,"json_bytes":json_bytes.len(),
+                "rlp_ms":rlp_ms,"rlp_bytes":rlp_bytes.len(),
+                "lz4_additional_ms":lz4_ms,"lz4_bytes":compressed.len()})
+            );
+        }
+    }
 }
