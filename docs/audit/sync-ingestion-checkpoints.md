@@ -367,3 +367,10 @@ The large profile fits the limit in this confirmation, and live remains faster;
 these are storage-call results, not measured P2P throughput. Next isolate whether
 initial raw-file creation benefits from two workers instead of four; the existing
 append scheduling and compaction remain unchanged in that experiment.
+
+**Rejected experiment:** [two initial workers](baselines/2026-09-11-raw-two-rejected.jsonl)
+at `6a659209` gives 17.216 → 17.776 ms (+3.25%) versus `224a9d30` in the isolated
+short-history comparison. It does not demonstrate improvement; restored four
+workers. Thirteen focused column/recovery tests and strict Clippy had passed.
+The remaining prototype therefore matches the previously validated production
+code while further performance work continues.
