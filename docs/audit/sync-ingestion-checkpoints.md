@@ -60,8 +60,8 @@ that shortcut for recovery, coverage or query state.
    complete replacements before rename; older rows cannot be sacrificed.
 2. Newly allocated segments, and an initial active segment with zero committed
    rows, can defer artifact/manifest synchronization. They contain no data the
-   catalog promises. Exclusive first creation avoids an unnecessary temporary rename; replacements
-   of existing files stay atomic for current readers.
+   catalog promises. Exclusive first creation avoids an unnecessary temporary
+   rename; replacements of existing files stay atomic for current readers.
 3. At checkpoint, submit all deferred segment trees and parent directory entries,
    order them before the catalog, and fully synchronize any other devices first.
    Publish one atomic checksummed catalog and complete its device synchronization.
@@ -89,11 +89,11 @@ JSON serialization. It intentionally drops automatic manifest adoption on startu
 
 ## Fresh-sync compatibility decision
 
-Version 1 and the unmerged version 2 directories are rejected with an actionable diagnostic; they are not
-migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
+Version 1 and the unmerged version 2 directories are rejected with an actionable
+diagnostic; they are not migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
 a dangling catalog alias, also fails instead of initializing an empty database.
-Older binaries fail to parse the binary frame at the original catalog path. A deployment must
-use a **new empty data directory** and verified fresh sync. Rolling back the binary
+Older binaries fail to parse the binary frame at the original catalog path.
+A deployment must use a **new empty data directory** and verified fresh sync. Rolling back the binary
 requires its original directory or another fresh sync, not reuse of version 3.
 Retain original directories until their owner explicitly chooses otherwise.
 The user's protected external-volume contents are outside this test scope.
@@ -252,3 +252,43 @@ catalog parser. New tests cover optional fields, oversized/trailing RLP, invalid
 encoding inputs before publication, and segment-ID exhaustion. The last two
 regressions failed before their fixes. Full version 3 gates and actual ingestion
 comparisons are in progress; earlier version 2 results do not validate version 3.
+
+## Catalog v3 release comparison
+
+All six [local gates](baselines/2026-09-11-catalog-v3-gates.jsonl) pass for committed
+`3f457987`: 841 tests passed, seven explicitly ignored cases, strict workspace
+Clippy, doc tests and release linking. [Paired release samples](baselines/2026-09-11-catalog-v3-comparison.jsonl)
+use four profiles, three alternating process pairs each, three fresh iterations
+per process. Final checkpoint/finalization remains timed; every exact row and
+progress/reopen oracle passes. The fixture digest and tip hash match across each
+pair. Builds/tests were stopped during timing. Hardware, cache conditions,
+compiler, binary and fixture hashes are captured in the raw output. The v3
+[baseline adapter](baselines/2026-09-11-publication-v3-baseline.patch) preserves
+original production code while giving it identical fixture inputs and oracles.
+
+| Workload | Baseline median ms | Catalog v3 median ms | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live, minimal headers | 2,777.323 | 469.196 | -83.11% |
+| Historical, 15,360 rows | 14.780 | 19.751 | +33.63% |
+| Historical, 491,520 rows | 74.197 | 81.285 | +9.55% |
+| Per-block checkpoint live, minimal headers | 2,801.352 | 1,985.857 | -29.11% |
+| Per-block checkpoint live, populated headers | 3,509.579 | 2,115.962 | -39.71% |
+
+The compact header format removes the measured live regression, including the
+per-block boundary and populated fields. It does **not** finish performance
+acceptance: short history remains above 10%; large history narrowly fits in this
+run and needs confirmation because its earlier baseline median was lower.
+These are storage-call timings, not end-to-end sync throughput. Process peak RSS
+medians were ~53-55 MiB candidate versus ~662-867 MiB baseline for per-block live;
+large-history RSS was ~1,270 MiB on both, including fixture/oracle allocations.
+Next profiling targets historical raw writes and compaction. Current cross-device
+and ExFAT recovery checks, CI and remaining storage review still gate merge.
+
+[Historical phase attribution](baselines/2026-09-11-catalog-v3-history-profile.json)
+shows short raw writes around 8 ms, compaction 5.5 ms and checkpoint 7-8.5 ms.
+In warm large calls, preparing/encoding the payload column takes 60-65 ms, while
+its page writer takes 31-38 ms. These overlapping worker durations include
+scheduling; they are not exclusive CPU totals. Code inspection confirms an entire
+column of cloned `Bytes` before paging and an unused raw buffer built even for
+adaptive encoding. The next experiment borrows payloads per page and removes
+that unused adaptive-path serialization. Temporary profiling scopes were removed.

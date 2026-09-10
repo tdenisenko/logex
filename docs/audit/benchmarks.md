@@ -140,3 +140,11 @@ This compares JSON, RLP and JSON followed by LZ4 on 8,192 minimal/populated head
 with exact RLP round trips. Its fixed codec order and absence of persistence mean
 it cannot establish ingestion performance acceptance. Use paired publication
 runs with both header profiles to validate the actual storage change.
+
+To reproduce the original production baseline with fixture v3, copy
+`crates/logex-storage/tests/ingestion_publication.rs` from `3f457987` into an
+isolated checkout of `09a63f55`, then apply the
+[baseline-only adapter](baselines/2026-09-11-publication-v3-baseline.patch).
+It restores the old separate-call sequence, removes the new codec-only diagnostic,
+and leaves baseline production code/dependencies unchanged. Build both revisions
+with the same pinned release profile and match fixture digests and tip hashes.

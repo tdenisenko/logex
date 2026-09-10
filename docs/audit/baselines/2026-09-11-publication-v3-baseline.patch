@@ -1,0 +1,197 @@
+--- a/crates/logex-storage/tests/ingestion_publication.rs
++++ b/crates/logex-storage/tests/ingestion_publication.rs
+@@ -36,29 +36,29 @@
+ }
+ 
+ fn fill_header_fields(header: &mut Header, index: usize) {
+-    let hash = |tag: u8| {
+-        let mut seed = (index as u64).to_le_bytes().to_vec();
+-        seed.push(tag);
+-        keccak256(seed)
+-    };
+-    header.beneficiary = Address::from_slice(&hash(0).as_slice()[12..]);
+-    header.state_root = hash(1);
+-    header.transactions_root = hash(2);
+-    header.receipts_root = hash(3);
+-    header.mix_hash = hash(4);
+-    header.extra_data = Bytes::copy_from_slice(hash(5).as_slice());
+-    let mut bloom = [0u8; 256];
+-    for (part, chunk) in bloom.as_chunks_mut::<32>().0.iter_mut().enumerate() {
+-        chunk.copy_from_slice(hash(10 + part as u8).as_slice());
+-    }
+-    header.logs_bloom = Bloom::from(bloom);
+-    header.gas_used = 15_000_000 + index as u64;
+-    header.base_fee_per_gas = Some(1_000_000_000 + index as u64);
+-    header.withdrawals_root = Some(hash(20));
+-    header.blob_gas_used = Some(393_216);
+-    header.excess_blob_gas = Some(index as u64 * 131_072);
+-    header.parent_beacon_block_root = Some(hash(21));
+-    header.requests_hash = Some(hash(22));
++                let hash = |tag: u8| {
++                    let mut seed = (index as u64).to_le_bytes().to_vec();
++                    seed.push(tag);
++                    keccak256(seed)
++                };
++                header.beneficiary = Address::from_slice(&hash(0).as_slice()[12..]);
++                header.state_root = hash(1);
++                header.transactions_root = hash(2);
++                header.receipts_root = hash(3);
++                header.mix_hash = hash(4);
++                header.extra_data = Bytes::copy_from_slice(hash(5).as_slice());
++                let mut bloom = [0u8; 256];
++                for (part, chunk) in bloom.as_chunks_mut::<32>().0.iter_mut().enumerate() {
++                    chunk.copy_from_slice(hash(10 + part as u8).as_slice());
++                }
++                header.logs_bloom = Bloom::from(bloom);
++                header.gas_used = 15_000_000 + index as u64;
++                header.base_fee_per_gas = Some(1_000_000_000 + index as u64);
++                header.withdrawals_root = Some(hash(20));
++                header.blob_gas_used = Some(393_216);
++                header.excess_blob_gas = Some(index as u64 * 131_072);
++                header.parent_beacon_block_root = Some(hash(21));
++                header.requests_hash = Some(hash(22));
+ }
+ 
+ fn fixture(config: &Config) -> (Vec<Header>, Vec<Vec<LogRow>>) {
+@@ -73,16 +73,14 @@
+             gas_limit: 30_000_000,
+             ..Default::default()
+         };
+-        if config.rich_headers {
+-            fill_header_fields(&mut header, index);
+-        }
++        if config.rich_headers { fill_header_fields(&mut header, index); }
+         let hash = header.hash_slow();
+         parent_hash = hash;
+         headers.push(header.clone());
+         if index < config.warm_headers {
+             continue;
+         }
+-        let count = if (index - config.warm_headers + 1).is_multiple_of(16) {
++        let count = if (index - config.warm_headers + 1) % 16 == 0 {
+             0
+         } else {
+             config.rows_per_block
+@@ -179,9 +177,7 @@
+     );
+     for iteration in 0..config.repeats {
+         for historical in [false, true] {
+-            if config.route.is_some_and(|route| route != historical) {
+-                continue;
+-            }
++            if config.route.is_some_and(|route| route != historical) { continue; }
+             let dir = tempfile::tempdir().unwrap();
+             let storage_config = PartitionManagerConfig {
+                 data_dir: dir.path().to_path_buf(),
+@@ -207,31 +203,31 @@
+             let start = Instant::now();
+             if historical {
+                 for (first, rows) in &history {
++                    if !rows.is_empty() {
++                        storage.write_historical_batch(rows).unwrap();
++                    }
+                     storage
+-                        .ingest_historical_batch(rows, &measured_headers[*first])
++                        .record_historical_floor(&measured_headers[*first])
+                         .unwrap();
+                 }
+                 storage.finalize_historical_segment().unwrap();
+             } else {
+                 for (index, (header, rows)) in measured_headers.iter().zip(&blocks).enumerate() {
++                    if !rows.is_empty() {
++                        storage.write_batch(rows).unwrap();
++                    }
+                     storage
+-                        .ingest_canonical_batch(
+-                            rows,
++                        .record_verified_canonical_state(
++                            &anchor(header),
+                             header,
+                             &headers[(config.warm_headers + index + 1)
+                                 .saturating_sub(RECENT_HEADER_WINDOW)
+-                                ..config.warm_headers + index + 1],
+-                            Some(&anchor(header)),
++                                ..=config.warm_headers + index],
+                         )
+                         .unwrap();
+-                    // Model sparse live traffic's durable boundary without
+-                    // sleeping between blocks; this is not a paced-network test.
+-                    if config.checkpoint_each_block {
+-                        storage.checkpoint().unwrap();
+-                    }
++                    storage.record_historical_floor(header).unwrap();
+                 }
+             }
+-            storage.checkpoint().unwrap();
+             let elapsed = start.elapsed();
+             println!(
+                 "{}",
+@@ -289,64 +285,17 @@
+         segment_rows: positive_env("LOGEX_PUBLICATION_SEGMENT_ROWS", 1_000_000) as u64,
+         repeats: positive_env("LOGEX_PUBLICATION_REPEATS", 3),
+         route: match std::env::var("LOGEX_PUBLICATION_ROUTE").as_deref() {
+-            Ok("live") => Some(false),
+-            Ok("historical") => Some(true),
++            Ok("live") => Some(false), Ok("historical") => Some(true),
+             Ok("both") | Err(std::env::VarError::NotPresent) => None,
+             value => panic!("invalid LOGEX_PUBLICATION_ROUTE: {value:?}"),
+         },
+         rich_headers: match std::env::var("LOGEX_PUBLICATION_HEADER_FIELDS").as_deref() {
+-            Ok("rich") => true,
+-            Ok("minimal") | Err(std::env::VarError::NotPresent) => false,
++            Ok("rich") => true, Ok("minimal") | Err(std::env::VarError::NotPresent) => false,
+             value => panic!("invalid LOGEX_PUBLICATION_HEADER_FIELDS: {value:?}"),
+         },
+-        checkpoint_each_block: match std::env::var("LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK")
+-            .as_deref()
+-        {
+-            Ok("1") => true,
+-            Ok("0") | Err(std::env::VarError::NotPresent) => false,
++        checkpoint_each_block: match std::env::var("LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK").as_deref() {
++            Ok("1") => true, Ok("0") | Err(std::env::VarError::NotPresent) => false,
+             value => panic!("invalid LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK: {value:?}"),
+         },
+     });
+ }
+-
+-#[test]
+-#[ignore = "release cached-header encoding comparison; see docs/audit/benchmarks.md"]
+-fn benchmark_cached_header_encoding() {
+-    use alloy_rlp::Decodable;
+-
+-    for rich in [false, true] {
+-        let (headers, _) = fixture(&Config {
+-            blocks: RECENT_HEADER_WINDOW,
+-            warm_headers: 0,
+-            rows_per_block: 0,
+-            history_batch_blocks: 2048,
+-            segment_rows: 1_000_000,
+-            repeats: 1,
+-            route: None,
+-            checkpoint_each_block: false,
+-            rich_headers: rich,
+-        });
+-        for iteration in 0..9 {
+-            let start = Instant::now();
+-            let json_bytes = serde_json::to_vec(&headers).unwrap();
+-            let json_ms = start.elapsed().as_secs_f64() * 1000.0;
+-            let start = Instant::now();
+-            let rlp_bytes = alloy_rlp::encode(&headers);
+-            let rlp_ms = start.elapsed().as_secs_f64() * 1000.0;
+-            let start = Instant::now();
+-            let compressed = lz4_flex::compress_prepend_size(&json_bytes);
+-            let lz4_ms = start.elapsed().as_secs_f64() * 1000.0;
+-            let mut input = rlp_bytes.as_slice();
+-            assert_eq!(Vec::<Header>::decode(&mut input).unwrap(), headers);
+-            assert!(input.is_empty());
+-            println!(
+-                "{}",
+-                json!({"kind":"header_encoding", "rich_fields":rich,
+-                "iteration":iteration,"headers":headers.len(),
+-                "json_ms":json_ms,"json_bytes":json_bytes.len(),
+-                "rlp_ms":rlp_ms,"rlp_bytes":rlp_bytes.len(),
+-                "lz4_additional_ms":lz4_ms,"lz4_bytes":compressed.len()})
+-            );
+-        }
+-    }
+-}

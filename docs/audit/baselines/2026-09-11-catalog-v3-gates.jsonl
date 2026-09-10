@@ -1,0 +1,7 @@
+{"candidate": "3f457987fc233441fb1eb9a25558f6f0bf4fa192", "notes": "All six local gates on the committed compact catalog and retained filename; no production source changes during these gates. Loopback fixture tests run outside the sandbox."}
+{"gate": "fmt", "returncode": 0, "elapsed_seconds": 0.580429500027094}
+{"gate": "check", "returncode": 0, "elapsed_seconds": 5.069309999991674}
+{"gate": "clippy", "returncode": 0, "elapsed_seconds": 5.392956083000172}
+{"gate": "test", "returncode": 0, "elapsed_seconds": 140.64264862501295}
+{"gate": "doc", "returncode": 0, "elapsed_seconds": 3.842627417005133}
+{"gate": "release", "returncode": 0, "elapsed_seconds": 0.7295968339894898}
