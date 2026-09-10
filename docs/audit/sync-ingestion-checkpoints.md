@@ -325,3 +325,13 @@ a small retained result does not pin an entire raw column. The complete raw file
 is still read into memory for compaction; this is not a streaming-file or globally
 bounded-recovery claim. Superseded offset vectors and the unused encoder wrapper
 are removed. Focused tests pass; full storage validation/timing is in progress.
+
+[Validated raw-payload borrowing](baselines/2026-09-11-raw-borrow-comparison.jsonl)
+at `2872595b` versus `2355d6f4` gives 18.079 → 17.205 ms short-history median
+(-4.83%) across three alternating pairs; all exact oracles pass. The small timing
+change needs confirmation against noise; the reproduced malformed-layout fix
+is independently required. Full storage tests pass (136, two ignored), as do the
+final layout tests and strict storage Clippy. The next isolated experiment avoids
+spawning fourteen compaction workers when each column occupies only one page;
+multipage raw segments retain parallel compaction. Nine focused compaction tests
+and strict Clippy pass; timing is pending.
