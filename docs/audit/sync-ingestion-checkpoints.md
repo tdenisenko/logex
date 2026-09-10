@@ -374,3 +374,13 @@ short-history comparison. It does not demonstrate improvement; restored four
 workers. Thirteen focused column/recovery tests and strict Clippy had passed.
 The remaining prototype therefore matches the previously validated production
 code while further performance work continues.
+
+[All-null file extension](baselines/2026-09-11-null-extension-comparison.jsonl)
+at `080c9eec` gives 19.058 → 17.134 ms (-10.10%) versus the validated `224a9d30`
+in three alternating isolated short-history pairs. It extends new replacement
+files to their required zero-filled logical length instead of writing each null
+slot, with unchanged headers, bitmap bytes and publication ordering. Fourteen
+focused column/recovery tests and strict Clippy pass, including exact file-byte
+checks for new files, replacements, empty/partial-byte counts and repopulation.
+This is promising but needs combined original-baseline confirmation and ExFAT
+validation; it does not establish acceptance for all sync workloads.
