@@ -1046,19 +1046,7 @@ impl NativeStorage {
             }) {
                 verify_segment_integrity(&self.paths, segment)?;
                 let dir = self.paths.segment_dir(segment.id);
-                let has_raw_artifacts = fs::read_dir(&dir)?.try_fold(false, |found, entry| {
-                    let path = entry?.path();
-                    Ok::<_, io::Error>(
-                        found
-                            || path
-                                .extension()
-                                .is_some_and(|ext| ext == "col" || ext == "null")
-                            || path
-                                .file_name()
-                                .is_some_and(|name| name == "canonical.bitmap"),
-                    )
-                })?;
-                if has_raw_artifacts
+                if has_raw_segment_artifacts(&dir)?
                     && hot_segment_physical_row_counts(&dir)?
                         .iter()
                         .any(|(_, count)| *count != segment.row_count)
@@ -1323,28 +1311,37 @@ impl NativeStorage {
     ) -> std::io::Result<bool> {
         let descriptor = self.catalog.segments[segment_index].clone();
         let segment_dir = self.paths.segment_dir(descriptor.id);
-        if !segment_dir.join("address.col").exists() {
-            return Ok(false);
-        }
+        if descriptor.row_count == 0 {
+            // An interrupted first write may have created any subset of columns.
+            // There is no committed prefix to read; replace the partial files
+            // with a complete empty prefix before replaying the verified WAL.
+            if !has_raw_segment_artifacts(&segment_dir)? {
+                return Ok(false);
+            }
+        } else {
+            if !segment_dir.join("address.col").exists() {
+                return Ok(false);
+            }
 
-        let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
-        if column_counts
-            .iter()
-            .all(|(_, row_count)| *row_count == descriptor.row_count)
-        {
-            return Ok(false);
-        }
-        if let Some((name, row_count)) = column_counts
-            .iter()
-            .find(|(_, row_count)| *row_count < descriptor.row_count)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{label} segment {} column {name} has fewer rows than descriptor: {row_count} < {}",
-                    descriptor.id, descriptor.row_count
-                ),
-            ));
+            let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
+            if column_counts
+                .iter()
+                .all(|(_, row_count)| *row_count == descriptor.row_count)
+            {
+                return Ok(false);
+            }
+            if let Some((name, row_count)) = column_counts
+                .iter()
+                .find(|(_, row_count)| *row_count < descriptor.row_count)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{label} segment {} column {name} has fewer rows than descriptor: {row_count} < {}",
+                        descriptor.id, descriptor.row_count
+                    ),
+                ));
+            }
         }
 
         let committed_rows = if descriptor.row_count == 0 {
@@ -1761,6 +1758,19 @@ fn repair_missing_timestamp_metadata(
     descriptor.max_timestamp = boundary_timestamps.iter().copied().max();
     persist_segment_manifest(paths, descriptor)?;
     Ok(true)
+}
+
+fn has_raw_segment_artifacts(dir: &Path) -> io::Result<bool> {
+    fs::read_dir(dir)?.try_fold(false, |found, entry| {
+        let path = entry?.path();
+        Ok(found
+            || path
+                .extension()
+                .is_some_and(|ext| ext == "col" || ext == "null")
+            || path
+                .file_name()
+                .is_some_and(|name| name == "canonical.bitmap"))
+    })
 }
 
 fn hot_segment_physical_row_counts(segment_dir: &Path) -> io::Result<Vec<(&'static str, u64)>> {
@@ -2603,6 +2613,40 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(actual, [make_rows(3, 100), make_rows(6, 200)].concat());
+        }
+    }
+
+    #[test]
+    fn journal_replays_when_first_batch_left_only_some_column_files() {
+        for missing in ["address.col", "topic1.null", "canonical.bitmap", "data.col"] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 10,
+                compaction_safety_margin_blocks: 2_048,
+            };
+            let pending = make_rows(3, 200);
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.begin_wal_batch(&pending).unwrap();
+            let dir = storage.segment_path(storage.catalog.active_hot_segment.unwrap());
+            // The first parallel column write did not finish all its files. The
+            // manifest still has zero rows; the WAL contains the entire batch.
+            ColumnFile::write_batch(&dir, &pending).unwrap();
+            fs::remove_file(dir.join(missing)).unwrap();
+            drop(storage);
+            for restart in 0..2 {
+                let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("missing {missing}, restart {restart}: {error}")
+                });
+                assert_eq!(recovered.total_rows(), pending.len() as u64);
+                assert_eq!(
+                    SegmentReader::open(&dir)
+                        .unwrap()
+                        .read_log_rows(None)
+                        .unwrap(),
+                    pending
+                );
+            }
         }
     }
 
