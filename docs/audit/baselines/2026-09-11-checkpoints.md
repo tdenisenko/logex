@@ -54,6 +54,65 @@ These exploratory pairs are not statistical acceptance evidence. Versions:
 - [v4](2026-09-11-checkpoint-v4.jsonl): additionally test four worker groups for
   appending independent columns. Retention depends on repeated comparisons.
 
+## Exact committed candidate comparison
+
+[v5 raw results](2026-09-11-checkpoint-v5.jsonl) compare `ff728ea3` with
+`09a63f55` after the final correctness fixes. This is the same internal-APFS
+environment and fixture configuration above: five alternating baseline/candidate
+pairs per profile, three iterations per process, 20 processes and 60 workload
+iterations. No local compilation or other test workload ran during measurement.
+Every exact lifecycle/query oracle passed. The new optional cross-filesystem
+test added afterward changes no production code or benchmark behavior.
+
+| Profile | Metric | Baseline median ms | Candidate median ms | Regression |
+| --- | --- | ---: | ---: | ---: |
+| dense | live_storage_ingest | 410.721 | 484.955 | +18.07% |
+| sparse | live_storage_ingest | 409.886 | 480.874 | +17.32% |
+| dense | historical_storage_ingest | 232.346 | 569.920 | +145.29% |
+| sparse | historical_storage_ingest | 240.724 | 575.825 | +139.21% |
+
+All five pair-level live median regressions exceed 10%: dense ranges from
+10.70–20.22%, sparse from 14.14–22.63%. Historical pair-level regressions range
+from 126.01–164.15% dense and 124.63–148.17% sparse. The requirement remains
+unmet; neither the lower live regression in this run nor green CI authorizes
+merging. Concurrent native query pooled medians changed by -5.53% dense and
+-1.06% sparse; these do not isolate the cause of earlier query variance.
+
+The binary SHA-256 values are recorded in the raw file. Candidate:
+`d1f2dd4020533f4b6c6db88f9d798def1ac84bb67f6d80f37e99d0f357215e69`.
+Individual timings, throughput, logical storage and whole-process RSS are
+retained. With only 15 observations per metric/profile/revision, nearest-rank
+p95 is the maximum and must not be described as production tail latency.
+
+The first attempt completed the baseline oracle successfully, but the sandbox
+denied `/usr/bin/time` its `kern.clockrate` read and that wrapper returned an
+error. The comparison was restarted with working system timing; the interrupted
+attempt was not combined with these measurements.
+
+## Larger caller-batch diagnostic
+
+[Raw results](2026-09-11-checkpoint-large-batch.jsonl) additionally use 1,000,000
+rows, 500,000-row calls and the default 1,000,000-row segment target, with the
+same baseline/v5 executables. Three alternating pairs per profile, one iteration
+per process, passed every exact oracle. These sizes exercise the historical
+writer's direct-compaction path and match its normal-memory row batching limit.
+They do not model the engine's additional 2,048-block cap, metadata publication,
+or live per-block calls. No local build or test ran during these measurements.
+
+| Profile | Metric | Baseline median ms | Candidate median ms | Change |
+| --- | --- | ---: | ---: | ---: |
+| dense | live_storage_ingest | 730.832 | 770.647 | +5.45% |
+| sparse | live_storage_ingest | 744.898 | 736.842 | -1.08% |
+| dense | historical_storage_ingest | 366.541 | 621.136 | +69.46% |
+| sparse | historical_storage_ingest | 348.339 | 727.714 | +108.91% |
+
+Larger calls reduce some overhead but do not resolve historical ingestion.
+Their live figures are diagnostics of a large storage call, not evidence of
+acceptable live sync performance. The original small-call regressions remain
+recorded and unacceptable. A separate storage-publication fixture now follows
+the actual live/historical metadata call sequences, including the 8,192-header
+window and empty blocks; it must be evaluated before drawing pipeline conclusions.
+
 ## Repeated worker comparison
 
 [Raw results](2026-09-11-checkpoint-workers.jsonl) cover five alternating process
@@ -145,12 +204,12 @@ check found one immutable reorg guard after the mutable API change; that caller
 was corrected before the complete successful run. The pre-fix raw cleanup and
 duplicate-descriptor regressions both failed as expected, then passed after fixes.
 
-An isolated ExFAT-image attempt used `hdiutil create -size 512m -fs ExFAT` in a
-new `/tmp` directory. The host returned `Operation not permitted`, created no
-image and mounted nothing. Actual ExFAT/cross-device validation is therefore
-blocked on an environment that permits an isolated test mount. This was an OS
-operation failure, not evidence that the filesystem implementation passed or failed.
-No production mount was accessed and no system protection was changed.
+The initial sparse-image attempt returned `Operation not permitted`. A later
+blank `UDIF` image succeeded without changing system protections. The
+[isolated ExFAT report](2026-09-11-exfat.md) records 117 passing storage tests
+on `mac-mini`, syscall compatibility and a new actual cross-filesystem recovery
+test. Existing external-volume contents remain untouched. Image-backed results
+do not establish physical USB-drive performance or power-loss durability.
 
 These green correctness gates do not satisfy the performance requirement.
 

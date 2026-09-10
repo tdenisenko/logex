@@ -2230,6 +2230,88 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts"]
+    fn checkpoint_recovery_across_distinct_mounts() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let roots = ["LOGEX_TEST_VOLUME_A", "LOGEX_TEST_VOLUME_B"].map(|name| {
+            PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")))
+        });
+        assert_ne!(
+            fs::metadata(&roots[0]).unwrap().dev(),
+            fs::metadata(&roots[1]).unwrap().dev(),
+            "the supplied test roots must be on different mounted filesystems"
+        );
+        for (root, other) in [(&roots[0], &roots[1]), (&roots[1], &roots[0])] {
+            for alias in ["wal", "segments"] {
+                for historical in [false, true] {
+                    // Only these newly allocated directories are changed or removed.
+                    let data = TempDir::new_in(root).unwrap();
+                    let external = TempDir::new_in(other).unwrap();
+                    if alias == "wal" {
+                        fs::create_dir(data.path().join("wal")).unwrap();
+                        // The first append must persist the newly created target
+                        // name as well as ordering the journal on another device.
+                        symlink(
+                            external.path().join("pending.wal"),
+                            data.path().join("wal/pending.wal"),
+                        )
+                        .unwrap();
+                    } else {
+                        symlink(external.path(), data.path().join("segments")).unwrap();
+                    }
+                    let config = NativeStorageConfig {
+                        data_dir: data.path().to_path_buf(),
+                        hot_target_rows: 6,
+                        compaction_safety_margin_blocks: 2_048,
+                    };
+                    let mut storage = NativeStorage::open(config.clone()).unwrap();
+                    let mut expected = Vec::new();
+                    for (count, block) in [(3, 200), (12, 100)] {
+                        let rows = make_rows(count, block);
+                        durability::inject_failure(usize::MAX);
+                        if historical {
+                            storage.write_historical_batch(&rows).unwrap();
+                        } else {
+                            storage.write_batch(&rows).unwrap();
+                        }
+                        let events = durability::take_events();
+                        #[cfg(target_vendor = "apple")]
+                        assert!(events.iter().any(|(op, _)| *op == "cross_device_sync"));
+                        #[cfg(not(target_vendor = "apple"))]
+                        let _ = events;
+                        expected.extend(rows);
+                        // Close with a live checkpoint; recovery must handle both
+                        // directions and historical raw-to-compacted rotation.
+                        drop(storage);
+                        storage = NativeStorage::open(config.clone()).unwrap();
+                    }
+                    storage.checkpoint().unwrap();
+                    drop(storage);
+                    let recovered = NativeStorage::open(config).unwrap();
+                    let mut actual: Vec<_> = recovered
+                        .segments()
+                        .iter()
+                        .filter(|segment| segment.row_count > 0)
+                        .flat_map(|segment| {
+                            SegmentReader::open(&recovered.segment_path(segment.id))
+                                .unwrap()
+                                .read_log_rows(None)
+                                .unwrap()
+                        })
+                        .collect();
+                    actual.sort_by_key(|row| (row.block_number, row.log_index));
+                    expected.sort_by_key(|row| (row.block_number, row.log_index));
+                    assert_eq!(actual, expected);
+                    assert!(recovered.wal.is_empty().unwrap());
+                    assert!(!RecoveryJournal::path(&recovered.paths).exists());
+                }
+            }
+        }
+    }
+
     fn header(number: u64, parent_hash: B256, marker: u8) -> Header {
         let mut header = Header {
             number,

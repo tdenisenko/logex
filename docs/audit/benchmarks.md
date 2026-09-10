@@ -34,7 +34,9 @@ data directory is opened.
 
 ## What is measured
 
-- Live storage ingestion, including its WAL and metadata writes.
+- Live storage ingestion, including its WAL, segment/catalog publication and
+  final checkpoint. Sync-engine canonical-header, anchor and coverage-state
+  publication are not part of this fixture.
 - Index construction and manifest publication, separate from compaction.
 - Eligible segment compaction and startup/reopen validation.
 - Native filters, SQL count and ordered/limited queries, warmed once per path.
@@ -92,3 +94,30 @@ batches. No speedup is claimed by adding this harness.
 Checked extraction fixtures and release comparisons are documented in the
 [extraction audit](extraction-boundaries.md) and its
 [baseline report](baselines/2026-09-09-extraction.md).
+
+## Sync storage publication
+
+The separate `logex-storage` integration fixture includes the live canonical
+header/anchor writes and historical floor updates omitted by the row-only
+benchmark. See its [findings and baseline](ingestion-publication.md).
+
+```sh
+cargo test -p logex-storage --test ingestion_publication --release --locked --no-run
+cargo test -p logex-storage --test ingestion_publication --release --locked -- \
+  --ignored --nocapture --test-threads=1
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LOGEX_PUBLICATION_BLOCKS` | 128 | Measured complete blocks |
+| `LOGEX_PUBLICATION_ROWS_PER_BLOCK` | 128 | Rows in each nonempty block |
+| `LOGEX_PUBLICATION_WARM_HEADERS` | 8192 | Untimed prior header-window setup |
+| `LOGEX_PUBLICATION_HISTORY_BLOCKS` | 2048 | Maximum complete blocks per historical call |
+| `LOGEX_PUBLICATION_SEGMENT_ROWS` | 1000000 | Segment row target |
+| `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
+
+All values are positive. Every sixteenth block is empty. This fixture holds the
+production 8,192-header window but does not warm an existing million-row hot
+segment; that additional write-amplification scenario remains to be measured.
+It prints individual timings and exact fixture identifiers, with no in-process
+summary or claim of end-to-end P2P throughput.

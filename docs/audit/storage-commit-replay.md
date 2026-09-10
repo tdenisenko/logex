@@ -22,6 +22,7 @@ records the current prototype and remaining performance work.
 | B2-07 | P1, orphaned rows made canonical | Startup recreated missing/short canonical bitmaps with all bits true. A test retaining a false committed bit but shortening the bitmap succeeded and made that row canonical on the baseline. Missing committed canonical bits now stop startup; an explained uncommitted append tail is rebuilt with the original committed bits. Interrupted recovery must preserve those bits too. |
 | B2-08 | P1, conflicting data-directory owners | Multiple storage instances could open the same directory and independently append/replay/truncate its WAL. Acquire a nonblocking exclusive lock on the directory inode before catalog or WAL access, retain it in background compaction plans, and reject competing owners with an actionable path. This implements the exclusivity prerequisite from batch 10; volume supervision remains pending. |
 | B2-09 | P2, valid compacted storage refused on reopen | A compacted manifest can coexist with a subset of obsolete raw files after interrupted cleanup. Recovery mistook its retained canonical bitmap for raw storage, and integrity checking required missing raw columns whenever address.col survived. Regressions cover an empty WAL with a complete journal and repeated ordinary reopen. Validate the representation referenced by the manifest; raw manifests still require every raw column. |
+| B2-10 | P1, sync repeats rows after a progress-publication interruption | **Unresolved.** Restart after the row write but before the engine's head/floor update; resuming from the old marker gives six rows instead of three, on both `09a63f55` and `ff728ea3`, in both ingestion routes. [Caller-level findings and measurements](ingestion-publication.md) require a joint data/progress recovery boundary. Exact WAL replay alone cannot repair this gap, and generic equality-based deduplication would be incorrect. |
 
 ## Commit and recovery protocol
 
@@ -176,12 +177,20 @@ improve live ingestion about 9–10% within the checkpoint prototype. The curren
 10% ingestion-regression ceiling; neither timing nor correctness gates authorize
 merging the unfinished performance work.
 
-All six pre-checkpoint local workspace gates passed at `e811325f`: 809 tests, four explicitly ignored
-benchmarks, strict Clippy, doc tests and release linking. The current checkpoint implementation also passes all six local gates: 823 tests
-(four ignored), including 117 in storage. The current performance requirement is
-still unmet. Actual ExFAT validation was blocked when the host rejected creation
-of a disposable image with `Operation not permitted`.
-Linux/macOS CI is required before merge. The
+All six pre-checkpoint local workspace gates passed at `e811325f`: 809 tests,
+four explicitly ignored benchmarks, strict Clippy, doc tests and release linking.
+The checkpoint implementation and publication fixture pass all six local gates:
+824 tests, including 117 storage unit tests, with six ignored cases. The optional
+cross-filesystem test passed explicitly on isolated APFS/ExFAT mounts.
+[Current gate results](baselines/2026-09-11-publication-gates.jsonl).
+All six Linux/macOS CI jobs also passed at `ff728ea3` in run `34520575847`.
+
+The [isolated ExFAT validation](baselines/2026-09-11-exfat.md) passed all 117
+storage tests on `mac-mini`; only its explicit WAL benchmark was ignored.
+Creating a sparse image failed, but a blank writable image succeeded without
+changing system protections or external-volume contents. Five alternating image
+benchmark pairs show +38–39% live and +49–55% historical storage-ingestion time;
+all exact oracles pass, but the performance requirement remains unmet. The
 [release comparison](baselines/2026-09-10-commit-replay.md) records write, index,
 compaction, warm reopen and query costs using unchanged dense/sparse fixtures.
 
@@ -200,4 +209,5 @@ validation and allocation limits, query snapshots and file lifetime, derived
 index corruption recovery, task supervision, external-volume identity/loss
 handling, verified offline repair and the integrated staging soak. The separate
 metadata file adds a compatibility condition for downgrade and durable writes
-have measurable cost. No production data or service was accessed.
+have measurable cost. Only read-only metadata of the existing external volume
+was inspected; production data contents and services were not changed.
