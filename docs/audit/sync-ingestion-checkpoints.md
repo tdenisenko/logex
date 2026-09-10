@@ -97,7 +97,9 @@ ignored; [results](baselines/2026-09-11-sync-checkpoint-gates.jsonl)). Those res
 do **not** validate the new catalog/deferred-publication protocol. Its storage
 suite passes 129 tests with two explicitly ignored cases, including the additional
 recovery-evidence and malformed-uncommitted-artifact checks. Strict workspace
-Clippy also passes. Full gates and performance validation are still pending.
+Clippy also passes. All six [local gates](baselines/2026-09-11-catalog-v2-gates.jsonl)
+pass for `adff367c`: 836 tests passed, six intentionally ignored, and the release
+build succeeds. Performance and platform validation remain pending.
 
 The current regressions exercise live/historical retry, empty progress, rotation,
 compaction, prior non-canonical rows, each main-thread write/commit failure point,
@@ -108,7 +110,7 @@ aliases. Worker failures and physical power-loss interleavings are not exhaustiv
 covered by the main-thread injection matrix.
 
 Pending: new release comparisons including large historical calls and per-block
-live checkpoints; full local gates; Linux/macOS CI; isolated ExFAT/distinct-device
+live checkpoints; Linux/macOS CI; isolated ExFAT/distinct-device
 recovery; concurrent-query failure behavior; recovery memory/startup cost; and the
 broader storage audit. Previous ExFAT results apply to `ff728ea3` only.
 
@@ -147,3 +149,38 @@ code was removed after capture.
 These measured costs motivated catalog version 2 and deferred publication as
 described above. The historical comparison records the rejected earlier design;
 it must not be presented as performance of the new candidate.
+
+## Catalog v2 release comparison
+
+[Raw samples](baselines/2026-09-11-catalog-v2-comparison.jsonl) compare original
+`09a63f55` with `adff367c` on internal APFS (Mac14,15, 16 GiB, pinned nightly
+2026-08-24). Three alternating pairs per profile, three iterations per process;
+all exact row/head/anchor/floor/reopen oracles pass. Final checkpoint/finalization
+is included; no build or test ran during timing. Fresh directories, OS caches
+not evicted, 8,192 warm headers and a million-row segment target. Fixture v2 adds
+route selection and per-block checkpoint controls, applied consistently to the
+baseline harness; baseline calls already publish separately. The per-block case
+forces the candidate's durability boundary without sleeping or network traffic.
+Binary hashes and fixture digests are in the raw records. `/usr/bin/time -l`
+required access to system counters; the initial sandboxed process passed its
+oracle but failed resource collection and was rerun, not combined with results.
+
+| Workload | Baseline median ms | Catalog v2 median ms | Change |
+| --- | ---: | ---: | ---: |
+| Live, 128 blocks / 15,360 rows | 2,854.581 | 515.835 | -81.93% |
+| Historical, same short input | 14.781 | 22.782 | +54.13% |
+| Historical, 2,048 blocks / 491,520 rows | 67.838 | 85.921 | +26.66% |
+| Live, checkpoint after every block | 2,759.964 | 3,322.951 | +20.40% |
+
+**This candidate still fails performance acceptance.** Grouped live improvement
+cannot be generalized to sparse live traffic or historical sync. Full local
+gates pass, but this PR must remain unmerged.
+
+[Temporary phase profiling](baselines/2026-09-11-catalog-v2-profile.json) shows
+checkpoint ordering/full synchronization at roughly 8-10 ms and short raw writes
+at roughly 8-9 ms after warmup. Individual file submission is below 0.2 ms in
+these samples, so parallelizing file fsync is not supported by this profile.
+Potential next reductions are redundant ordering before the catalog's own barrier,
+first writes to unpublished files, and per-call publication that can safely defer
+to the same catalog checkpoint. Committed prefixes and current readers still
+require protection; any optimization needs its own recovery and timing evidence.

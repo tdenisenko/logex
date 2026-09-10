@@ -11,7 +11,11 @@ PR #130 remains unmerged: the initial ingestion slowdown was rejected. The user
 requires no more than 10% degradation and authorized bounded WAL checkpoints.
 The [grouped-flush investigation](baselines/2026-09-11-grouped-flush.md) records
 the tested intermediate changes; the [checkpoint investigation](baselines/2026-09-11-checkpoints.md)
-records the current prototype and remaining performance work.
+records that rejected intermediate prototype. The current
+[catalog v2 candidate](sync-ingestion-checkpoints.md) combines sync rows/progress,
+uses bounded restart re-fetch, and requires a new data directory. The protocol
+and old-format downgrade notes below describe the preceding WAL-checkpoint
+implementation; they do not authorize opening catalog v2 with an older binary.
 
 ## Findings
 
@@ -142,7 +146,7 @@ Older binaries and arbitrary low-level filesystem writers do not participate.
 Offline commands that open storage must stop the other owner first; use the
 running server's API for concurrent log queries.
 
-Stop the node cleanly before downgrading: require `pending.wal` empty and
+For the preceding **catalog v1** prototype only, stop cleanly before downgrading: require `pending.wal` empty and
 `recovery.json` absent. An older binary ignores the new journal and can duplicate
 or discard a pending transaction. Preserve the whole closed data directory and
 use this version to finish recovery before downgrading. On an ambiguity/corruption
