@@ -2910,8 +2910,18 @@ mod tests {
                     // Only these newly allocated directories are changed or removed.
                     let data = TempDir::new_in(root).unwrap();
                     let external = TempDir::new_in(other).unwrap();
+                    let config = NativeStorageConfig {
+                        data_dir: data.path().to_path_buf(),
+                        hot_target_rows: 6,
+                        compaction_safety_margin_blocks: 2_048,
+                    };
                     if alias == "wal" {
-                        fs::create_dir(data.path().join("wal")).unwrap();
+                        // Establish an empty catalog before installing the WAL
+                        // alias. A WAL artifact without a catalog deliberately
+                        // fails closed instead of initializing a new dataset.
+                        drop(NativeStorage::open(config.clone()).unwrap());
+                        let wal = data.path().join("wal/pending.wal");
+                        assert!(!wal.exists()); // Created lazily by the first append.
                         // The first append must persist the newly created target
                         // name as well as ordering the journal on another device.
                         symlink(
@@ -2922,11 +2932,6 @@ mod tests {
                     } else {
                         symlink(external.path(), data.path().join("segments")).unwrap();
                     }
-                    let config = NativeStorageConfig {
-                        data_dir: data.path().to_path_buf(),
-                        hot_target_rows: 6,
-                        compaction_safety_margin_blocks: 2_048,
-                    };
                     let mut storage = NativeStorage::open(config.clone()).unwrap();
                     let mut expected = Vec::new();
                     for (count, block) in [(3, 200), (12, 100)] {
@@ -2967,6 +2972,111 @@ mod tests {
                     assert_eq!(actual, expected);
                     assert!(recovered.wal.is_empty().unwrap());
                     assert!(!RecoveryJournal::path(&recovered.paths).exists());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts"]
+    fn sync_checkpoint_recovery_across_distinct_mounts() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let roots = ["LOGEX_TEST_VOLUME_A", "LOGEX_TEST_VOLUME_B"].map(|name| {
+            PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")))
+        });
+        assert_ne!(
+            fs::metadata(&roots[0]).unwrap().dev(),
+            fs::metadata(&roots[1]).unwrap().dev()
+        );
+        for (root, other) in [(&roots[0], &roots[1]), (&roots[1], &roots[0])] {
+            for historical in [false, true] {
+                for count in [0, 3, 12] {
+                    for commit in [false, true] {
+                        // Only these new temporary directories are modified.
+                        let data = TempDir::new_in(root).unwrap();
+                        let columns = TempDir::new_in(other).unwrap();
+                        symlink(columns.path(), data.path().join("segments")).unwrap();
+                        let config = NativeStorageConfig {
+                            data_dir: data.path().to_owned(),
+                            hot_target_rows: 6,
+                            ..Default::default()
+                        };
+                        let prior = ingestion_header(100, B256::ZERO);
+                        let incoming =
+                            ingestion_header(if historical { 99 } else { 101 }, prior.hash_slow());
+                        let initial = ingestion_rows(3, &prior);
+                        let next = ingestion_rows(count, &incoming);
+                        let mut storage = NativeStorage::open(config.clone()).unwrap();
+                        if historical {
+                            storage.ingest_historical_batch(&initial, &prior).unwrap();
+                        } else {
+                            storage
+                                .ingest_canonical_batch(
+                                    &initial,
+                                    &prior,
+                                    std::slice::from_ref(&prior),
+                                    None,
+                                )
+                                .unwrap();
+                        }
+                        storage.checkpoint().unwrap();
+                        durability::inject_failure(usize::MAX);
+                        ingest_test_batch(&mut storage, historical, &next, &incoming, &prior)
+                            .unwrap();
+                        if commit {
+                            storage.checkpoint().unwrap();
+                        }
+                        let events = durability::take_events();
+                        #[cfg(target_vendor = "apple")]
+                        if commit && count > 0 {
+                            let catalog = storage.paths.catalog_path();
+                            let publish = events
+                                .iter()
+                                .position(|(op, path)| {
+                                    *op == "rename_temporary" && path == &catalog
+                                })
+                                .unwrap();
+                            assert!(
+                                events[..publish]
+                                    .iter()
+                                    .any(|(op, _)| *op == "cross_device_sync")
+                            );
+                        }
+                        #[cfg(not(target_vendor = "apple"))]
+                        let _ = events;
+                        drop(storage);
+                        let mut expected = initial.clone();
+                        if commit {
+                            expected.extend(next.clone());
+                        }
+                        expected.sort_by_key(|row| (row.block_number, row.log_index));
+                        for _ in 0..2 {
+                            let storage = NativeStorage::open(config.clone()).unwrap();
+                            assert_eq!(read_ingestion_rows(&storage), expected);
+                            let head = if commit { &incoming } else { &prior };
+                            if historical {
+                                assert_eq!(storage.historical_floor_header(), Some(head));
+                            } else {
+                                assert_eq!(
+                                    storage.sync_head().unwrap().block_hash,
+                                    head.hash_slow()
+                                );
+                            }
+                        }
+                        if !commit {
+                            let mut storage = NativeStorage::open(config.clone()).unwrap();
+                            ingest_test_batch(&mut storage, historical, &next, &incoming, &prior)
+                                .unwrap();
+                            storage.checkpoint().unwrap();
+                            drop(storage);
+                            let storage = NativeStorage::open(config).unwrap();
+                            expected.extend(next);
+                            expected.sort_by_key(|row| (row.block_number, row.log_index));
+                            assert_eq!(read_ingestion_rows(&storage), expected);
+                        }
+                    }
                 }
             }
         }

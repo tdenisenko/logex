@@ -397,3 +397,20 @@ explains a fixed cost but does not waive the user's 10% performance ceiling.
 A bounded larger replacement-write buffer is the next isolated experiment: raw
 fixed-width writes currently pass through an 8 KiB buffer, generating repeated
 small writes before compression. No checkpoint ordering is relaxed.
+
+[Larger replacement write buffers](baselines/2026-09-11-replacement-buffer-comparison.jsonl)
+at `260f5c64` versus `080c9eec` reduce isolated short-history median
+18.009 → 16.182 ms (-10.14%), with three alternating pairs and all exact
+oracles passing. The 64 KiB buffers retain at most 2 MiB for the bounded
+replacement set. Fourteen focused column/recovery tests and strict storage
+Clippy pass. Combined original-baseline confirmation is still required.
+
+Current combined-sync cross-device recovery now has an explicit ignored test
+using `LOGEX_TEST_VOLUME_A/B`: both filesystem directions, live/history,
+empty/three/twelve incoming rows, checkpoint versus restart rewind, repeated
+reopen and exact retry. All 24 combinations pass on the disposable local
+APFS/ExFAT image. The eight existing generic-WAL cross-device cases also pass
+after initializing a catalog before installing the dangling WAL alias: catalog
+v3 correctly rejects such an artifact in an otherwise uninitialized directory.
+These are process-reopen/order checks, not physical power-cut certification.
+The complete storage suite on ExFAT is running before performance confirmation.
