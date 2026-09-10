@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,41 +8,28 @@ use std::thread;
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::B256;
 use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
-use serde::{Deserialize, Serialize};
 
-use super::ingestion::IngestionJournal;
 use super::recovery::{IngestRoute, RecoveryJournal};
-use crate::durability;
+#[cfg(test)]
+use super::segment::append_rows;
+use crate::durability::{self, Publication};
 use crate::state::SyncHead;
 use crate::wal::{EncodedWalBatch, WriteAheadLog};
 use crate::{ColumnFile, ColumnFileHeader, ColumnReader, NullBitmap, SegmentReader};
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
-    StorageCatalogPaths,
+    StorageCatalogPaths, StorageState,
 };
 use super::segment::{
-    append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor,
+    append_ingest_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor,
     compact_ingest_segment, compact_segment, persist_ingest_manifest,
     persist_ingest_manifest_with_columns, persist_segment_manifest,
     segment_uses_current_compaction_profile, verify_raw_segment_files_complete,
     write_compacted_rows,
 };
 
-const STORAGE_STATE_FILE: &str = "storage_state.json";
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct StorageState {
-    #[serde(default)]
-    sync_head: Option<SyncHead>,
-    #[serde(default)]
-    recent_headers: Vec<Header>,
-    #[serde(default)]
-    historical_floor_header: Option<Header>,
-    #[serde(default)]
-    historical_anchor_header: Option<Header>,
-}
 
 #[derive(Debug, Clone, Copy)]
 enum CompactionMode {
@@ -154,8 +141,28 @@ struct PendingCheckpoint {
     started_at: std::time::Instant,
 }
 
+struct IngestionOrigin {
+    route: IngestRoute,
+    start: Option<SegmentDescriptor>,
+    next_segment_id: u64,
+}
+
+impl IngestionOrigin {
+    fn can_defer(&self, id: u64) -> bool {
+        id >= self.next_segment_id
+            || self
+                .start
+                .as_ref()
+                .is_some_and(|start| start.id == id && start.row_count == 0)
+    }
+
+    fn includes(&self, id: u64) -> bool {
+        self.start.as_ref().is_some_and(|start| start.id == id) || id >= self.next_segment_id
+    }
+}
+
 struct PendingIngestion {
-    journal: IngestionJournal,
+    origin: IngestionOrigin,
     bytes: u64,
     batches: u32,
     started_at: std::time::Instant,
@@ -166,7 +173,6 @@ pub struct NativeStorage {
     paths: StorageCatalogPaths,
     catalog: NativeStorageCatalog,
     wal: WriteAheadLog,
-    state: StorageState,
     recovery_required: bool,
     pending_checkpoint: Option<PendingCheckpoint>,
     pending_ingestion: Option<PendingIngestion>,
@@ -196,53 +202,23 @@ impl NativeStorage {
             ),
         })?;
         let directory_lock = Arc::new(DataDirectoryLock(directory_lock));
-        let recovery_paths = StorageCatalogPaths::new(config.data_dir.clone());
-        let active_ingestion = if let Some(journal) = IngestionJournal::load(&recovery_paths)? {
-            let wal = WriteAheadLog::open(config.data_dir.join("wal/pending.wal"))?;
-            if !wal.is_empty()? || RecoveryJournal::load(&recovery_paths)?.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "conflicting WAL and ingestion recovery journals",
-                ));
-            }
-            let active = !journal.finish_publication(&recovery_paths)?;
-            if active {
-                journal.verify_origin(&recovery_paths)?;
-            }
-            active
-        } else {
-            false
-        };
-        let (catalog, paths) = if active_ingestion {
-            // Do not rewrite even a changed configuration until rollback has
-            // retired the journal that fingerprints the previous metadata.
-            let catalog = serde_json::from_slice(&fs::read(recovery_paths.catalog_path())?)
-                .map_err(io::Error::other)?;
-            (catalog, recovery_paths)
-        } else {
-            NativeStorageCatalog::open_or_create(&config)?
-        };
+        let (catalog, paths) = NativeStorageCatalog::open_or_create(&config)?;
+        verify_recent_headers(&catalog.state)?;
         let wal = WriteAheadLog::open(config.data_dir.join("wal").join("pending.wal"))?;
-        let state = load_state(&paths)?;
 
         let mut storage = Self {
             config,
             paths,
             catalog,
             wal,
-            state,
             recovery_required: false,
             pending_checkpoint: None,
             pending_ingestion: None,
             directory_lock,
         };
 
-        storage.recover_ingestion()?;
-        if storage.catalog.hot_target_rows != storage.config.hot_target_rows {
-            storage.catalog.hot_target_rows = storage.config.hot_target_rows;
-            storage.persist_catalog()?;
-        }
-        storage.repair_catalog_from_manifests()?;
+        storage.verify_recovery_evidence()?;
+        storage.restore_catalog_checkpoint()?;
         storage.ensure_active_hot_segment()?;
         storage.replay_wal()?;
         storage.repair_recoverable_hot_segment_artifacts()?;
@@ -256,30 +232,32 @@ impl NativeStorage {
     }
 
     pub fn sync_head(&self) -> Option<SyncHead> {
-        self.state.sync_head
+        self.catalog.state.sync_head
     }
 
     pub fn recent_headers(&self) -> &[Header] {
-        &self.state.recent_headers
+        &self.catalog.state.recent_headers
     }
 
     pub fn historical_floor_header(&self) -> Option<&Header> {
-        self.state.historical_floor_header.as_ref()
+        self.catalog.state.historical_floor_header.as_ref()
     }
 
     pub fn historical_anchor_header(&self) -> Option<&Header> {
-        self.state.historical_anchor_header.as_ref()
+        self.catalog.state.historical_anchor_header.as_ref()
     }
 
     pub fn historical_floor(&self) -> Option<ExecutionBlockMarker> {
-        self.state
+        self.catalog
+            .state
             .historical_floor_header
             .as_ref()
             .map(execution_marker_from_header)
     }
 
     pub fn historical_anchor(&self) -> Option<ExecutionBlockMarker> {
-        self.state
+        self.catalog
+            .state
             .historical_anchor_header
             .as_ref()
             .map(execution_marker_from_header)
@@ -300,11 +278,11 @@ impl NativeStorage {
             block_hash,
             timestamp,
         };
-        if self.state.sync_head == Some(next) {
+        if self.catalog.state.sync_head == Some(next) {
             return Ok(());
         }
 
-        self.state.sync_head = Some(next);
+        self.catalog.state.sync_head = Some(next);
         self.persist_state()
     }
 
@@ -324,14 +302,14 @@ impl NativeStorage {
         };
         let next_recent_headers = recent_headers.to_vec();
 
-        if self.state.sync_head == Some(next_sync_head)
-            && self.state.recent_headers == next_recent_headers
+        if self.catalog.state.sync_head == Some(next_sync_head)
+            && self.catalog.state.recent_headers == next_recent_headers
         {
             return Ok(());
         }
 
-        self.state.sync_head = Some(next_sync_head);
-        self.state.recent_headers = next_recent_headers;
+        self.catalog.state.sync_head = Some(next_sync_head);
+        self.catalog.state.recent_headers = next_recent_headers;
         self.persist_state()
     }
 
@@ -357,15 +335,15 @@ impl NativeStorage {
         if self.pending_ingestion.is_some() {
             self.checkpoint()?;
         }
-        if let Some(current) = self.state.historical_floor_header.as_ref()
+        if let Some(current) = self.catalog.state.historical_floor_header.as_ref()
             && current.number() <= header.number()
         {
             return Ok(());
         }
 
-        self.state.historical_floor_header = Some(header.clone());
-        if self.state.historical_anchor_header.is_none() {
-            self.state.historical_anchor_header = Some(header.clone());
+        self.catalog.state.historical_floor_header = Some(header.clone());
+        if self.catalog.state.historical_anchor_header.is_none() {
+            self.catalog.state.historical_anchor_header = Some(header.clone());
         }
         self.persist_state()
     }
@@ -403,12 +381,12 @@ impl NativeStorage {
         let mut next_anchors = self.catalog.anchors.clone();
         next_anchors.indexed_head = indexed_head;
 
-        let state_changed = self.state.sync_head != next_sync_head
-            || self.state.recent_headers != next_recent_headers;
+        let state_changed = self.catalog.state.sync_head != next_sync_head
+            || self.catalog.state.recent_headers != next_recent_headers;
         let anchors_changed = self.catalog.anchors != next_anchors;
 
-        self.state.sync_head = next_sync_head;
-        self.state.recent_headers = next_recent_headers;
+        self.catalog.state.sync_head = next_sync_head;
+        self.catalog.state.recent_headers = next_recent_headers;
         self.catalog.anchors = next_anchors;
 
         if state_changed {
@@ -446,12 +424,12 @@ impl NativeStorage {
         self.begin_ingestion(rows, IngestRoute::Live)?;
         self.commit_rows_to_segments(rows)?;
         durability::checkpoint("ingestion_rows_applied", self.paths.root())?;
-        self.state.sync_head = Some(SyncHead {
+        self.catalog.state.sync_head = Some(SyncHead {
             block_number: header.number,
             block_hash: hash,
             timestamp: header.timestamp,
         });
-        self.state.recent_headers = recent_headers.to_vec();
+        self.catalog.state.recent_headers = recent_headers.to_vec();
         if let Some(anchor) = anchor {
             self.catalog.anchors.indexed_head = Some(*anchor);
             self.advance_historical_floor(header);
@@ -479,14 +457,15 @@ impl NativeStorage {
 
     fn advance_historical_floor(&mut self, header: &Header) {
         if self
+            .catalog
             .state
             .historical_floor_header
             .as_ref()
             .is_none_or(|current| current.number > header.number)
         {
-            self.state.historical_floor_header = Some(header.clone());
-            if self.state.historical_anchor_header.is_none() {
-                self.state.historical_anchor_header = Some(header.clone());
+            self.catalog.state.historical_floor_header = Some(header.clone());
+            if self.catalog.state.historical_anchor_header.is_none() {
+                self.catalog.state.historical_anchor_header = Some(header.clone());
             }
         }
     }
@@ -496,7 +475,7 @@ impl NativeStorage {
         let bytes = crate::wal::validated_payload_len(rows)? as u64;
         if self.pending_checkpoint.is_some()
             || self.pending_ingestion.as_ref().is_some_and(|pending| {
-                pending.journal.route != route
+                pending.origin.route != route
                     || pending.bytes.saturating_add(bytes) > CHECKPOINT_INGEST_BYTES
                     || pending.batches >= 64
                     || pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
@@ -520,11 +499,12 @@ impl NativeStorage {
                         .ok_or_else(|| io::Error::other("ingestion starting segment is missing"))
                 })
                 .transpose()?;
-            let journal =
-                IngestionJournal::new(&self.paths, route, start, self.catalog.next_segment_id)?;
-            journal.persist(&self.paths)?;
             self.pending_ingestion = Some(PendingIngestion {
-                journal,
+                origin: IngestionOrigin {
+                    route,
+                    start,
+                    next_segment_id: self.catalog.next_segment_id,
+                },
                 bytes: 0,
                 batches: 0,
                 started_at: std::time::Instant::now(),
@@ -542,6 +522,20 @@ impl NativeStorage {
         Ok(())
     }
 
+    fn segment_publication(&self, id: u64) -> Publication {
+        if self
+            .pending_ingestion
+            .as_ref()
+            .is_some_and(|pending| pending.origin.can_defer(id))
+        {
+            Publication::Deferred
+        } else if self.pending_checkpoint.is_some() || self.pending_ingestion.is_some() {
+            Publication::Ordered
+        } else {
+            Publication::Durable
+        }
+    }
+
     fn complete_ingestion_batch(&mut self) -> io::Result<()> {
         self.recovery_required = false;
         if self.pending_ingestion.as_ref().is_some_and(|pending| {
@@ -554,106 +548,244 @@ impl NativeStorage {
 
     fn checkpoint_ingestion(&mut self, pending: PendingIngestion) -> io::Result<()> {
         self.recovery_required = true;
-        let catalog = serde_json::to_vec(&self.catalog).map_err(io::Error::other)?;
-        let state = serde_json::to_vec(&self.state).map_err(io::Error::other)?;
-        pending.journal.publish(&self.paths, &catalog, &state)?;
+        let deferred = self
+            .catalog
+            .segments
+            .iter()
+            .filter(|segment| pending.origin.can_defer(segment.id))
+            .map(|segment| self.paths.segment_dir(segment.id))
+            .collect::<Vec<_>>();
+        durability::order_trees_before_catalog(
+            deferred.iter().map(PathBuf::as_path),
+            &self.paths.catalog_path(),
+        )?;
+        self.catalog.persist(&self.paths)?;
         self.recovery_required = false;
         Ok(())
     }
 
-    fn recover_ingestion(&mut self) -> io::Result<()> {
-        let Some(journal) = IngestionJournal::load(&self.paths)? else {
-            return Ok(());
-        };
-        if !self.wal.is_empty()? || RecoveryJournal::load(&self.paths)?.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "conflicting WAL and ingestion recovery journals",
-            ));
+    /// Validate recovery evidence before rollback can remove any uncommitted
+    /// artifacts. An unreadable/mismatched WAL must remain inspectable intact.
+    fn verify_recovery_evidence(&self) -> io::Result<()> {
+        let journal = RecoveryJournal::load(&self.paths)?;
+        let rows = self.wal.read_all()?;
+        if let Some(journal) = journal {
+            self.verify_wal_transaction(&journal, &rows)?;
+        } else if !rows.is_empty() {
+            self.reject_ambiguous_legacy_wal(&rows)?;
         }
-        let start_id = match journal.route {
-            IngestRoute::Live => self.catalog.active_hot_segment,
-            IngestRoute::Historical => self.catalog.active_historical_segment,
+        Ok(())
+    }
+
+    fn verify_wal_transaction(
+        &self,
+        journal: &RecoveryJournal,
+        rows: &[LogRow],
+    ) -> io::Result<Vec<LogRow>> {
+        let max_rows = if journal.is_active_checkpoint() {
+            u32::try_from(rows.len())
+                .map_err(|_| io::Error::other("checkpoint row count exceeds u32"))?
+        } else {
+            journal.row_count
         };
-        let expected_start = start_id.and_then(|id| {
-            self.catalog
-                .segments
-                .iter()
-                .find(|segment| segment.id == id)
-        });
-        if journal.next_segment_id != self.catalog.next_segment_id
-            || journal.start.as_ref() != expected_start
+        let applied = self.read_applied_wal_rows(journal, max_rows)?;
+        if rows.is_empty() {
+            for segment in self.catalog.segments.iter().filter(|segment| {
+                segment.id == journal.start.id || segment.id >= journal.next_segment_id
+            }) {
+                verify_segment_integrity(&self.paths, segment)?;
+                let dir = self.paths.segment_dir(segment.id);
+                // Compacted segments retain canonical.bitmap at the root; it
+                // does not imply that the removed raw columns still exist.
+                if !super::segment::segment_is_compacted(&self.paths, segment.id)?
+                    && has_raw_segment_artifacts(&dir)?
+                    && hot_segment_physical_row_counts(&dir)?
+                        .iter()
+                        .any(|(_, count)| *count != segment.row_count)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "WAL is empty but its segment contains unexplained physical rows",
+                    ));
+                }
+            }
+            if applied.is_empty() {
+                if journal.is_complete_checkpoint() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "completed checkpoint has an empty WAL and missing committed rows",
+                    ));
+                }
+                // Journal publication preceded the WAL append; no rows committed.
+                return Ok(applied);
+            }
+            let batch = EncodedWalBatch::new(&applied)?;
+            if batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WAL is empty but its recovery journal describes an incomplete or mismatched commit",
+                ));
+            }
+            // Crash after durable WAL truncation, before journal removal.
+            return Ok(applied);
+        }
+        let batch = EncodedWalBatch::new(rows)?;
+        if !journal.is_active_checkpoint()
+            && (batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "ingestion recovery origin does not match the durable catalog",
+                "WAL payload does not match its recovery journal",
             ));
         }
-        self.recovery_required = true;
-        if let Some(start) = &journal.start {
-            let dir = self.paths.segment_dir(start.id);
-            let mut rows = Vec::new();
-            let mut canonical = NullBitmap::new();
-            if start.row_count > 0 {
-                let reader = SegmentReader::open(&dir)?;
-                let previous = reader.read_canonical()?;
-                if previous.len() < start.row_count {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "ingestion rollback cannot recover missing committed canonical bits",
-                    ));
-                }
-                let end = u32::try_from(start.row_count)
-                    .map_err(|_| io::Error::other("ingestion prefix exceeds row addressing"))?;
-                let mut first = 0;
-                while first < end {
-                    let next = first.saturating_add(8192).min(end);
-                    let ids = (first..next).collect::<Vec<_>>();
-                    let chunk = reader.read_log_rows(Some(&ids))?;
-                    if chunk.len() != ids.len() {
-                        return Err(io::Error::other("incomplete committed ingestion prefix"));
-                    }
-                    rows.try_reserve(chunk.len()).map_err(io::Error::other)?;
-                    rows.extend(chunk);
-                    first = next;
-                }
-                for row in 0..start.row_count {
-                    canonical.push(previous.is_present(row));
-                }
-            }
-            ColumnFile::write_batch_with_canonical(&dir, &rows, Some(&canonical))?;
-            let indexes = dir.join("indexes");
-            if indexes.exists() {
-                fs::remove_dir_all(indexes)?;
-            }
-            super::segment::persist_segment_manifest_with_columns(
-                &self.paths,
-                start,
-                super::segment::default_columns(),
-            )?;
+        if rows.get(..applied.len()) != Some(applied.as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "committed segment rows do not match the journaled WAL prefix",
+            ));
         }
+        Ok(applied)
+    }
+
+    /// The checksummed catalog alone identifies durable rows and progress.
+    /// Never adopt manifests/new segments left by an unfinished ingestion epoch.
+    fn restore_catalog_checkpoint(&mut self) -> io::Result<()> {
+        self.recovery_required = true;
+        for segment in &self.catalog.segments {
+            let dir = self.paths.segment_dir(segment.id);
+            if !dir.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("committed segment {} is unavailable", segment.id),
+                ));
+            }
+            let active = Some(segment.id) == self.catalog.active_hot_segment
+                || Some(segment.id) == self.catalog.active_historical_segment;
+            let manifest = match fs::read(self.paths.segment_manifest_path(segment.id)) {
+                Ok(bytes) => match serde_json::from_slice::<SegmentManifest>(&bytes) {
+                    Ok(manifest) => Some(manifest),
+                    Err(_) if active && segment.row_count == 0 => None,
+                    Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound && active => None,
+                Err(error) => return Err(error),
+            };
+            if manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.segment_id != segment.id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "catalog and manifest segment identities disagree",
+                ));
+            }
+            if active && segment.row_count == 0 && manifest.is_none() {
+                self.restore_committed_prefix(segment)?;
+                continue;
+            }
+            let compacted = super::segment::segment_is_compacted(&self.paths, segment.id)?;
+            let mut restore = active
+                && (manifest.as_ref().is_none_or(|manifest| {
+                    manifest.row_count != segment.row_count || manifest.kind != segment.kind
+                }) || (Some(segment.id) == self.catalog.active_historical_segment
+                    && compacted));
+            if active && !compacted && has_raw_segment_artifacts(&dir)? {
+                match hot_segment_physical_row_counts(&dir) {
+                    Ok(counts) => {
+                        if counts.iter().any(|(_, count)| *count < segment.row_count) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "missing committed raw segment rows; verified repair is required",
+                            ));
+                        }
+                        restore |= counts.iter().any(|(_, count)| *count != segment.row_count);
+                    }
+                    Err(_) if segment.row_count == 0 => restore = true,
+                    Err(error) => return Err(error),
+                }
+            }
+            if restore {
+                self.restore_committed_prefix(segment)?;
+            }
+        }
+        let mut removed = false;
         for entry in fs::read_dir(self.paths.segments_dir())? {
             let entry = entry?;
             let name = entry.file_name();
-            let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_prefix("s_"))
-                .and_then(|id| id.parse::<u64>().ok())
-            else {
+            let Some(id) = parse_segment_dir_name(&name) else {
                 continue;
             };
             if name != format!("s_{id:016}").as_str() {
                 continue;
             }
-            if id >= journal.next_segment_id {
+            if id >= self.catalog.next_segment_id {
                 durability::checkpoint("ingestion_remove_uncommitted_segment", &entry.path())?;
                 fs::remove_dir_all(entry.path())?;
+                removed = true;
+            } else if !self.catalog.segments.iter().any(|segment| segment.id == id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexplained segment below catalog allocation boundary; verified repair is required",
+                ));
             }
         }
-        durability::sync_directory(&self.paths.segments_dir())?;
-        IngestionJournal::remove(&self.paths)?;
+        if removed {
+            durability::sync_directory(&self.paths.segments_dir())?;
+        }
         self.recovery_required = false;
-        tracing::warn!("discarded unfinished ingestion epoch; resuming from durable sync progress");
+        Ok(())
+    }
+
+    fn restore_committed_prefix(&self, start: &SegmentDescriptor) -> io::Result<()> {
+        let dir = self.paths.segment_dir(start.id);
+        let mut rows = Vec::new();
+        let mut canonical = NullBitmap::new();
+        if start.row_count > 0 {
+            let reader = SegmentReader::open(&dir)?;
+            let previous = reader.read_canonical()?;
+            if previous.len() < start.row_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ingestion rollback cannot recover missing committed canonical bits",
+                ));
+            }
+            let end = u32::try_from(start.row_count)
+                .map_err(|_| io::Error::other("ingestion prefix exceeds row addressing"))?;
+            let mut first = 0;
+            while first < end {
+                let next = first.saturating_add(8192).min(end);
+                let ids = (first..next).collect::<Vec<_>>();
+                let chunk = reader.read_log_rows(Some(&ids))?;
+                if chunk.len() != ids.len() {
+                    return Err(io::Error::other("incomplete committed ingestion prefix"));
+                }
+                rows.try_reserve(chunk.len()).map_err(io::Error::other)?;
+                rows.extend(chunk);
+                first = next;
+            }
+            for row in 0..start.row_count {
+                canonical.push(previous.is_present(row));
+            }
+        }
+        ColumnFile::write_batch_with_canonical(&dir, &rows, Some(&canonical))?;
+        let indexes = dir.join("indexes");
+        if indexes.exists() {
+            fs::remove_dir_all(indexes)?;
+        }
+        super::segment::persist_segment_manifest_with_columns(
+            &self.paths,
+            start,
+            super::segment::default_columns(),
+        )?;
+        // These pages no longer have a published reader after restoring the raw
+        // prefix; remove superseded derived representations only after it is durable.
+        for name in ["columns", "columns_profile_v2"] {
+            let obsolete = dir.join(name);
+            if obsolete.exists() {
+                fs::remove_dir_all(obsolete)?;
+            }
+        }
+        durability::sync_directory(&dir)?;
         Ok(())
     }
 
@@ -721,7 +853,7 @@ impl NativeStorage {
                 &self.paths,
                 &descriptor,
                 columns,
-                self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
+                self.segment_publication(descriptor.id),
             )?;
             appended.push(self.partition_meta(&descriptor));
             self.catalog.segments.push(descriptor);
@@ -769,15 +901,12 @@ impl NativeStorage {
             }
 
             let segment_dir = self.paths.segment_dir(segment_id);
-            append_rows(&segment_dir, existing_rows, chunk)?;
+            let publication = self.segment_publication(segment_id);
+            append_ingest_rows(&segment_dir, existing_rows, chunk, publication)?;
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
                 apply_ordered_rows_to_descriptor(descriptor, chunk);
-                persist_ingest_manifest(
-                    &self.paths,
-                    descriptor,
-                    self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
-                )?;
+                persist_ingest_manifest(&self.paths, descriptor, publication)?;
                 touched.insert(descriptor.id);
             }
             self.persist_catalog()?;
@@ -831,7 +960,7 @@ impl NativeStorage {
             compact_ingest_segment(
                 &self.paths,
                 &descriptor,
-                self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
+                self.segment_publication(descriptor.id),
             )?;
         }
         self.catalog.active_historical_segment = None;
@@ -871,6 +1000,7 @@ impl NativeStorage {
             let take = remaining_capacity.min((rows.len() - offset) as u64) as usize;
             let chunk = &rows[offset..offset + take];
             let hot_dir = self.paths.segment_dir(hot_id);
+            let publication = self.segment_publication(hot_id);
 
             let should_seal = {
                 let descriptor = self
@@ -880,14 +1010,10 @@ impl NativeStorage {
                     .find(|segment| segment.id == hot_id)
                     .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
 
-                append_rows(&hot_dir, descriptor.row_count, chunk)?;
+                append_ingest_rows(&hot_dir, descriptor.row_count, chunk, publication)?;
                 apply_rows_to_descriptor(descriptor, chunk);
                 let should_seal = descriptor.row_count >= target_rows;
-                persist_ingest_manifest(
-                    &self.paths,
-                    descriptor,
-                    self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
-                )?;
+                persist_ingest_manifest(&self.paths, descriptor, publication)?;
                 should_seal
             };
 
@@ -1038,7 +1164,7 @@ impl NativeStorage {
             || self
                 .pending_ingestion
                 .as_ref()
-                .is_some_and(|pending| pending.journal.includes(segment.id))
+                .is_some_and(|pending| pending.origin.includes(segment.id))
             || self.pending_checkpoint.as_ref().is_some_and(|pending| {
                 segment.id == pending.journal.start.id
                     || segment.id >= pending.journal.next_segment_id
@@ -1150,7 +1276,8 @@ impl NativeStorage {
     }
 
     pub fn head_block(&self) -> Option<u64> {
-        self.state
+        self.catalog
+            .state
             .sync_head
             .map(|head| head.block_number)
             .or_else(|| self.indexed_head_block())
@@ -1199,7 +1326,7 @@ impl NativeStorage {
         persist_ingest_manifest(
             &self.paths,
             &descriptor,
-            self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
+            self.segment_publication(descriptor.id),
         )?;
         self.persist_catalog()?;
         Ok(descriptor.id)
@@ -1234,7 +1361,7 @@ impl NativeStorage {
         persist_ingest_manifest(
             &self.paths,
             &descriptor,
-            self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
+            self.segment_publication(descriptor.id),
         )?;
         let segment_id = descriptor.id;
         self.catalog.segments.push(descriptor);
@@ -1243,97 +1370,12 @@ impl NativeStorage {
         Ok(segment_id)
     }
 
-    fn repair_catalog_from_manifests(&mut self) -> std::io::Result<()> {
-        let mut descriptors = load_manifest_descriptors(&self.paths)?;
-        if descriptors.is_empty() {
-            return Ok(());
-        }
-
-        let mut repaired_segments =
-            Vec::with_capacity(self.catalog.segments.len().max(descriptors.len()));
-        let mut changed = false;
-
-        for segment in &self.catalog.segments {
-            if let Some(mut descriptor) = descriptors.remove(&segment.id) {
-                if repair_missing_timestamp_metadata(&self.paths, &mut descriptor)? {
-                    changed = true;
-                }
-                if &descriptor != segment {
-                    if !segment_diff_is_timestamp_metadata_only(segment, &descriptor) {
-                        tracing::warn!(
-                            segment_id = segment.id,
-                            catalog_rows = segment.row_count,
-                            manifest_rows = descriptor.row_count,
-                            "repairing storage catalog segment metadata from manifest"
-                        );
-                    }
-                    changed = true;
-                }
-                repaired_segments.push(descriptor);
-            } else {
-                repaired_segments.push(segment.clone());
-            }
-        }
-
-        for mut descriptor in descriptors.into_values() {
-            repair_missing_timestamp_metadata(&self.paths, &mut descriptor)?;
-            tracing::warn!(
-                segment_id = descriptor.id,
-                row_count = descriptor.row_count,
-                "recovering storage segment missing from catalog"
-            );
-            repaired_segments.push(descriptor);
-            changed = true;
-        }
-
-        repaired_segments.sort_by_key(|segment| segment.id);
-
-        let active_hot_segment = repaired_segments
-            .iter()
-            .filter(|segment| segment.kind == SegmentKind::Hot)
-            .map(|segment| segment.id)
-            .max();
-        if self.catalog.active_hot_segment != active_hot_segment {
-            self.catalog.active_hot_segment = active_hot_segment;
-            changed = true;
-        }
-
-        let active_historical_segment =
-            self.catalog.active_historical_segment.filter(|segment_id| {
-                repaired_segments
-                    .iter()
-                    .any(|segment| segment.id == *segment_id && segment.kind == SegmentKind::Sealed)
-            });
-        if self.catalog.active_historical_segment != active_historical_segment {
-            self.catalog.active_historical_segment = active_historical_segment;
-            changed = true;
-        }
-
-        if let Some(max_id) = repaired_segments.iter().map(|segment| segment.id).max() {
-            let next_segment_id = max_id.saturating_add(1);
-            if self.catalog.next_segment_id < next_segment_id {
-                self.catalog.next_segment_id = next_segment_id;
-                changed = true;
-            }
-        }
-
-        if self.catalog.segments != repaired_segments {
-            self.catalog.segments = repaired_segments;
-            changed = true;
-        }
-
-        if changed {
-            self.persist_catalog()?;
-        }
-
-        Ok(())
-    }
-
     fn seal_hot_segment(&mut self) -> std::io::Result<()> {
         let hot_id = self
             .catalog
             .active_hot_segment
             .ok_or_else(|| std::io::Error::other("missing hot segment"))?;
+        let publication = self.segment_publication(hot_id);
         if let Some(descriptor) = self
             .catalog
             .segments
@@ -1341,11 +1383,7 @@ impl NativeStorage {
             .find(|segment| segment.id == hot_id)
         {
             descriptor.kind = SegmentKind::Sealed;
-            persist_ingest_manifest(
-                &self.paths,
-                descriptor,
-                self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
-            )?;
+            persist_ingest_manifest(&self.paths, descriptor, publication)?;
             tracing::info!(
                 segment_id = descriptor.id,
                 row_count = descriptor.row_count,
@@ -1357,11 +1395,7 @@ impl NativeStorage {
         let new_hot = self.catalog.register_segment(SegmentKind::Hot);
         let path = self.paths.segment_dir(new_hot.id);
         fs::create_dir_all(&path)?;
-        persist_ingest_manifest(
-            &self.paths,
-            &new_hot,
-            self.pending_checkpoint.is_some() || self.pending_ingestion.is_some(),
-        )?;
+        persist_ingest_manifest(&self.paths, &new_hot, self.segment_publication(new_hot.id))?;
         self.persist_catalog()?;
         Ok(())
     }
@@ -1510,7 +1544,7 @@ impl NativeStorage {
         // directory entries. External devices were fully persisted before that
         // publication returned. Retire_after orders this catalog before clearing
         // the WAL, and journal removal supplies the final same-device full sync.
-        let bytes = serde_json::to_vec(&self.catalog).map_err(io::Error::other)?;
+        let bytes = self.catalog.encode()?;
         durability::write_bytes_ordered(&self.paths.catalog_path(), &bytes)
     }
 
@@ -1550,67 +1584,9 @@ impl NativeStorage {
             }
         };
         self.recovery_required = true;
-        let max_rows = if journal.is_active_checkpoint() {
-            u32::try_from(rows.len())
-                .map_err(|_| io::Error::other("checkpoint row count exceeds u32"))?
-        } else {
-            journal.row_count
-        };
-        let applied = self.read_applied_wal_rows(&journal, max_rows)?;
+        let applied = self.verify_wal_transaction(&journal, &rows)?;
         if rows.is_empty() {
-            for segment in self.catalog.segments.iter().filter(|segment| {
-                segment.id == journal.start.id || segment.id >= journal.next_segment_id
-            }) {
-                verify_segment_integrity(&self.paths, segment)?;
-                let dir = self.paths.segment_dir(segment.id);
-                // Compacted segments retain canonical.bitmap at the root; it
-                // does not imply that the removed raw columns still exist.
-                if !super::segment::segment_is_compacted(&self.paths, segment.id)?
-                    && has_raw_segment_artifacts(&dir)?
-                    && hot_segment_physical_row_counts(&dir)?
-                        .iter()
-                        .any(|(_, count)| *count != segment.row_count)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "WAL is empty but its segment contains unexplained physical rows",
-                    ));
-                }
-            }
-            if applied.is_empty() {
-                if journal.is_complete_checkpoint() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "completed checkpoint has an empty WAL and missing committed rows",
-                    ));
-                }
-                // Journal publication preceded the WAL append; no rows committed.
-                return self.finish_wal_batch();
-            }
-            let batch = EncodedWalBatch::new(&applied)?;
-            if batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "WAL is empty but its recovery journal describes an incomplete or mismatched commit",
-                ));
-            }
-            // Crash after durable WAL truncation, before journal removal.
             return self.finish_wal_batch();
-        }
-        let batch = EncodedWalBatch::new(&rows)?;
-        if !journal.is_active_checkpoint()
-            && (batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "WAL payload does not match its recovery journal",
-            ));
-        }
-        if rows.get(..applied.len()) != Some(applied.as_slice()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "committed segment rows do not match the journaled WAL prefix",
-            ));
         }
         // Incomplete column writes beyond the last manifest are uncommitted.
         // Restore that prefix before appending the remainder, preserving its
@@ -1653,6 +1629,7 @@ impl NativeStorage {
             }
         }
         if journal.is_active_checkpoint() {
+            let batch = EncodedWalBatch::new(&rows)?;
             journal.complete_checkpoint(batch.row_count, batch.checksum)?;
             journal.persist(&self.paths)?;
         }
@@ -1961,8 +1938,8 @@ impl NativeStorage {
     }
 
     fn persist_catalog(&self) -> std::io::Result<()> {
-        // Ordered segment manifests reconstruct ingestion-only catalog changes.
-        // Public anchor/state updates still publish their metadata durably.
+        // Rows and progress remain at the durable catalog checkpoint until the
+        // containing ingestion operation or generic WAL checkpoint is committed.
         if self.pending_ingestion.is_some()
             || (self.pending_checkpoint.is_some() && self.recovery_required)
         {
@@ -1971,14 +1948,8 @@ impl NativeStorage {
         self.catalog.persist(&self.paths)
     }
 
-    fn persist_state(&self) -> std::io::Result<()> {
-        let path = self.state_path();
-        let json = serde_json::to_vec(&self.state).map_err(std::io::Error::other)?;
-        durability::write_bytes(&path, &json)
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.paths.root().join(STORAGE_STATE_FILE)
+    fn persist_state(&self) -> io::Result<()> {
+        self.persist_catalog()
     }
 
     fn should_compact_segment(&self, descriptor: &SegmentDescriptor) -> bool {
@@ -2042,13 +2013,11 @@ impl NativeStorage {
     }
 
     fn verify_integrity(&self) -> io::Result<()> {
-        verify_recent_headers(&self.state)?;
-
         verify_segments_integrity_parallel(&self.paths, &self.catalog.segments)?;
 
         tracing::info!(
             segments = self.catalog.segments.len(),
-            recent_headers = self.state.recent_headers.len(),
+            recent_headers = self.catalog.state.recent_headers.len(),
             "storage integrity check passed"
         );
         Ok(())
@@ -2226,16 +2195,6 @@ fn verify_segment_integrity(
     Ok(())
 }
 
-fn segment_diff_is_timestamp_metadata_only(
-    catalog: &SegmentDescriptor,
-    repaired: &SegmentDescriptor,
-) -> bool {
-    let mut comparable = catalog.clone();
-    comparable.min_timestamp = repaired.min_timestamp;
-    comparable.max_timestamp = repaired.max_timestamp;
-    &comparable == repaired
-}
-
 fn historical_segment_would_exceed_block_span(
     descriptor: &SegmentDescriptor,
     rows: &[LogRow],
@@ -2290,51 +2249,6 @@ fn rows_block_range(rows: &[LogRow]) -> Option<(u64, u64)> {
         max_block = max_block.max(block_number);
     }
     Some((min_block, max_block))
-}
-
-fn repair_missing_timestamp_metadata(
-    paths: &StorageCatalogPaths,
-    descriptor: &mut SegmentDescriptor,
-) -> io::Result<bool> {
-    if descriptor.row_count == 0 {
-        let changed =
-            descriptor.min_timestamp.take().is_some() || descriptor.max_timestamp.take().is_some();
-        if changed {
-            persist_segment_manifest(paths, descriptor)?;
-        }
-        return Ok(changed);
-    }
-
-    if descriptor.min_timestamp.is_some() && descriptor.max_timestamp.is_some() {
-        return Ok(false);
-    }
-
-    let dir = paths.segment_dir(descriptor.id);
-    let reader = SegmentReader::open(&dir)?;
-    let last_row = u32::try_from(descriptor.row_count - 1).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "segment {} exceeds supported per-segment row addressing",
-                descriptor.id
-            ),
-        )
-    })?;
-    let boundary_timestamps = reader.read_u64("timestamp", Some(&[0, last_row]))?;
-    if boundary_timestamps.len() != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "segment {} failed to read boundary timestamps",
-                descriptor.id
-            ),
-        ));
-    }
-
-    descriptor.min_timestamp = boundary_timestamps.iter().copied().min();
-    descriptor.max_timestamp = boundary_timestamps.iter().copied().max();
-    persist_segment_manifest(paths, descriptor)?;
-    Ok(true)
 }
 
 fn has_raw_segment_artifacts(dir: &Path) -> io::Result<bool> {
@@ -2403,76 +2317,10 @@ fn hot_segment_physical_row_counts(segment_dir: &Path) -> io::Result<Vec<(&'stat
     Ok(counts)
 }
 
-fn load_manifest_descriptors(
-    paths: &StorageCatalogPaths,
-) -> std::io::Result<BTreeMap<u64, SegmentDescriptor>> {
-    let mut descriptors = BTreeMap::new();
-    let segments_dir = paths.segments_dir();
-    if !segments_dir.exists() {
-        return Ok(descriptors);
-    }
-
-    for entry in fs::read_dir(segments_dir)? {
-        let entry = entry?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-
-        let Some(segment_id) = parse_segment_dir_name(&entry.file_name()) else {
-            continue;
-        };
-        let manifest_path = entry.path().join("segment.json");
-        if !manifest_path.exists() {
-            continue;
-        }
-
-        let json = fs::read_to_string(&manifest_path)?;
-        let manifest: SegmentManifest = serde_json::from_str(&json).map_err(io::Error::other)?;
-        if manifest.segment_id != segment_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "segment directory id {segment_id} does not match manifest id {}",
-                    manifest.segment_id
-                ),
-            ));
-        }
-
-        let relative_path = PathBuf::from("segments").join(format!("s_{segment_id:016}"));
-        descriptors.insert(
-            segment_id,
-            SegmentDescriptor {
-                id: segment_id,
-                generation: manifest.generation,
-                kind: manifest.kind,
-                relative_path: relative_path.clone(),
-                manifest_relative_path: relative_path.join("segment.json"),
-                min_block: manifest.min_block,
-                max_block: manifest.max_block,
-                min_timestamp: manifest.min_timestamp,
-                max_timestamp: manifest.max_timestamp,
-                row_count: manifest.row_count,
-            },
-        );
-    }
-
-    Ok(descriptors)
-}
-
 fn parse_segment_dir_name(name: &std::ffi::OsStr) -> Option<u64> {
     let name = name.to_str()?;
     let id = name.strip_prefix("s_")?;
     id.parse().ok()
-}
-
-fn load_state(paths: &StorageCatalogPaths) -> std::io::Result<StorageState> {
-    let path = paths.root().join(STORAGE_STATE_FILE);
-    if !path.exists() {
-        return Ok(StorageState::default());
-    }
-
-    let json = fs::read_to_string(path)?;
-    serde_json::from_str(&json).map_err(std::io::Error::other)
 }
 
 fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
@@ -2529,6 +2377,7 @@ fn verify_recent_headers(state: &StorageState) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use alloy_consensus::Header;
@@ -2640,13 +2489,11 @@ mod tests {
                 }
                 storage.checkpoint().unwrap();
                 let catalog_before = fs::read(storage.paths.catalog_path()).unwrap();
-                let state_before = fs::read(storage.state_path()).unwrap();
                 ingest_test_batch(&mut storage, historical, &next, &incoming, &prior).unwrap();
                 assert_eq!(
                     fs::read(storage.paths.catalog_path()).unwrap(),
                     catalog_before
                 );
-                assert_eq!(fs::read(storage.state_path()).unwrap(), state_before);
                 assert!(storage.wal.is_empty().unwrap());
                 drop(storage);
                 let mut reopened = NativeStorage::open(config.clone()).unwrap();
@@ -2821,41 +2668,83 @@ mod tests {
 
     #[test]
     fn ingestion_origin_damage_is_rejected_without_discarding_rows() {
-        for damaged in ["catalog.json", "storage_state.json", "wal/ingestion.json"] {
-            let dir = TempDir::new().unwrap();
-            let config = NativeStorageConfig {
-                data_dir: dir.path().to_owned(),
-                ..Default::default()
-            };
-            let header = ingestion_header(100, B256::ZERO);
-            let mut storage = NativeStorage::open(config.clone()).unwrap();
-            storage
-                .ingest_canonical_batch(
-                    &ingestion_rows(3, &header),
-                    &header,
-                    std::slice::from_ref(&header),
-                    None,
-                )
-                .unwrap();
-            storage.checkpoint().unwrap();
-            let next = ingestion_header(101, header.hash_slow());
-            ingest_test_batch(
-                &mut storage,
-                false,
-                &ingestion_rows(3, &next),
-                &next,
+        let damaged = "catalog.json";
+        let dir = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        };
+        let header = ingestion_header(100, B256::ZERO);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage
+            .ingest_canonical_batch(
+                &ingestion_rows(3, &header),
                 &header,
+                std::slice::from_ref(&header),
+                None,
             )
             .unwrap();
-            let hot = storage.segment_path(storage.catalog.active_hot_segment.unwrap());
-            let before = fs::read(hot.join("data.col")).unwrap();
-            drop(storage);
-            let original = fs::read(dir.path().join(damaged)).unwrap();
-            fs::write(dir.path().join(damaged), b"{}").unwrap();
-            assert!(NativeStorage::open(config.clone()).is_err());
-            assert_eq!(fs::read(hot.join("data.col")).unwrap(), before);
-            fs::write(dir.path().join(damaged), original).unwrap();
-            assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
+        storage.checkpoint().unwrap();
+        let next = ingestion_header(101, header.hash_slow());
+        ingest_test_batch(
+            &mut storage,
+            false,
+            &ingestion_rows(3, &next),
+            &next,
+            &header,
+        )
+        .unwrap();
+        let hot = storage.segment_path(storage.catalog.active_hot_segment.unwrap());
+        let before = fs::read(hot.join("data.col")).unwrap();
+        drop(storage);
+        let original = fs::read(dir.path().join(damaged)).unwrap();
+        fs::write(dir.path().join(damaged), b"{}").unwrap();
+        assert!(NativeStorage::open(config.clone()).is_err());
+        assert_eq!(fs::read(hot.join("data.col")).unwrap(), before);
+        fs::write(dir.path().join(damaged), original).unwrap();
+        assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
+    }
+
+    #[test]
+    fn ingestion_discards_damaged_segments_that_have_no_committed_rows() {
+        for historical in [false, true] {
+            for damage in ["segment.json", "address.col", "data.col"] {
+                let dir = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: dir.path().to_owned(),
+                    hot_target_rows: 10,
+                    ..Default::default()
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let prior = ingestion_header(99, B256::ZERO);
+                let header = ingestion_header(100, prior.hash_slow());
+                let rows = ingestion_rows(13, &header);
+                ingest_test_batch(&mut storage, historical, &rows, &header, &prior).unwrap();
+                let catalog_before = fs::read(storage.paths.catalog_path()).unwrap();
+                for segment in storage
+                    .segments()
+                    .iter()
+                    .filter(|segment| segment.row_count > 0)
+                {
+                    fs::write(storage.segment_path(segment.id).join(damage), b"broken").unwrap();
+                }
+                drop(storage);
+                let mut reopened = NativeStorage::open(config.clone()).unwrap();
+                assert_eq!(reopened.total_rows(), 0);
+                assert!(reopened.sync_head().is_none());
+                assert!(reopened.historical_floor().is_none());
+                assert_eq!(
+                    fs::read(reopened.paths.catalog_path()).unwrap(),
+                    catalog_before
+                );
+                ingest_test_batch(&mut reopened, historical, &rows, &header, &prior).unwrap();
+                reopened.checkpoint().unwrap();
+                drop(reopened);
+                assert_eq!(
+                    read_ingestion_rows(&NativeStorage::open(config).unwrap()),
+                    rows
+                );
+            }
         }
     }
 
@@ -3214,7 +3103,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn catalog_repair_recovers_symlinked_segment_directories() {
+    fn catalog_reopens_symlinked_segment_directories() {
         let tmp = TempDir::new().unwrap();
         let external = TempDir::new().unwrap();
         let rows = make_rows(10, 100);
@@ -3238,7 +3127,7 @@ mod tests {
             .join(segment_path.file_name().expect("segment path has a name"));
         fs::rename(&segment_path, &external_path).unwrap();
         std::os::unix::fs::symlink(&external_path, &segment_path).unwrap();
-        fs::remove_file(storage.paths.catalog_path()).unwrap();
+        storage.checkpoint().unwrap();
         drop(storage);
 
         let reloaded = NativeStorage::open(NativeStorageConfig {
@@ -3281,37 +3170,34 @@ mod tests {
     }
 
     #[test]
-    fn native_storage_recovers_catalog_from_segment_manifests() {
+    fn missing_catalog_never_adopts_segment_manifests() {
         let tmp = TempDir::new().unwrap();
         let config = NativeStorageConfig {
-            data_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().to_owned(),
             hot_target_rows: 10,
-            compaction_safety_margin_blocks: 2_048,
+            ..Default::default()
         };
-
-        {
-            let mut storage = NativeStorage::open(config.clone()).unwrap();
-            storage.write_batch(&make_rows(25, 100)).unwrap();
-        }
-
-        {
-            let (mut catalog, paths) = NativeStorageCatalog::open_or_create(&config).unwrap();
-            catalog.segments.truncate(1);
-            catalog.segments[0].kind = SegmentKind::Hot;
-            catalog.segments[0].row_count = 4;
-            catalog.next_segment_id = 1;
-            catalog.active_hot_segment = Some(catalog.segments[0].id);
-            catalog.persist(&paths).unwrap();
-        }
-
-        let recovered = NativeStorage::open(config).unwrap();
-        assert_eq!(recovered.total_rows(), 25);
-        assert_eq!(recovered.sealed_count(), 2);
-        assert_eq!(recovered.hot_partition_meta().row_count, 5);
-        assert_eq!(
-            recovered.segments().last().map(|segment| segment.id),
-            Some(2)
-        );
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage.write_batch(&make_rows(25, 100)).unwrap();
+        storage.checkpoint().unwrap();
+        let rows_before = read_ingestion_rows(&storage);
+        let descriptors = storage.segments().to_vec();
+        fs::remove_file(storage.paths.catalog_path()).unwrap();
+        drop(storage);
+        let error = NativeStorage::open(config.clone()).err().unwrap();
+        assert!(error.to_string().contains("missing catalog"));
+        assert!(!config.data_dir.join("catalog.json").exists());
+        let actual = descriptors
+            .iter()
+            .filter(|segment| segment.row_count > 0)
+            .flat_map(|segment| {
+                SegmentReader::open(&config.data_dir.join(&segment.relative_path))
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, rows_before);
     }
 
     #[test]
@@ -3325,6 +3211,7 @@ mod tests {
         let path = tmp.path().join("wal/pending.wal");
         let mut storage = NativeStorage::open(config.clone()).unwrap();
         storage.write_batch(&make_rows(1, 50)).unwrap();
+        storage.checkpoint().unwrap();
         storage.wal.append(&make_rows(1, 100)).unwrap();
         let first_end = fs::metadata(&path).unwrap().len() as usize;
         storage.wal.append(&make_rows(1, 200)).unwrap();
@@ -4430,7 +4317,11 @@ mod tests {
         }
 
         let error = NativeStorage::open(config).err().unwrap();
-        assert!(error.to_string().contains("canonical bitmap length"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing committed raw segment rows")
+        );
     }
 
     #[test]
@@ -4571,11 +4462,13 @@ mod tests {
             ..Default::default()
         };
 
-        fs::write(
-            tmp.path().join(STORAGE_STATE_FILE),
-            serde_json::to_vec_pretty(&bad_state).unwrap(),
-        )
-        .unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, paths) = NativeStorageCatalog::open_or_create(&config).unwrap();
+        catalog.state = bad_state;
+        catalog.persist(&paths).unwrap();
 
         let err = NativeStorage::open(NativeStorageConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -4600,6 +4493,7 @@ mod tests {
         {
             let mut storage = NativeStorage::open(config.clone()).unwrap();
             storage.write_batch(&make_rows(6, 100)).unwrap();
+            storage.checkpoint().unwrap();
             let sealed = storage
                 .segments()
                 .iter()

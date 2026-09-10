@@ -119,8 +119,10 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_HISTORY_BLOCKS` | 2048 | Maximum complete blocks per historical call |
 | `LOGEX_PUBLICATION_SEGMENT_ROWS` | 1000000 | Segment row target |
 | `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
+| `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
+| `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` forces a durable checkpoint after every live block; useful for sparse-live boundary cost without a wall-clock sleep |
 
-All values are positive. Every sixteenth block is empty. This fixture holds the
+Numeric sizes and repetition counts must be positive. Every sixteenth block is empty. This fixture holds the
 production 8,192-header window but does not warm an existing million-row hot
 segment; that additional write-amplification scenario remains to be measured.
 It prints individual timings and exact fixture identifiers, with no in-process

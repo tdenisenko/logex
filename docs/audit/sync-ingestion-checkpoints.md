@@ -4,8 +4,9 @@ This is an **unmerged prototype** continuing PR #130. It addresses B2-10 in the
 sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.
 The user permits incompatible changes if they materially help performance and
-is willing to perform a fresh sync; this prototype has not required a column
-format change. No existing production dataset has been reset or modified.
+is willing to perform a fresh sync. The current candidate changes the catalog
+format to version 2; segment/column encodings remain version 1. No existing
+production dataset has been reset or modified.
 
 ## Behavior and invariants
 
@@ -33,70 +34,83 @@ it is not a hard wall-clock deadline. Route changes, generic durable writes,
 standalone metadata updates and relevant maintenance boundaries checkpoint first.
 Detached compaction plans exclude the epoch's affected segments.
 
-## Recovery protocol
+## Catalog version 2 recovery protocol
 
-`wal/ingestion.json` is a checksummed, versioned journal limited to 16 KiB. It
-records the route, original active segment descriptor, segment-allocation boundary
-and fingerprints of the durable catalog/state. Referenced metadata files have a
-64 MiB limit and are checked using bounded streaming reads. The existing row WAL
-and its version 1/2 recovery journal cannot coexist with an ingestion journal.
+The checksummed `catalog.json` is the single durable authority for segment row
+counts, allocation IDs, canonical head/header window, chain anchors and historical
+progress. Its versioned envelope contains the catalog JSON and its CRC32, with a
+64 MiB read/encoding limit. The checksum detects accidental corruption, not
+malicious tampering. Segment IDs, relative paths and active ownership are checked.
+Unknown fields and unsupported versions fail explicitly.
 
-1. Persist an active journal before modifying segment artifacts. Leave the old
-   catalog and state files unchanged while publishing in-memory rows and progress.
-   Column replacements still order complete contents before rename, preserving
-   older committed prefixes; removing those ordering operations would be unsafe.
-2. At checkpoint, stage the new catalog/state under reserved temporary names.
-   Fully persist their contents and the preceding segment publications before
-   recording a durable publishing decision. External segment devices are already
-   fully synchronized before their manifests can refer across devices.
-3. Rename both staged metadata files to their normal names, persist both names,
-   then remove the journal durably. The journal contains their lengths/checksums.
-4. Startup with an active journal verifies the old metadata before opening it.
-   Restore the original segment prefix and canonical bits; discard only newly
-   allocated segment directories. Restore a raw manifest and discard derived
-   indexes for that prefix. Keep the journal until rollback is fully persisted.
-   Interruption during rollback repeats the same operation safely.
-5. Startup with a publishing decision validates both new metadata files before
-   replacing either destination. A rename already completed is accepted only
-   when the destination matches the recorded fingerprint. Finish publication;
-   do not rewind a decided commit. Missing/corrupt recovery inputs fail explicitly
-   and leave recovery artifacts in place.
+1. Keep the durable catalog unchanged during an ingestion epoch. Update rows and
+   progress in memory. Files containing a previously committed prefix still order
+   complete replacements before rename; older rows cannot be sacrificed.
+2. Newly allocated segments, and an initial active segment with zero committed
+   rows, can defer artifact/manifest synchronization. They contain no data the
+   catalog promises. Their filenames are published atomically for current readers.
+3. At checkpoint, submit all deferred segment trees and parent directory entries,
+   order them before the catalog, and fully synchronize any other devices first.
+   Publish one atomic checksummed catalog and complete its device synchronization.
+   The catalog can then reference only complete, already-ordered segment contents.
+4. On startup, validate catalog and WAL evidence before modifying rows. Restore
+   active segment prefixes and canonical bits to the catalog's counts; discard
+   only canonical segment IDs at or above its allocation boundary. Never infer
+   committed rows/progress by adopting newer manifests. Missing committed
+   artifacts fail explicitly. Damage confined to wholly uncommitted segments can
+   be discarded, including malformed initial-hot manifests and partial columns.
+5. Publish each restored raw prefix durably before removing obsolete compressed
+   pages. The catalog remains unchanged, so an interrupted rollback repeats
+   safely. The existing verified sync path re-fetches from its restored head/floor.
 
-Recovery runs under exclusive data-directory ownership before ordinary manifest
-adoption or queries. A configuration change must not overwrite fingerprinted
-metadata before recovery completes. The checkpoint boundary is a complete caller
-batch, so rows from a block spanning multiple segments roll back together with
-its progress; chain finality alone is not used as a local persistence boundary.
+Recovery runs under exclusive data-directory ownership before queries. Complete
+caller batches define checkpoints, including empty blocks and blocks split across
+segments. Chain finality is not a substitute for local persistence ordering.
+Generic WAL-backed writes retain their recovery journal and use the same catalog;
+WAL validation precedes rollback so damaged recovery evidence remains inspectable.
+
+The separate sync `storage_state.json`, `wal/ingestion.json`, publishing decision,
+and pair of staged metadata files from `aefbc0db` are superseded. This removes
+several full flushes per checkpoint and avoids duplicating the header window in
+JSON serialization. It intentionally drops automatic manifest adoption on startup.
+
+## Fresh-sync compatibility decision
+
+Version 1 directories are rejected with an actionable diagnostic; they are not
+migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
+a dangling catalog alias, also fails instead of initializing an empty database.
+Older binaries cannot read the new envelope as an old catalog. A deployment must
+use a **new empty data directory** and verified fresh sync. Rolling back the binary
+requires its original directory or another fresh sync, not reuse of version 2.
+Retain original directories until their owner explicitly chooses otherwise.
+The user's protected external-volume contents are outside this test scope.
+
+This breaking change is a performance candidate, not an accepted release. It will
+be retained only with measured evidence meeting the user's 10% limit. Starting
+fresh alone does not improve performance; removing redundant durability work is
+the intended benefit.
 
 ## Validation and remaining work
 
-All six local workspace gates passed with 833 tests, zero failures and six
-explicitly ignored cases ([results](baselines/2026-09-11-sync-checkpoint-gates.jsonl)).
-The first sandboxed run could not bind the existing loopback HTTP test fixtures;
-the complete rerun with local sockets allowed passed. Subsequent cleanup changes
-only clarify API comments, a constant name and a recovery error message.
+The preceding `aefbc0db` prototype passed all six local gates (833 tests, six
+ignored; [results](baselines/2026-09-11-sync-checkpoint-gates.jsonl)). Those results
+do **not** validate the new catalog/deferred-publication protocol. Its storage
+suite passes 129 tests with two explicitly ignored cases, including the additional
+recovery-evidence and malformed-uncommitted-artifact checks. Strict workspace
+Clippy also passes. Full gates and performance validation are still pending.
 
-New regressions cover live/historical retries, zero-log progress, rotation and
-historical compaction, prior non-canonical rows, every main-thread write/commit
-failure checkpoint, interrupted rollback, origin metadata damage, staged metadata
-damage, journal bounds/checksums, route changes, generic API transitions,
-configuration changes and actual child-process exit during the first batch.
-Worker-syscall failures and physical power-loss interleavings are not exhaustively
-covered by the main-thread injection matrix. The previous ExFAT test results
-apply to `ff728ea3`, not this new protocol.
+The current regressions exercise live/historical retry, empty progress, rotation,
+compaction, prior non-canonical rows, each main-thread write/commit failure point,
+interrupted rollback, origin damage, route/API/configuration changes and actual
+child-process exit. Catalog tests cover every truncation/single-byte mutation,
+valid-checksum invalid identities, old versions, oversized input and missing
+aliases. Worker failures and physical power-loss interleavings are not exhaustively
+covered by the main-thread injection matrix.
 
-Remaining validation includes isolated ExFAT and distinct-device recovery for the
-new journal, representative large/sparse historical batches, paced live writes,
-concurrent query behavior during failed writes, recovery memory/startup costs and
-current Linux/macOS CI. The existing caller-shaped release fixture now invokes
-the combined APIs, with unchanged input construction, final checkpoint timing and
-exact post-reopen oracles. Original baseline executables still use the original
-separate calls; comparisons must identify this changed durability strategy.
-
-Column replacement ordering and variable-data rewrites are still candidates for
-profiling if ingestion exceeds the 10% ceiling. The permission to start fresh
-allows a format change where evidence justifies it; resetting a database by itself
-does not remove write or synchronization overhead.
+Pending: new release comparisons including large historical calls and per-block
+live checkpoints; full local gates; Linux/macOS CI; isolated ExFAT/distinct-device
+recovery; concurrent-query failure behavior; recovery memory/startup cost; and the
+broader storage audit. Previous ExFAT results apply to `ff728ea3` only.
 
 ## First release comparison
 
@@ -130,11 +144,6 @@ instrumented diagnostic, including its automatic oversized-batch checkpoint;
 its corresponding baseline comparison is still needed. All temporary profiling
 code was removed after capture.
 
-The user-authorized format-change option can address these measured costs:
-make a checksummed catalog the single durable authority for both rows and
-progress, then discard unpublished segment tails on reopen. This would remove
-the compatibility-driven second metadata file and publishing journal. It also
-allows writes to entirely uncommitted segments to defer durability until the
-catalog checkpoint, while retaining prefix protection for existing committed
-rows. This next strategy is not yet implemented or accepted; measured evidence
-is required before retaining it.
+These measured costs motivated catalog version 2 and deferred publication as
+described above. The historical comparison records the rejected earlier design;
+it must not be presented as performance of the new candidate.

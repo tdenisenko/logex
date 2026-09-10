@@ -147,15 +147,34 @@ pub(crate) fn atomic_replace_ordered(
 #[derive(Default)]
 pub(crate) struct ReplacementBatch {
     pending: std::sync::Mutex<Vec<Replacement>>,
+    publication: Publication,
+}
+
+/// Deferred files contain no committed data and must be flushed as a complete
+/// tree before the catalog can reference them. Ordered replacements preserve a
+/// committed prefix; durable publication also completes the device flush.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Publication {
+    #[default]
+    Durable,
+    Ordered,
+    Deferred,
 }
 
 impl ReplacementBatch {
+    pub(crate) fn new(publication: Publication) -> Self {
+        Self {
+            publication,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn write(
         &self,
         path: &Path,
         write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
     ) -> io::Result<()> {
-        let replacement = Replacement::prepare(path, write)?;
+        let replacement = Replacement::prepare_with_publication(path, write, self.publication)?;
         let mut pending = self
             .pending
             .lock()
@@ -175,14 +194,16 @@ impl ReplacementBatch {
             .pending
             .into_inner()
             .map_err(|_| io::Error::other("column replacement lock poisoned"))?;
-        let mut group = SyncGroup::default();
-        for replacement in &pending {
-            group.include_flushed(
-                replacement.writer.get_ref().try_clone()?,
-                &replacement.destination,
-            )?;
+        if self.publication != Publication::Deferred {
+            let mut group = SyncGroup::default();
+            for replacement in &pending {
+                group.include_flushed(
+                    replacement.writer.get_ref().try_clone()?,
+                    &replacement.destination,
+                )?;
+            }
+            group.order()?;
         }
-        group.order()?;
         for replacement in pending {
             replacement.publish()?;
         }
@@ -200,6 +221,14 @@ impl Replacement {
     fn prepare(
         path: &Path,
         write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        Self::prepare_with_publication(path, write, Publication::Ordered)
+    }
+
+    fn prepare_with_publication(
+        path: &Path,
+        write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+        publication: Publication,
     ) -> io::Result<Self> {
         static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
         let name = path
@@ -231,8 +260,10 @@ impl Replacement {
             };
             write(&mut replacement.writer)?;
             replacement.writer.flush()?;
-            checkpoint("sync_temporary", path)?;
-            flush_file(replacement.writer.get_ref())?;
+            if publication != Publication::Deferred {
+                checkpoint("sync_temporary", path)?;
+                flush_file(replacement.writer.get_ref())?;
+            }
             return Ok(replacement);
         }
         Err(io::Error::new(
@@ -310,6 +341,30 @@ pub(crate) fn write_bytes_ordered(path: &Path, bytes: &[u8]) -> io::Result<()> {
     atomic_replace_ordered(path, |writer| writer.write_all(bytes))?;
     checkpoint("order_directory", parent(path))?;
     order_file(&File::open(parent(path))?)
+}
+
+pub(crate) fn write_bytes_deferred(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    Replacement::prepare_with_publication(
+        path,
+        |writer| writer.write_all(bytes),
+        Publication::Deferred,
+    )?
+    .publish()
+}
+
+/// Submit complete new segment trees and order them before the catalog's single
+/// commit. Devices other than the catalog's require their own full flush.
+pub(crate) fn order_trees_before_catalog<'a>(
+    trees: impl IntoIterator<Item = &'a Path>,
+    catalog: &Path,
+) -> io::Result<()> {
+    let mut group = SyncGroup::default();
+    for tree in trees {
+        flush_tree(tree, &mut group)?;
+        group.flush_directory(parent(tree))?;
+    }
+    group.order()?;
+    group.persist_external_devices(catalog)
 }
 
 /// Persist a just-written file and its directory entry with one device flush.

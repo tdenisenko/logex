@@ -1,4 +1,4 @@
-use crate::durability;
+use crate::durability::{self, Publication};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -49,15 +49,25 @@ const RAW_BITMAP_COLUMNS: &[&str] = &[
     "canonical.bitmap",
 ];
 
+#[cfg(test)]
 pub(crate) fn append_rows(
     segment_dir: &Path,
     existing_rows: u64,
     rows: &[LogRow],
 ) -> std::io::Result<()> {
+    append_ingest_rows(segment_dir, existing_rows, rows, Publication::Ordered)
+}
+
+pub(crate) fn append_ingest_rows(
+    segment_dir: &Path,
+    existing_rows: u64,
+    rows: &[LogRow],
+    publication: Publication,
+) -> std::io::Result<()> {
     if existing_rows == 0 {
-        ColumnFile::write_batch(segment_dir, rows)
+        ColumnFile::write_batch_with_publication(segment_dir, rows, None, publication)
     } else {
-        ColumnFile::append_batch(segment_dir, rows, existing_rows)
+        ColumnFile::append_batch_with_publication(segment_dir, rows, existing_rows, publication)
     }
 }
 
@@ -287,32 +297,32 @@ pub(crate) fn persist_segment_manifest_with_columns(
     descriptor: &SegmentDescriptor,
     columns: Vec<ColumnDescriptor>,
 ) -> std::io::Result<()> {
-    persist_manifest(paths, descriptor, columns, false)
+    persist_manifest(paths, descriptor, columns, Publication::Durable)
 }
 
 pub(crate) fn persist_ingest_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
-    ordered: bool,
+    publication: Publication,
 ) -> std::io::Result<()> {
     let columns = existing_columns(paths, descriptor.id)?.unwrap_or_else(default_columns);
-    persist_manifest(paths, descriptor, columns, ordered)
+    persist_manifest(paths, descriptor, columns, publication)
 }
 
 pub(crate) fn persist_ingest_manifest_with_columns(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
     columns: Vec<ColumnDescriptor>,
-    ordered: bool,
+    publication: Publication,
 ) -> std::io::Result<()> {
-    persist_manifest(paths, descriptor, columns, ordered)
+    persist_manifest(paths, descriptor, columns, publication)
 }
 
 fn persist_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
     columns: Vec<ColumnDescriptor>,
-    ordered: bool,
+    publication: Publication,
 ) -> std::io::Result<()> {
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(&segment_dir)?;
@@ -334,10 +344,12 @@ fn persist_manifest(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    if ordered {
-        durability::publish_tree_ordered(&segment_dir, &path, &json, &paths.catalog_path())
-    } else {
-        durability::publish_tree(&segment_dir, &path, &json)
+    match publication {
+        Publication::Deferred => durability::write_bytes_deferred(&path, &json),
+        Publication::Ordered => {
+            durability::publish_tree_ordered(&segment_dir, &path, &json, &paths.catalog_path())
+        }
+        Publication::Durable => durability::publish_tree(&segment_dir, &path, &json),
     }
 }
 
@@ -345,20 +357,20 @@ pub(crate) fn compact_segment(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
-    compact_ingest_segment(paths, descriptor, false)
+    compact_ingest_segment(paths, descriptor, Publication::Durable)
 }
 
 pub(crate) fn compact_ingest_segment(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
-    ordered: bool,
+    publication: Publication,
 ) -> std::io::Result<()> {
     if descriptor.kind != SegmentKind::Sealed || descriptor.row_count == 0 {
-        return persist_ingest_manifest(paths, descriptor, ordered);
+        return persist_ingest_manifest(paths, descriptor, publication);
     }
 
     if segment_uses_current_compaction_profile(paths, descriptor.id)? {
-        return persist_ingest_manifest(paths, descriptor, ordered);
+        return persist_ingest_manifest(paths, descriptor, publication);
     }
 
     if segment_is_compacted(paths, descriptor.id)? {
@@ -423,7 +435,7 @@ pub(crate) fn compact_ingest_segment(
         ])
     })?;
 
-    persist_ingest_manifest_with_columns(paths, descriptor, columns, ordered)?;
+    persist_ingest_manifest_with_columns(paths, descriptor, columns, publication)?;
     remove_raw_hot_files(&segment_dir)?;
 
     tracing::info!(

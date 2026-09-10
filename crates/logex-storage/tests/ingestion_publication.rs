@@ -15,6 +15,8 @@ struct Config {
     history_batch_blocks: usize,
     segment_rows: u64,
     repeats: usize,
+    route: Option<bool>,
+    checkpoint_each_block: bool,
 }
 
 // SyncEngine's retained canonical-header window.
@@ -133,17 +135,22 @@ fn run(config: Config) {
     let tip = headers.last().unwrap();
     println!(
         "{}",
-        json!({"kind":"config", "fixture_version":1, "workload":"sync_storage_publication",
+        json!({"kind":"config", "fixture_version":2, "workload":"sync_storage_publication",
             "blocks":config.blocks,"rows_per_nonempty_block":config.rows_per_block,
             "empty_every_nth_block":16,"history_batch_blocks":config.history_batch_blocks,
             "segment_rows":config.segment_rows,"repeats":config.repeats,
             "rows":expected.len(),"fixture_digest":keccak256(serde_json::to_vec(&expected).unwrap()),
             "tip_hash":tip.hash_slow(),"recent_header_window":RECENT_HEADER_WINDOW,
             "warm_headers":config.warm_headers,
+            "route":config.route.map(|historical| if historical {"historical"} else {"live"}),
+            "checkpoint_each_block":config.checkpoint_each_block,
             "cache":"fresh directories; OS cache not evicted"})
     );
     for iteration in 0..config.repeats {
         for historical in [false, true] {
+            if config.route.is_some_and(|route| route != historical) {
+                continue;
+            }
             let dir = tempfile::tempdir().unwrap();
             let storage_config = PartitionManagerConfig {
                 data_dir: dir.path().to_path_buf(),
@@ -186,6 +193,11 @@ fn run(config: Config) {
                             Some(&anchor(header)),
                         )
                         .unwrap();
+                    // Model sparse live traffic's durable boundary without
+                    // sleeping between blocks; this is not a paced-network test.
+                    if config.checkpoint_each_block {
+                        storage.checkpoint().unwrap();
+                    }
                 }
             }
             storage.checkpoint().unwrap();
@@ -229,6 +241,8 @@ fn storage_publication_preserves_rows_and_empty_block_progress() {
         history_batch_blocks: 6,
         segment_rows: 11,
         repeats: 1,
+        route: None,
+        checkpoint_each_block: false,
     });
 }
 
@@ -242,5 +256,18 @@ fn benchmark_sync_storage_publication() {
         history_batch_blocks: positive_env("LOGEX_PUBLICATION_HISTORY_BLOCKS", 2_048),
         segment_rows: positive_env("LOGEX_PUBLICATION_SEGMENT_ROWS", 1_000_000) as u64,
         repeats: positive_env("LOGEX_PUBLICATION_REPEATS", 3),
+        route: match std::env::var("LOGEX_PUBLICATION_ROUTE").as_deref() {
+            Ok("live") => Some(false),
+            Ok("historical") => Some(true),
+            Ok("both") | Err(std::env::VarError::NotPresent) => None,
+            value => panic!("invalid LOGEX_PUBLICATION_ROUTE: {value:?}"),
+        },
+        checkpoint_each_block: match std::env::var("LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK")
+            .as_deref()
+        {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            value => panic!("invalid LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK: {value:?}"),
+        },
     });
 }

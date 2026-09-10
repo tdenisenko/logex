@@ -1,13 +1,13 @@
 mod catalog;
 mod filter;
-mod ingestion;
 mod recovery;
 mod segment;
 mod storage;
 
 pub use catalog::{
-    ColumnDescriptor, CompressionCodec, IndexKind, NativeStorageCatalog, NativeStorageConfig,
-    STORAGE_FORMAT_VERSION, SegmentDescriptor, SegmentKind, SegmentManifest, StorageCatalogPaths,
+    CATALOG_FORMAT_VERSION, ColumnDescriptor, CompressionCodec, IndexKind, NativeStorageCatalog,
+    NativeStorageConfig, STORAGE_FORMAT_VERSION, SegmentDescriptor, SegmentKind, SegmentManifest,
+    StorageCatalogPaths, StorageState,
 };
 pub use filter::{LogOrder, NativeLogFilter, TopicConstraint};
 #[cfg(test)]

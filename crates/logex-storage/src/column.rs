@@ -146,6 +146,15 @@ impl ColumnFile {
         rows: &[LogRow],
         canonical: Option<&NullBitmap>,
     ) -> io::Result<()> {
+        Self::write_batch_with_publication(dir, rows, canonical, durability::Publication::Ordered)
+    }
+
+    pub(crate) fn write_batch_with_publication(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: Option<&NullBitmap>,
+        publication: durability::Publication,
+    ) -> io::Result<()> {
         if canonical.is_some_and(|bitmap| bitmap.len() != rows.len() as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -154,7 +163,7 @@ impl ColumnFile {
         }
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
-        let replacements = durability::ReplacementBatch::default();
+        let replacements = durability::ReplacementBatch::new(publication);
 
         thread::scope(|scope| {
             let address = scope.spawn(|| {
@@ -302,12 +311,26 @@ impl ColumnFile {
 
     /// Append rows to existing column files (for the hot partition).
     pub fn append_batch(dir: &Path, rows: &[LogRow], existing_rows: u64) -> io::Result<()> {
+        Self::append_batch_with_publication(
+            dir,
+            rows,
+            existing_rows,
+            durability::Publication::Ordered,
+        )
+    }
+
+    pub(crate) fn append_batch_with_publication(
+        dir: &Path,
+        rows: &[LogRow],
+        existing_rows: u64,
+        publication: durability::Publication,
+    ) -> io::Result<()> {
         if !dir.exists() {
-            return Self::write_batch(dir, rows);
+            return Self::write_batch_with_publication(dir, rows, None, publication);
         }
 
         let new_row_count = existing_rows + rows.len() as u64;
-        let replacements = durability::ReplacementBatch::default();
+        let replacements = durability::ReplacementBatch::new(publication);
 
         thread::scope(|scope| {
             let block_columns = scope.spawn(|| {

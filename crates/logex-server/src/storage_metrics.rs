@@ -250,6 +250,11 @@ enum SizeCacheKey {
 }
 
 #[derive(Debug, Deserialize)]
+struct CatalogSizeEnvelope {
+    catalog: CatalogSizeSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
 struct CatalogSizeSnapshot {
     active_hot_segment: Option<u64>,
 }
@@ -350,7 +355,8 @@ fn active_hot_segment_path(root: &Path) -> io::Result<Option<PathBuf>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let catalog: CatalogSizeSnapshot = serde_json::from_slice(&json).map_err(io::Error::other)?;
+    let envelope: CatalogSizeEnvelope = serde_json::from_slice(&json).map_err(io::Error::other)?;
+    let catalog = envelope.catalog;
     Ok(catalog
         .active_hot_segment
         .map(|id| root.join("segments").join(format!("s_{id:016}"))))
@@ -770,7 +776,7 @@ mod tests {
     fn write_active_hot_catalog(root: &Path, active_hot_segment: u64) {
         fs::write(
             root.join("catalog.json"),
-            format!(r#"{{"active_hot_segment":{active_hot_segment}}}"#),
+            format!(r#"{{"catalog":{{"active_hot_segment":{active_hot_segment}}}}}"#),
         )
         .expect("catalog");
     }
