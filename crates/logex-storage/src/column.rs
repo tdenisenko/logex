@@ -10,7 +10,7 @@ use logex_types::LogRow;
 const COLUMN_MAGIC: &[u8; 4] = b"LXCL";
 
 /// Current column file format version.
-const COLUMN_VERSION: u32 = 1;
+pub(crate) const COLUMN_VERSION: u32 = 1;
 const ZERO_B256: [u8; 32] = [0; 32];
 
 /// Header written at the start of every `.col` file.

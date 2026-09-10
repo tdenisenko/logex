@@ -303,3 +303,25 @@ The latter path does not use the full-column borrowing change; repeat it with th
 next short-write investigation to distinguish noise from an encoder regression.
 All 134 storage tests and strict storage Clippy pass. The original-baseline 10%
 ceiling still applies, and neither this isolated result nor earlier CI permits merge.
+
+[Four-worker initial-write comparison](baselines/2026-09-11-raw-four-comparison.jsonl)
+at `2355d6f4` versus `45372779` reduces short-history median 19.897 → 17.237 ms
+(-13.37%), with three alternating pairs and exact oracles passing. It uses the
+same four column groups as appends; publication ordering and worker error
+propagation stay intact. All 134 storage tests and strict storage Clippy pass.
+This is still above the original short-history baseline's 10% allowance. The
+remaining raw-to-compressed payload path allocates one `Bytes` per row; a bounded
+borrowed reader can remove that overhead while validating its offsets before
+allocation. That reader's corrupt-length behavior needs a regression first.
+
+The borrowed raw-payload experiment also fixes B2-12: `read_var_bytes` previously
+computed/allocated offsets from the untrusted row count before checking the table
+fits in the file. The pre-fix 44-byte/`u64::MAX` fixture panics; it now returns
+`InvalidData`. A shared owned file buffer validates the raw version, compression,
+count arithmetic, offset table and full monotonic/sentinel layout before either
+public query materialization or page-level compaction borrowing. Empty and repeated
+selected rows retain their order. Query results still own individual payloads, so
+a small retained result does not pin an entire raw column. The complete raw file
+is still read into memory for compaction; this is not a streaming-file or globally
+bounded-recovery claim. Superseded offset vectors and the unused encoder wrapper
+are removed. Focused tests pass; full storage validation/timing is in progress.

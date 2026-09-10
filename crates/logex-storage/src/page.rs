@@ -380,11 +380,7 @@ pub fn decode_u8_page(
     Ok(raw)
 }
 
-pub fn encode_var_bytes_page(values: &[Bytes], codec: CompressionCodec) -> io::Result<Vec<u8>> {
-    encode_bytes_page(values, codec)
-}
-
-pub(crate) fn encode_bytes_page(
+pub(crate) fn encode_var_bytes_page(
     values: &[impl AsRef<[u8]>],
     codec: CompressionCodec,
 ) -> io::Result<Vec<u8>> {

@@ -11,10 +11,10 @@ use logex_types::LogRow;
 
 use crate::column::{ColumnFile, ColumnFileHeader, NullBitmap};
 use crate::page::{
-    PageIndexEntry, encode_bytes_page, encode_fixed_width_page, encode_u8_page, encode_u32_page,
-    encode_u64_page, encode_var_bytes_page, write_page_index,
+    PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
+    encode_var_bytes_page, write_page_index,
 };
-use crate::reader::ColumnReader;
+use crate::reader::{ColumnReader, RawBytesColumn};
 use crate::segment_reader::SegmentReader;
 
 use super::catalog::{
@@ -685,7 +685,7 @@ fn compact_address_values(
     for value in values {
         raw.extend_from_slice(value.as_slice());
     }
-    write_fixed_width_pages(
+    write_encoded_pages(
         segment_dir,
         "address",
         CompressionCodec::AdaptiveFixed,
@@ -711,7 +711,7 @@ fn compact_b256_values(
     for value in values {
         raw.extend_from_slice(value.as_slice());
     }
-    write_fixed_width_pages(segment_dir, name, codec, raw.len() / 32, |range| {
+    write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
         encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
     })
 }
@@ -756,10 +756,9 @@ fn compact_nullable_b256_values(
         }
     }
 
-    let mut descriptor =
-        write_fixed_width_pages(segment_dir, name, codec, raw.len() / 32, |range| {
-            encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
-        })?;
+    let mut descriptor = write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
+        encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
+    })?;
 
     let null_rel = format!("columns/{name}.null");
     let null_file = File::create(segment_dir.join(&null_rel))?;
@@ -837,9 +836,14 @@ fn compact_data_column(
     segment_dir: &Path,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_var_bytes(segment_dir, "data.col", None)?;
-    write_typed_pages(segment_dir, "data", codec, &values, |slice| {
-        encode_var_bytes_page(slice, codec)
+    let column = RawBytesColumn::open(&segment_dir.join("data.col"))?;
+    let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
+    write_encoded_pages(segment_dir, "data", codec, column.row_count(), |range| {
+        values.clear();
+        for row in range {
+            values.push(column.row(row)?);
+        }
+        encode_var_bytes_page(&values, codec)
     })
 }
 
@@ -855,7 +859,7 @@ fn compact_data_values(segment_dir: &Path, rows: &[LogRow]) -> std::io::Result<C
         |slice| {
             values.clear();
             values.extend(slice.iter().map(|row| row.data.as_ref()));
-            encode_bytes_page(&values, CompressionCodec::AdaptiveBytes)
+            encode_var_bytes_page(&values, CompressionCodec::AdaptiveBytes)
         },
     )
 }
@@ -884,7 +888,7 @@ fn rewrite_column_path(path: &str, dir_name: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-fn write_fixed_width_pages<F>(
+fn write_encoded_pages<F>(
     segment_dir: &Path,
     name: &str,
     codec: CompressionCodec,
