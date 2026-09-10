@@ -555,11 +555,11 @@ impl NativeStorage {
             .filter(|segment| pending.origin.can_defer(segment.id))
             .map(|segment| self.paths.segment_dir(segment.id))
             .collect::<Vec<_>>();
-        durability::order_trees_before_catalog(
+        durability::publish_catalog_after_trees(
             deferred.iter().map(PathBuf::as_path),
             &self.paths.catalog_path(),
+            &self.catalog.encode()?,
         )?;
-        self.catalog.persist(&self.paths)?;
         self.recovery_required = false;
         Ok(())
     }

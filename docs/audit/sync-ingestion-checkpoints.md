@@ -184,3 +184,9 @@ Potential next reductions are redundant ordering before the catalog's own barrie
 first writes to unpublished files, and per-call publication that can safely defer
 to the same catalog checkpoint. Committed prefixes and current readers still
 require protection; any optimization needs its own recovery and timing evidence.
+
+The next isolated change prepares the catalog temporary file before the barrier
+for deferred trees. The same barrier orders both payloads before publishing the
+catalog's name; other devices are fully persisted first, and the final catalog
+parent sync still supplies durability. Nine focused ingestion/recovery tests
+pass, including both interruption matrices. New timing evidence is pending.

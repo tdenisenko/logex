@@ -352,19 +352,24 @@ pub(crate) fn write_bytes_deferred(path: &Path, bytes: &[u8]) -> io::Result<()> 
     .publish()
 }
 
-/// Submit complete new segment trees and order them before the catalog's single
-/// commit. Devices other than the catalog's require their own full flush.
-pub(crate) fn order_trees_before_catalog<'a>(
+/// Order complete new segment trees and the unpublished catalog together before
+/// its rename. One barrier covers both on the catalog's device; other devices
+/// require their own full flush before that publication can become visible.
+pub(crate) fn publish_catalog_after_trees<'a>(
     trees: impl IntoIterator<Item = &'a Path>,
     catalog: &Path,
+    bytes: &[u8],
 ) -> io::Result<()> {
     let mut group = SyncGroup::default();
     for tree in trees {
         flush_tree(tree, &mut group)?;
         group.flush_directory(parent(tree))?;
     }
-    group.order()?;
-    group.persist_external_devices(catalog)
+    let replacement = Replacement::prepare(catalog, |writer| writer.write_all(bytes))?;
+    group.include_flushed(replacement.writer.get_ref().try_clone()?, catalog)?;
+    group.order_before_manifest(catalog)?;
+    replacement.publish()?;
+    sync_directory(parent(catalog))
 }
 
 /// Persist a just-written file and its directory entry with one device flush.
