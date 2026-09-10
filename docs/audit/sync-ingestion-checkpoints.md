@@ -384,3 +384,16 @@ focused column/recovery tests and strict Clippy pass, including exact file-byte
 checks for new files, replacements, empty/partial-byte counts and repopulation.
 This is promising but needs combined original-baseline confirmation and ExFAT
 validation; it does not establish acceptance for all sync workloads.
+
+The [mixed original-baseline confirmation](baselines/2026-09-11-null-original-comparison.jsonl)
+at `080c9eec` (docs-only HEAD `5cb4518d`) still fails: five alternating pairs,
+three iterations per route give short history 14.800 → 18.152 ms (+22.65%),
+and grouped live 2,881.240 → 490.167 ms (-82.99%). All exact oracles pass.
+The isolated all-null gain did not establish a convincing improvement over the
+previous mixed confirmation; it remains provisional, and PR #130 stays unmerged.
+The original historical path omitted fsync, unlike its live WAL path. Its faster
+short finalization therefore includes no equivalent durability guarantee. This
+explains a fixed cost but does not waive the user's 10% performance ceiling.
+A bounded larger replacement-write buffer is the next isolated experiment: raw
+fixed-width writes currently pass through an 8 KiB buffer, generating repeated
+small writes before compression. No checkpoint ordering is relaxed.

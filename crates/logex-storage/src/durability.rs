@@ -3,6 +3,10 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Column replacements receive many small fixed-width writes. Buffer them in
+// larger chunks; the bounded replacement set retains at most 2 MiB of buffers.
+const REPLACEMENT_BUFFER_BYTES: usize = 64 * 1024;
+
 /// Flush this file to the device without draining its hardware queue. A later
 /// ordering barrier or full sync on the SAME device is required on Apple.
 fn flush_file(file: &File) -> io::Result<()> {
@@ -245,7 +249,7 @@ impl Replacement {
                     let mut replacement = Self {
                         temporary: None,
                         destination: path.to_path_buf(),
-                        writer: BufWriter::new(file),
+                        writer: BufWriter::with_capacity(REPLACEMENT_BUFFER_BYTES, file),
                     };
                     write(&mut replacement.writer)?;
                     replacement.writer.flush()?;
@@ -277,7 +281,7 @@ impl Replacement {
             let mut replacement = Self {
                 temporary: Some(temporary),
                 destination: path.to_path_buf(),
-                writer: BufWriter::new(file),
+                writer: BufWriter::with_capacity(REPLACEMENT_BUFFER_BYTES, file),
             };
             write(&mut replacement.writer)?;
             replacement.writer.flush()?;
