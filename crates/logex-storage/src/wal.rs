@@ -55,14 +55,7 @@ impl WriteAheadLog {
         w.write_all(&batch.checksum.to_le_bytes())?;
         w.flush()?;
 
-        // fsync for durability
-        w.get_ref().sync_all()?;
-        durability::sync_directory(
-            self.path
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new(".")),
-        )?;
+        durability::sync_file_and_directory(w.get_ref(), &self.path)?;
         durability::checkpoint("wal_synced", &self.path)?;
         Ok(())
     }

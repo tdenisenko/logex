@@ -80,7 +80,7 @@ impl RecoveryJournal {
                 "WAL recovery journal exceeds size limit",
             ));
         }
-        durability::write_bytes(&Self::path(paths), &bytes)
+        durability::write_bytes_ordered(&Self::path(paths), &bytes)
     }
 
     pub(super) fn load(paths: &StorageCatalogPaths) -> io::Result<Option<Self>> {

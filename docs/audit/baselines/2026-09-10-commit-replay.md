@@ -1,6 +1,8 @@
 # Journaled commit release comparison — 2026-09-10
 
-The retained change fixes duplicate replay and missing durability barriers.
+This initial implementation fixes duplicate replay and missing durability barriers.
+Its ingestion slowdown was rejected by the user; these measurements are historical
+evidence, not acceptance of the cost. PR #130 remains open for a performance fix.
 It is a correctness change with substantial measured I/O cost, not a throughput
 improvement. A profiled concurrent-flush experiment was rejected because it did
 not demonstrate useful gains. No production directory was opened.
@@ -36,7 +38,7 @@ not demonstrate useful gains. No production directory was opened.
 Lockfile SHA-256: `6dcb648496174b61ba135432d0f1eec51a9d1ae9dbcbd9f8a5e6483906e7e50c`.
 Harness SHA-256: `0df8e9a28642760b1a7b609a0c4c4c0f3aaef3f4484150f8367435bc55a0bc12`.
 
-## Baseline versus retained sequential durability
+## Baseline versus initial sequential durability
 
 All times are milliseconds across 15 measured iterations per cell. P95 is
 nearest-rank over this small sample, not a production tail-latency estimate.
@@ -62,8 +64,8 @@ nearest-rank over this small sample, not a production tail-latency estimate.
 | sparse | sql_ordered | 10.701 / 13.161 | 10.466 / 11.701 | -2.19% |
 | sparse | concurrent_native_queries | 131.130 / 150.355 | 145.804 / 226.283 | +11.19% |
 
-These write/index/compaction/reopen costs are explicitly retained to establish
-durable publication before recovery metadata is discarded. Live ingestion in
+These initial write/index/compaction/reopen costs are unacceptable for merging.
+The follow-up must preserve durable publication while reducing repeated flushes. Live ingestion in
 this fixture is approximately 49,000 rows/s with durability versus 453,000–463,000
 rows/s before it. Historical ingestion is approximately 41,000–49,000 rows/s
 versus 757,000–795,000 rows/s. They are local storage figures, not verified node

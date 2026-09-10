@@ -307,9 +307,7 @@ pub(crate) fn persist_segment_manifest_with_columns(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    durability::sync_tree(&segment_dir)?;
-    durability::write_bytes(&path, &json)?;
-    durability::sync_directory(&paths.segments_dir())
+    durability::publish_tree(&segment_dir, &path, &json)
 }
 
 pub(crate) fn compact_segment(

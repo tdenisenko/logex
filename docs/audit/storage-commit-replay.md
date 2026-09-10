@@ -7,6 +7,11 @@ It preserves the WAL and segment encodings; the user approved a separate journal
 instead of a versioned WAL. Other storage formats and compaction replacement
 protocols still require review.
 
+PR #130 remains unmerged: the initial ingestion slowdown was rejected. The user
+requires no more than 10% degradation and authorized bounded WAL checkpoints.
+The [grouped-flush investigation](baselines/2026-09-11-grouped-flush.md) records
+the tested intermediate changes and why further work is required.
+
 ## Findings
 
 | ID | Severity | Evidence and disposition |
@@ -26,7 +31,8 @@ kind, position and nonempty count. Checksums detect accidental damage; they are
 not chain authentication or protection against malicious filesystem edits.
 
 1. Validate/encode the batch before any transaction writes. Require an empty WAL.
-2. Durably publish the journal before appending any WAL bytes or segment rows.
+2. Order journal publication before appending any WAL bytes or segment rows;
+   the WAL full sync supplies persistence before segment writes proceed.
 3. Append and synchronize the WAL and its parent directory.
 4. Apply rows, synchronizing segment artifacts before each manifest and the
    catalog. Manifests remain the existing source for recovering a catalog whose
@@ -66,14 +72,20 @@ batches written by this version remain supported and are not deduplicated.
 ## Filesystem and compatibility boundaries
 
 Replacement files are created exclusively under unique temporary names in the
-same directory, flushed, synchronized, renamed and followed by a directory sync.
+same directory. Contents are ordered before rename; column replacements are
+persisted as a group before manifest publication succeeds. Standalone metadata
+replacements also synchronize their containing directory before returning.
 Handled errors attempt to remove their temporary file without hiding the primary
 failure. Abrupt process exit may leave unreferenced `.name.pid.sequence.tmp`
 artifacts. Startup does not infer committed data from those names or delete
 unrelated files. A stale conventional `.name.tmp` symlink is not followed.
 
 The pinned Rust library uses `F_FULLFSYNC` for `File::sync_all` on Apple and
-`fsync` on Linux. Directory entries need their own synchronization; see the
+`fsync` on Linux. The intermediate implementation groups explicit Apple `fsync`
+calls and ordering barriers before a full sync per touched device. Unsupported
+ordering barriers fall back to full sync; other I/O errors propagate. The two
+FFI calls, ownership assumptions and platform tests are documented in the
+[grouped-flush investigation](baselines/2026-09-11-grouped-flush.md). Directory entries need their own synchronization; see the
 [Linux fsync contract](https://man7.org/linux/man-pages/man2/fsync.2.html).
 The exact pinned implementation was inspected in the installed standard-library
 source. These barriers depend on the filesystem/device honoring its flush
@@ -114,10 +126,10 @@ sync failure, proving each replacement leaves a complete old or new file.
 This is not a claim to exercise every OS write or power-loss interleaving.
 
 A bounded eight-worker flush experiment was measured after profiling and rejected:
-it did not demonstrate a useful improvement. The final path retains sequential
-segment synchronization and the existing scoped column writers.
+it did not demonstrate a useful improvement. Subsequent grouping reduces device
+flushes; the existing scoped column writers remain.
 
-All six final local workspace gates pass: 807 tests, four explicitly ignored
+All six intermediate local workspace gates pass: 809 tests, four explicitly ignored
 benchmarks, strict Clippy, doc tests and release linking. Linux/macOS CI is
 required before merge. The
 [release comparison](baselines/2026-09-10-commit-replay.md) records write, index,
@@ -129,7 +141,7 @@ Removed the equality-based already-applied replay helper, permissive all-true
 canonical repair and duplicated temporary-file replacement logic. Full-column
 serialization writes checked offsets directly instead of allocating an intermediate
 offset vector; the stale four-byte offset comment is corrected to eight bytes.
-The active hot-segment lookup no longer republishes an unchanged manifest.
+Active hot and historical segment lookups no longer republish unchanged manifests.
 Four old restart tests now drop the first owner before reopening.
 
 Still pending: atomic compaction directory replacement (including profile

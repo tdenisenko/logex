@@ -125,6 +125,8 @@ impl NullBitmap {
 }
 
 /// Handles writing column files for a partition directory.
+/// Column replacements order their contents before rename. The storage caller
+/// must synchronize the complete segment before publishing its manifest.
 pub struct ColumnFile;
 
 fn join_write_worker(handle: thread::ScopedJoinHandle<'_, io::Result<()>>) -> io::Result<()> {
@@ -351,7 +353,7 @@ impl ColumnFile {
         rows: &[LogRow],
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
-        durability::atomic_write(&dir.join(name), |writer| {
+        durability::atomic_replace_ordered(&dir.join(name), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -391,7 +393,7 @@ impl ColumnFile {
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
     ) -> io::Result<()> {
         let mut nulls = NullBitmap::new();
-        durability::atomic_write(&dir.join(format!("{base_name}.col")), |writer| {
+        durability::atomic_replace_ordered(&dir.join(format!("{base_name}.col")), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -403,7 +405,7 @@ impl ColumnFile {
             }
             Ok(())
         })?;
-        durability::atomic_write(&dir.join(format!("{base_name}.null")), |writer| {
+        durability::atomic_replace_ordered(&dir.join(format!("{base_name}.null")), |writer| {
             nulls.write_to(writer)
         })
     }
@@ -441,14 +443,14 @@ impl ColumnFile {
         }
         col_file.flush()?;
 
-        durability::atomic_write(&null_path, |nw| nulls.write_to(nw))?;
+        durability::atomic_replace_ordered(&null_path, |nw| nulls.write_to(nw))?;
 
         Ok(())
     }
 
     /// Variable-length column: 8-byte offsets (one per row plus sentinel), then data.
     fn write_var_col(dir: &Path, name: &str, row_count: u64, rows: &[LogRow]) -> io::Result<()> {
-        durability::atomic_write(&dir.join(name), |writer| {
+        durability::atomic_replace_ordered(&dir.join(name), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -524,7 +526,7 @@ impl ColumnFile {
         }
         new_offsets.push(off);
 
-        durability::atomic_write(&path, |w| {
+        durability::atomic_replace_ordered(&path, |w| {
             let new_header = ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count: new_row_count,
@@ -585,7 +587,7 @@ impl ColumnFile {
             bitmap.push(true);
         }
 
-        durability::atomic_write(&path, |w| bitmap.write_to(w))?;
+        durability::atomic_replace_ordered(&path, |w| bitmap.write_to(w))?;
         Ok(())
     }
 

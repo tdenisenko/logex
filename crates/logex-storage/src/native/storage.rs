@@ -843,8 +843,12 @@ impl NativeStorage {
                 .find(|segment| segment.id == segment_id && segment.kind == SegmentKind::Sealed)
             {
                 let path = self.paths.segment_dir(descriptor.id);
-                fs::create_dir_all(&path)?;
-                persist_segment_manifest(&self.paths, descriptor)?;
+                if !path.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "active historical segment directory is missing",
+                    ));
+                }
                 return Ok(descriptor.id);
             }
             self.catalog.active_historical_segment = None;
@@ -2354,7 +2358,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(plan);
-        assert!(NativeStorage::open(config).is_ok());
+        NativeStorage::open(config).expect("directory lock released after compaction plan drops");
     }
 
     #[test]
