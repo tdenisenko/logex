@@ -11,7 +11,7 @@ data and running deployments are not modified by the benchmark suite.
 | 0 | Baseline, dependency inventory, CI, benchmarks | Complete: PR #120 merged as `afe5939c`; all six CI jobs passed. Includes compacted-page ordering fix B0-05. |
 | 0a | Compatible dependency security remediation | Complete: PR #121 merged as `bf4b97ab`; all six CI jobs passed. Seven vulnerability matches removed; remaining advisories and measured tradeoffs documented. |
 | 1 | Shared types, checkpoints, CL proofs, EL validation, extraction | In progress: [header/checkpoint fixes](consensus-header-trust.md) merged in PR #122; [HTTP checkpoint resolution](checkpoint-resolution.md) in PR #123; [cached-state guards](consensus-cached-state.md) in PR #124; [receipt decoding/extraction](execution-receipt-validation.md) in PR #125. [Beacon SSZ/context fixes](beacon-ssz-validation.md) merged in PR #126 as `a83023cf`. [Extraction boundary checks](extraction-boundaries.md) merged in PR #127 as `f5fdd83c`, with all six CI jobs passing. [Execution header boundaries](execution-header-boundaries.md) merged in PR #128 as `11c1bec7` after all six CI jobs passed. Other trust paths remain pending. |
-| 2 | WAL, catalogs, segments, codecs, readers, durability | In progress: [WAL recovery integrity](wal-recovery.md) fixes silent corruption recovery and bounds allocation; all six local gates pass (789 tests), PR/CI pending. Commit durability, remaining formats and persisted state are still pending. |
+| 2 | WAL, catalogs, segments, codecs, readers, durability | In progress: [WAL recovery integrity](wal-recovery.md) fixes silent corruption recovery and bounds allocation; merged in PR #129 as `09a63f55` after all six CI jobs passed (789 local tests). [Journaled commit recovery](storage-commit-replay.md) adds transaction positions, durable publication and canonical-bit preservation; all six local gates pass (807 tests), PR/CI pending. Remaining formats and persisted state are still pending. |
 | 3 | CL RPC, gossip, discovery, scheduling, supervision | Pending; bounded requests and recovery across stale heads and committee transitions. |
 | 4 | EL discovery, peer management, requests, serving cache | Pending; bounded accounting, correct response attribution and cancellation. |
 | 5 | Live/historical sync, reorgs, ingestion, coverage | Pending; publish only verified contiguous data across crashes and reorgs. |
@@ -19,7 +19,7 @@ data and running deployments are not modified by the benchmark suite.
 | 7 | Native and SQL queries, snapshots, pushdown, cancellation | Pending; exact filtering/order/pagination and safe concurrent file lifetimes. |
 | 8 | HTTP, JSON-RPC, gRPC, WebSocket, authentication | Pending; consistent results/errors, bounded clients and correct cancellation ownership. |
 | 9 | Dashboard, metrics, health, status | Pending; safe rendering, responsive controls, accurate unavailable/stale states. |
-| 10 | CLI/runtime and volume supervision | Pending; preflight volume identity and writability, runtime loss detection, launchd/systemd templates. |
+| 10 | CLI/runtime and volume supervision | Directory exclusivity prerequisite implemented with journal recovery; remaining work pending: preflight volume identity and writability, runtime loss detection, launchd/systemd templates. |
 | 11 | Offline automatic segment repair | Pending; dry-run, quarantine, verified refetch, resumable publication, exclusive access. |
 | 12 | Integrated regression and performance | Pending; repeated baselines, fault injection, platform validation and a 24-hour staging soak. |
 
