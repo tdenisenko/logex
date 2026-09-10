@@ -381,42 +381,59 @@ pub(crate) fn compact_ingest_segment(
     fs::create_dir_all(segment_dir.join("columns"))?;
     verify_raw_segment_files_complete(descriptor, &segment_dir)?;
 
-    type Compactor = fn(&Path) -> std::io::Result<ColumnDescriptor>;
-    let compactors: [Compactor; 14] = [
-        |dir| compact_address_column(dir),
-        |dir| compact_u64_column(dir, "block_number", CompressionCodec::DeltaZigZag),
-        |dir| compact_b256_column(dir, "block_hash", CompressionCodec::AdaptiveFixed),
-        |dir| compact_u64_column(dir, "timestamp", CompressionCodec::DeltaOfDelta),
-        |dir| compact_b256_column(dir, "tx_hash", CompressionCodec::AdaptiveFixed),
-        |dir| compact_u32_column(dir, "tx_index", CompressionCodec::Zstd),
-        |dir| compact_u32_column(dir, "log_index", CompressionCodec::Zstd),
-        |dir| compact_u32_column(dir, "data_len", CompressionCodec::Zstd),
-        |dir| compact_u8_column(dir, "source", CompressionCodec::Dictionary),
-        |dir| compact_nullable_b256_column(dir, "topic0", CompressionCodec::AdaptiveFixed),
-        |dir| compact_nullable_b256_column(dir, "topic1", CompressionCodec::AdaptiveFixed),
-        |dir| compact_nullable_b256_column(dir, "topic2", CompressionCodec::AdaptiveFixed),
-        |dir| compact_nullable_b256_column(dir, "topic3", CompressionCodec::AdaptiveFixed),
-        |dir| compact_data_column(dir, CompressionCodec::AdaptiveBytes),
-    ];
-    let columns = if descriptor.row_count <= u64::from(DEFAULT_PAGE_ROWS) {
-        // One page per column is too little work to amortize fourteen threads.
-        compactors
-            .iter()
-            .map(|compact| compact(&segment_dir))
-            .collect::<std::io::Result<Vec<_>>>()?
-    } else {
-        let dir = segment_dir.as_path();
-        thread::scope(|scope| {
-            let workers = compactors
-                .into_iter()
-                .map(|compact| scope.spawn(move || compact(dir)))
-                .collect::<Vec<_>>();
-            workers
-                .into_iter()
-                .map(join_column_worker)
-                .collect::<std::io::Result<Vec<_>>>()
-        })?
-    };
+    let columns = thread::scope(|scope| {
+        let address = scope.spawn(|| compact_address_column(&segment_dir));
+        let block_number = scope.spawn(|| {
+            compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)
+        });
+        let block_hash = scope.spawn(|| {
+            compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)
+        });
+        let timestamp = scope.spawn(|| {
+            compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)
+        });
+        let tx_hash = scope.spawn(|| {
+            compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)
+        });
+        let tx_index =
+            scope.spawn(|| compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd));
+        let log_index =
+            scope.spawn(|| compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd));
+        let data_len =
+            scope.spawn(|| compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd));
+        let source =
+            scope.spawn(|| compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary));
+        let topic0 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::AdaptiveFixed)
+        });
+        let topic1 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::AdaptiveFixed)
+        });
+        let topic2 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::AdaptiveFixed)
+        });
+        let topic3 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::AdaptiveFixed)
+        });
+        let data =
+            scope.spawn(|| compact_data_column(&segment_dir, CompressionCodec::AdaptiveBytes));
+        Ok::<_, std::io::Error>(vec![
+            join_column_worker(address)?,
+            join_column_worker(block_number)?,
+            join_column_worker(block_hash)?,
+            join_column_worker(timestamp)?,
+            join_column_worker(tx_hash)?,
+            join_column_worker(tx_index)?,
+            join_column_worker(log_index)?,
+            join_column_worker(data_len)?,
+            join_column_worker(source)?,
+            join_column_worker(topic0)?,
+            join_column_worker(topic1)?,
+            join_column_worker(topic2)?,
+            join_column_worker(topic3)?,
+            join_column_worker(data)?,
+        ])
+    })?;
 
     persist_ingest_manifest_with_columns(paths, descriptor, columns, publication)?;
     remove_raw_hot_files(&segment_dir)?;

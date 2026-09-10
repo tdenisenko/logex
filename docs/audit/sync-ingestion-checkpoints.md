@@ -335,3 +335,10 @@ final layout tests and strict storage Clippy. The next isolated experiment avoid
 spawning fourteen compaction workers when each column occupies only one page;
 multipage raw segments retain parallel compaction. Nine focused compaction tests
 and strict Clippy pass; timing is pending.
+
+**Rejected experiment:** [single-page serial compaction](baselines/2026-09-11-single-page-rejected.jsonl)
+at `2635b41c` increases the short median 16.985 → 20.208 ms (+18.97%) versus
+`2872595b`. All oracles pass, but the performance result rejects the scheduling
+assumption even at one page per column. Restored the previous parallel compaction
+implementation; no serial-size threshold remains. Recompare the combined retained
+changes against original `09a63f55` before further tuning or acceptance.
