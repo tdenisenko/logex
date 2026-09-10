@@ -97,3 +97,44 @@ Column replacement ordering and variable-data rewrites are still candidates for
 profiling if ingestion exceeds the 10% ceiling. The permission to start fresh
 allows a format change where evidence justifies it; resetting a database by itself
 does not remove write or synchronization overhead.
+
+## First release comparison
+
+[Raw results](baselines/2026-09-11-sync-checkpoint-publication.jsonl) compare the
+original `09a63f55` baseline with prototype `aefbc0db` on internal APFS, using the
+same pinned compiler, Mac14,15, 16 GiB RAM and warm-cache conditions as the prior
+publication fixture. Three alternating process pairs, three iterations per
+process, 128 measured blocks, 128 rows per nonempty block and the 8,192-header
+window. No build or test ran during timing. Both revisions pass the exact row,
+head, anchor, floor and reopen oracles; final checkpoint/finalization is included.
+
+| Workload | Baseline median ms | Prototype median ms | Change |
+| --- | ---: | ---: | ---: |
+| Live storage publication | 2,799.517 | 789.061 | -71.81% |
+| Short historical storage publication | 14.960 | 51.719 | +245.72% |
+
+This establishes a live improvement for this fixture, not end-to-end P2P sync or
+paced live performance. The short historical fixture fits in one sparse staging
+chunk; it still fails the 10% ceiling badly. Removing its WAL copy did not resolve
+that cost. The next investigation separates raw-column, compaction and checkpoint
+costs and measures larger production-shaped history chunks before selecting a
+format change or a further durability optimization.
+
+A [temporary release attribution run](baselines/2026-09-11-sync-checkpoint-profile.json)
+separated the short historical append (24.17 ms) and finalization/checkpoint
+(32.64 ms). Full directory syncs account for approximately 21.86 ms across those
+phases, while raw-file flush helpers account for another 13.45 ms during append.
+Helper totals include worker overlap; this is instrumentation evidence, not an
+acceptance benchmark. A 491,520-row historical call took 156.96 ms in the same
+instrumented diagnostic, including its automatic oversized-batch checkpoint;
+its corresponding baseline comparison is still needed. All temporary profiling
+code was removed after capture.
+
+The user-authorized format-change option can address these measured costs:
+make a checksummed catalog the single durable authority for both rows and
+progress, then discard unpublished segment tails on reopen. This would remove
+the compatibility-driven second metadata file and publishing journal. It also
+allows writes to entirely uncommitted segments to defer durability until the
+catalog checkpoint, while retaining prefix protection for existing committed
+rows. This next strategy is not yet implemented or accepted; measured evidence
+is required before retaining it.
