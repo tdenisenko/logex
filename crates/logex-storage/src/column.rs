@@ -199,8 +199,8 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&r.timestamp.to_le_bytes()),
                 )?;
-                Self::write_nullable_col(dir, &replacements, "topic0", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic0.as_ref())
+                Self::write_nullable_col(dir, &replacements, "topic0", row_count, rows, |row| {
+                    row.topic0.as_ref()
                 })?;
                 Ok(())
             });
@@ -245,17 +245,17 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&[r.source as u8]),
                 )?;
-                Self::write_nullable_col(dir, &replacements, "topic1", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic1.as_ref())
+                Self::write_nullable_col(dir, &replacements, "topic1", row_count, rows, |row| {
+                    row.topic1.as_ref()
                 })?;
                 Ok(())
             });
             let remaining_topics = scope.spawn(|| {
-                Self::write_nullable_col(dir, &replacements, "topic2", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic2.as_ref())
+                Self::write_nullable_col(dir, &replacements, "topic2", row_count, rows, |row| {
+                    row.topic2.as_ref()
                 })?;
-                Self::write_nullable_col(dir, &replacements, "topic3", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic3.as_ref())
+                Self::write_nullable_col(dir, &replacements, "topic3", row_count, rows, |row| {
+                    row.topic3.as_ref()
                 })?;
                 Ok(())
             });
@@ -500,9 +500,17 @@ impl ColumnFile {
         base_name: &str,
         row_count: u64,
         rows: &[LogRow],
-        mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
+        value: impl Fn(&LogRow) -> Option<&alloy_primitives::B256>,
     ) -> io::Result<()> {
-        let mut nulls = NullBitmap::new();
+        let all_null = rows.iter().all(|row| value(row).is_none());
+        let mut nulls = if all_null {
+            NullBitmap {
+                bits: vec![0; rows.len().div_ceil(8)],
+                len: row_count,
+            }
+        } else {
+            NullBitmap::new()
+        };
         replacements.write(&dir.join(format!("{base_name}.col")), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
@@ -510,8 +518,24 @@ impl ColumnFile {
                 compression: 0,
             }
             .write_to(writer)?;
-            for row in rows {
-                nulls.push(write_value(writer, row)?);
+            if all_null {
+                let length = row_count
+                    .checked_mul(32)
+                    .and_then(|bytes| bytes.checked_add(ColumnFileHeader::SIZE as u64))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "nullable column length overflow",
+                        )
+                    })?;
+                // Replacement files are new/empty. Extension supplies the same
+                // logical zero bytes without explicitly writing every null slot.
+                // Normal replacement/checkpoint ordering also persists its length.
+                writer.get_ref().set_len(length)?;
+            } else {
+                for row in rows {
+                    nulls.push(write_optional_b256(writer, value(row))?);
+                }
             }
             Ok(())
         })?;

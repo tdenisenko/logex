@@ -704,4 +704,54 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn all_null_column_extensions_preserve_new_and_replaced_file_bytes() {
+        for publication in [
+            crate::durability::Publication::Ordered,
+            crate::durability::Publication::Deferred,
+        ] {
+            for replace in [false, true] {
+                for count in [0, 1, 9, 513] {
+                    let tmp = TempDir::new().unwrap();
+                    if replace {
+                        ColumnFile::write_batch(tmp.path(), &make_test_rows(1024)).unwrap();
+                    }
+                    let mut rows = make_test_rows(count);
+                    for row in &mut rows {
+                        row.topic0 = None;
+                        row.topic1 = None;
+                        row.topic2 = None;
+                        row.topic3 = None;
+                    }
+                    ColumnFile::write_batch_with_publication(tmp.path(), &rows, None, publication)
+                        .unwrap();
+                    for name in ["topic0", "topic1", "topic2", "topic3"] {
+                        let data = fs::read(tmp.path().join(format!("{name}.col"))).unwrap();
+                        assert_eq!(
+                            ColumnFileHeader::read_from(&data).unwrap().row_count,
+                            count as u64
+                        );
+                        assert_eq!(&data[ColumnFileHeader::SIZE..], vec![0; count * 32]);
+                        assert_eq!(
+                            ColumnReader::read_nullable_b256(tmp.path(), name, None).unwrap(),
+                            vec![None; count]
+                        );
+                    }
+                    assert_eq!(ColumnReader::read_log_rows(tmp.path(), None).unwrap(), rows);
+                    let restored = make_test_rows(3);
+                    ColumnFile::write_batch_with_publication(
+                        tmp.path(),
+                        &restored,
+                        None,
+                        publication,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        ColumnReader::read_log_rows(tmp.path(), None).unwrap(),
+                        restored
+                    );
+                }
+            }
+        }
+    }
 }
