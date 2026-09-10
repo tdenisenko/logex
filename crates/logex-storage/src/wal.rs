@@ -1,9 +1,11 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
 use std::path::PathBuf;
 
 use alloy_primitives::{Address, B256, Bytes};
 use logex_types::{LogRow, Source};
+
+use crate::durability;
 
 /// Write-ahead log for crash recovery.
 ///
@@ -29,43 +31,48 @@ impl WriteAheadLog {
     pub fn open(path: PathBuf) -> io::Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            durability::create_dir_all(parent)?;
         }
         Ok(Self { path })
     }
 
     /// Append a batch of rows to the WAL.
     pub fn append(&mut self, rows: &[LogRow]) -> io::Result<()> {
-        // Validate and encode before opening the file, so invalid input cannot
-        // create a WAL or leave an incomplete entry after a valid prefix.
-        let row_count = u32::try_from(rows.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "too many rows for a WAL entry")
-        })?;
-        let serialized = encode_rows(rows)?;
-        let payload_len = u32::try_from(serialized.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "WAL payload exceeds u32 length",
-            )
-        })?;
-        let checksum = crc32fast::hash(&serialized);
+        self.append_encoded(&EncodedWalBatch::new(rows)?)
+    }
 
+    pub(crate) fn append_encoded(&mut self, batch: &EncodedWalBatch) -> io::Result<()> {
+        durability::checkpoint("append_wal", &self.path)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
         let mut w = BufWriter::new(file);
 
-        w.write_all(&row_count.to_le_bytes())?;
-        w.write_all(&payload_len.to_le_bytes())?;
-        w.write_all(&serialized)?;
-        w.write_all(&checksum.to_le_bytes())?;
+        w.write_all(&batch.row_count.to_le_bytes())?;
+        w.write_all(&batch.payload_len.to_le_bytes())?;
+        w.write_all(&batch.serialized)?;
+        w.write_all(&batch.checksum.to_le_bytes())?;
         w.flush()?;
 
         // fsync for durability
         w.get_ref().sync_all()?;
-
+        durability::sync_directory(
+            self.path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new(".")),
+        )?;
+        durability::checkpoint("wal_synced", &self.path)?;
         Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> io::Result<bool> {
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => Ok(metadata.len() == 0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     /// Read recoverable entries without modifying the WAL. An error anywhere
@@ -87,15 +94,48 @@ impl WriteAheadLog {
 
     /// Truncate the WAL (called after successful commit to storage).
     pub fn truncate(&mut self) -> io::Result<()> {
+        durability::checkpoint("truncate_wal", &self.path)?;
         match OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(&self.path)
         {
-            Ok(_) => Ok(()),
+            Ok(file) => file.sync_all(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+}
+
+pub(crate) struct EncodedWalBatch {
+    serialized: Vec<u8>,
+    pub(crate) row_count: u32,
+    payload_len: u32,
+    pub(crate) checksum: u32,
+}
+
+impl EncodedWalBatch {
+    pub(crate) fn new(rows: &[LogRow]) -> io::Result<Self> {
+        // Validate and encode before opening the file, so invalid input cannot
+        // create a WAL or leave an incomplete entry after a valid prefix.
+        let row_count = u32::try_from(rows.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "too many rows for a WAL entry")
+        })?;
+        let serialized = encode_rows(rows)?;
+        let payload_len = u32::try_from(serialized.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "WAL payload exceeds u32 length",
+            )
+        })?;
+        let checksum = crc32fast::hash(&serialized);
+
+        Ok(Self {
+            serialized,
+            row_count,
+            payload_len,
+            checksum,
+        })
     }
 }
 
@@ -374,7 +414,39 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, bytes};
     use logex_types::Source;
+    use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn wal_bare_relative_filename_roundtrips() {
+        const CHILD: &str = "LOGEX_WAL_RELATIVE_PATH_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let rows = make_test_rows(2);
+            let mut wal = WriteAheadLog::open(PathBuf::from("pending.wal")).unwrap();
+            wal.append(&rows).unwrap();
+            assert_eq!(wal.read_all().unwrap(), rows);
+            wal.truncate().unwrap();
+            assert!(wal.is_empty().unwrap());
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "wal::tests::wal_bare_relative_filename_roundtrips",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn make_test_rows(count: usize) -> Vec<LogRow> {
         (0..count)

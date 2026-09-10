@@ -1,5 +1,6 @@
 mod column;
 pub mod compression;
+mod durability;
 pub mod native;
 mod page;
 mod partition;

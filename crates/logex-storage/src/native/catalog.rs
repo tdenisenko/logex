@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
@@ -56,8 +57,8 @@ impl StorageCatalogPaths {
     }
 
     pub fn ensure_base_dirs(&self) -> std::io::Result<()> {
-        fs::create_dir_all(&self.root)?;
-        fs::create_dir_all(self.segments_dir())?;
+        durability::create_dir_all(&self.root)?;
+        durability::create_dir_all(&self.segments_dir())?;
         Ok(())
     }
 }
@@ -202,11 +203,8 @@ impl NativeStorageCatalog {
     pub fn persist(&self, paths: &StorageCatalogPaths) -> std::io::Result<()> {
         paths.ensure_base_dirs()?;
         let path = paths.catalog_path();
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        fs::write(&tmp, json)?;
-        fs::rename(tmp, path)?;
-        Ok(())
+        durability::write_bytes(&path, &json)
     }
 
     pub fn register_segment(&mut self, kind: SegmentKind) -> SegmentDescriptor {

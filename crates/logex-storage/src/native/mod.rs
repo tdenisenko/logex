@@ -1,5 +1,6 @@
 mod catalog;
 mod filter;
+mod recovery;
 mod segment;
 mod storage;
 

@@ -1,3 +1,4 @@
+use crate::durability;
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -305,11 +306,10 @@ pub(crate) fn persist_segment_manifest_with_columns(
     };
 
     let path = paths.segment_manifest_path(descriptor.id);
-    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    fs::write(&tmp, json)?;
-    fs::rename(tmp, path)?;
-    Ok(())
+    durability::sync_tree(&segment_dir)?;
+    durability::write_bytes(&path, &json)?;
+    durability::sync_directory(&paths.segments_dir())
 }
 
 pub(crate) fn compact_segment(

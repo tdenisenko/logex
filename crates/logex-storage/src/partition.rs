@@ -453,6 +453,7 @@ mod tests {
         })
         .unwrap();
 
+        drop(mgr);
         let reloaded = PartitionManager::open(PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
             partition_target_rows: 1_000,

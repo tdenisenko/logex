@@ -1,3 +1,4 @@
+use crate::durability;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -135,6 +136,20 @@ fn join_write_worker(handle: thread::ScopedJoinHandle<'_, io::Result<()>>) -> io
 impl ColumnFile {
     /// Write all fixed-size and variable-length column files for a batch of rows.
     pub fn write_batch(dir: &Path, rows: &[LogRow]) -> io::Result<()> {
+        Self::write_batch_with_canonical(dir, rows, None)
+    }
+
+    pub(crate) fn write_batch_with_canonical(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: Option<&NullBitmap>,
+    ) -> io::Result<()> {
+        if canonical.is_some_and(|bitmap| bitmap.len() != rows.len() as u64) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "canonical bitmap length differs from replacement rows",
+            ));
+        }
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
 
@@ -205,7 +220,10 @@ impl ColumnFile {
                 })
             });
             let data = scope.spawn(|| Self::write_var_col(dir, "data.col", row_count, rows));
-            let canonical = scope.spawn(|| Self::write_canonical_bitmap(dir, row_count));
+            let canonical = scope.spawn(|| match canonical {
+                Some(bitmap) => Self::replace_canonical_bitmap(dir, bitmap),
+                None => Self::write_canonical_bitmap(dir, row_count),
+            });
 
             join_write_worker(address)?;
             join_write_worker(block_number)?;
@@ -333,22 +351,18 @@ impl ColumnFile {
         rows: &[LogRow],
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
-        let path = dir.join(name);
-        let file = File::create(&path)?;
-        let mut w = BufWriter::new(file);
-
-        let header = ColumnFileHeader {
-            version: COLUMN_VERSION,
-            row_count,
-            compression: 0,
-        };
-        header.write_to(&mut w)?;
-
-        for row in rows {
-            write_value(&mut w, row)?;
-        }
-        w.flush()?;
-        Ok(())
+        durability::atomic_write(&dir.join(name), |writer| {
+            ColumnFileHeader {
+                version: COLUMN_VERSION,
+                row_count,
+                compression: 0,
+            }
+            .write_to(writer)?;
+            for row in rows {
+                write_value(writer, row)?;
+            }
+            Ok(())
+        })
     }
 
     fn append_fixed_col(
@@ -376,32 +390,22 @@ impl ColumnFile {
         rows: &[LogRow],
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
     ) -> io::Result<()> {
-        let col_path = dir.join(format!("{base_name}.col"));
-        let null_path = dir.join(format!("{base_name}.null"));
-
-        let col_file = File::create(&col_path)?;
-        let mut w = BufWriter::new(col_file);
         let mut nulls = NullBitmap::new();
-
-        let header = ColumnFileHeader {
-            version: COLUMN_VERSION,
-            row_count,
-            compression: 0,
-        };
-        header.write_to(&mut w)?;
-
-        for row in rows {
-            nulls.push(write_value(&mut w, row)?);
-        }
-        w.flush()?;
-
-        // Write null bitmap
-        let null_file = File::create(&null_path)?;
-        let mut nw = BufWriter::new(null_file);
-        nulls.write_to(&mut nw)?;
-        nw.flush()?;
-
-        Ok(())
+        durability::atomic_write(&dir.join(format!("{base_name}.col")), |writer| {
+            ColumnFileHeader {
+                version: COLUMN_VERSION,
+                row_count,
+                compression: 0,
+            }
+            .write_to(writer)?;
+            for row in rows {
+                nulls.push(write_value(writer, row)?);
+            }
+            Ok(())
+        })?;
+        durability::atomic_write(&dir.join(format!("{base_name}.null")), |writer| {
+            nulls.write_to(writer)
+        })
     }
 
     fn append_nullable_col(
@@ -437,44 +441,33 @@ impl ColumnFile {
         }
         col_file.flush()?;
 
-        Self::replace_file(&null_path, |nw| nulls.write_to(nw))?;
+        durability::atomic_write(&null_path, |nw| nulls.write_to(nw))?;
 
         Ok(())
     }
 
-    /// Variable-length column: 4-byte offset array (one per row + 1 sentinel) + data blob.
+    /// Variable-length column: 8-byte offsets (one per row plus sentinel), then data.
     fn write_var_col(dir: &Path, name: &str, row_count: u64, rows: &[LogRow]) -> io::Result<()> {
-        let path = dir.join(name);
-        let file = File::create(&path)?;
-        let mut w = BufWriter::new(file);
-
-        let header = ColumnFileHeader {
-            version: COLUMN_VERSION,
-            row_count,
-            compression: 0,
-        };
-        header.write_to(&mut w)?;
-
-        // Compute offsets
-        let mut offset: u64 = 0;
-        let mut offsets = Vec::with_capacity(rows.len() + 1);
-        for row in rows {
-            offsets.push(offset);
-            offset += row.data.len() as u64;
-        }
-        offsets.push(offset); // sentinel
-
-        // Write offset array
-        for o in &offsets {
-            w.write_all(&o.to_le_bytes())?;
-        }
-
-        // Write data blob
-        for row in rows {
-            w.write_all(&row.data)?;
-        }
-        w.flush()?;
-        Ok(())
+        durability::atomic_write(&dir.join(name), |writer| {
+            ColumnFileHeader {
+                version: COLUMN_VERSION,
+                row_count,
+                compression: 0,
+            }
+            .write_to(writer)?;
+            let mut offset = 0u64;
+            for row in rows {
+                writer.write_all(&offset.to_le_bytes())?;
+                offset = offset.checked_add(row.data.len() as u64).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "data column size overflow")
+                })?;
+            }
+            writer.write_all(&offset.to_le_bytes())?;
+            for row in rows {
+                writer.write_all(&row.data)?;
+            }
+            Ok(())
+        })
     }
 
     fn append_var_col(
@@ -531,7 +524,7 @@ impl ColumnFile {
         }
         new_offsets.push(off);
 
-        Self::replace_file(&path, |w| {
+        durability::atomic_write(&path, |w| {
             let new_header = ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count: new_row_count,
@@ -559,17 +552,17 @@ impl ColumnFile {
 
     /// Write a canonical bitmap where all rows are marked canonical (all 1s).
     pub(crate) fn write_canonical_bitmap(dir: &Path, row_count: u64) -> io::Result<()> {
-        let path = dir.join("canonical.bitmap");
-        let file = File::create(&path)?;
-        let mut w = BufWriter::new(file);
-
         let mut bitmap = NullBitmap::new();
         for _ in 0..row_count {
             bitmap.push(true);
         }
-        bitmap.write_to(&mut w)?;
-        w.flush()?;
-        Ok(())
+        Self::replace_canonical_bitmap(dir, &bitmap)
+    }
+
+    pub(crate) fn replace_canonical_bitmap(dir: &Path, bitmap: &NullBitmap) -> io::Result<()> {
+        durability::atomic_write(&dir.join("canonical.bitmap"), |writer| {
+            bitmap.write_to(writer)
+        })
     }
 
     fn append_canonical_bitmap(dir: &Path, existing_rows: u64, new_rows: u64) -> io::Result<()> {
@@ -592,7 +585,7 @@ impl ColumnFile {
             bitmap.push(true);
         }
 
-        Self::replace_file(&path, |w| bitmap.write_to(w))?;
+        durability::atomic_write(&path, |w| bitmap.write_to(w))?;
         Ok(())
     }
 
@@ -625,28 +618,6 @@ impl ColumnFile {
         file.write_all(&new_row_count.to_le_bytes())?;
         file.seek(SeekFrom::End(0))?;
         Ok(file)
-    }
-
-    fn replace_file(
-        path: &Path,
-        write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid file name: {}", path.display()),
-                )
-            })?;
-        let tmp_path = path.with_file_name(format!(".{file_name}.tmp"));
-        let file = File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(file);
-        write(&mut writer)?;
-        writer.flush()?;
-        fs::rename(tmp_path, path)?;
-        Ok(())
     }
 }
 
