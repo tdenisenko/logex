@@ -100,6 +100,17 @@ impl PartitionManager {
         Ok(finalized)
     }
 
+    /// Persist pending columns and retire the bounded recovery WAL.
+    pub fn checkpoint(&mut self) -> std::io::Result<()> {
+        self.inner.checkpoint()?;
+        self.refresh_views();
+        Ok(())
+    }
+
+    pub fn checkpoint_if_due(&mut self) -> std::io::Result<bool> {
+        self.inner.checkpoint_if_due()
+    }
+
     /// Return the segment currently absorbing sparse historical writes.
     pub fn active_historical_segment_id(&self) -> Option<u64> {
         self.inner.active_historical_segment_id()
@@ -271,7 +282,7 @@ impl PartitionManager {
     }
 
     /// Mark rows in a given block as non-canonical during a reorg.
-    pub fn mark_non_canonical(&self, block_hash: B256) -> std::io::Result<u64> {
+    pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.inner.mark_non_canonical(block_hash)
     }
 

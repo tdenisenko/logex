@@ -1,0 +1,166 @@
+{"kind": "binary", "revision": "base", "sha256": "548753bcbcdac60957d18c2603c40dd66fd7eea853a19c396e1e457542f74cdb"}
+{"kind": "binary", "revision": "candidate", "sha256": "d61cc33ced1f253027eee23ca3d6f46dabcc5de57e16d3d447f286b61d634e89"}
+{"batch_rows": 8192, "cache": "fresh directories for writes; OS cache not evicted; queries warmed once", "fixture_digest": "0xabc9bb8095eaaaa4facb4b2828783893840b564470e02eee1e3859c04ebfe701", "fixture_version": 1, "kind": "config", "profile": "dense", "repeats": 3, "rows": 200000, "segment_rows": 50000, "workers": 4, "revision": "base", "pair": 0}
+{"elapsed_ms": 414.510334, "iteration": 0, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 482497.01779449487, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 229.876959, "iteration": 0, "kind": "sample", "metric": "index_build", "rows_per_second": 870030.64974424, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 73.65625, "iteration": 0, "kind": "sample", "metric": "compaction", "rows_per_second": 2715316.0797624094, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 0, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 1.326208, "iteration": 0, "kind": "sample", "metric": "reopen", "rows_per_second": 150805906.76575622, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 97.62375, "iteration": 0, "kind": "sample", "metric": "native_filter", "rows_per_second": 1404811.8413808115, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 5.287, "iteration": 0, "kind": "sample", "metric": "sql_count", "rows_per_second": 25939663.325137127, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 10.077083, "iteration": 0, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 99235.06633814567, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 122.49816700000001, "iteration": 0, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4478205.784091447, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 233.32525, "iteration": 0, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 857172.5520491245, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 378.957583, "iteration": 1, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 527763.5518379376, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 225.248, "iteration": 1, "kind": "sample", "metric": "index_build", "rows_per_second": 887910.2145191078, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 69.96458299999999, "iteration": 1, "kind": "sample", "metric": "compaction", "rows_per_second": 2858589.1807573554, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 1, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 1.298125, "iteration": 1, "kind": "sample", "metric": "reopen", "rows_per_second": 154068367.83822823, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 90.296958, "iteration": 1, "kind": "sample", "metric": "native_filter", "rows_per_second": 1518799.7806083346, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 4.443584, "iteration": 1, "kind": "sample", "metric": "sql_count", "rows_per_second": 30863150.10586049, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 9.926875, "iteration": 1, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 100736.63665554367, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 120.594959, "iteration": 1, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4548880.024081272, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 227.728084, "iteration": 1, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 878240.3842645951, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 377.13475, "iteration": 2, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 530314.4300545097, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 227.45570800000002, "iteration": 2, "kind": "sample", "metric": "index_build", "rows_per_second": 879292.0685903385, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 68.77066699999999, "iteration": 2, "kind": "sample", "metric": "compaction", "rows_per_second": 2908216.6674346784, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 2, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 1.2360419999999999, "iteration": 2, "kind": "sample", "metric": "reopen", "rows_per_second": 161806799.4453263, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 90.575208, "iteration": 2, "kind": "sample", "metric": "native_filter", "rows_per_second": 1514133.9780307212, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 6.9313329999999995, "iteration": 2, "kind": "sample", "metric": "sql_count", "rows_per_second": 19785948.82109978, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 10.219624999999999, "iteration": 2, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 97850.94854263244, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 112.32708299999999, "iteration": 2, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4883702.000878987, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 216.198375, "iteration": 2, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 925076.333251811, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 69.96458299999999, "metric": "compaction", "p95_ms": 73.65625, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 120.594959, "metric": "concurrent_native_queries", "p95_ms": 122.49816700000001, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 227.728084, "metric": "historical_storage_ingest", "p95_ms": 233.32525, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 227.45570800000002, "metric": "index_build", "p95_ms": 229.876959, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 378.957583, "metric": "live_storage_ingest", "p95_ms": 414.510334, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 90.575208, "metric": "native_filter", "p95_ms": 97.62375, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 1.298125, "metric": "reopen", "p95_ms": 1.326208, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 5.287, "metric": "sql_count", "p95_ms": 6.9313329999999995, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 10.077083, "metric": "sql_ordered", "p95_ms": 10.219624999999999, "samples": 3, "revision": "base", "pair": 0, "profile": "dense"}
+{"kind": "rss", "revision": "base", "pair": 0, "profile": "dense", "bytes": 620298240}
+{"batch_rows": 8192, "cache": "fresh directories for writes; OS cache not evicted; queries warmed once", "fixture_digest": "0xabc9bb8095eaaaa4facb4b2828783893840b564470e02eee1e3859c04ebfe701", "fixture_version": 1, "kind": "config", "profile": "dense", "repeats": 3, "rows": 200000, "segment_rows": 50000, "workers": 4, "revision": "candidate", "pair": 0}
+{"elapsed_ms": 525.605458, "iteration": 0, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 380513.5524296629, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 265.630792, "iteration": 0, "kind": "sample", "metric": "index_build", "rows_per_second": 752924.7588133533, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 78.230542, "iteration": 0, "kind": "sample", "metric": "compaction", "rows_per_second": 2556546.2655237643, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 0, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 5.709083000000001, "iteration": 0, "kind": "sample", "metric": "reopen", "rows_per_second": 35031895.66520578, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 95.765292, "iteration": 0, "kind": "sample", "metric": "native_filter", "rows_per_second": 1432074.1589760934, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 5.077667, "iteration": 0, "kind": "sample", "metric": "sql_count", "rows_per_second": 27009057.506134216, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 13.525417, "iteration": 0, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 73934.87387486834, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 131.744833, "iteration": 0, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4163897.645989653, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 559.8145420000001, "iteration": 0, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 357261.17311186244, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 499.103833, "iteration": 1, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 400718.22089172376, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 323.937125, "iteration": 1, "kind": "sample", "metric": "index_build", "rows_per_second": 617403.7631531119, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 89.45362499999999, "iteration": 1, "kind": "sample", "metric": "compaction", "rows_per_second": 2235795.3632398914, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 1, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 5.977875, "iteration": 1, "kind": "sample", "metric": "reopen", "rows_per_second": 33456704.932772934, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 100.53066600000001, "iteration": 1, "kind": "sample", "metric": "native_filter", "rows_per_second": 1364190.703759985, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 6.75725, "iteration": 1, "kind": "sample", "metric": "sql_count", "rows_per_second": 20295682.41518369, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 10.86675, "iteration": 1, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 92023.83417305083, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 138.42433400000002, "iteration": 1, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 3962973.735528321, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 634.948542, "iteration": 1, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 314986.15520877915, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 519.235042, "iteration": 2, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 385182.01550811355, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 251.79649999999998, "iteration": 2, "kind": "sample", "metric": "index_build", "rows_per_second": 794292.2161348549, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 76.54279199999999, "iteration": 2, "kind": "sample", "metric": "compaction", "rows_per_second": 2612917.4906501975, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"compacted_file_bytes": 23659738, "compacted_segments": 4, "indexed_file_bytes": 80561156, "iteration": 2, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 6.706625, "iteration": 2, "kind": "sample", "metric": "reopen", "rows_per_second": 29821258.82988836, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 91.99145899999999, "iteration": 2, "kind": "sample", "metric": "native_filter", "rows_per_second": 1490823.186096005, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 5.291334, "iteration": 2, "kind": "sample", "metric": "sql_count", "rows_per_second": 25918416.792438354, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 10.160874999999999, "iteration": 2, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 98416.72100089806, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 123.12058300000001, "iteration": 2, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4455566.946105185, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"elapsed_ms": 572.188667, "iteration": 2, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 349535.0599105801, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 78.230542, "metric": "compaction", "p95_ms": 89.45362499999999, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 131.744833, "metric": "concurrent_native_queries", "p95_ms": 138.42433400000002, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 572.188667, "metric": "historical_storage_ingest", "p95_ms": 634.948542, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 265.630792, "metric": "index_build", "p95_ms": 323.937125, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 519.235042, "metric": "live_storage_ingest", "p95_ms": 525.605458, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 95.765292, "metric": "native_filter", "p95_ms": 100.53066600000001, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 5.977875, "metric": "reopen", "p95_ms": 6.706625, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 5.291334, "metric": "sql_count", "p95_ms": 6.75725, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "summary", "median_ms": 10.86675, "metric": "sql_ordered", "p95_ms": 13.525417, "samples": 3, "revision": "candidate", "pair": 0, "profile": "dense"}
+{"kind": "rss", "revision": "candidate", "pair": 0, "profile": "dense", "bytes": 702414848}
+{"batch_rows": 8192, "cache": "fresh directories for writes; OS cache not evicted; queries warmed once", "fixture_digest": "0x45471657110c6ed19f0f0246fa34b4643b1b3cfcc5469c405af60b6bf8855d93", "fixture_version": 1, "kind": "config", "profile": "sparse", "repeats": 3, "rows": 200000, "segment_rows": 50000, "workers": 4, "revision": "base", "pair": 0}
+{"elapsed_ms": 412.8205, "iteration": 0, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 484472.0647351573, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 458.97758300000004, "iteration": 0, "kind": "sample", "metric": "index_build", "rows_per_second": 435751.1290480607, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 80.130958, "iteration": 0, "kind": "sample", "metric": "compaction", "rows_per_second": 2495914.250769347, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 0, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 1.259584, "iteration": 0, "kind": "sample", "metric": "reopen", "rows_per_second": 158782582.18586454, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 88.039375, "iteration": 0, "kind": "sample", "metric": "native_filter", "rows_per_second": 1557746.1789114245, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 5.117375, "iteration": 0, "kind": "sample", "metric": "sql_count", "rows_per_second": 26799482.156379, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 9.992916, "iteration": 0, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 100070.89021863088, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 147.56975, "iteration": 0, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 3717374.3263778654, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 263.00379200000003, "iteration": 0, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 760445.3094729524, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 695.100458, "iteration": 1, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 287728.1948215894, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 452.59054100000003, "iteration": 1, "kind": "sample", "metric": "index_build", "rows_per_second": 441900.5301306109, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 81.505917, "iteration": 1, "kind": "sample", "metric": "compaction", "rows_per_second": 2453809.580474998, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 1, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 1.268334, "iteration": 1, "kind": "sample", "metric": "reopen", "rows_per_second": 157687170.7294766, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 98.037708, "iteration": 1, "kind": "sample", "metric": "native_filter", "rows_per_second": 1398880.1125379226, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 5.237708, "iteration": 1, "kind": "sample", "metric": "sql_count", "rows_per_second": 26183781.15007557, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 10.486832999999999, "iteration": 1, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 95357.67376099153, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 154.724583, "iteration": 1, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 3545474.0892725494, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 250.735667, "iteration": 1, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 797652.7727106331, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 391.61899999999997, "iteration": 2, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 510700.45120384864, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 454.887208, "iteration": 2, "kind": "sample", "metric": "index_build", "rows_per_second": 439669.43119666714, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 78.484459, "iteration": 2, "kind": "sample", "metric": "compaction", "rows_per_second": 2548275.1942011854, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 2, "kind": "storage", "raw_file_bytes": 68497860, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 1.242083, "iteration": 2, "kind": "sample", "metric": "reopen", "rows_per_second": 161019835.2284026, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 93.309584, "iteration": 2, "kind": "sample", "metric": "native_filter", "rows_per_second": 1469763.2774785492, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 6.460583, "iteration": 2, "kind": "sample", "metric": "sql_count", "rows_per_second": 21227650.817271445, "work_rows": 137143, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 10.028166, "iteration": 2, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 99719.13109535682, "work_rows": 1000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 121.14850000000001, "iteration": 2, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4528095.684222256, "work_rows": 548572, "revision": "base", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 227.276, "iteration": 2, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 879987.3281824741, "work_rows": 200000, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 80.130958, "metric": "compaction", "p95_ms": 81.505917, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 147.56975, "metric": "concurrent_native_queries", "p95_ms": 154.724583, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 250.735667, "metric": "historical_storage_ingest", "p95_ms": 263.00379200000003, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 454.887208, "metric": "index_build", "p95_ms": 458.97758300000004, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 412.8205, "metric": "live_storage_ingest", "p95_ms": 695.100458, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 93.309584, "metric": "native_filter", "p95_ms": 98.037708, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 1.259584, "metric": "reopen", "p95_ms": 1.268334, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 5.237708, "metric": "sql_count", "p95_ms": 6.460583, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 10.028166, "metric": "sql_ordered", "p95_ms": 10.486832999999999, "samples": 3, "revision": "base", "pair": 0, "profile": "sparse"}
+{"kind": "rss", "revision": "base", "pair": 0, "profile": "sparse", "bytes": 676839424}
+{"batch_rows": 8192, "cache": "fresh directories for writes; OS cache not evicted; queries warmed once", "fixture_digest": "0x45471657110c6ed19f0f0246fa34b4643b1b3cfcc5469c405af60b6bf8855d93", "fixture_version": 1, "kind": "config", "profile": "sparse", "repeats": 3, "rows": 200000, "segment_rows": 50000, "workers": 4, "revision": "candidate", "pair": 0}
+{"elapsed_ms": 509.69291699999997, "iteration": 0, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 392393.13188258413, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 505.57241600000003, "iteration": 0, "kind": "sample", "metric": "index_build", "rows_per_second": 395591.2025073773, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 81.110209, "iteration": 0, "kind": "sample", "metric": "compaction", "rows_per_second": 2465780.8488694686, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 0, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 5.589042, "iteration": 0, "kind": "sample", "metric": "reopen", "rows_per_second": 35784307.93685215, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 88.46954099999999, "iteration": 0, "kind": "sample", "metric": "native_filter", "rows_per_second": 1550171.9399674516, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 4.740666999999999, "iteration": 0, "kind": "sample", "metric": "sql_count", "rows_per_second": 28929051.544856455, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 10.05675, "iteration": 0, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 99435.70238894275, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 116.71362500000001, "iteration": 0, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4700153.902340022, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 553.018667, "iteration": 0, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 361651.44494118856, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 555.331625, "iteration": 1, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 360145.165512589, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 467.41554099999996, "iteration": 1, "kind": "sample", "metric": "index_build", "rows_per_second": 427884.7887088119, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 78.763917, "iteration": 1, "kind": "sample", "metric": "compaction", "rows_per_second": 2539233.7966127307, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 1, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 5.3934999999999995, "iteration": 1, "kind": "sample", "metric": "reopen", "rows_per_second": 37081672.38342449, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 89.87425, "iteration": 1, "kind": "sample", "metric": "native_filter", "rows_per_second": 1525943.1928500098, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 4.685083, "iteration": 1, "kind": "sample", "metric": "sql_count", "rows_per_second": 29272266.89473805, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 9.987166, "iteration": 1, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 100128.50492321845, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 110.01879100000001, "iteration": 1, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 4986166.408609235, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 596.983958, "iteration": 1, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 335017.3774686254, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 520.388792, "iteration": 2, "kind": "sample", "metric": "live_storage_ingest", "rows_per_second": 384328.03141540376, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 469.8925, "iteration": 2, "kind": "sample", "metric": "index_build", "rows_per_second": 425629.2662683486, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 83.83204099999999, "iteration": 2, "kind": "sample", "metric": "compaction", "rows_per_second": 2385722.6618161425, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"compacted_file_bytes": 72611593, "compacted_segments": 4, "indexed_file_bytes": 120558828, "iteration": 2, "kind": "storage", "raw_file_bytes": 68497860, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 6.016166, "iteration": 2, "kind": "sample", "metric": "reopen", "rows_per_second": 33243763.553066853, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 97.034291, "iteration": 2, "kind": "sample", "metric": "native_filter", "rows_per_second": 1413345.7212564165, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 4.804, "iteration": 2, "kind": "sample", "metric": "sql_count", "rows_per_second": 28547668.60949209, "work_rows": 137143, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 14.562541999999999, "iteration": 2, "kind": "sample", "metric": "sql_ordered", "rows_per_second": 68669.32984639633, "work_rows": 1000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 147.67266700000002, "iteration": 2, "kind": "sample", "metric": "concurrent_native_queries", "rows_per_second": 3714783.5895724697, "work_rows": 548572, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"elapsed_ms": 576.562334, "iteration": 2, "kind": "sample", "metric": "historical_storage_ingest", "rows_per_second": 346883.5687070741, "work_rows": 200000, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 81.110209, "metric": "compaction", "p95_ms": 83.83204099999999, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 116.71362500000001, "metric": "concurrent_native_queries", "p95_ms": 147.67266700000002, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 576.562334, "metric": "historical_storage_ingest", "p95_ms": 596.983958, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 469.8925, "metric": "index_build", "p95_ms": 505.57241600000003, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 520.388792, "metric": "live_storage_ingest", "p95_ms": 555.331625, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 89.87425, "metric": "native_filter", "p95_ms": 97.034291, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 5.589042, "metric": "reopen", "p95_ms": 6.016166, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 4.740666999999999, "metric": "sql_count", "p95_ms": 4.804, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "summary", "median_ms": 10.05675, "metric": "sql_ordered", "p95_ms": 14.562541999999999, "samples": 3, "revision": "candidate", "pair": 0, "profile": "sparse"}
+{"kind": "rss", "revision": "candidate", "pair": 0, "profile": "sparse", "bytes": 652607488}

@@ -286,6 +286,9 @@ async fn run(config: Config) {
         for batch in rows.chunks(config.batch_rows) {
             storage.write_batch(batch).unwrap();
         }
+        // Include the final checkpoint: deferring column persistence must not
+        // make ingestion appear faster by charging it to indexing or reopen.
+        storage.checkpoint().unwrap();
         samples.record(
             "live_storage_ingest",
             iteration,

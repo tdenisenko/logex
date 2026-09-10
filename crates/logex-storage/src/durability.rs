@@ -136,56 +136,136 @@ pub(crate) fn atomic_replace_ordered(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
 ) -> io::Result<()> {
-    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
-    checkpoint("write_temporary", path)?;
-    let mut created = None;
-    for _ in 0..32 {
-        let mut temporary_name = std::ffi::OsString::from(".");
-        temporary_name.push(name);
-        temporary_name.push(format!(
-            ".{}.{}.tmp",
-            std::process::id(),
-            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
-        ));
-        let temporary = path.with_file_name(temporary_name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
+    let replacement = Replacement::prepare(path, write)?;
+    order_file(replacement.writer.get_ref())?;
+    replacement.publish()
+}
+
+/// Stage the fixed set of column replacements on the existing scoped workers,
+/// then order all their contents with one barrier per device before any rename.
+/// Publication of the segment still supplies the final durability guarantee.
+#[derive(Default)]
+pub(crate) struct ReplacementBatch {
+    pending: std::sync::Mutex<Vec<Replacement>>,
+}
+
+impl ReplacementBatch {
+    pub(crate) fn write(
+        &self,
+        path: &Path,
+        write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let replacement = Replacement::prepare(path, write)?;
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| io::Error::other("column replacement lock poisoned"))?;
+        if pending.len() >= 32 || pending.iter().any(|r| r.destination == path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid column replacement set",
+            ));
+        }
+        pending.push(replacement);
+        Ok(())
+    }
+
+    pub(crate) fn publish(self) -> io::Result<()> {
+        let pending = self
+            .pending
+            .into_inner()
+            .map_err(|_| io::Error::other("column replacement lock poisoned"))?;
+        let mut group = SyncGroup::default();
+        for replacement in &pending {
+            group.include_flushed(
+                replacement.writer.get_ref().try_clone()?,
+                &replacement.destination,
+            )?;
+        }
+        group.order()?;
+        for replacement in pending {
+            replacement.publish()?;
+        }
+        Ok(())
+    }
+}
+
+struct Replacement {
+    temporary: Option<std::path::PathBuf>,
+    destination: std::path::PathBuf,
+    writer: BufWriter<File>,
+}
+
+impl Replacement {
+    fn prepare(
+        path: &Path,
+        write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
+        checkpoint("write_temporary", path)?;
+        for _ in 0..32 {
+            let mut temporary_name = std::ffi::OsString::from(".");
+            temporary_name.push(name);
+            temporary_name.push(format!(
+                ".{}.{}.tmp",
+                std::process::id(),
+                NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+            ));
+            let temporary = path.with_file_name(temporary_name);
+            let file = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            let mut replacement = Self {
+                temporary: Some(temporary),
+                destination: path.to_path_buf(),
+                writer: BufWriter::new(file),
+            };
+            write(&mut replacement.writer)?;
+            replacement.writer.flush()?;
+            checkpoint("sync_temporary", path)?;
+            flush_file(replacement.writer.get_ref())?;
+            return Ok(replacement);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "cannot allocate temporary file for {}",
+                name.to_string_lossy()
+            ),
+        ))
+    }
+
+    fn publish(mut self) -> io::Result<()> {
+        checkpoint("rename_temporary", &self.destination)?;
+        fs::rename(
+            self.temporary
+                .as_ref()
+                .ok_or_else(|| io::Error::other("replacement already published"))?,
+            &self.destination,
+        )?;
+        self.temporary = None;
+        Ok(())
+    }
+}
+
+impl Drop for Replacement {
+    fn drop(&mut self) {
+        if let Some(path) = &self.temporary
+            && let Err(error) = fs::remove_file(path)
+            && error.kind() != io::ErrorKind::NotFound
         {
-            Ok(file) => {
-                created = Some((temporary, file));
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+            tracing::warn!(path = %path.display(), %error, "could not remove failed temporary write");
         }
     }
-    let (temporary, file) = created.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "cannot allocate temporary file",
-        )
-    })?;
-    let result = (|| {
-        let mut writer = BufWriter::new(file);
-        write(&mut writer)?;
-        writer.flush()?;
-        checkpoint("sync_temporary", path)?;
-        order_file(writer.get_ref())?;
-        checkpoint("rename_temporary", path)?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err()
-        && let Err(error) = fs::remove_file(&temporary)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %temporary.display(), %error, "could not remove failed temporary write");
-    }
-    result
 }
 
 pub(crate) fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -195,13 +275,32 @@ pub(crate) fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Publish a manifest after ordering all its artifacts. Complete the directory
 /// changes and persist them together, once per device, before returning success.
 pub(crate) fn publish_tree(tree: &Path, manifest: &Path, bytes: &[u8]) -> io::Result<()> {
+    prepare_tree_publication(tree, manifest, bytes)?.finish()
+}
+
+/// WAL-backed publication can defer the full device flush until checkpoint, but
+/// every artifact and name must remain ordered before subsequent publications.
+pub(crate) fn publish_tree_ordered(
+    tree: &Path,
+    manifest: &Path,
+    bytes: &[u8],
+    catalog: &Path,
+) -> io::Result<()> {
+    // A later catalog/state write can persist independently of a segment mounted
+    // on another device, so that segment needs a full flush before returning.
+    prepare_tree_publication(tree, manifest, bytes)?.persist_external_devices(catalog)
+}
+
+fn prepare_tree_publication(tree: &Path, manifest: &Path, bytes: &[u8]) -> io::Result<SyncGroup> {
     let mut group = SyncGroup::default();
     flush_tree(tree, &mut group)?;
-    group.order()?;
-    atomic_replace_ordered(manifest, |writer| writer.write_all(bytes))?;
+    let replacement = Replacement::prepare(manifest, |writer| writer.write_all(bytes))?;
+    group.include_flushed(replacement.writer.get_ref().try_clone()?, manifest)?;
+    group.order_before_manifest(manifest)?;
+    replacement.publish()?;
     group.flush_directory(tree)?;
     group.flush_directory(parent(tree))?;
-    group.finish()
+    Ok(group)
 }
 
 /// Order journal publication before any WAL or column writes. The WAL's full
@@ -219,21 +318,110 @@ pub(crate) fn sync_file_and_directory(file: &File, path: &Path) -> io::Result<()
     let mut group = SyncGroup::default();
     group.flush_handle(file.try_clone()?, path)?;
     group.flush_directory(parent(path))?;
+    // OpenOptions::create follows a dangling file symlink. In that case the
+    // newly created name belongs to the target's directory, not the alias's.
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        let resolved = fs::canonicalize(path)?;
+        if fs::canonicalize(parent(path))? != parent(&resolved) {
+            group.flush_directory(parent(&resolved))?;
+        }
+    }
     group.finish()
 }
 
+pub(crate) fn persist_directory_before_file(directory: &Path, file: &File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = File::open(directory)?;
+        if parent.metadata()?.dev() != file.metadata()?.dev() {
+            checkpoint("cross_device_sync", directory)?;
+            parent.sync_all()?;
+        }
+    }
+    // On other platforms ordered journal publication already uses full fsync.
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = (directory, file);
+    Ok(())
+}
+
+pub(crate) fn order_directories_before_file(paths: &[&Path], file: &File) -> io::Result<()> {
+    let mut group = SyncGroup::default();
+    for path in paths {
+        group.flush_directory(path)?;
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        group.order_before_device(file.metadata()?.dev())?;
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = file;
+    Ok(())
+}
+
+pub(crate) fn order_file_before_directory(file: &File, directory: &Path) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file.metadata()?.dev() != File::open(directory)?.metadata()?.dev() {
+            checkpoint("cross_device_sync", directory)?;
+            return file.sync_all();
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = directory;
+    order_file(file)
+}
+
 fn flush_tree(path: &Path, group: &mut SyncGroup) -> io::Result<()> {
+    flush_tree_inner(path, group, &mut Vec::new())
+}
+
+#[cfg(unix)]
+type DirectoryIdentity = (u64, u64);
+#[cfg(not(unix))]
+type DirectoryIdentity = std::path::PathBuf;
+
+fn flush_tree_inner(
+    path: &Path,
+    group: &mut SyncGroup,
+    ancestors: &mut Vec<DirectoryIdentity>,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = fs::canonicalize(path)?;
+    // Normal segment layouts have only a few levels. Bound recursion as well
+    // as detecting aliases and bind-mount/symlink cycles by directory identity.
+    if ancestors.len() >= 64 || ancestors.contains(&identity) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cyclic or excessively nested storage directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    ancestors.push(identity);
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            flush_tree(&entry.path(), group)?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() || (file_type.is_symlink() && fs::metadata(entry.path())?.is_dir()) {
+            flush_tree_inner(&entry.path(), group, ancestors)?;
         } else {
             checkpoint("sync_file", &entry.path())?;
             group.flush(&entry.path())?;
         }
     }
     checkpoint("sync_directory", path)?;
-    group.flush(path)
+    group.flush(path)?;
+    ancestors.pop();
+    Ok(())
 }
 
 /// Apple documents that a full sync persists all previously fsync'd data on the
@@ -257,12 +445,16 @@ impl SyncGroup {
 
     fn flush_handle(&mut self, file: File, _path: &Path) -> io::Result<()> {
         flush_file(&file)?;
+        self.include_flushed(file, _path)
+    }
+
+    fn include_flushed(&mut self, _file: File, _path: &Path) -> io::Result<()> {
         #[cfg(target_vendor = "apple")]
         {
             use std::os::unix::fs::MetadataExt;
             self.devices
-                .entry(file.metadata()?.dev())
-                .or_insert_with(|| (file, _path.to_path_buf()));
+                .entry(_file.metadata()?.dev())
+                .or_insert_with(|| (_file, _path.to_path_buf()));
         }
         Ok(())
     }
@@ -272,6 +464,51 @@ impl SyncGroup {
         for (file, path) in self.devices.values() {
             checkpoint("order_device", path)?;
             order_file(file)?;
+        }
+        Ok(())
+    }
+
+    fn order_before_manifest(&self, _manifest: &Path) -> io::Result<()> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let device = File::open(parent(_manifest))?.metadata()?.dev();
+            self.order_before_device(device)?;
+        }
+        Ok(())
+    }
+
+    fn persist_external_devices(&self, _catalog: &Path) -> io::Result<()> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let destination = File::open(parent(_catalog))?.metadata()?.dev();
+            for (&device, (file, path)) in &self.devices {
+                if device != destination {
+                    checkpoint("cross_device_sync", path)?;
+                    file.sync_all()?;
+                }
+            }
+        }
+        // The directory fsyncs already submitted names to the device. The next
+        // manifest/catalog ordering barrier, WAL fsync or final checkpoint flush
+        // orders/persists them on this same device; another barrier here adds no
+        // dependency. Other devices above must complete before that next phase.
+        Ok(())
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn order_before_device(&self, destination_device: u64) -> io::Result<()> {
+        // Ordering barriers do not order another device. Those columns must be
+        // fully durable before publishing a manifest that references them.
+        for (&device, (file, path)) in &self.devices {
+            if device != destination_device {
+                checkpoint("cross_device_sync", path)?;
+                file.sync_all()?;
+            } else {
+                checkpoint("order_device", path)?;
+                order_file(file)?;
+            }
         }
         Ok(())
     }
@@ -359,6 +596,87 @@ pub(crate) fn take_events() -> Vec<(&'static str, std::path::PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn cross_device_dependencies_require_full_sync_before_publication() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("column");
+        fs::write(&path, b"complete column").unwrap();
+        let mut group = SyncGroup::default();
+        group.flush(&path).unwrap();
+        let actual_device = fs::metadata(&path).unwrap().dev();
+        // Exercise the cross-device branch deterministically without requiring
+        // privileged mount operations. Real mount/device failure tests are still
+        // needed for platform integration; this checks the publication contract.
+        let different_device = actual_device ^ 1;
+        inject_failure(usize::MAX);
+        group.order_before_device(different_device).unwrap();
+        let events = take_events();
+        assert_eq!(events, [("cross_device_sync", path.clone())]);
+        inject_failure(0);
+        let result = group.order_before_device(different_device);
+        take_events();
+        assert!(result.is_err());
+        inject_failure(usize::MAX);
+        group.order_before_device(actual_device).unwrap();
+        assert_eq!(take_events(), [("order_device", path)]);
+    }
+
+    #[test]
+    fn column_replacements_are_staged_and_failure_keeps_complete_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [dir.path().join("first"), dir.path().join("second")];
+        for path in &paths {
+            fs::write(path, b"old").unwrap();
+        }
+        let abandoned = ReplacementBatch::default();
+        abandoned.write(&paths[0], |w| w.write_all(b"new")).unwrap();
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"old");
+        let result = abandoned.write(&paths[1], |w| {
+            w.write_all(b"partial")?;
+            Err(io::Error::other("writer failed"))
+        });
+        assert!(result.is_err());
+        drop(abandoned);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        for path in &paths {
+            assert_eq!(fs::read(path).unwrap(), b"old");
+        }
+
+        let stage = || {
+            let batch = ReplacementBatch::default();
+            for path in &paths {
+                batch.write(path, |w| w.write_all(b"new")).unwrap();
+            }
+            batch
+        };
+        let batch = stage();
+        inject_failure(usize::MAX);
+        batch.publish().unwrap();
+        let events = take_events();
+        for failure in 0..events.len() {
+            for path in &paths {
+                fs::write(path, b"old").unwrap();
+            }
+            let batch = stage();
+            inject_failure(failure);
+            let result = batch.publish();
+            let observed = take_events();
+            assert!(result.is_err(), "{observed:?}");
+            for path in &paths {
+                let was_renamed = observed[..observed.len() - 1]
+                    .iter()
+                    .any(|(op, p)| *op == "rename_temporary" && p == path);
+                assert_eq!(
+                    fs::read(path).unwrap(),
+                    if was_renamed { b"new" } else { b"old" }
+                );
+            }
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
 
     #[cfg(target_vendor = "apple")]
     #[test]
@@ -495,6 +813,64 @@ mod tests {
             write_bytes(&path, b"recovered").unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"recovered");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_follows_directory_symlinks_and_rejects_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("segment");
+        let columns = dir.path().join("column-files");
+        fs::create_dir(&tree).unwrap();
+        fs::create_dir(&columns).unwrap();
+        fs::write(columns.join("data.pages"), b"column payload").unwrap();
+        std::os::unix::fs::symlink(&columns, tree.join("columns")).unwrap();
+        let manifest = tree.join("segment.json");
+        inject_failure(usize::MAX);
+        publish_tree(&tree, &manifest, b"committed").unwrap();
+        let events = take_events();
+        let file = tree.join("columns/data.pages");
+        let rename = events
+            .iter()
+            .position(|(operation, path)| *operation == "rename_temporary" && path == &manifest)
+            .unwrap();
+        assert!(
+            events[..rename]
+                .iter()
+                .any(|(operation, path)| *operation == "sync_file" && path == &file)
+        );
+
+        std::os::unix::fs::symlink(&tree, columns.join("cycle")).unwrap();
+        assert_eq!(
+            publish_tree(&tree, &manifest, b"must not publish")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), b"committed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_file_through_symlink_syncs_its_actual_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("targets");
+        fs::create_dir(&target_dir).unwrap();
+        let target = target_dir.join("pending.wal");
+        let alias = dir.path().join("pending.wal");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let mut file = File::create(&alias).unwrap();
+        file.write_all(b"durable WAL bytes").unwrap();
+        inject_failure(usize::MAX);
+        sync_file_and_directory(&file, &alias).unwrap();
+        let events = take_events();
+        let actual_parent = fs::canonicalize(&target_dir).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(operation, path)| *operation == "sync_directory" && path == &actual_parent)
+        );
+        assert_eq!(fs::read(target).unwrap(), b"durable WAL bytes");
     }
 
     #[test]

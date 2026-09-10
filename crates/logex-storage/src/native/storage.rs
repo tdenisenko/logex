@@ -10,7 +10,7 @@ use alloy_primitives::B256;
 use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 use serde::{Deserialize, Serialize};
 
-use super::recovery::RecoveryJournal;
+use super::recovery::{IngestRoute, RecoveryJournal};
 use crate::durability;
 use crate::state::SyncHead;
 use crate::wal::{EncodedWalBatch, WriteAheadLog};
@@ -21,8 +21,9 @@ use super::catalog::{
     StorageCatalogPaths,
 };
 use super::segment::{
-    append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor, compact_segment,
-    persist_segment_manifest, persist_segment_manifest_with_columns,
+    append_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor,
+    compact_ingest_segment, compact_segment, persist_ingest_manifest,
+    persist_ingest_manifest_with_columns, persist_segment_manifest,
     segment_uses_current_compaction_profile, verify_raw_segment_files_complete,
     write_compacted_rows,
 };
@@ -55,10 +56,24 @@ enum CompactionOrder {
     NewestFirst,
 }
 
+#[derive(Debug)]
+struct DataDirectoryLock(File);
+
+impl Drop for DataDirectoryLock {
+    fn drop(&mut self) {
+        // Closing this fd alone can leave a lock alive in a descriptor inherited
+        // during another thread's fork/exec. Release it when the last managed
+        // storage/compaction owner disappears, regardless of such duplicates.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "failed to explicitly unlock data directory before closing it");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SegmentCompactionTask {
     // A background plan can outlive the storage handle that created it.
-    _directory_lock: Arc<File>,
+    _directory_lock: Arc<DataDirectoryLock>,
     paths: StorageCatalogPaths,
     descriptor: SegmentDescriptor,
 }
@@ -97,7 +112,7 @@ impl SegmentCompactionPlan {
     fn new(
         paths: StorageCatalogPaths,
         descriptors: Vec<SegmentDescriptor>,
-        directory_lock: Arc<File>,
+        directory_lock: Arc<DataDirectoryLock>,
     ) -> Self {
         let tasks = descriptors
             .into_iter()
@@ -126,6 +141,18 @@ impl SegmentCompactionPlan {
     }
 }
 
+// Bound retained WAL batches; one pre-existing valid oversized batch is
+// checkpointed immediately rather than accumulating further batches beside it.
+const CHECKPOINT_WAL_BYTES: u64 = 32 * 1024 * 1024;
+
+struct PendingCheckpoint {
+    journal: RecoveryJournal,
+    bytes: u64,
+    rows: u32,
+    checksum: crc32fast::Hasher,
+    started_at: std::time::Instant,
+}
+
 pub struct NativeStorage {
     config: NativeStorageConfig,
     paths: StorageCatalogPaths,
@@ -133,7 +160,8 @@ pub struct NativeStorage {
     wal: WriteAheadLog,
     state: StorageState,
     recovery_required: bool,
-    directory_lock: Arc<File>,
+    pending_checkpoint: Option<PendingCheckpoint>,
+    directory_lock: Arc<DataDirectoryLock>,
 }
 
 impl NativeStorage {
@@ -141,7 +169,7 @@ impl NativeStorage {
         durability::create_dir_all(&config.data_dir)?;
         // Lock the directory inode without creating a lock file. Alternative
         // path spellings that resolve to the same directory must also conflict.
-        let directory_lock = Arc::new(File::open(&config.data_dir)?);
+        let directory_lock = File::open(&config.data_dir)?;
         directory_lock.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -158,6 +186,7 @@ impl NativeStorage {
                 ),
             ),
         })?;
+        let directory_lock = Arc::new(DataDirectoryLock(directory_lock));
         let (catalog, paths) = NativeStorageCatalog::open_or_create(&config)?;
         let wal = WriteAheadLog::open(config.data_dir.join("wal").join("pending.wal"))?;
         let state = load_state(&paths)?;
@@ -169,6 +198,7 @@ impl NativeStorage {
             wal,
             state,
             recovery_required: false,
+            pending_checkpoint: None,
             directory_lock,
         };
 
@@ -308,6 +338,7 @@ impl NativeStorage {
         indexed_head: Option<ExecutionAnchor>,
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
+        self.checkpoint()?;
         let next_sync_head = recent_headers.last().map(|header| SyncHead {
             block_number: header.number(),
             block_hash: header.hash_slow(),
@@ -341,9 +372,9 @@ impl NativeStorage {
         }
 
         self.ensure_writable()?;
-        self.begin_wal_batch(rows)?;
+        self.begin_checkpoint_batch(rows, IngestRoute::Live)?;
         self.commit_rows_to_segments(rows)?;
-        self.finish_wal_batch()
+        self.complete_checkpoint_batch()
     }
 
     pub fn write_historical_batch(
@@ -355,10 +386,17 @@ impl NativeStorage {
             return Ok(Vec::new());
         }
 
+        self.begin_checkpoint_batch(rows, IngestRoute::Historical)?;
+        let appended = self.write_historical_rows(rows)?;
+        self.complete_checkpoint_batch()?;
+        Ok(appended)
+    }
+
+    fn write_historical_rows(&mut self, rows: &[LogRow]) -> io::Result<Vec<PartitionMeta>> {
         let target_rows = self.config.hot_target_rows.max(1) as usize;
         let dense_threshold = dense_historical_batch_row_threshold(target_rows);
         if rows.len() >= dense_threshold {
-            self.finalize_active_historical_segment()?;
+            self.finalize_historical_segment()?;
 
             let compacted_len = compacted_historical_row_prefix_len(rows.len(), target_rows);
             let mut appended =
@@ -388,7 +426,12 @@ impl NativeStorage {
             }
             let columns = write_compacted_rows(&segment_dir, chunk)?;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
-            persist_segment_manifest_with_columns(&self.paths, &descriptor, columns)?;
+            persist_ingest_manifest_with_columns(
+                &self.paths,
+                &descriptor,
+                columns,
+                self.pending_checkpoint.is_some(),
+            )?;
             appended.push(self.partition_meta(&descriptor));
             self.catalog.segments.push(descriptor);
         }
@@ -417,7 +460,7 @@ impl NativeStorage {
             let existing_rows = self.catalog.segments[segment_index].row_count;
             let remaining_capacity = target_rows.saturating_sub(existing_rows as usize);
             if remaining_capacity == 0 {
-                self.finalize_active_historical_segment()?;
+                self.finalize_historical_segment()?;
                 continue;
             }
 
@@ -430,7 +473,7 @@ impl NativeStorage {
                     chunk,
                 )
             {
-                self.finalize_active_historical_segment()?;
+                self.finalize_historical_segment()?;
                 continue;
             }
 
@@ -439,7 +482,11 @@ impl NativeStorage {
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
                 apply_ordered_rows_to_descriptor(descriptor, chunk);
-                persist_segment_manifest(&self.paths, descriptor)?;
+                persist_ingest_manifest(
+                    &self.paths,
+                    descriptor,
+                    self.pending_checkpoint.is_some(),
+                )?;
                 touched.insert(descriptor.id);
             }
             self.persist_catalog()?;
@@ -452,7 +499,7 @@ impl NativeStorage {
                         .is_some_and(|span| span >= HISTORICAL_STAGING_MAX_BLOCK_SPAN)
             };
             if should_finalize {
-                self.finalize_active_historical_segment()?;
+                self.finalize_historical_segment()?;
             }
         }
 
@@ -470,6 +517,14 @@ impl NativeStorage {
 
     pub fn finalize_active_historical_segment(&mut self) -> std::io::Result<bool> {
         self.ensure_writable()?;
+        self.recovery_required = true;
+        let finalized = self.finalize_historical_segment()?;
+        self.recovery_required = false;
+        self.checkpoint()?;
+        Ok(finalized)
+    }
+
+    fn finalize_historical_segment(&mut self) -> std::io::Result<bool> {
         let Some(segment_id) = self.catalog.active_historical_segment else {
             return Ok(false);
         };
@@ -482,7 +537,7 @@ impl NativeStorage {
             .ok_or_else(|| std::io::Error::other("active historical segment is missing"))?;
 
         if descriptor.row_count > 0 {
-            compact_segment(&self.paths, &descriptor)?;
+            compact_ingest_segment(&self.paths, &descriptor, self.pending_checkpoint.is_some())?;
         }
         self.catalog.active_historical_segment = None;
         self.persist_catalog()?;
@@ -533,7 +588,11 @@ impl NativeStorage {
                 append_rows(&hot_dir, descriptor.row_count, chunk)?;
                 apply_rows_to_descriptor(descriptor, chunk);
                 let should_seal = descriptor.row_count >= target_rows;
-                persist_segment_manifest(&self.paths, descriptor)?;
+                persist_ingest_manifest(
+                    &self.paths,
+                    descriptor,
+                    self.pending_checkpoint.is_some(),
+                )?;
                 should_seal
             };
 
@@ -550,6 +609,7 @@ impl NativeStorage {
 
     pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.ensure_writable()?;
+        self.checkpoint()?;
         let descriptor = self
             .catalog
             .segments
@@ -566,6 +626,7 @@ impl NativeStorage {
 
     pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.ensure_writable()?;
+        self.checkpoint()?;
         let descriptor = self
             .catalog
             .segments
@@ -586,6 +647,7 @@ impl NativeStorage {
     }
 
     pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
+        self.checkpoint()?;
         let plan = self.segment_compaction_plan(limit)?;
         plan.compact()
     }
@@ -677,7 +739,12 @@ impl NativeStorage {
         segment: &SegmentDescriptor,
         mode: CompactionMode,
     ) -> std::io::Result<bool> {
-        if Some(segment.id) == self.catalog.active_historical_segment {
+        if Some(segment.id) == self.catalog.active_historical_segment
+            || self.pending_checkpoint.as_ref().is_some_and(|pending| {
+                segment.id == pending.journal.start.id
+                    || segment.id >= pending.journal.next_segment_id
+            })
+        {
             return Ok(false);
         }
 
@@ -727,8 +794,9 @@ impl NativeStorage {
         Ok(count)
     }
 
-    pub fn mark_non_canonical(&self, block_hash: B256) -> std::io::Result<u64> {
+    pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.ensure_writable()?;
+        self.checkpoint()?;
         let mut total_marked = 0u64;
 
         for descriptor in &self.catalog.segments {
@@ -829,7 +897,7 @@ impl NativeStorage {
         let descriptor = self.catalog.register_segment(SegmentKind::Hot);
         let path = self.paths.segment_dir(descriptor.id);
         fs::create_dir_all(&path)?;
-        persist_segment_manifest(&self.paths, &descriptor)?;
+        persist_ingest_manifest(&self.paths, &descriptor, self.pending_checkpoint.is_some())?;
         self.persist_catalog()?;
         Ok(descriptor.id)
     }
@@ -860,7 +928,7 @@ impl NativeStorage {
             fs::remove_dir_all(&segment_dir)?;
         }
         fs::create_dir_all(&segment_dir)?;
-        persist_segment_manifest(&self.paths, &descriptor)?;
+        persist_ingest_manifest(&self.paths, &descriptor, self.pending_checkpoint.is_some())?;
         let segment_id = descriptor.id;
         self.catalog.segments.push(descriptor);
         self.catalog.active_historical_segment = Some(segment_id);
@@ -966,7 +1034,7 @@ impl NativeStorage {
             .find(|segment| segment.id == hot_id)
         {
             descriptor.kind = SegmentKind::Sealed;
-            persist_segment_manifest(&self.paths, descriptor)?;
+            persist_ingest_manifest(&self.paths, descriptor, self.pending_checkpoint.is_some())?;
             tracing::info!(
                 segment_id = descriptor.id,
                 row_count = descriptor.row_count,
@@ -978,7 +1046,7 @@ impl NativeStorage {
         let new_hot = self.catalog.register_segment(SegmentKind::Hot);
         let path = self.paths.segment_dir(new_hot.id);
         fs::create_dir_all(&path)?;
-        persist_segment_manifest(&self.paths, &new_hot)?;
+        persist_ingest_manifest(&self.paths, &new_hot, self.pending_checkpoint.is_some())?;
         self.persist_catalog()?;
         Ok(())
     }
@@ -992,7 +1060,9 @@ impl NativeStorage {
         Ok(())
     }
 
+    #[cfg(test)]
     fn begin_wal_batch(&mut self, rows: &[LogRow]) -> io::Result<()> {
+        self.checkpoint()?;
         let batch = EncodedWalBatch::new(rows)?;
         if !self.wal.is_empty()? {
             return Err(io::Error::other(
@@ -1007,6 +1077,116 @@ impl NativeStorage {
         self.wal.append_encoded(&batch)
     }
 
+    fn begin_checkpoint_batch(&mut self, rows: &[LogRow], route: IngestRoute) -> io::Result<()> {
+        // Validate the entire caller batch before checkpointing or changing files.
+        let batch = EncodedWalBatch::new(rows)?;
+        if self.pending_checkpoint.as_ref().is_some_and(|pending| {
+            pending.journal.route() != route
+                || pending.bytes.saturating_add(batch.encoded_len()) > CHECKPOINT_WAL_BYTES
+                || pending.rows.checked_add(batch.row_count).is_none()
+                || pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
+        }) {
+            self.checkpoint()?;
+        }
+        self.recovery_required = true;
+        if self.pending_checkpoint.is_none() {
+            if !self.wal.is_empty()? {
+                return Err(io::Error::other(
+                    "WAL is not empty; reopen storage before beginning a checkpoint",
+                ));
+            }
+            let start_id = match route {
+                IngestRoute::Live => self.ensure_active_hot_segment()?,
+                IngestRoute::Historical => match self.catalog.active_historical_segment {
+                    Some(id) => id,
+                    // An unchanged hot descriptor anchors an epoch that starts
+                    // with newly allocated history; do not create an empty
+                    // historical segment just to carry a journal position.
+                    None => self.ensure_active_hot_segment()?,
+                },
+            };
+            let start = self
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == start_id)
+                .cloned()
+                .ok_or_else(|| io::Error::other("checkpoint starting segment missing"))?;
+            let journal =
+                RecoveryJournal::new_checkpoint(start, self.catalog.next_segment_id, route)?;
+            journal.persist(&self.paths)?;
+            self.pending_checkpoint = Some(PendingCheckpoint {
+                journal,
+                bytes: 0,
+                rows: 0,
+                checksum: EncodedWalBatch::checkpoint_checksum(),
+                started_at: std::time::Instant::now(),
+            });
+        }
+        self.wal.append_encoded(&batch)?;
+        let pending = self
+            .pending_checkpoint
+            .as_mut()
+            .ok_or_else(|| io::Error::other("checkpoint disappeared"))?;
+        pending.bytes += batch.encoded_len();
+        pending.rows = pending
+            .rows
+            .checked_add(batch.row_count)
+            .ok_or_else(|| io::Error::other("checkpoint row count overflow"))?;
+        batch.extend_checkpoint_checksum(&mut pending.checksum);
+        Ok(())
+    }
+
+    fn complete_checkpoint_batch(&mut self) -> io::Result<()> {
+        self.recovery_required = false;
+        if self
+            .pending_checkpoint
+            .as_ref()
+            .is_some_and(|pending| pending.bytes >= CHECKPOINT_WAL_BYTES)
+        {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    /// Persist pending columns/catalog before retiring the bounded recovery WAL.
+    /// Successful batches are already durable in the WAL; this is also useful at
+    /// maintenance boundaries and for measurements that include all write costs.
+    pub fn checkpoint(&mut self) -> io::Result<()> {
+        self.ensure_writable()?;
+        let Some(mut pending) = self.pending_checkpoint.take() else {
+            return Ok(());
+        };
+        self.recovery_required = true;
+        pending
+            .journal
+            .complete_checkpoint(pending.rows, pending.checksum.finalize())?;
+        pending.journal.persist(&self.paths)?;
+        self.persist_checkpoint_catalog()?;
+        self.finish_wal_batch()
+    }
+
+    /// Let the runtime retire small pending epochs even when ingestion is idle.
+    pub fn checkpoint_if_due(&mut self) -> io::Result<bool> {
+        self.ensure_writable()?;
+        if self.pending_checkpoint.as_ref().is_some_and(|pending| {
+            pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
+        }) {
+            self.checkpoint()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn persist_checkpoint_catalog(&self) -> io::Result<()> {
+        // Each WAL-backed manifest already ordered its columns and submitted its
+        // directory entries. External devices were fully persisted before that
+        // publication returned. Retire_after orders this catalog before clearing
+        // the WAL, and journal removal supplies the final same-device full sync.
+        let bytes = serde_json::to_vec(&self.catalog).map_err(io::Error::other)?;
+        durability::write_bytes_ordered(&self.paths.catalog_path(), &bytes)
+    }
+
     fn journal_for_batch(&self, batch: &EncodedWalBatch) -> io::Result<RecoveryJournal> {
         let start = self.catalog.active_hot_segment().cloned().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "missing WAL starting segment")
@@ -1016,9 +1196,9 @@ impl NativeStorage {
 
     fn finish_wal_batch(&mut self) -> io::Result<()> {
         durability::checkpoint("rows_committed", self.paths.root())?;
-        // Each manifest was published only after its column files were durable;
-        // catalog publication completed before this recovery information is cleared.
-        self.wal.truncate()?;
+        // Artifact/name ordering makes the catalog recoverable before the WAL
+        // can disappear. Journal removal completes the final full device sync.
+        self.wal.retire_after(self.paths.root())?;
         RecoveryJournal::remove(&self.paths)?;
         self.recovery_required = false;
         Ok(())
@@ -1027,7 +1207,7 @@ impl NativeStorage {
     fn replay_wal(&mut self) -> io::Result<()> {
         let journal = RecoveryJournal::load(&self.paths)?;
         let rows = self.wal.read_all()?;
-        let journal = match journal {
+        let mut journal = match journal {
             Some(journal) => journal,
             None if rows.is_empty() => return self.wal.truncate(),
             None => {
@@ -1043,14 +1223,23 @@ impl NativeStorage {
             }
         };
         self.recovery_required = true;
-        let applied = self.read_applied_wal_rows(&journal)?;
+        let max_rows = if journal.is_active_checkpoint() {
+            u32::try_from(rows.len())
+                .map_err(|_| io::Error::other("checkpoint row count exceeds u32"))?
+        } else {
+            journal.row_count
+        };
+        let applied = self.read_applied_wal_rows(&journal, max_rows)?;
         if rows.is_empty() {
             for segment in self.catalog.segments.iter().filter(|segment| {
                 segment.id == journal.start.id || segment.id >= journal.next_segment_id
             }) {
                 verify_segment_integrity(&self.paths, segment)?;
                 let dir = self.paths.segment_dir(segment.id);
-                if has_raw_segment_artifacts(&dir)?
+                // Compacted segments retain canonical.bitmap at the root; it
+                // does not imply that the removed raw columns still exist.
+                if !super::segment::segment_is_compacted(&self.paths, segment.id)?
+                    && has_raw_segment_artifacts(&dir)?
                     && hot_segment_physical_row_counts(&dir)?
                         .iter()
                         .any(|(_, count)| *count != segment.row_count)
@@ -1062,6 +1251,12 @@ impl NativeStorage {
                 }
             }
             if applied.is_empty() {
+                if journal.is_complete_checkpoint() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "completed checkpoint has an empty WAL and missing committed rows",
+                    ));
+                }
                 // Journal publication preceded the WAL append; no rows committed.
                 return self.finish_wal_batch();
             }
@@ -1076,7 +1271,9 @@ impl NativeStorage {
             return self.finish_wal_batch();
         }
         let batch = EncodedWalBatch::new(&rows)?;
-        if batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum {
+        if !journal.is_active_checkpoint()
+            && (batch.row_count != journal.row_count || batch.checksum != journal.payload_checksum)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "WAL payload does not match its recovery journal",
@@ -1091,17 +1288,56 @@ impl NativeStorage {
         // Incomplete column writes beyond the last manifest are uncommitted.
         // Restore that prefix before appending the remainder, preserving its
         // canonical bits and using atomic file replacement for every column.
-        self.rebuild_partial_hot_segment_before_wal_replay()?;
+        match journal.route() {
+            IngestRoute::Live => {
+                self.rebuild_partial_hot_segment_before_wal_replay()?;
+            }
+            IngestRoute::Historical => {
+                let last = self
+                    .catalog
+                    .segments
+                    .iter()
+                    .filter(|segment| {
+                        segment.kind == SegmentKind::Sealed
+                            && (segment.id == journal.start.id
+                                || segment.id >= journal.next_segment_id)
+                    })
+                    .max_by_key(|segment| segment.id);
+                self.catalog.active_historical_segment = match last {
+                    Some(segment)
+                        if !super::segment::segment_is_compacted(&self.paths, segment.id)? =>
+                    {
+                        Some(segment.id)
+                    }
+                    _ => None,
+                };
+                self.repair_recoverable_historical_segment_artifacts()?;
+            }
+        }
         tracing::info!(
             committed_rows = applied.len(),
             remaining_rows = rows.len() - applied.len(),
             "resuming journaled WAL transaction"
         );
-        self.commit_rows_to_segments(&rows[applied.len()..])?;
+        match journal.route() {
+            IngestRoute::Live => self.commit_rows_to_segments(&rows[applied.len()..])?,
+            IngestRoute::Historical => {
+                self.write_historical_rows(&rows[applied.len()..])?;
+            }
+        }
+        if journal.is_active_checkpoint() {
+            journal.complete_checkpoint(batch.row_count, batch.checksum)?;
+            journal.persist(&self.paths)?;
+        }
+        self.persist_checkpoint_catalog()?;
         self.finish_wal_batch()
     }
 
-    fn read_applied_wal_rows(&self, journal: &RecoveryJournal) -> io::Result<Vec<LogRow>> {
+    fn read_applied_wal_rows(
+        &self,
+        journal: &RecoveryJournal,
+        max_rows: u32,
+    ) -> io::Result<Vec<LogRow>> {
         let start = self
             .catalog
             .segments
@@ -1144,7 +1380,7 @@ impl NativeStorage {
                     "WAL segment row count decreased",
                 )
             })?;
-            if count > u64::from(journal.row_count).saturating_sub(applied.len() as u64) {
+            if count > u64::from(max_rows).saturating_sub(applied.len() as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "segments contain more rows than the journaled WAL batch",
@@ -1398,6 +1634,11 @@ impl NativeStorage {
     }
 
     fn persist_catalog(&self) -> std::io::Result<()> {
+        // Ordered segment manifests reconstruct ingestion-only catalog changes.
+        // Public anchor/state updates still publish their metadata durably.
+        if self.pending_checkpoint.is_some() && self.recovery_required {
+            return Ok(());
+        }
         self.catalog.persist(&self.paths)
     }
 
@@ -1574,7 +1815,10 @@ fn verify_segment_integrity(
         ));
     }
 
-    if dir.join("address.col").exists() {
+    // Once the manifest references compacted pages, raw files are obsolete and
+    // their interrupted deletion must not make the committed representation
+    // unreadable. Raw manifests still require the complete raw file set.
+    if !super::segment::segment_is_compacted(paths, descriptor.id)? {
         verify_raw_segment_files_complete(descriptor, &dir)?;
         for (name, physical_rows) in hot_segment_physical_row_counts(&dir)? {
             if physical_rows != row_count {
@@ -1959,7 +2203,7 @@ mod tests {
     use std::fs;
 
     use alloy_consensus::Header;
-    use alloy_primitives::{Address, B256, bytes};
+    use alloy_primitives::{Address, B256, Bytes, bytes};
     use logex_types::{LogRow, Source};
     use tempfile::TempDir;
 
@@ -2350,6 +2594,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         storage.write_batch(&make_rows(10, 100)).unwrap();
+        storage.checkpoint().unwrap();
         let plan = storage.raw_segment_compaction_plan(1).unwrap();
         assert!(!plan.is_empty());
         drop(storage);
@@ -2359,6 +2604,333 @@ mod tests {
         );
         drop(plan);
         NativeStorage::open(config).expect("directory lock released after compaction plan drops");
+    }
+
+    #[test]
+    fn checkpoint_replays_multiple_batches_and_continues_both_ingestion_routes() {
+        for route in [IngestRoute::Live, IngestRoute::Historical] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 10,
+                compaction_safety_margin_blocks: 0,
+            };
+            let mut expected = make_rows(3, 100);
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&expected).unwrap();
+            storage.checkpoint().unwrap();
+            for (count, first) in [(3, 900), (12, 800), (2, 700)] {
+                let rows = make_rows(count, first);
+                match route {
+                    IngestRoute::Live => storage.write_batch(&rows).unwrap(),
+                    IngestRoute::Historical => {
+                        storage.write_historical_batch(&rows).unwrap();
+                    }
+                }
+                expected.extend(rows);
+            }
+            assert_eq!(storage.wal.read_all().unwrap().len(), expected.len() - 3);
+            assert!(
+                RecoveryJournal::load(&storage.paths)
+                    .unwrap()
+                    .unwrap()
+                    .is_active_checkpoint()
+            );
+            drop(storage); // No explicit final checkpoint: exercise actual WAL recovery.
+            for _ in 0..2 {
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let actual = storage
+                    .segments()
+                    .iter()
+                    .filter(|s| s.row_count > 0)
+                    .flat_map(|s| {
+                        SegmentReader::open(&storage.segment_path(s.id))
+                            .unwrap()
+                            .read_log_rows(None)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{route:?}");
+                assert!(storage.wal.is_empty().unwrap());
+                let rows = make_rows(2, 600);
+                match route {
+                    IngestRoute::Live => storage.write_batch(&rows).unwrap(),
+                    IngestRoute::Historical => {
+                        storage.write_historical_batch(&rows).unwrap();
+                    }
+                }
+                expected.extend(rows);
+                // Leave another pending epoch to exercise recovered staging state.
+            }
+        }
+    }
+
+    #[test]
+    fn last_directory_owner_unlocks_even_with_a_duplicated_descriptor() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NativeStorageConfig::default()
+        };
+        let storage = NativeStorage::open(config.clone()).unwrap();
+        // dup and a transient fork/exec inherit references to the same OS lock.
+        // Such a descriptor is not a managed storage or compaction owner.
+        let duplicate = storage.directory_lock.0.try_clone().unwrap();
+        drop(storage);
+        let reopened = NativeStorage::open(config).unwrap();
+        drop(duplicate);
+        assert_eq!(reopened.total_rows(), 0);
+    }
+
+    #[test]
+    fn route_switch_and_reorg_retire_previous_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 10,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        for (route, first) in [
+            (IngestRoute::Live, 100),
+            (IngestRoute::Historical, 90),
+            (IngestRoute::Live, 110),
+            (IngestRoute::Historical, 80),
+        ] {
+            let rows = make_rows(3, first);
+            match route {
+                IngestRoute::Live => storage.write_batch(&rows).unwrap(),
+                IngestRoute::Historical => {
+                    storage.write_historical_batch(&rows).unwrap();
+                }
+            }
+            assert_eq!(storage.wal.read_all().unwrap(), rows);
+            assert_eq!(
+                RecoveryJournal::load(&storage.paths)
+                    .unwrap()
+                    .unwrap()
+                    .route(),
+                route
+            );
+        }
+        assert_eq!(storage.total_rows(), 12);
+        storage.mark_non_canonical(B256::ZERO).unwrap();
+        assert!(storage.wal.is_empty().unwrap());
+        assert!(RecoveryJournal::load(&storage.paths).unwrap().is_none());
+        assert!(storage.pending_checkpoint.is_none());
+    }
+
+    #[test]
+    fn checkpoint_age_is_controlled_without_sleeping() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NativeStorageConfig::default()
+        })
+        .unwrap();
+        storage.write_batch(&make_rows(2, 100)).unwrap();
+        assert!(!storage.checkpoint_if_due().unwrap());
+        storage.pending_checkpoint.as_mut().unwrap().started_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+        assert!(storage.checkpoint_if_due().unwrap());
+        assert!(storage.wal.is_empty().unwrap());
+        assert!(!storage.checkpoint_if_due().unwrap());
+    }
+
+    #[test]
+    fn checkpoint_bounds_accumulated_wal_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 128,
+            compaction_safety_margin_blocks: 0,
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let payload = Bytes::from(vec![0x5a; 512 * 1024]);
+        let mut checkpointed = false;
+        let mut previous_bytes = 0;
+        for batch in 0..9 {
+            let mut rows = make_rows(8, 100 + batch * 8);
+            for row in &mut rows {
+                row.data = payload.clone();
+                row.data_len = payload.len() as u32;
+            }
+            storage.write_batch(&rows).unwrap();
+            let bytes = fs::metadata(tmp.path().join("wal/pending.wal"))
+                .unwrap()
+                .len();
+            assert!(bytes <= CHECKPOINT_WAL_BYTES);
+            checkpointed |= bytes < previous_bytes;
+            previous_bytes = bytes;
+        }
+        assert!(checkpointed);
+        drop(storage);
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 72);
+        assert!(recovered.wal.is_empty().unwrap());
+    }
+
+    #[test]
+    fn oversized_caller_batch_is_checkpointed_before_success() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NativeStorageConfig::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let mut rows = make_rows(1, 100);
+        rows[0].data = Bytes::from(vec![0x53; CHECKPOINT_WAL_BYTES as usize + 1]);
+        rows[0].data_len = u32::try_from(rows[0].data.len()).unwrap();
+        storage.write_batch(&rows).unwrap();
+        assert!(storage.pending_checkpoint.is_none());
+        assert!(storage.wal.is_empty().unwrap());
+        assert!(!RecoveryJournal::path(&storage.paths).exists());
+        drop(storage);
+        let recovered = NativeStorage::open(config).unwrap();
+        let actual = SegmentReader::open(&recovered.hot_partition_meta().path)
+            .unwrap()
+            .read_log_rows(None)
+            .unwrap();
+        assert_eq!(actual, rows);
+    }
+
+    #[test]
+    fn completed_checkpoint_with_missing_rows_preserves_its_journal() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NativeStorageConfig::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage.write_batch(&make_rows(3, 100)).unwrap();
+        let mut pending = storage.pending_checkpoint.take().unwrap();
+        pending
+            .journal
+            .complete_checkpoint(pending.rows, pending.checksum.finalize())
+            .unwrap();
+        pending.journal.persist(&storage.paths).unwrap();
+        // Model loss of the committed data/metadata after WAL retirement. The
+        // complete checkpoint marker must distinguish this from preparation
+        // interrupted before its first WAL append.
+        let start = pending.journal.start.clone();
+        ColumnFile::write_batch(&storage.segment_path(start.id), &[]).unwrap();
+        persist_segment_manifest(&storage.paths, &start).unwrap();
+        storage.catalog.segments = vec![start];
+        storage.persist_checkpoint_catalog().unwrap();
+        storage.wal.truncate().unwrap();
+        let journal_path = RecoveryJournal::path(&storage.paths);
+        let journal_bytes = fs::read(&journal_path).unwrap();
+        drop(storage);
+        for _ in 0..2 {
+            let error = NativeStorage::open(config.clone()).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+        }
+    }
+
+    #[test]
+    fn historical_checkpoint_recovers_after_each_io_failure_with_prior_wal_batches() {
+        fn setup() -> (TempDir, NativeStorageConfig, NativeStorage) {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 10,
+                compaction_safety_margin_blocks: 0,
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.write_batch(&make_rows(3, 100)).unwrap();
+            storage.checkpoint().unwrap();
+            storage.write_historical_batch(&make_rows(3, 900)).unwrap();
+            storage.write_historical_batch(&make_rows(2, 800)).unwrap();
+            (tmp, config, storage)
+        }
+        let pending = make_rows(13, 700);
+        let (_tmp, _config, mut storage) = setup();
+        durability::inject_failure(usize::MAX);
+        storage.write_historical_batch(&pending).unwrap();
+        storage.checkpoint().unwrap();
+        let events = durability::take_events();
+        for failure in 0..events.len() {
+            let (_tmp, config, mut storage) = setup();
+            durability::inject_failure(failure);
+            let result = storage
+                .write_historical_batch(&pending)
+                .and_then(|_| storage.checkpoint());
+            let observed = durability::take_events();
+            assert!(result.is_err(), "{failure}: {observed:?}");
+            assert!(storage.write_batch(&pending).is_err());
+            let wal = storage.wal.read_all().unwrap();
+            let mut expected = make_rows(3, 100);
+            if wal.is_empty() {
+                expected.extend(make_rows(3, 900));
+                expected.extend(make_rows(2, 800));
+                expected.extend(pending.clone());
+            } else {
+                expected.extend(wal);
+            }
+            drop(storage);
+            for restart in 0..2 {
+                let storage = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("{failure}, restart {restart}, {observed:?}: {error}")
+                });
+                let actual = storage
+                    .segments()
+                    .iter()
+                    .filter(|s| s.row_count > 0)
+                    .flat_map(|s| {
+                        SegmentReader::open(&storage.segment_path(s.id))
+                            .unwrap()
+                            .read_log_rows(None)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{failure}, restart {restart}");
+                assert!(storage.wal.is_empty().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn compacted_checkpoint_ignores_partially_removed_raw_columns() {
+        for journal_remains in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 10,
+                compaction_safety_margin_blocks: 0,
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let rows = make_rows(3, 100);
+            storage.write_historical_batch(&rows).unwrap();
+            let id = storage.active_historical_segment_id().unwrap();
+            let address_path = storage.segment_path(id).join("address.col");
+            let raw_address = fs::read(&address_path).unwrap();
+            storage.finalize_historical_segment().unwrap();
+            if journal_remains {
+                let mut pending = storage.pending_checkpoint.take().unwrap();
+                pending
+                    .journal
+                    .complete_checkpoint(pending.rows, pending.checksum.finalize())
+                    .unwrap();
+                pending.journal.persist(&storage.paths).unwrap();
+                storage.persist_checkpoint_catalog().unwrap();
+                storage.wal.truncate().unwrap();
+            } else {
+                storage.checkpoint().unwrap();
+            }
+            // Deletions may reach disk in a different order: a raw address
+            // file can survive after other raw columns have disappeared.
+            fs::write(&address_path, raw_address).unwrap();
+            drop(storage);
+            for _ in 0..2 {
+                let recovered = NativeStorage::open(config.clone()).unwrap();
+                let actual = SegmentReader::open(&recovered.segment_path(id))
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap();
+                assert_eq!(actual, rows);
+            }
+        }
     }
 
     #[test]
@@ -2397,6 +2969,7 @@ mod tests {
         let rows = make_rows(2, 100);
         let mut storage = NativeStorage::open(config.clone()).unwrap();
         storage.write_batch(&rows).unwrap();
+        storage.checkpoint().unwrap();
         storage.wal.append(&rows).unwrap();
         let wal_path = tmp.path().join("wal/pending.wal");
         let bytes = fs::read(&wal_path).unwrap();
@@ -2665,12 +3238,14 @@ mod tests {
             };
             let mut storage = NativeStorage::open(config.clone()).unwrap();
             storage.write_batch(&make_rows(3, 100)).unwrap();
+            storage.checkpoint().unwrap();
             (tmp, config, storage)
         }
         let pending = make_rows(6, 200);
         let (_tmp, _config, mut storage) = setup();
         durability::inject_failure(usize::MAX);
         storage.write_batch(&pending).unwrap();
+        storage.checkpoint().unwrap();
         let events = durability::take_events();
         assert!(events.iter().any(|(op, _)| *op == "rows_committed"));
         assert!(events.iter().any(|(op, _)| *op == "truncate_wal"));
@@ -2686,7 +3261,9 @@ mod tests {
         for failure in 0..events.len() {
             let (_tmp, config, mut storage) = setup();
             durability::inject_failure(failure);
-            let result = storage.write_batch(&pending);
+            let result = storage
+                .write_batch(&pending)
+                .and_then(|()| storage.checkpoint());
             let observed = durability::take_events();
             assert!(result.is_err(), "checkpoint {failure} was not exercised");
             assert!(storage.write_batch(&pending).is_err());
@@ -2812,6 +3389,7 @@ mod tests {
             let mut storage = NativeStorage::open(config).unwrap();
             if !already_committed {
                 storage.write_batch(&rows).unwrap();
+                storage.checkpoint().unwrap();
             }
             storage.wal.append(&rows).unwrap();
             if already_committed {
@@ -3016,6 +3594,7 @@ mod tests {
         {
             let mut storage = NativeStorage::open(config.clone()).unwrap();
             storage.write_batch(&initial_rows).unwrap();
+            storage.checkpoint().unwrap();
 
             let hot_id = storage.catalog.active_hot_segment.unwrap();
             let segment_index = storage
@@ -3243,6 +3822,7 @@ mod tests {
         .unwrap();
 
         storage.write_batch(&make_rows(6, 100)).unwrap();
+        storage.checkpoint().unwrap();
         let sealed = storage
             .segments()
             .iter()

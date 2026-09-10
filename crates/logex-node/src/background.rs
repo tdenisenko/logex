@@ -53,6 +53,24 @@ pub async fn run_background_indexer(
             _ = ticker.tick() => {}
         }
 
+        // Small live epochs must also checkpoint when the node becomes idle.
+        // Keep filesystem work off async workers and run before compaction/index
+        // selection so newly durable sealed segments become eligible together.
+        let storage = Arc::clone(&state.storage);
+        match tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due())
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "storage checkpoint failed; writes require recovery");
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "storage checkpoint worker failed");
+                continue;
+            }
+        }
+
         {
             let active_sync_status = sync_is_active(&state);
             let historical_incomplete = historical_sync_is_incomplete(&state).await;

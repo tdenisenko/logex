@@ -287,6 +287,33 @@ pub(crate) fn persist_segment_manifest_with_columns(
     descriptor: &SegmentDescriptor,
     columns: Vec<ColumnDescriptor>,
 ) -> std::io::Result<()> {
+    persist_manifest(paths, descriptor, columns, false)
+}
+
+pub(crate) fn persist_ingest_manifest(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+    ordered: bool,
+) -> std::io::Result<()> {
+    let columns = existing_columns(paths, descriptor.id)?.unwrap_or_else(default_columns);
+    persist_manifest(paths, descriptor, columns, ordered)
+}
+
+pub(crate) fn persist_ingest_manifest_with_columns(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+    columns: Vec<ColumnDescriptor>,
+    ordered: bool,
+) -> std::io::Result<()> {
+    persist_manifest(paths, descriptor, columns, ordered)
+}
+
+fn persist_manifest(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+    columns: Vec<ColumnDescriptor>,
+    ordered: bool,
+) -> std::io::Result<()> {
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(&segment_dir)?;
 
@@ -307,19 +334,31 @@ pub(crate) fn persist_segment_manifest_with_columns(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    durability::publish_tree(&segment_dir, &path, &json)
+    if ordered {
+        durability::publish_tree_ordered(&segment_dir, &path, &json, &paths.catalog_path())
+    } else {
+        durability::publish_tree(&segment_dir, &path, &json)
+    }
 }
 
 pub(crate) fn compact_segment(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
+    compact_ingest_segment(paths, descriptor, false)
+}
+
+pub(crate) fn compact_ingest_segment(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+    ordered: bool,
+) -> std::io::Result<()> {
     if descriptor.kind != SegmentKind::Sealed || descriptor.row_count == 0 {
-        return persist_segment_manifest(paths, descriptor);
+        return persist_ingest_manifest(paths, descriptor, ordered);
     }
 
     if segment_uses_current_compaction_profile(paths, descriptor.id)? {
-        return persist_segment_manifest(paths, descriptor);
+        return persist_ingest_manifest(paths, descriptor, ordered);
     }
 
     if segment_is_compacted(paths, descriptor.id)? {
@@ -330,24 +369,61 @@ pub(crate) fn compact_segment(
     fs::create_dir_all(segment_dir.join("columns"))?;
     verify_raw_segment_files_complete(descriptor, &segment_dir)?;
 
-    let columns = vec![
-        compact_address_column(&segment_dir)?,
-        compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)?,
-        compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)?,
-        compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)?,
-        compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)?,
-        compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd)?,
-        compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd)?,
-        compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd)?,
-        compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary)?,
-        compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::AdaptiveFixed)?,
-        compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::AdaptiveFixed)?,
-        compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::AdaptiveFixed)?,
-        compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::AdaptiveFixed)?,
-        compact_data_column(&segment_dir, CompressionCodec::AdaptiveBytes)?,
-    ];
+    let columns = thread::scope(|scope| {
+        let address = scope.spawn(|| compact_address_column(&segment_dir));
+        let block_number = scope.spawn(|| {
+            compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)
+        });
+        let block_hash = scope.spawn(|| {
+            compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)
+        });
+        let timestamp = scope.spawn(|| {
+            compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)
+        });
+        let tx_hash = scope.spawn(|| {
+            compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)
+        });
+        let tx_index =
+            scope.spawn(|| compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd));
+        let log_index =
+            scope.spawn(|| compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd));
+        let data_len =
+            scope.spawn(|| compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd));
+        let source =
+            scope.spawn(|| compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary));
+        let topic0 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::AdaptiveFixed)
+        });
+        let topic1 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::AdaptiveFixed)
+        });
+        let topic2 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::AdaptiveFixed)
+        });
+        let topic3 = scope.spawn(|| {
+            compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::AdaptiveFixed)
+        });
+        let data =
+            scope.spawn(|| compact_data_column(&segment_dir, CompressionCodec::AdaptiveBytes));
+        Ok::<_, std::io::Error>(vec![
+            join_column_worker(address)?,
+            join_column_worker(block_number)?,
+            join_column_worker(block_hash)?,
+            join_column_worker(timestamp)?,
+            join_column_worker(tx_hash)?,
+            join_column_worker(tx_index)?,
+            join_column_worker(log_index)?,
+            join_column_worker(data_len)?,
+            join_column_worker(source)?,
+            join_column_worker(topic0)?,
+            join_column_worker(topic1)?,
+            join_column_worker(topic2)?,
+            join_column_worker(topic3)?,
+            join_column_worker(data)?,
+        ])
+    })?;
 
-    persist_segment_manifest_with_columns(paths, descriptor, columns)?;
+    persist_ingest_manifest_with_columns(paths, descriptor, columns, ordered)?;
     remove_raw_hot_files(&segment_dir)?;
 
     tracing::info!(

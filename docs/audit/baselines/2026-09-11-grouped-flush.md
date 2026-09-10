@@ -58,12 +58,20 @@ coordinator checkpoint. This does not simulate every hardware power-loss case.
 
 A first v2 storage run had one lock-release test failure whose old assertion
 hid the I/O error. The assertion now exposes the error; the focused test and a
-subsequent complete storage run (103 tests) passed. The intermittent cause is
-not established and must remain visible during full workspace/CI validation.
+subsequent complete storage run (103 tests) passed. The same symptom recurred during checkpoint tests. A deterministic duplicate-fd
+regression now reproduces it and the final managed owner explicitly unlocks; the
+[checkpoint follow-up](2026-09-11-checkpoints.md) records the fix. The precise
+process-creation interleaving of the original failure was not captured.
 
-## Next step
+## Follow-up
 
-Implement bounded WAL checkpoints, retain durable successful writes, include
+The [checkpoint investigation](2026-09-11-checkpoints.md) records the subsequent
+implementation. It also corrects a cross-device dependency in this intermediate
+code: ordering barriers on different devices do not order one another. The
+current prototype fully persists external-device dependencies before publishing
+a manifest/catalog reference. Same-device exploratory timings are unaffected.
+
+Bounded WAL checkpoints must retain durable successful writes, include
 both live and historical behavior and metadata/coverage ordering, preserve exact
 query results, and compare repeated release runs against the original baseline.
 Checkpoint cost must be measured, not hidden by shifting it to indexing, close

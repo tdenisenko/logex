@@ -10,7 +10,8 @@ protocols still require review.
 PR #130 remains unmerged: the initial ingestion slowdown was rejected. The user
 requires no more than 10% degradation and authorized bounded WAL checkpoints.
 The [grouped-flush investigation](baselines/2026-09-11-grouped-flush.md) records
-the tested intermediate changes and why further work is required.
+the tested intermediate changes; the [checkpoint investigation](baselines/2026-09-11-checkpoints.md)
+records the current prototype and remaining performance work.
 
 ## Findings
 
@@ -20,25 +21,47 @@ the tested intermediate changes and why further work is required.
 | B2-06 | P1, missing publication durability | Column, catalog and manifest paths flushed userspace buffers or renamed temporary files without synchronizing referenced data and directory entries before discarding WAL contents. Recovery also rewrote committed column prefixes directly. Synchronize data before manifest/catalog publication, synchronize replacement names and WAL truncation, and atomically replace recovered columns while preserving the original prefix. Failure tests cover the coordinator's publication checkpoints and the shared replacement primitive. |
 | B2-07 | P1, orphaned rows made canonical | Startup recreated missing/short canonical bitmaps with all bits true. A test retaining a false committed bit but shortening the bitmap succeeded and made that row canonical on the baseline. Missing committed canonical bits now stop startup; an explained uncommitted append tail is rebuilt with the original committed bits. Interrupted recovery must preserve those bits too. |
 | B2-08 | P1, conflicting data-directory owners | Multiple storage instances could open the same directory and independently append/replay/truncate its WAL. Acquire a nonblocking exclusive lock on the directory inode before catalog or WAL access, retain it in background compaction plans, and reject competing owners with an actionable path. This implements the exclusivity prerequisite from batch 10; volume supervision remains pending. |
+| B2-09 | P2, valid compacted storage refused on reopen | A compacted manifest can coexist with a subset of obsolete raw files after interrupted cleanup. Recovery mistook its retained canonical bitmap for raw storage, and integrity checking required missing raw columns whenever address.col survived. Regressions cover an empty WAL with a complete journal and repeated ordinary reopen. Validate the representation referenced by the manifest; raw manifests still require every raw column. |
 
 ## Commit and recovery protocol
 
-A new `wal/recovery.json` contains version 1 metadata, protected by a CRC32 over
-its canonical serialized payload. It records the starting hot descriptor,
-`next_segment_id`, batch row count and CRC32 of the unchanged binary WAL row
-encoding. Reads are limited to 16 KiB, reject unknown fields and validate version,
-kind, position and nonempty count. Checksums detect accidental damage; they are
-not chain authentication or protection against malicious filesystem edits.
+`wal/recovery.json` has a checksum over its canonical serialized payload and a
+16 KiB read limit. Version 1 single-batch journals remain readable. Version 2
+adds a checkpoint state (live/historical route and active/complete phase) while
+preserving the WAL frames and all segment encodings. Both versions record the
+starting descriptor and the segment-allocation boundary. An active checkpoint
+uses WAL frame checksums; a complete checkpoint also records the cumulative row
+count and checksum of the equivalent concatenated binary row payload.
 
-1. Validate/encode the batch before any transaction writes. Require an empty WAL.
-2. Order journal publication before appending any WAL bytes or segment rows;
-   the WAL full sync supplies persistence before segment writes proceed.
-3. Append and synchronize the WAL and its parent directory.
-4. Apply rows, synchronizing segment artifacts before each manifest and the
-   catalog. Manifests remain the existing source for recovering a catalog whose
-   publication was interrupted. Newly allocated segment directory entries are
-   synchronized before the commit returns.
-5. Synchronize WAL truncation, then remove the journal and synchronize its parent.
+1. Validate/encode the entire caller batch before changing files. Finish the
+   previous checkpoint on a route change, a 32 MiB accumulated-WAL boundary,
+   count overflow, or age of at least five seconds.
+2. For a new epoch, order its active journal before any WAL/column mutation.
+   The WAL's full sync supplies persistence before segment writes proceed.
+3. Append and synchronize every caller batch's WAL frame and its parent. Both
+   live and historical successful writes have durable recovery data.
+4. Apply rows and order column files before each manifest. Defer ingestion-only
+   catalog rewrites; manifests reconstruct those descriptors on recovery.
+   External-device dependencies receive a full sync before their references
+   can publish on another device. Public anchor/state updates remain durable.
+5. At checkpoint, record the complete count/checksum, order catalog publication
+   before WAL truncation, then order truncation before removing the journal.
+   Journal removal completes the full device flush before checkpoint success.
+
+The 32 MiB threshold bounds accumulation across calls. A single already-valid
+larger caller batch is allowed by the existing API, but is checkpointed before
+returning success and cannot accumulate other batches beside it. Route switches,
+reorg mutation, index/manifest publication and synchronous compaction also finish
+a pending checkpoint. Detached compaction plans exclude the current epoch's
+segments. The background indexer checks age on its ten-second ticker; five
+seconds is eligibility, not a hard completion deadline. It performs the I/O on a
+blocking worker. Closing storage with pending WAL remains a supported recovery
+path; no destructor performs fallible I/O.
+
+`checkpoint()` and `checkpoint_if_due()` are available on the storage facade.
+`mark_non_canonical` now requires a mutable receiver so it can retire the prior
+checkpoint before changing canonical bits. Runtime callers already hold mutable
+storage guards; this is a Rust source API change, not a wire or file-format change.
 
 Any error after preparation starts leaves the storage instance closed to further
 mutations until it is dropped and reopened. This includes canonical-state updates,
@@ -46,19 +69,24 @@ historical writes and creating compaction plans. Existing read interfaces remain
 whole-node storage-failure health and bounded shutdown belong to batch 10.
 
 Recovery first validates the complete WAL using PR #129's conservative tail
-policy. Journal positions identify already-published rows in the original hot
+policy. Journal positions identify already-published rows in the original starting
 segment and segments allocated during the transaction. Preexisting historical
 segments between those IDs are excluded. Read selections are chunked; applied
 rows must match the WAL prefix exactly and have present, true canonical bits.
 Partial raw-column tails beyond the manifest are rebuilt before appending the
-remaining rows. A zero-row segment can contain any subset of files after its
+remaining rows. Historical replay recovers the newest affected raw staging segment; a compacted
+segment is not a raw append target. A zero-row segment can contain any subset of files after its
 first interrupted write; it is rebuilt without requiring a complete prior file
 set. Missing files for a nonempty committed prefix remain an error. Existing committed canonical flags are copied into every
 replacement, including when rebuilding itself is interrupted.
 
 With an empty WAL, a prepared journal can be retired only when there are no
 applied rows or the entire applied batch matches its recorded count/fingerprint.
-Affected physical artifacts must also agree with committed metadata. Partial
+A completed version 2 checkpoint with no applied rows is an error, even when
+the WAL is empty: it cannot be confused with preparation before the first append.
+A regression reproduced silent journal removal in that damaged state and now
+requires preserving the evidence on repeated reopen. Affected physical artifacts
+must also agree with committed metadata. Partial
 commits, unexplained physical rows, malformed metadata and mismatched payloads
 stop with an error and retain the journal/WAL. A missing or damaged committed
 canonical bitmap cannot be reconstructed by guessing all rows were canonical.
@@ -73,7 +101,8 @@ batches written by this version remain supported and are not deduplicated.
 
 Replacement files are created exclusively under unique temporary names in the
 same directory. Contents are ordered before rename; column replacements are
-persisted as a group before manifest publication succeeds. Standalone metadata
+ordered as a group before manifest publication. Successful batches remain
+recoverable from the durable WAL until checkpoint supplies final persistence. Standalone metadata
 replacements also synchronize their containing directory before returning.
 Handled errors attempt to remove their temporary file without hiding the primary
 failure. Abrupt process exit may leave unreferenced `.name.pid.sequence.tmp`
@@ -81,11 +110,16 @@ artifacts. Startup does not infer committed data from those names or delete
 unrelated files. A stale conventional `.name.tmp` symlink is not followed.
 
 The pinned Rust library uses `F_FULLFSYNC` for `File::sync_all` on Apple and
-`fsync` on Linux. The intermediate implementation groups explicit Apple `fsync`
-calls and ordering barriers before a full sync per touched device. Unsupported
+`fsync` on Linux. The implementation groups explicit Apple `fsync`
+calls and ordering barriers before a full sync per touched device. Traversal follows directory symlinks, checks directory identities for cycles,
+and bounds nesting to 64 levels before any manifest can publish. This prevents
+synchronizing only a symlinked columns directory while leaving its files dirty.
+Unsupported
 ordering barriers fall back to full sync; other I/O errors propagate. The two
 FFI calls, ownership assumptions and platform tests are documented in the
-[grouped-flush investigation](baselines/2026-09-11-grouped-flush.md). Directory entries need their own synchronization; see the
+[grouped-flush investigation](baselines/2026-09-11-grouped-flush.md). WAL aliases also require synchronizing the actual newly created target
+directory and persisting a journal on another device before WAL bytes.
+Directory entries need their own synchronization; see the
 [Linux fsync contract](https://man7.org/linux/man-pages/man2/fsync.2.html).
 The exact pinned implementation was inspected in the installed standard-library
 source. These barriers depend on the filesystem/device honoring its flush
@@ -95,6 +129,14 @@ controller failure or physical power removal.
 The directory lock uses the pinned standard library, requires no new dependency
 or lock file, and survives the originating storage handle while a compaction plan
 still exists. Alternate path spellings resolving to the same directory conflict.
+The last managed owner explicitly unlocks before closing its descriptor. A
+duplicated descriptor can otherwise retain the same lock after the storage
+owner drops; this is also relevant to transient process creation in other
+threads. A deterministic duplicate-descriptor regression failed before the fix.
+Compaction plans continue to retain the shared owner until they are dropped.
+The original intermittent test timing is consistent with descriptor inheritance,
+but that timing itself was not captured. Apple documents shared dup/fork lock
+references in [flock(2)](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/flock.2).
 Older binaries and arbitrary low-level filesystem writers do not participate.
 Offline commands that open storage must stop the other owner first; use the
 running server's API for concurrent log queries.
@@ -127,11 +169,19 @@ This is not a claim to exercise every OS write or power-loss interleaving.
 
 A bounded eight-worker flush experiment was measured after profiling and rejected:
 it did not demonstrate a useful improvement. Subsequent grouping reduces device
-flushes; the existing scoped column writers remain.
+flushes. Thirty process runs compare later column-worker changes: parallel raw
+compaction improves its median by 25–30%, and four groups of raw append workers
+improve live ingestion about 9–10% within the checkpoint prototype. The current
+[measurements](baselines/2026-09-11-checkpoints.md) still exceed the user’s overall
+10% ingestion-regression ceiling; neither timing nor correctness gates authorize
+merging the unfinished performance work.
 
-All six intermediate local workspace gates pass: 809 tests, four explicitly ignored
-benchmarks, strict Clippy, doc tests and release linking. Linux/macOS CI is
-required before merge. The
+All six pre-checkpoint local workspace gates passed at `e811325f`: 809 tests, four explicitly ignored
+benchmarks, strict Clippy, doc tests and release linking. The current checkpoint implementation also passes all six local gates: 823 tests
+(four ignored), including 117 in storage. The current performance requirement is
+still unmet. Actual ExFAT validation was blocked when the host rejected creation
+of a disposable image with `Operation not permitted`.
+Linux/macOS CI is required before merge. The
 [release comparison](baselines/2026-09-10-commit-replay.md) records write, index,
 compaction, warm reopen and query costs using unchanged dense/sparse fixtures.
 

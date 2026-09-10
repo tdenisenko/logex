@@ -47,6 +47,15 @@ impl WriteAheadLog {
             .create(true)
             .append(true)
             .open(&self.path)?;
+        // A journal beside the WAL must precede WAL bytes even when an existing
+        // file symlink sends those bytes to a different device.
+        durability::persist_directory_before_file(
+            self.path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new(".")),
+            &file,
+        )?;
         let mut w = BufWriter::new(file);
 
         w.write_all(&batch.row_count.to_le_bytes())?;
@@ -98,6 +107,28 @@ impl WriteAheadLog {
             Err(error) => Err(error),
         }
     }
+
+    /// Order completed data/catalog and journal metadata before WAL retirement.
+    /// The caller must durably remove the journal afterward before acknowledging
+    /// checkpoint completion. Cross-device ordering falls back to full sync.
+    pub(crate) fn retire_after(&mut self, catalog_directory: &std::path::Path) -> io::Result<()> {
+        let file = match OpenOptions::new().write(true).open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return durability::sync_directory(catalog_directory);
+            }
+            Err(error) => return Err(error),
+        };
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        durability::order_directories_before_file(&[catalog_directory, parent], &file)?;
+        durability::checkpoint("truncate_wal", &self.path)?;
+        file.set_len(0)?;
+        durability::order_file_before_directory(&file, parent)
+    }
 }
 
 pub(crate) struct EncodedWalBatch {
@@ -108,6 +139,23 @@ pub(crate) struct EncodedWalBatch {
 }
 
 impl EncodedWalBatch {
+    pub(crate) fn encoded_len(&self) -> u64 {
+        u64::from(self.payload_len) + 12
+    }
+
+    pub(crate) fn checkpoint_checksum() -> crc32fast::Hasher {
+        let mut checksum = crc32fast::Hasher::new();
+        checksum.update(WAL_BINARY_MAGIC);
+        checksum.update(&WAL_BINARY_VERSION.to_le_bytes());
+        checksum
+    }
+
+    pub(crate) fn extend_checkpoint_checksum(&self, checksum: &mut crc32fast::Hasher) {
+        // EncodedWalBatch always owns validated binary encoding. Omit each
+        // frame's magic/version so this equals one concatenated row payload.
+        checksum.update(&self.serialized[8..]);
+    }
+
     pub(crate) fn new(rows: &[LogRow]) -> io::Result<Self> {
         // Validate and encode before opening the file, so invalid input cannot
         // create a WAL or leave an incomplete entry after a valid prefix.

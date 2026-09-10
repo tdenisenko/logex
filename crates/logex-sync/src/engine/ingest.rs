@@ -271,7 +271,7 @@ impl SyncEngine {
 
         self.peers.remove_cached_blocks(&reorg.reverted_hashes);
 
-        let storage = self.storage.write().await;
+        let mut storage = self.storage.write().await;
         let mut total_reverted = 0u64;
         for hash in &reorg.reverted_hashes {
             total_reverted += storage

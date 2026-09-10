@@ -154,77 +154,130 @@ impl ColumnFile {
         }
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
+        let replacements = durability::ReplacementBatch::default();
 
         thread::scope(|scope| {
             let address = scope.spawn(|| {
-                Self::write_fixed_col(dir, "address.col", row_count, rows, |w, r| {
-                    w.write_all(r.address.as_slice())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "address.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(r.address.as_slice()),
+                )
             });
             let block_number = scope.spawn(|| {
-                Self::write_fixed_col(dir, "block_number.col", row_count, rows, |w, r| {
-                    w.write_all(&r.block_number.to_le_bytes())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "block_number.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(&r.block_number.to_le_bytes()),
+                )
             });
             let block_hash = scope.spawn(|| {
-                Self::write_fixed_col(dir, "block_hash.col", row_count, rows, |w, r| {
-                    w.write_all(r.block_hash.as_slice())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "block_hash.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(r.block_hash.as_slice()),
+                )
             });
             let tx_hash = scope.spawn(|| {
-                Self::write_fixed_col(dir, "tx_hash.col", row_count, rows, |w, r| {
-                    w.write_all(r.tx_hash.as_slice())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "tx_hash.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(r.tx_hash.as_slice()),
+                )
             });
             let tx_index = scope.spawn(|| {
-                Self::write_fixed_col(dir, "tx_index.col", row_count, rows, |w, r| {
-                    w.write_all(&r.tx_index.to_le_bytes())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "tx_index.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(&r.tx_index.to_le_bytes()),
+                )
             });
             let log_index = scope.spawn(|| {
-                Self::write_fixed_col(dir, "log_index.col", row_count, rows, |w, r| {
-                    w.write_all(&r.log_index.to_le_bytes())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "log_index.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(&r.log_index.to_le_bytes()),
+                )
             });
             let timestamp = scope.spawn(|| {
-                Self::write_fixed_col(dir, "timestamp.col", row_count, rows, |w, r| {
-                    w.write_all(&r.timestamp.to_le_bytes())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "timestamp.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(&r.timestamp.to_le_bytes()),
+                )
             });
             let data_len = scope.spawn(|| {
-                Self::write_fixed_col(dir, "data_len.col", row_count, rows, |w, r| {
-                    w.write_all(&r.data_len.to_le_bytes())
-                })
+                Self::write_fixed_col(
+                    dir,
+                    &replacements,
+                    "data_len.col",
+                    row_count,
+                    rows,
+                    |w, r| w.write_all(&r.data_len.to_le_bytes()),
+                )
             });
             let source = scope.spawn(|| {
-                Self::write_fixed_col(dir, "source.col", row_count, rows, |w, r| {
+                Self::write_fixed_col(dir, &replacements, "source.col", row_count, rows, |w, r| {
                     w.write_all(&[r.source as u8])
                 })
             });
             let topic0 = scope.spawn(|| {
-                Self::write_nullable_col(dir, "topic0", row_count, rows, |w, r| {
+                Self::write_nullable_col(dir, &replacements, "topic0", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic0.as_ref())
                 })
             });
             let topic1 = scope.spawn(|| {
-                Self::write_nullable_col(dir, "topic1", row_count, rows, |w, r| {
+                Self::write_nullable_col(dir, &replacements, "topic1", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic1.as_ref())
                 })
             });
             let topic2 = scope.spawn(|| {
-                Self::write_nullable_col(dir, "topic2", row_count, rows, |w, r| {
+                Self::write_nullable_col(dir, &replacements, "topic2", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic2.as_ref())
                 })
             });
             let topic3 = scope.spawn(|| {
-                Self::write_nullable_col(dir, "topic3", row_count, rows, |w, r| {
+                Self::write_nullable_col(dir, &replacements, "topic3", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic3.as_ref())
                 })
             });
-            let data = scope.spawn(|| Self::write_var_col(dir, "data.col", row_count, rows));
-            let canonical = scope.spawn(|| match canonical {
-                Some(bitmap) => Self::replace_canonical_bitmap(dir, bitmap),
-                None => Self::write_canonical_bitmap(dir, row_count),
+            let data = scope
+                .spawn(|| Self::write_var_col(dir, &replacements, "data.col", row_count, rows));
+            let canonical = scope.spawn(|| {
+                let mut bitmap = NullBitmap::new();
+                let bitmap = match canonical {
+                    Some(bitmap) => bitmap,
+                    None => {
+                        for _ in 0..row_count {
+                            bitmap.push(true);
+                        }
+                        &bitmap
+                    }
+                };
+                replacements.write(&dir.join("canonical.bitmap"), |writer| {
+                    bitmap.write_to(writer)
+                })
             });
 
             join_write_worker(address)?;
@@ -242,8 +295,9 @@ impl ColumnFile {
             join_write_worker(topic3)?;
             join_write_worker(data)?;
             join_write_worker(canonical)?;
-            Ok(())
-        })
+            Ok::<(), io::Error>(())
+        })?;
+        replacements.publish()
     }
 
     /// Append rows to existing column files (for the hot partition).
@@ -253,107 +307,162 @@ impl ColumnFile {
         }
 
         let new_row_count = existing_rows + rows.len() as u64;
+        let replacements = durability::ReplacementBatch::default();
 
-        Self::append_fixed_col(
-            dir,
-            "address.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(r.address.as_slice()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "block_number.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&r.block_number.to_le_bytes()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "block_hash.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(r.block_hash.as_slice()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "tx_hash.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(r.tx_hash.as_slice()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "tx_index.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&r.tx_index.to_le_bytes()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "log_index.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&r.log_index.to_le_bytes()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "timestamp.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&r.timestamp.to_le_bytes()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "data_len.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&r.data_len.to_le_bytes()),
-        )?;
-        Self::append_fixed_col(
-            dir,
-            "source.col",
-            existing_rows,
-            new_row_count,
-            rows,
-            |w, r| w.write_all(&[r.source as u8]),
-        )?;
+        thread::scope(|scope| {
+            let block_columns = scope.spawn(|| {
+                Self::append_fixed_col(
+                    dir,
+                    "address.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(r.address.as_slice()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "block_number.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&r.block_number.to_le_bytes()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "block_hash.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(r.block_hash.as_slice()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "timestamp.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&r.timestamp.to_le_bytes()),
+                )?;
+                Self::append_nullable_col(
+                    dir,
+                    &replacements,
+                    "topic0",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| write_optional_b256(w, r.topic0.as_ref()),
+                )?;
+                Ok(())
+            });
+            let transaction_columns = scope.spawn(|| {
+                Self::append_fixed_col(
+                    dir,
+                    "tx_hash.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(r.tx_hash.as_slice()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "tx_index.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&r.tx_index.to_le_bytes()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "log_index.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&r.log_index.to_le_bytes()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "data_len.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&r.data_len.to_le_bytes()),
+                )?;
+                Self::append_fixed_col(
+                    dir,
+                    "source.col",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| w.write_all(&[r.source as u8]),
+                )?;
+                Self::append_nullable_col(
+                    dir,
+                    &replacements,
+                    "topic1",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| write_optional_b256(w, r.topic1.as_ref()),
+                )?;
+                Ok(())
+            });
+            let remaining_topics = scope.spawn(|| {
+                Self::append_nullable_col(
+                    dir,
+                    &replacements,
+                    "topic2",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| write_optional_b256(w, r.topic2.as_ref()),
+                )?;
+                Self::append_nullable_col(
+                    dir,
+                    &replacements,
+                    "topic3",
+                    existing_rows,
+                    new_row_count,
+                    rows,
+                    |w, r| write_optional_b256(w, r.topic3.as_ref()),
+                )?;
+                Ok(())
+            });
+            let variable_columns = scope.spawn(|| {
+                Self::append_var_col(
+                    dir,
+                    &replacements,
+                    "data.col",
+                    new_row_count,
+                    rows,
+                    existing_rows,
+                )?;
+                Self::append_canonical_bitmap(
+                    dir,
+                    &replacements,
+                    existing_rows,
+                    rows.len() as u64,
+                )?;
+                Ok(())
+            });
+            join_write_worker(block_columns)?;
+            join_write_worker(transaction_columns)?;
+            join_write_worker(remaining_topics)?;
+            join_write_worker(variable_columns)?;
+            Ok::<_, io::Error>(())
+        })?;
 
-        Self::append_nullable_col(dir, "topic0", existing_rows, new_row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic0.as_ref())
-        })?;
-        Self::append_nullable_col(dir, "topic1", existing_rows, new_row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic1.as_ref())
-        })?;
-        Self::append_nullable_col(dir, "topic2", existing_rows, new_row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic2.as_ref())
-        })?;
-        Self::append_nullable_col(dir, "topic3", existing_rows, new_row_count, rows, |w, r| {
-            write_optional_b256(w, r.topic3.as_ref())
-        })?;
-
-        Self::append_var_col(dir, "data.col", new_row_count, rows, existing_rows)?;
-        Self::append_canonical_bitmap(dir, existing_rows, rows.len() as u64)?;
-
-        Ok(())
+        replacements.publish()
     }
 
     fn write_fixed_col(
         dir: &Path,
+        replacements: &durability::ReplacementBatch,
         name: &str,
         row_count: u64,
         rows: &[LogRow],
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
-        durability::atomic_replace_ordered(&dir.join(name), |writer| {
+        replacements.write(&dir.join(name), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -387,13 +496,14 @@ impl ColumnFile {
 
     fn write_nullable_col(
         dir: &Path,
+        replacements: &durability::ReplacementBatch,
         base_name: &str,
         row_count: u64,
         rows: &[LogRow],
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<bool>,
     ) -> io::Result<()> {
         let mut nulls = NullBitmap::new();
-        durability::atomic_replace_ordered(&dir.join(format!("{base_name}.col")), |writer| {
+        replacements.write(&dir.join(format!("{base_name}.col")), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -405,13 +515,14 @@ impl ColumnFile {
             }
             Ok(())
         })?;
-        durability::atomic_replace_ordered(&dir.join(format!("{base_name}.null")), |writer| {
+        replacements.write(&dir.join(format!("{base_name}.null")), |writer| {
             nulls.write_to(writer)
         })
     }
 
     fn append_nullable_col(
         dir: &Path,
+        replacements: &durability::ReplacementBatch,
         base_name: &str,
         existing_rows: u64,
         new_row_count: u64,
@@ -443,14 +554,20 @@ impl ColumnFile {
         }
         col_file.flush()?;
 
-        durability::atomic_replace_ordered(&null_path, |nw| nulls.write_to(nw))?;
+        replacements.write(&null_path, |nw| nulls.write_to(nw))?;
 
         Ok(())
     }
 
     /// Variable-length column: 8-byte offsets (one per row plus sentinel), then data.
-    fn write_var_col(dir: &Path, name: &str, row_count: u64, rows: &[LogRow]) -> io::Result<()> {
-        durability::atomic_replace_ordered(&dir.join(name), |writer| {
+    fn write_var_col(
+        dir: &Path,
+        replacements: &durability::ReplacementBatch,
+        name: &str,
+        row_count: u64,
+        rows: &[LogRow],
+    ) -> io::Result<()> {
+        replacements.write(&dir.join(name), |writer| {
             ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count,
@@ -474,6 +591,7 @@ impl ColumnFile {
 
     fn append_var_col(
         dir: &Path,
+        replacements: &durability::ReplacementBatch,
         name: &str,
         new_row_count: u64,
         rows: &[LogRow],
@@ -526,7 +644,7 @@ impl ColumnFile {
         }
         new_offsets.push(off);
 
-        durability::atomic_replace_ordered(&path, |w| {
+        replacements.write(&path, |w| {
             let new_header = ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count: new_row_count,
@@ -558,7 +676,9 @@ impl ColumnFile {
         for _ in 0..row_count {
             bitmap.push(true);
         }
-        Self::replace_canonical_bitmap(dir, &bitmap)
+        durability::atomic_replace_ordered(&dir.join("canonical.bitmap"), |writer| {
+            bitmap.write_to(writer)
+        })
     }
 
     pub(crate) fn replace_canonical_bitmap(dir: &Path, bitmap: &NullBitmap) -> io::Result<()> {
@@ -567,7 +687,12 @@ impl ColumnFile {
         })
     }
 
-    fn append_canonical_bitmap(dir: &Path, existing_rows: u64, new_rows: u64) -> io::Result<()> {
+    fn append_canonical_bitmap(
+        dir: &Path,
+        replacements: &durability::ReplacementBatch,
+        existing_rows: u64,
+        new_rows: u64,
+    ) -> io::Result<()> {
         let path = dir.join("canonical.bitmap");
         let data = fs::read(&path)?;
         let mut bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
@@ -587,7 +712,7 @@ impl ColumnFile {
             bitmap.push(true);
         }
 
-        durability::atomic_replace_ordered(&path, |w| bitmap.write_to(w))?;
+        replacements.write(&path, |w| bitmap.write_to(w))?;
         Ok(())
     }
 
