@@ -190,3 +190,19 @@ for deferred trees. The same barrier orders both payloads before publishing the
 catalog's name; other devices are fully persisted first, and the final catalog
 parent sync still supplies durability. Nine focused ingestion/recovery tests
 pass, including both interruption matrices. New timing evidence is pending.
+
+[The barrier-only comparison](baselines/2026-09-11-catalog-barrier-comparison.jsonl)
+at `b2b8b7b9` repeats the same 18 processes/54 iterations with exact oracles passing.
+Short historical publication falls to 21.042 ms versus a paired 14.928 ms baseline
+(+40.96%); large history is 80.922 versus 66.414 ms (+21.85%). Grouped live is
+495.086 versus 2,870.973 ms (-82.76%); per-block live remains 3,340.908 versus
+2,773.894 ms (+20.44%). The isolated change reduces historical cost but does not
+meet acceptance. Per-block live mostly writes existing prefixes, for which there
+was no deferred-tree barrier to remove.
+
+All six Linux/macOS CI jobs for catalog candidate `adff367c` pass in run
+`34533144525`. That CI does not cover later performance changes. The next
+experiment removes temporary creation/rename only when exclusive creation proves
+a wholly uncommitted destination does not exist; existing files retain atomic
+replacement. Its full storage suite passes 130 tests with two ignored, and
+strict storage Clippy passes. Its timing is pending.

@@ -234,6 +234,27 @@ impl Replacement {
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
+        if publication == Publication::Deferred {
+            // No catalog or earlier reader can reference a file that does not
+            // yet exist in this wholly uncommitted segment. Create it directly,
+            // exclusively; existing files still use atomic replacement below.
+            // A failed first write leaves an uncommitted artifact for rollback.
+            checkpoint("write_unpublished", path)?;
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(file) => {
+                    let mut replacement = Self {
+                        temporary: None,
+                        destination: path.to_path_buf(),
+                        writer: BufWriter::new(file),
+                    };
+                    write(&mut replacement.writer)?;
+                    replacement.writer.flush()?;
+                    return Ok(replacement);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
         checkpoint("write_temporary", path)?;
         for _ in 0..32 {
             let mut temporary_name = std::ffi::OsString::from(".");
@@ -276,13 +297,12 @@ impl Replacement {
     }
 
     fn publish(mut self) -> io::Result<()> {
+        let Some(temporary) = &self.temporary else {
+            // Exclusive first creation in a wholly uncommitted segment.
+            return Ok(());
+        };
         checkpoint("rename_temporary", &self.destination)?;
-        fs::rename(
-            self.temporary
-                .as_ref()
-                .ok_or_else(|| io::Error::other("replacement already published"))?,
-            &self.destination,
-        )?;
+        fs::rename(temporary, &self.destination)?;
         self.temporary = None;
         Ok(())
     }
@@ -656,6 +676,29 @@ pub(crate) fn take_events() -> Vec<(&'static str, std::path::PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_creation_preserves_existing_files_when_writes_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        fs::write(&existing, b"previous rows").unwrap();
+        let fail = |writer: &mut BufWriter<File>| {
+            writer.write_all(b"incomplete")?;
+            writer.flush()?;
+            Err(io::Error::other("write interrupted"))
+        };
+        assert!(
+            Replacement::prepare_with_publication(&existing, fail, Publication::Deferred).is_err()
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"previous rows");
+
+        let new = dir.path().join("new");
+        assert!(Replacement::prepare_with_publication(&new, fail, Publication::Deferred).is_err());
+        assert_eq!(fs::read(&new).unwrap(), b"incomplete");
+        // Recovery must discard this unpublished first-write artifact; no
+        // previously published bytes were overwritten by either failure.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 
     #[cfg(target_vendor = "apple")]
     #[test]
