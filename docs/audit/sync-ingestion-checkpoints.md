@@ -293,3 +293,13 @@ scheduling; they are not exclusive CPU totals. Code inspection confirms an entir
 column of cloned `Bytes` before paging and an unused raw buffer built even for
 adaptive encoding. The next experiment borrows payloads per page and removes
 that unused adaptive-path serialization. Temporary profiling scopes were removed.
+
+[Payload-borrowing comparison](baselines/2026-09-11-borrowed-data-comparison.jsonl)
+at `45372779` versus `3f457987` isolates page-sized borrowed payload references and
+removal of unused adaptive-path raw serialization. Three alternating pairs with
+three iterations each pass exact row/progress/reopen oracles. Large-history median
+falls 80.056 → 71.005 ms (-11.31%); short history is 20.021 → 20.737 ms (+3.58%).
+The latter path does not use the full-column borrowing change; repeat it with the
+next short-write investigation to distinguish noise from an encoder regression.
+All 134 storage tests and strict storage Clippy pass. The original-baseline 10%
+ceiling still applies, and neither this isolated result nor earlier CI permits merge.
