@@ -11,8 +11,8 @@ use logex_types::LogRow;
 
 use crate::column::{ColumnFile, ColumnFileHeader, NullBitmap};
 use crate::page::{
-    PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
-    encode_var_bytes_page, write_page_index,
+    PageIndexEntry, encode_bytes_page, encode_fixed_width_page, encode_u8_page, encode_u32_page,
+    encode_u64_page, encode_var_bytes_page, write_page_index,
 };
 use crate::reader::ColumnReader;
 use crate::segment_reader::SegmentReader;
@@ -844,13 +844,19 @@ fn compact_data_column(
 }
 
 fn compact_data_values(segment_dir: &Path, rows: &[LogRow]) -> std::io::Result<ColumnDescriptor> {
-    let values: Vec<_> = rows.iter().map(|row| row.data.clone()).collect();
+    // Borrow payloads for one page instead of cloning the entire column before
+    // compression. This bounds temporary references and avoids Bytes refcounts.
+    let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
     write_typed_pages(
         segment_dir,
         "data",
         CompressionCodec::AdaptiveBytes,
-        &values,
-        |slice| encode_var_bytes_page(slice, CompressionCodec::AdaptiveBytes),
+        rows,
+        |slice| {
+            values.clear();
+            values.extend(slice.iter().map(|row| row.data.as_ref()));
+            encode_bytes_page(&values, CompressionCodec::AdaptiveBytes)
+        },
     )
 }
 
@@ -900,16 +906,15 @@ where
     })
 }
 
-fn write_typed_pages<T, F>(
+fn write_typed_pages<'a, T, F>(
     segment_dir: &Path,
     name: &str,
     codec: CompressionCodec,
-    values: &[T],
+    values: &'a [T],
     mut encode_page: F,
 ) -> std::io::Result<ColumnDescriptor>
 where
-    T: Clone,
-    F: FnMut(&[T]) -> std::io::Result<Vec<u8>>,
+    F: FnMut(&'a [T]) -> std::io::Result<Vec<u8>>,
 {
     let (data_path, index_path, page_rows) =
         write_pages(segment_dir, name, values.len(), |range| {

@@ -281,8 +281,9 @@ run and needs confirmation because its earlier baseline median was lower.
 These are storage-call timings, not end-to-end sync throughput. Process peak RSS
 medians were ~53-55 MiB candidate versus ~662-867 MiB baseline for per-block live;
 large-history RSS was ~1,270 MiB on both, including fixture/oracle allocations.
-Next profiling targets historical raw writes and compaction. Current cross-device
-and ExFAT recovery checks, CI and remaining storage review still gate merge.
+All six Linux/macOS CI jobs pass for `3f457987` in run `34538163643`. Historical
+raw writes/compaction, current cross-device and ExFAT recovery checks, and remaining
+storage review still gate merge.
 
 [Historical phase attribution](baselines/2026-09-11-catalog-v3-history-profile.json)
 shows short raw writes around 8 ms, compaction 5.5 ms and checkpoint 7-8.5 ms.

@@ -381,24 +381,18 @@ pub fn decode_u8_page(
 }
 
 pub fn encode_var_bytes_page(values: &[Bytes], codec: CompressionCodec) -> io::Result<Vec<u8>> {
-    let mut raw = Vec::new();
-    raw.extend_from_slice(&(values.len() as u32).to_le_bytes());
+    encode_bytes_page(values, codec)
+}
 
-    let mut offset = 0u64;
-    raw.extend_from_slice(&offset.to_le_bytes());
-    for value in values {
-        offset += value.len() as u64;
-        raw.extend_from_slice(&offset.to_le_bytes());
-    }
-    for value in values {
-        raw.extend_from_slice(value);
-    }
-
+pub(crate) fn encode_bytes_page(
+    values: &[impl AsRef<[u8]>],
+    codec: CompressionCodec,
+) -> io::Result<Vec<u8>> {
     match codec {
-        CompressionCodec::None => Ok(raw),
-        CompressionCodec::Zstd => zstd_compress(&raw),
-        CompressionCodec::Lz4 => Ok(lz4_compress(&raw)),
         CompressionCodec::AdaptiveBytes => encode_adaptive_var_bytes_page(values),
+        CompressionCodec::None => Ok(encode_var_bytes_raw_u64(values)),
+        CompressionCodec::Zstd => zstd_compress(&encode_var_bytes_raw_u64(values)),
+        CompressionCodec::Lz4 => Ok(lz4_compress(&encode_var_bytes_raw_u64(values))),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported bytes codec: {other:?}"),
@@ -468,10 +462,12 @@ pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Res
     Ok(values)
 }
 
-fn encode_adaptive_var_bytes_page(values: &[Bytes]) -> io::Result<Vec<u8>> {
+fn encode_adaptive_var_bytes_page(values: &[impl AsRef<[u8]>]) -> io::Result<Vec<u8>> {
     let total_len = values
         .iter()
-        .try_fold(0u64, |acc, value| acc.checked_add(value.len() as u64))
+        .try_fold(0u64, |acc, value| {
+            acc.checked_add(value.as_ref().len() as u64)
+        })
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bytes page is too large"))?;
 
     if total_len > u32::MAX as u64 {
@@ -506,34 +502,34 @@ fn decode_adaptive_var_bytes_page(encoded: &[u8]) -> io::Result<Vec<Bytes>> {
     }
 }
 
-fn encode_var_bytes_raw_u64(values: &[Bytes]) -> Vec<u8> {
+fn encode_var_bytes_raw_u64(values: &[impl AsRef<[u8]>]) -> Vec<u8> {
     let mut raw = Vec::new();
     raw.extend_from_slice(&(values.len() as u32).to_le_bytes());
 
     let mut offset = 0u64;
     raw.extend_from_slice(&offset.to_le_bytes());
     for value in values {
-        offset += value.len() as u64;
+        offset += value.as_ref().len() as u64;
         raw.extend_from_slice(&offset.to_le_bytes());
     }
     for value in values {
-        raw.extend_from_slice(value);
+        raw.extend_from_slice(value.as_ref());
     }
     raw
 }
 
-fn encode_var_bytes_raw_u32(values: &[Bytes]) -> Vec<u8> {
+fn encode_var_bytes_raw_u32(values: &[impl AsRef<[u8]>]) -> Vec<u8> {
     let mut raw = Vec::new();
     raw.extend_from_slice(&(values.len() as u32).to_le_bytes());
 
     let mut offset = 0u32;
     raw.extend_from_slice(&offset.to_le_bytes());
     for value in values {
-        offset += value.len() as u32;
+        offset += value.as_ref().len() as u32;
         raw.extend_from_slice(&offset.to_le_bytes());
     }
     for value in values {
-        raw.extend_from_slice(value);
+        raw.extend_from_slice(value.as_ref());
     }
     raw
 }
