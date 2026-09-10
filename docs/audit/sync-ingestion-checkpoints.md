@@ -342,3 +342,28 @@ at `2635b41c` increases the short median 16.985 → 20.208 ms (+18.97%) versus
 assumption even at one page per column. Restored the previous parallel compaction
 implementation; no serial-size threshold remains. Recompare the combined retained
 changes against original `09a63f55` before further tuning or acceptance.
+
+## Combined confirmation at 224a9d30
+
+All six [local gates](baselines/2026-09-11-catalog-v3-final-gates.jsonl) pass with
+843 tests and seven ignored cases. All six Linux/macOS CI jobs pass in run
+`34540157764`. [Expanded original-baseline comparison](baselines/2026-09-11-catalog-v3-final-comparison.jsonl)
+uses five alternating pairs for grouped live/short history and large history,
+three pairs for each per-block live profile, and three iterations per process.
+All exact oracles and fixture identifiers agree. No builds/tests ran during timing;
+final checkpoint/finalization is included. Raw output records median and observed
+nearest-rank p95 (9/15 samples are not a production latency distribution).
+
+| Workload | Original baseline median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live | 2,889.054 | 518.361 | -82.06% |
+| Short historical | 15.202 | 18.388 | +20.96% |
+| Large historical | 66.830 | 71.237 | +6.59% |
+| Per-block live, minimal headers | 2,850.929 | 2,067.854 | -27.47% |
+| Per-block live, populated headers | 3,532.592 | 2,232.949 | -36.79% |
+
+Short history still fails the 10% ceiling, so the candidate remains unmerged.
+The large profile fits the limit in this confirmation, and live remains faster;
+these are storage-call results, not measured P2P throughput. Next isolate whether
+initial raw-file creation benefits from two workers instead of four; the existing
+append scheduling and compaction remain unchanged in that experiment.

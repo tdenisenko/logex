@@ -202,6 +202,12 @@ impl ColumnFile {
                 Self::write_nullable_col(dir, &replacements, "topic0", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic0.as_ref())
                 })?;
+                Self::write_nullable_col(dir, &replacements, "topic2", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic2.as_ref())
+                })?;
+                Self::write_nullable_col(dir, &replacements, "topic3", row_count, rows, |w, r| {
+                    write_optional_b256(w, r.topic3.as_ref())
+                })?;
                 Ok(())
             });
             let transaction_columns = scope.spawn(|| {
@@ -248,18 +254,6 @@ impl ColumnFile {
                 Self::write_nullable_col(dir, &replacements, "topic1", row_count, rows, |w, r| {
                     write_optional_b256(w, r.topic1.as_ref())
                 })?;
-                Ok(())
-            });
-            let remaining_topics = scope.spawn(|| {
-                Self::write_nullable_col(dir, &replacements, "topic2", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic2.as_ref())
-                })?;
-                Self::write_nullable_col(dir, &replacements, "topic3", row_count, rows, |w, r| {
-                    write_optional_b256(w, r.topic3.as_ref())
-                })?;
-                Ok(())
-            });
-            let variable_columns = scope.spawn(|| {
                 Self::write_var_col(dir, &replacements, "data.col", row_count, rows)?;
                 let mut bitmap = NullBitmap::new();
                 let bitmap = match canonical {
@@ -278,8 +272,6 @@ impl ColumnFile {
             });
             join_write_worker(block_columns)?;
             join_write_worker(transaction_columns)?;
-            join_write_worker(remaining_topics)?;
-            join_write_worker(variable_columns)?;
             Ok::<_, io::Error>(())
         })?;
 
