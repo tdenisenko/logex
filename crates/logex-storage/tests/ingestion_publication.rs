@@ -229,17 +229,19 @@ fn anchor(header: &Header) -> ExecutionAnchor {
     }
 }
 
-fn assert_rows(storage: &PartitionManager, expected: &[LogRow]) {
+fn assert_rows(storage: &PartitionManager, expected: &[LogRow], selected: bool) {
     let mut actual: Vec<_> = storage
         .sealed_partitions()
         .iter()
         .chain(std::iter::once(storage.hot_partition()))
         .filter(|partition| partition.meta.row_count > 0)
         .flat_map(|partition| {
-            SegmentReader::open(&partition.meta.path)
-                .unwrap()
-                .read_log_rows(None)
-                .unwrap()
+            let reader = SegmentReader::open(&partition.meta.path).unwrap();
+            let ids = selected.then(|| {
+                (0..u32::try_from(partition.meta.row_count).expect("fixture row count fits u32"))
+                    .collect::<Vec<_>>()
+            });
+            reader.read_log_rows(ids.as_deref()).unwrap()
         })
         .collect();
     actual.sort_by_key(|row| (row.block_number, row.log_index));
@@ -248,6 +250,11 @@ fn assert_rows(storage: &PartitionManager, expected: &[LogRow]) {
 }
 
 fn run(config: Config) {
+    let selected_reads = match std::env::var("LOGEX_PUBLICATION_READ_MODE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("full") => false,
+        Ok("selected") => true,
+        value => panic!("invalid LOGEX_PUBLICATION_READ_MODE: {value:?}"),
+    };
     let (headers, blocks) = fixture(&config);
     let measured_headers = &headers[config.warm_headers..];
     let expected: Vec<_> = blocks.iter().flatten().cloned().collect();
@@ -281,6 +288,7 @@ fn run(config: Config) {
             "durable_checkpoint":config.durable_checkpoint,
             "header_fields":if config.rich_headers {"rich"} else {"minimal"},
             "payload":if config.mixed_payloads {"mixed"} else {"transfer"},
+            "read_mode":if selected_reads {"selected"} else {"full"},
             "cache":"fresh directories; OS cache not evicted"})
     );
     for iteration in 0..config.repeats {
@@ -351,7 +359,7 @@ fn run(config: Config) {
                     "rows_per_second":expected.len() as f64/elapsed.as_secs_f64()})
             );
             let start = Instant::now();
-            assert_rows(&storage, &expected);
+            assert_rows(&storage, &expected, selected_reads);
             let validation_ms = start.elapsed().as_secs_f64() * 1000.0;
             let files = footprint(dir.path()).unwrap();
             let segments = storage.sealed_partitions().len()
@@ -360,7 +368,7 @@ fn run(config: Config) {
             let start = Instant::now();
             let reopened = PartitionManager::open(storage_config).unwrap();
             let reopen_ms = start.elapsed().as_secs_f64() * 1000.0;
-            assert_rows(&reopened, &expected);
+            assert_rows(&reopened, &expected, selected_reads);
             if historical {
                 assert_eq!(reopened.historical_floor_header(), measured_headers.first());
                 assert_eq!(reopened.historical_anchor_header(), Some(tip));

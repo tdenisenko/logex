@@ -76,6 +76,35 @@ The reuse also preserves the inspected file when its pathname changes. This is
 the integrated implementation. These small CPU differences are not a claimed
 end-to-end sync gain. [Boundary-reuse comparison](baselines/2026-09-11-bundle-group-boundary-reuse.jsonl).
 
+Exact `a0559acd` confirmation against `9215da2c` gives ingestion medians of
+-0.29% mixed history, +1.06% mixed live, -1.87% sparse history (45 samples), and
++0.18% sparse live (three samples). Sparse full-row validation increases 3.74%
+(8.395 → 8.709 ms), while its p95 increases 3.03%; warm-reopen median is nearly
+unchanged, with a noisier +12.17% p95 (8.884 → 9.966 ms). Mixed-live full-row p95
+also increases 13.07% despite a +2.91% median. These tails remain visible and
+need attribution in the read/startup follow-up. File reductions reproduce exactly.
+[Exact previous-candidate comparison](baselines/2026-09-11-bundle-groups-integrated-previous.jsonl).
+
+A direct original-`09a63f55` comparison has 15 samples for each profile:
+
+| Workload | Ingestion median, original → current | Change | Full-row validation, original → current |
+| --- | ---: | ---: | ---: |
+| Large history (491,520 rows) | 59.841 → 64.000 ms | +6.95% | 217.681 → 211.212 ms |
+| Mixed live | 2,982.361 → 903.840 ms | -69.69% | 4.043 → 9.599 ms |
+| Sparse history | 2,299.452 → 821.160 ms | -64.29% | 0.936 → 8.875 ms |
+
+All exact oracles pass and these ingestion medians meet the user's 10% ceiling.
+The large-history difference exceeds the audit's 5% investigation threshold and
+still needs cost attribution; this is not a waiver of the remaining lifecycle
+regressions. Sparse history uses 2,765,385 versus 136,843 logical bytes (20.21×),
+while OS-attributed writes fall 91.53%. This distinguishes final retained size
+from cumulative writes: grouping reduces repeated metadata, but small immutable
+payload fragments still cost space and reads. The original adapter uses separate row/progress calls and the candidate uses
+combined calls with bounded ordered publication; the raw artifact includes an
+explicit correction to a copied conditions sentence. This is a complete storage
+lifecycle comparison, not an isolated metadata-layout benchmark.
+[Exact original comparison](baselines/2026-09-11-bundle-groups-integrated-original.jsonl).
+
 No table-compression codec or new dependency is retained. The superseded
 base-32 traversal and pathname-reopening prototype are absent from production.
 
@@ -96,8 +125,10 @@ field mutations now target the new byte offsets rather than accidentally testing
 the wrong fields. [Before proofs and restoration record](baselines/2026-09-11-bundle-group-guard-proofs.json).
 
 All 18 focused bundle tests and all six workspace gates pass: 899 tests passed,
-nine ignored. [Validation record](baselines/2026-09-11-bundle-groups-validation.json). Exact integrated performance confirmation and Linux/macOS CI
-plus both ExFAT recovery/query suites remain required for this format.
+nine ignored. [Validation record](baselines/2026-09-11-bundle-groups-validation.json). All six Linux/macOS CI jobs also pass in run `34586152098`. Exact `a0559acd`
+ExFAT suites pass on Apple Silicon and Intel: 188 storage tests/four ignored,
+five query tests/one ignored, and 128 cross-mount recovery cases each. Both
+disposable images are detached. [Platform, source and binary evidence](baselines/2026-09-11-bundle-groups-platform-validation.jsonl).
 
 Grouping removes the repeated full-prefix growth pattern; it does not coalesce
 the many tiny payload pages or reclaim all superseded records. Sparse historical

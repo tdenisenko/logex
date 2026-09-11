@@ -54,7 +54,9 @@ mixed-live full-row cost 15% and mixed-history warm reopen 14%. It is superseded
 
 An independent logical-offset/binary-search experiment does not materially
 improve the sparse workload: full-row cost changes +0.20%, ingestion -0.11%.
-It is removed; there is no retained offset vector/field or lookup abstraction.
+It was removed from this milestone. This comparison exercised full reads only;
+the later [page-selection investigation](bundle-selected-reads.md) measures the
+different caller path before reconsidering a lazy lookup.
 [Lookup experiment](baselines/2026-09-11-bundle-logical-lookup-probe.jsonl).
 
 The narrowed policy produces these median changes against saved behavior:

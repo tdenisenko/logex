@@ -121,6 +121,7 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
 | `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
 | `LOGEX_PUBLICATION_PAYLOAD` | transfer | `transfer` preserves fixture v3's 32-byte data; `mixed` selects fixture v4, varying 0–1024 bytes with independently hashed words |
+| `LOGEX_PUBLICATION_READ_MODE` | full | `full` reads whole columns; `selected` passes all row IDs through the page-selection path used by query callers. Both validate identical rows before and after reopen; ingestion inputs and timing are unchanged. |
 | `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
 | `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
 | `LOGEX_PUBLICATION_DURABLE_CHECKPOINT` | 0 | `1` uses `checkpoint_durable()` for the final checkpoint and any per-block checkpoint. Report this separately from bounded ordered publication; both include exact clean-reopen oracles. |
@@ -135,7 +136,14 @@ The `lifecycle` records supplement ingestion timing with logical/allocated file
 bytes, file and segment counts, warm reopen time, full-row validation time, and
 OS-attributed process writes. Collection is outside the ingestion timer. Full-row
 validation includes materialization, sorting and comparison with the independent
-oracle; it is not query latency. Unix allocated bytes use `stat` blocks and exclude
+oracle; it is not query latency. The existing `full_row_validation_ms` field
+means validation of all rows in either `read_mode`; selected mode also includes
+building the row-ID vector. It does not include SQL planning, predicate matching
+or index lookup. Report the mode and compare identical modes for optimization
+acceptance. A same-binary full-versus-selected comparison diagnoses caller cost
+and is not an old-versus-new performance result. See the
+[selection investigation](bundle-selected-reads.md).
+Unix allocated bytes use `stat` blocks and exclude
 directory/filesystem metadata. The process write counters are
 [Apple's `proc_pid_rusage` v2](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 ([matching structure](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h))

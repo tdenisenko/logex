@@ -142,6 +142,7 @@ struct ReadWindow {
     file: File,
     offset: u64,
     bytes: Vec<u8>,
+    logical_ends: BTreeMap<u8, Vec<u64>>,
 }
 
 impl ReadWindow {
@@ -289,6 +290,7 @@ impl BundleReader {
                 file,
                 offset: 0,
                 bytes: Vec::new(),
+                logical_ends: BTreeMap::new(),
             })),
             reference: reference.clone(),
             streams: Arc::new(streams),
@@ -311,8 +313,36 @@ impl BundleReader {
             return Ok(stream.inline[range.start as usize..range.end as usize].to_vec());
         }
         let mut output = buffer(len)?;
-        let mut logical = 0;
-        for (index, extent) in stream.extents.iter().enumerate() {
+        let (first, mut logical) = if range.start != 0 && stream.extents.len() >= 32 {
+            // Page selections must not rescan every preceding extent. Build
+            // offsets only for selected streams; full scans and startup retain
+            // the compact extent layout and allocate no lookup table.
+            let mut file = self
+                .file
+                .lock()
+                .map_err(|_| invalid("bundle reader lock poisoned"))?;
+            let ends = match file.logical_ends.entry(id) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let mut ends = Vec::new();
+                    ends.try_reserve_exact(stream.extents.len())
+                        .map_err(|_| invalid("bundle lookup allocation failed"))?;
+                    let mut end = 0;
+                    for extent in &stream.extents {
+                        // The immutable table already bounds the sum and count.
+                        end += u64::from(extent.len);
+                        ends.push(end);
+                    }
+                    entry.insert(ends)
+                }
+            };
+            let first = ends.partition_point(|&end| end <= range.start);
+            let logical = first.checked_sub(1).map_or(0, |previous| ends[previous]);
+            (first, logical)
+        } else {
+            (0, 0)
+        };
+        for (index, extent) in stream.extents.iter().enumerate().skip(first) {
             let next = logical + u64::from(extent.len); // validated by decode_table
             let start = range.start.max(logical);
             let end = range.end.min(next);
@@ -1006,6 +1036,65 @@ mod tests {
                 .read_stream(0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn selected_ranges_keep_each_stream_and_snapshot_independent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let mut writer = BundleWriter::create(&path).unwrap();
+        let mut expected = vec![Vec::new(); 3];
+        let mut snapshots = Vec::new();
+        for row in 1..=128 {
+            for (id, bytes) in expected.iter_mut().enumerate() {
+                let chunk: Vec<_> = (0..1 + row as usize * (id + 1) % 101)
+                    .map(|n| (n ^ id ^ row as usize) as u8)
+                    .collect();
+                writer.append_data(id as u8, &chunk).unwrap();
+                bytes.extend(chunk);
+            }
+            let reference = writer.finish(row).unwrap();
+            if [63, 128].contains(&row) {
+                let reader = BundleReader::open(&path, &reference).unwrap();
+                // Warm selections before later appends carry the table group.
+                for (id, bytes) in expected.iter().enumerate() {
+                    let middle = bytes.len() / 2;
+                    assert_eq!(
+                        reader
+                            .read_range(id as u8, middle as u64..bytes.len() as u64)
+                            .unwrap(),
+                        bytes[middle..]
+                    );
+                }
+                snapshots.push((reader, expected.clone()));
+            }
+            writer = BundleWriter::append(&path, &reference).unwrap();
+        }
+        std::thread::scope(|scope| {
+            for (reader, model) in &snapshots {
+                for (id, bytes) in model.iter().enumerate() {
+                    let reader = reader.clone();
+                    scope.spawn(move || {
+                        let mut rng = 919u64 + id as u64;
+                        for _ in 0..200 {
+                            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            let start = rng as usize % (bytes.len() + 1);
+                            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            let end = start + rng as usize % (bytes.len() - start + 1);
+                            assert_eq!(
+                                reader
+                                    .read_range(id as u8, start as u64..end as u64)
+                                    .unwrap(),
+                                bytes[start..end]
+                            );
+                        }
+                        let end = bytes.len() as u64;
+                        assert!(reader.read_range(id as u8, end..end).unwrap().is_empty());
+                        assert!(reader.read_range(id as u8, end..end + 1).is_err());
+                    });
+                }
+            }
+        });
     }
 
     #[test]
