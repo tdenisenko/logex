@@ -382,7 +382,6 @@ pub(crate) fn restore_bundled_checkpoint(
         columns,
     };
     let artifacts = ColumnArtifacts::open(&dir, Some(&prefix))?;
-    artifacts.verify_bundle()?;
     let (inspected, tail) = PageOutput::inspect(&dir, &prefix, &artifacts)?;
     // A bundle's manifest is derived metadata. The catalog pins the complete
     // schema, row boundary and immutable canonical bitmap; an unpublished or
@@ -394,8 +393,14 @@ pub(crate) fn restore_bundled_checkpoint(
             Err(error) => return Err(error),
         };
     if !tail && previous.as_ref() == Some(&prefix) {
+        // Clean startup validates tables, schema, bitmaps and row boundaries.
+        // Payload extents retain their checksum checks when read; scanning all
+        // payload bytes here would make every restart proportional to DB size.
         return Ok(());
     }
+    // Recovery must validate every retained extent before changing evidence,
+    // even if the damage is outside the columns selected by startup or queries.
+    artifacts.verify_bundle()?;
     let canonical = inspected
         .canonical
         .ok_or_else(|| std::io::Error::other("missing canonical prefix"))?;
@@ -641,15 +646,34 @@ fn retire_bundle_file(path: &Path) -> std::io::Result<()> {
 }
 
 /// Called only after the observed catalog is hardened and its current bundle
-/// has been verified/restored. Reserved generation names cannot select a path
+/// metadata is verified/restored. Verify all current payloads before deleting
+/// possible recovery evidence. Reserved generation names cannot select a path
 /// outside this segment, and unrelated directory contents remain untouched.
 pub(crate) fn retire_unreferenced_bundles(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
     let dir = paths.segment_dir(descriptor.id);
+    let mut verified = false;
+    let mut retire = |path: PathBuf| -> std::io::Result<()> {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !verified => {
+                let reference = descriptor
+                    .column_bundle
+                    .as_ref()
+                    .ok_or_else(|| std::io::Error::other("missing catalog bundle reference"))?;
+                BundleReader::open(&bundle_path(&dir, descriptor.generation), reference)?
+                    .verify_all()?;
+                verified = true;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        retire_bundle_file(&path)
+    };
     if descriptor.generation != 0 {
-        retire_bundle_file(&bundle_path(&dir, 0))?;
+        retire(bundle_path(&dir, 0))?;
     }
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
@@ -673,7 +697,7 @@ pub(crate) fn retire_unreferenced_bundles(
                 "reserved bundle generation is not a directory",
             ));
         }
-        retire_bundle_file(&bundle_path(&dir, generation))?;
+        retire(bundle_path(&dir, generation))?;
     }
     Ok(())
 }

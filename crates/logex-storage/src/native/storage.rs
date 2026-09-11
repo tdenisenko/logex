@@ -2237,7 +2237,7 @@ impl NativeStorage {
         tracing::info!(
             segments = self.catalog.segments.len(),
             recent_headers = self.catalog.state.recent_headers.len(),
-            "storage integrity check passed"
+            "storage metadata and row-boundary checks passed"
         );
         Ok(())
     }
@@ -4586,10 +4586,160 @@ mod tests {
         assert_eq!(reader.read_log_rows(None).unwrap(), rows);
     }
 
+    fn corrupt_bundle_address(path: &Path, reference: &crate::bundle::BundleReference) {
+        // Locate a complete encoded stream in this single-page fixture, without
+        // assuming the column workers' physical write order or table encoding.
+        let payload = crate::bundle::BundleReader::open(path, reference)
+            .unwrap()
+            .read_stream(crate::column_artifact::stream_id("columns/address.pages").unwrap())
+            .unwrap();
+        let mut bytes = fs::read(path).unwrap();
+        let offsets: Vec<_> = bytes[..reference.end().unwrap() as usize]
+            .windows(payload.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == payload).then_some(offset))
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            1,
+            "fixture stream must have a unique location"
+        );
+        bytes[offsets[0]] ^= 0x80;
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn clean_bundle_reopen_checks_payload_on_read_and_preserves_recovery_evidence() {
+        for historical in [false, true] {
+            // No recovery, unpublished suffix, missing manifest, and an orphan
+            // generation. The latter three must verify before any mutation.
+            for recovery in 0..4 {
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    hot_target_rows: 1_000,
+                    ..Default::default()
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let header = ingestion_header(100, B256::ZERO);
+                let mut rows = ingestion_rows(64, &header);
+                for (index, row) in rows.iter_mut().enumerate() {
+                    row.address = Address::repeat_byte(index as u8);
+                }
+                ingest_test_initial_batch(&mut storage, historical, &rows, &header).unwrap();
+                storage.checkpoint_durable().unwrap();
+                let descriptor = storage
+                    .segments()
+                    .iter()
+                    .find(|s| s.row_count != 0)
+                    .unwrap();
+                let dir = storage.segment_path(descriptor.id);
+                let bundle = crate::column_artifact::bundle_path(&dir, descriptor.generation);
+                let manifest = dir.join("segment.json");
+                let catalog = storage.paths.catalog_path();
+                corrupt_bundle_address(&bundle, descriptor.column_bundle.as_ref().unwrap());
+                let mut paths = vec![bundle.clone(), manifest.clone(), catalog];
+                match recovery {
+                    0 => {}
+                    1 => {
+                        use std::io::Write;
+                        fs::OpenOptions::new()
+                            .append(true)
+                            .open(&bundle)
+                            .unwrap()
+                            .write_all(b"unpublished suffix")
+                            .unwrap();
+                    }
+                    2 => {
+                        fs::remove_file(&manifest).unwrap();
+                    }
+                    3 => {
+                        let orphan = crate::column_artifact::bundle_path(&dir, 1);
+                        fs::create_dir(orphan.parent().unwrap()).unwrap();
+                        fs::write(&orphan, b"preserve possible recovery evidence").unwrap();
+                        paths.push(orphan);
+                    }
+                    _ => unreachable!(),
+                }
+                let before: Vec<_> = paths.iter().map(|path| fs::read(path).ok()).collect();
+                drop(storage);
+                for _ in 0..2 {
+                    let reopened = NativeStorage::open(config.clone());
+                    if recovery == 0 {
+                        let reopened = reopened.expect("clean reopen must not scan every payload");
+                        assert_eq!(reopened.total_rows(), rows.len() as u64);
+                        assert_eq!(
+                            SegmentReader::open(&dir)
+                                .unwrap()
+                                .read_log_rows(None)
+                                .unwrap_err()
+                                .kind(),
+                            io::ErrorKind::InvalidData
+                        );
+                    } else {
+                        assert!(
+                            matches!(reopened, Err(error) if error.kind() == io::ErrorKind::InvalidData)
+                        );
+                    }
+                    for (path, bytes) in paths.iter().zip(&before) {
+                        assert_eq!(&fs::read(path).ok(), bytes, "{}", path.display());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repacked_bundle_cleanup_preserves_predecessors_when_payload_is_corrupt() {
+        for historical in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, mut expected, previous) =
+                sparse_repack_fixture(tmp.path(), historical);
+            trigger_repack(&mut storage, historical, &mut expected, &previous);
+            let old = storage
+                .segments()
+                .iter()
+                .find(|s| s.row_count != 0)
+                .unwrap();
+            let dir = storage.segment_path(old.id);
+            let predecessor = crate::column_artifact::bundle_path(&dir, old.generation);
+            let old_bytes = fs::read(&predecessor).unwrap();
+            storage.checkpoint_durable().unwrap();
+            let current = storage
+                .segments()
+                .iter()
+                .find(|s| s.row_count != 0)
+                .unwrap();
+            assert_eq!(current.generation, 1);
+            let bundle = crate::column_artifact::bundle_path(&dir, current.generation);
+            // A retirement can be lost independently of the durable new catalog.
+            fs::create_dir_all(predecessor.parent().unwrap()).unwrap();
+            fs::write(&predecessor, old_bytes).unwrap();
+            corrupt_bundle_address(&bundle, current.column_bundle.as_ref().unwrap());
+            let paths = [
+                predecessor,
+                bundle,
+                dir.join("segment.json"),
+                storage.paths.catalog_path(),
+            ];
+            let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+            let config = storage.config.clone();
+            drop(storage);
+            for _ in 0..2 {
+                assert!(
+                    matches!(NativeStorage::open(config.clone()), Err(error) if error.kind() == io::ErrorKind::InvalidData)
+                );
+                for (path, bytes) in paths.iter().zip(&before) {
+                    assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+                }
+            }
+        }
+    }
+
     #[test]
     fn committed_bundle_corruption_is_preserved_before_rollback() {
         for historical in [false, true] {
-            for damage in 0..3 {
+            for damage in 0..4 {
                 let tmp = TempDir::new().unwrap();
                 let config = NativeStorageConfig {
                     data_dir: tmp.path().to_owned(),
@@ -4637,9 +4787,13 @@ mod tests {
                     0 => bytes[8] ^= 1,
                     1 => bytes[reference.table_offset as usize] ^= 1,
                     2 => bytes.truncate(reference.end().unwrap() as usize - 1),
+                    3 => {}
                     _ => unreachable!(),
                 }
                 fs::write(&bundle_path, &bytes).unwrap();
+                if damage == 3 {
+                    corrupt_bundle_address(&bundle_path, &reference);
+                }
                 let paths = [
                     bundle_path,
                     dir.join("segment.json"),
