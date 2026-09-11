@@ -1,0 +1,26 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.26s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::storage::tests::historical_ingestion_coalesces_medium_chunks ... FAILED
+
+failures:
+
+---- native::storage::tests::historical_ingestion_coalesces_medium_chunks stdout ----
+
+thread 'native::storage::tests::historical_ingestion_coalesces_medium_chunks' (19333487) panicked at crates/logex-storage/src/native/storage.rs:3240:9:
+assertion `left == right` failed
+  left: 16
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native::storage::tests::historical_ingestion_coalesces_medium_chunks
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 145 filtered out; finished in 0.40s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

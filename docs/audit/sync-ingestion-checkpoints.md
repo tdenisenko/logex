@@ -466,3 +466,23 @@ estimate the removable raw-staging cost. A lower dense threshold by itself is
 not a production fix: it creates extra small segments. Any retained design must
 continue coalescing historical chunks, preserve existing committed pages through
 interruption, bound index/page growth, and include final publication costs.
+
+
+The [direct-compression diagnostic](baselines/2026-09-11-direct-staging-probe.jsonl)
+reduces isolated short-history median 17.137 → 12.190 ms (-28.87%) across three
+alternating pairs, with exact row/progress/reopen oracles passing. It temporarily
+caps the dense threshold at 8,192 rows; the captured source diff records that
+one-line probe. The [coalescing regression](baselines/2026-09-11-direct-staging-coalescing-failure.log)
+fails as expected: sixteen medium chunks produce sixteen segments instead of
+one. **The threshold change was restored and is not a candidate for merge.**
+
+This supports investigating compressed page appends inside the existing active
+historical segment. Preserve row/segment/block-span limits and the catalog
+checkpoint boundary; keep committed page payloads/index entries unchanged,
+append new pages, atomically replace page indexes/bitmaps, and publish the
+manifest only after required ordering. Readers must respect their manifest's
+row boundary while later pages are appended. Test interruption at append/index/
+manifest/catalog phases, repeated rewind/retry, exact page/row results and sparse
+multi-batch workloads. Existing readers support explicit per-page row counts;
+no page-boundary assumption or reduction in integrity checks may be introduced.
+Full format/checksum and snapshot-lifetime review remain required audit work.
