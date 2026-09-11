@@ -154,3 +154,90 @@ hashes exposed the error. That attempt was stopped and its disposable image was
 detached; it is excluded from candidate validation. The corrected archive stamps
 changed sources freshly, and the build checks for the new regression tests before
 running ExFAT validation. No production volume contents were accessed.
+
+## Integrated confirmation at ee502b56
+
+All six required workspace gates pass: 905 tests, nine ignored, plus documentation
+tests and the release node build. All six Linux/macOS CI jobs pass in run
+34598239258. Source hashes bind the generated validation archive to the eight
+changed source files in this commit.
+[Local gates](baselines/2026-09-11-compaction-capture-local-validation.json),
+[CI results](baselines/2026-09-11-compaction-capture-ci.json).
+
+The final query comparison uses 15 alternating process pairs, three fresh datasets
+per process: **45 samples per revision/profile**. Startup integrity validation now
+captures only block numbers plus canonicality, retaining the preceding complete
+raw-file/prefix checks. This removes the earlier startup penalty.
+
+| Query metric | Dense median change | Sparse median change |
+| --- | ---: | ---: |
+| Generic live WAL ingestion | -1.96% | +1.88% |
+| Generic historical WAL ingestion | -2.05% | -0.91% |
+| Compaction | -0.03% | +0.65% |
+| Index construction | +2.28% | +1.89% |
+| Native filter | -3.42% | -3.21% |
+| Concurrent native queries | -4.24% | -4.30% |
+| SQL count | -3.72% | +0.90% |
+| Ordered SQL | -6.78% | -4.16% |
+| Warm reopen | -3.79% | -0.77% |
+
+Every measured query/lifecycle median and p95 regression is below 5% in this
+confirmation. Earlier larger tail spikes do not repeat at their previous magnitude.
+RSS medians decrease 2.52%/0.54%; they include the full fixture and query buffers.
+This supports retaining the compaction fix and projected capture without accepting
+the first prototype's count/startup penalties. It does not resolve the older
+original-baseline generic-write, index, startup or sparse-bundle costs.
+[Exact source, parameters and all samples](baselines/2026-09-11-compaction-capture-query.jsonl).
+
+The exact combined-sync comparison has 15 samples per profile. Ingestion medians
+change -1.78% mixed history, +0.37% mixed live and +0.08% sparse history; median
+reopen/read changes stay below 1.9%. Logical sizes and median OS-attributed writes
+are unchanged. Sparse ingestion p95 rises 6.84%, and sparse full-row validation
+p95 rises 7.43%, both within the user's 10% ceiling and still recorded for the
+broader performance review. No samples are excluded. The preceding 15-sample
+comparison had sparse ingestion p95 improve; these runs do not establish a stable
+tail gain. All rows, progress, fixture digests and reopen oracles pass.
+[Complete sync comparison](baselines/2026-09-11-compaction-capture-sync.jsonl).
+
+Exact ExFAT validation on both Apple Silicon and Intel passes all 194 storage
+tests/four ignored and five query tests/one ignored. Both matched disposable
+images are detached. The block/full rewrite sweeps exercise 88/146 observed
+main-thread publication boundaries on Apple Silicon and 48/77 on Intel; these
+counts are discovered from each platform's actual successful operation trace.
+They do not exhaust every worker syscall or prove physical power-loss behavior.
+[Build hashes, runner sources and complete results](baselines/2026-09-11-compaction-capture-platform-validation.jsonl).
+The rejected cached-binary attempt remains explicitly excluded in its
+[validation record](baselines/2026-09-11-compaction-rejected-intel-validation.jsonl).
+
+Ownership review confirms completed historical segments are not selected again
+for ingestion: a new historical owner gets a newly allocated ID. This narrows the
+stale-plan concern but does not prove exclusion between overlapping compaction
+and standalone manifest refresh. A controlled refresh/publication interleaving is
+the next regression to test; future bundle reclamation also remains open.
+
+## Standalone manifest refresh race
+
+The controlled interleaving reproduces another publication bug at `ee502b56`:
+standalone refresh captures the raw column descriptors, compaction publishes pages
+and retires the raw files, then refresh successfully republishes its old raw
+descriptors. Both operations report success, but a new reader fails `NotFound`.
+The test pauses refresh with channels after descriptor capture; no sleeps or
+clock assumptions choose the interleaving.
+[Before proof](baselines/2026-09-11-compaction-refresh-race-before.log),
+[test-only patch](baselines/2026-09-11-compaction-refresh-race-before.patch), and
+[exact source/focused validation](baselines/2026-09-11-compaction-refresh-race-validation.json).
+
+The follow-up gives nonempty sealed-segment compaction and standalone manifest
+refresh exclusive access to the same directory inode. Conflict returns
+`WouldBlock` before mutation, so callers can retry. Ownership spans descriptor
+capture, publication and cleanup, with explicit unlock on drop. Query readers
+continue using their captured files. Active hot/historical ingestion ownership
+retains its existing rules; this is not a new per-batch ingestion lock.
+
+The regression passes with the guard, then retries compaction and checks exact
+rows. All 11 focused compaction tests and strict storage Clippy pass, followed
+by all six workspace gates (906 tests/nine ignored, documentation tests and the
+release node build). Targeted ARM/Intel lock validation and a compaction/query
+cost comparison are pending for this additional change.
+[Local validation](baselines/2026-09-11-compaction-owner-local-validation.json). The completed `ee502b56`
+results above remain evidence for that earlier source, not this follow-up.

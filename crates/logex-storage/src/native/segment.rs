@@ -2,7 +2,7 @@ use crate::bundle::{BundleReader, BundleReference, BundleWriter};
 use crate::column_artifact::{BUNDLE_PATH, ColumnArtifacts, stream_id};
 use crate::durability::{self, Publication};
 use std::fs;
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -814,11 +814,55 @@ pub(crate) fn apply_ordered_rows_to_descriptor(
     descriptor.row_count += rows.len() as u64;
 }
 
+/// Compaction and standalone manifest refresh share one segment owner. Query
+/// readers retain their own files and never wait on this maintenance lock.
+struct SegmentMaintenanceGuard(File);
+
+impl SegmentMaintenanceGuard {
+    fn acquire(
+        paths: &StorageCatalogPaths,
+        descriptor: &SegmentDescriptor,
+    ) -> std::io::Result<Option<Self>> {
+        if descriptor.kind != SegmentKind::Sealed || descriptor.row_count == 0 {
+            return Ok(None);
+        }
+        let file = File::open(paths.segment_dir(descriptor.id))?;
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "segment maintenance is in progress; retry the operation",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
+        Ok(Some(Self(file)))
+    }
+}
+
+impl Drop for SegmentMaintenanceGuard {
+    fn drop(&mut self) {
+        // Explicit unlock also releases a descriptor inherited by a concurrent
+        // fork, matching the existing data-directory and index lock lifecycle.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "failed to release segment maintenance lock");
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_REFRESH_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn persist_segment_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
+    let _owner = SegmentMaintenanceGuard::acquire(paths, descriptor)?;
     let columns = existing_columns(paths, descriptor.id)?.unwrap_or_else(default_columns);
+    #[cfg(test)]
+    if let Some(hook) = AFTER_REFRESH_CAPTURE.with_borrow_mut(Option::take) {
+        hook();
+    }
     persist_segment_manifest_with_columns(paths, descriptor, columns)
 }
 
@@ -899,6 +943,7 @@ pub(crate) fn compact_ingest_segment(
     if descriptor.kind != SegmentKind::Sealed || descriptor.row_count == 0 {
         return persist_ingest_manifest(paths, descriptor, publication);
     }
+    let _owner = SegmentMaintenanceGuard::acquire(paths, descriptor)?;
 
     if segment_uses_current_compaction_profile(paths, descriptor.id)? {
         return persist_ingest_manifest(paths, descriptor, publication);
@@ -2647,5 +2692,52 @@ mod tests {
         });
         assert_eq!(reader.read_canonical_len().unwrap(), 2);
         assert!(SegmentReader::open_projected(&dir, &["../unknown"]).is_err());
+    }
+    #[test]
+    fn manifest_refresh_cannot_restore_retired_column_paths() {
+        let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(false);
+        let dir = paths.segment_dir(descriptor.id);
+        // Use the generic raw representation that compaction will retire.
+        fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
+        append_rows(&dir, 0, &rows).unwrap();
+        persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
+        let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let result = thread::scope(|scope| {
+            let paths = &paths;
+            let descriptor = &descriptor;
+            let refresh = scope.spawn(move || {
+                AFTER_REFRESH_CAPTURE.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        captured_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }))
+                });
+                persist_segment_manifest(paths, descriptor)
+            });
+            // No clock/sleep controls this race. Release the refresh before any
+            // assertion, so a failed compaction never strands the scoped worker.
+            captured_rx.recv().unwrap();
+            let compacted = compact_segment(paths, descriptor);
+            resume_tx.send(()).unwrap();
+            refresh.join().unwrap().unwrap();
+            compacted
+        });
+        assert_eq!(
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            rows
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        compact_segment(&paths, &descriptor).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            rows
+        );
     }
 }

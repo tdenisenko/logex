@@ -1,0 +1,90 @@
+{
+  "source": {
+    "base": "ee502b56efaa8ac027fee05083c31c4827b717ee",
+    "archive_sha256": "90ca3e0787f3a11205c4cc69fd43230dffb5e688baf448de8dd90ae656ca897d",
+    "segment_source_sha256": "c645d4ad2e5ec0a25376b4868a7c1dea9fa64f37b41ceb52dd0cd6fcbe7467d8"
+  },
+  "gates": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.8077973750187084
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 5.495313500054181
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 4.97247400006745
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 125.12673145800363
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 10.019292084034532
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 48.5165006670868
+    }
+  ],
+  "workspace_tests": {
+    "passed": 906,
+    "ignored": 9
+  },
+  "status": "All six local gates pass. Targeted platform validation and cost confirmation of the maintenance guard remain pending."
+}
