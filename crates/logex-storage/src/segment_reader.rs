@@ -277,7 +277,7 @@ impl SegmentReader {
     }
 
     pub fn read_log_rows(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<LogRow>> {
-        self.materialize_log_rows(row_ids, self.read_var_bytes("data", row_ids)?)
+        self.materialize_log_rows(row_ids, None)
     }
 
     /// Materialize a small maintenance candidate without trusting compressed
@@ -327,13 +327,13 @@ impl SegmentReader {
             }
             data.extend(page);
         }
-        self.materialize_log_rows(None, data)
+        self.materialize_log_rows(None, Some(data))
     }
 
     fn materialize_log_rows(
         &self,
         row_ids: Option<&[u32]>,
-        data: Vec<Bytes>,
+        data: Option<Vec<Bytes>>,
     ) -> io::Result<Vec<LogRow>> {
         let addresses = self.read_address(row_ids)?;
         let block_numbers = self.read_u64("block_number", row_ids)?;
@@ -346,6 +346,10 @@ impl SegmentReader {
         let topic1s = self.read_nullable_b256("topic1", row_ids)?;
         let topic2s = self.read_nullable_b256("topic2", row_ids)?;
         let topic3s = self.read_nullable_b256("topic3", row_ids)?;
+        let data = match data {
+            Some(data) => data,
+            None => self.read_var_bytes("data", row_ids)?,
+        };
         let data_lens = self.read_u32("data_len", row_ids)?;
         let sources = self.read_u8("source", row_ids)?;
 

@@ -161,3 +161,32 @@ All six local gates now pass on the frozen archive cb40500627ef2700af4e8f19a8d9b
 917 workspace tests/10 ignored, including 206 storage tests/five ignored.
 [Failure reproductions, source identities and validation](baselines/2026-09-11-bundle-repack-validation.json).
 Release confirmation, both ExFAT architectures and PR merge remain outstanding. No live deployment or protected-volume access occurred.
+
+
+### Exact b457ca60 and materialization-order follow-up
+
+All six CI jobs pass at b457ca60 on Linux/macOS. The exact release comparison
+against 6156 retains the sparse improvement: ingestion -21.34%, full-row
+validation -87.22%, reopen -30.69%, with four files and unchanged row/progress
+oracles. Large/mixed-history/live ingestion medians are -1.36%/+0.64%/-0.52%.
+However, large/mixed-history validation medians rise 6.50%/10.62%; that result is
+not accepted as a completed read-performance improvement.
+[Exact comparison](baselines/2026-09-11-bundle-repack-exact.jsonl).
+
+The bounded-read refactor had also moved ordinary variable-data materialization
+before all fixed columns. Restoring its prior position after topic columns keeps
+all checks and gives large-history validation -5.87% (228.057→214.675 ms) against
+b457ca60; mixed-history validation -1.94% (141.037→138.297 ms). Ingestion changes
+-0.07%/-1.90%; reopen +0.22%/+1.05%. Large-read p95 rises 4.69% while its median
+improves; all samples remain. Baseline timing also varies across runs, so this
+does not attribute all earlier mixed-history variation to one cause. The direct
+bounded decoder alone did not remove the earlier regression. The retained order
+change restores prior behavior and the measured large-read cost.
+[Paired order comparison](baselines/2026-09-11-bundle-repack-read-order.jsonl) and
+[exact build/patch](baselines/2026-09-11-bundle-repack-read-order-build.jsonl).
+
+All six local gates pass for this follow-up (917 tests/10 ignored), including
+the six SegmentReader regressions. [Exact validation and builds](baselines/2026-09-11-bundle-repack-read-order-validation.json).
+Original-baseline/platform confirmation remains pending. Historical benchmark
+coverage is also being extended to include a retained live-head cache during backfill;
+previous historical profiles seeded only a floor/anchor, not that cached state.

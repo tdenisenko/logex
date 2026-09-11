@@ -1,0 +1,243 @@
+{
+  "archive": {
+    "archive_sha256": "f69bd5c3201fd5443f5b27e044c0b0faac6d71372daa589c0c7b828dd7ce9f56",
+    "source_base": "b457ca6036ee188b36bfbbecad34b0b7e4ad4d25",
+    "source_hashes": {
+      "Cargo.lock": "6a314668828ebf8c1bc23e28fe49978ab4f6d2ba24424f2053145f3a9fb7a52a",
+      "Cargo.toml": "ffb828af41fc4436e952c8c46ca31899c4cb11ea9c4e5bb742982936a50449dc",
+      "crates/logex-cl/Cargo.toml": "f7c430f83ffb13398ab8edd41ee2dacd486002ae94ca3e3742b5ac829a16a6f6",
+      "crates/logex-cl/src/beacon_block.rs": "37d8e6d482d80be4ccc876215e810377c28675821be1f8c788d2e2e7992c3ce8",
+      "crates/logex-cl/src/chain.rs": "e27912d49270a7170aa111b24e6b768da6e619f63877aa2944106aa4aa16c801",
+      "crates/logex-cl/src/lib.rs": "3f65eccfda215e0b9b797e075526f94bc2eb0a74f5005102473a8060ae4bf933",
+      "crates/logex-cl/src/light_client.rs": "dc42588e5bfb50380f74dd1a622e4382a3f455a3500e64511acfad0726fc6905",
+      "crates/logex-cl/src/network.rs": "77fd65691adcf894024d77a8f305327ac6c16e58ff5948af2fd8577509969ab4",
+      "crates/logex-cl/src/rpc.rs": "6aaba97d14ce8e1d0f33c626ad83203a4cb518b40b4d2846b62a21197b10228e",
+      "crates/logex-index/Cargo.toml": "eb49c4dfaa2c8e72c05b30f85285e5ba98abb79c77de04384aa2b9a4dcd312bb",
+      "crates/logex-index/src/bitmap.rs": "12c213a60a65e3abf412baae4744d2ccdba0eb7f852208cf4e38608ae8e90f44",
+      "crates/logex-index/src/btree.rs": "133b09c163dc7fc25fd4d5903ee30baae651356d0548eca0d07e545e4e792393",
+      "crates/logex-index/src/builder.rs": "5fc96a6a42b192728bfa1e61f9fb8bb82b397106a7cd695d8741ca60d945d677",
+      "crates/logex-index/src/composite.rs": "188339e845993eb317d18afb32cf4b1526a69dfcbc16eff5be248b4713a86a5d",
+      "crates/logex-index/src/lib.rs": "96f23091a1628db8c9a56cb90b3cb3dc71a70aff03320e1a7b3b34c9ead78731",
+      "crates/logex-index/src/transfer_bloom.rs": "8f5677bb64e5eca50dc61bfe6b5088d1b811de78cca64841e1fac6231e73a458",
+      "crates/logex-node/Cargo.toml": "52b001c77274e4ec60010d68ed0f31c42d06a67562a4203f63b2e6d158b68f34",
+      "crates/logex-node/src/background.rs": "6162cb94e277a9677991df01fc535c1dea4dea5439093fe9ac30ca5fceb5c7e5",
+      "crates/logex-node/src/checkpoint.rs": "08268ada66013f797d42000333fe48f3cc30063b8730e5578ab2220bf7a9560f",
+      "crates/logex-node/src/cli.rs": "1383e32d4033e8f6f1bd33da2e9fed02ef83346f993f85b5f43d445a4bdcda3f",
+      "crates/logex-node/src/commands.rs": "d0c038174baa3d2ffea30d583ea426269a4a0375034d465e79301736823ec149",
+      "crates/logex-node/src/main.rs": "1812600ffccc6b263293bc71ba89acab4d20796ed0f48940075c08ca6d87e17f",
+      "crates/logex-node/src/runtime.rs": "8c4bf9a1d29333b3424078467451b485d377fe8c60e24421305d577f26175312",
+      "crates/logex-query/Cargo.toml": "0e565733dcd026b23dbd44acf41243622a2e541fd7c8634817f357d99b8d0684",
+      "crates/logex-query/src/lexer.rs": "f4c0c1a4ab084f156998627ff1aa7127ad8789a4d3e9c8ae4f35ad96117f5ea5",
+      "crates/logex-query/src/lib.rs": "b5e1bbc35edec71e24eb0d46b46601178676b0d290cee0048680a73edecb6904",
+      "crates/logex-query/src/native.rs": "a00f4c223aa32d35f4290b5dd6b2e26445a560dddee593cd0e24af7986b777f0",
+      "crates/logex-query/src/sql.rs": "dccb3c53672577d1b91fe5fc0ae94530e995df515334a09249311374d28dd92e",
+      "crates/logex-query/tests/audit_harness.rs": "d58e73ab934a4ce4157f99eb5e429316538d562150b941b4b645f2097548f77e",
+      "crates/logex-server/Cargo.toml": "78b5c42af076a1abdf14be1a4149523298f5b52d3946f4d2bfe4a50622c534f6",
+      "crates/logex-server/build.rs": "f59737ffee5414ad249cdb156f647b90fbe2e65cdc7bde6c4add1395acb20dc1",
+      "crates/logex-server/src/eth_filter.rs": "c0b345325cfec09b91aa844b7557c1c969e474c434bb0aba2e6444668a77962d",
+      "crates/logex-server/src/grpc.rs": "c89b41132a909bd3fe18bdd46242dd06793f701ce9f176d7cbc6788b17a24a82",
+      "crates/logex-server/src/handler.rs": "fed939a8ea995ed4a474af8f27d4aa48650786ecb110a8682757270dc6b12d4f",
+      "crates/logex-server/src/jsonrpc.rs": "23486befd867b3569ba81c2e173d2fc214b67888d1ead555bdbf6996ee53f172",
+      "crates/logex-server/src/lib.rs": "71fe0a2ac9957b894c26d5ac661e5a8c3feb7701837c3d0cdb9ad2daf5c83cfe",
+      "crates/logex-server/src/rest.rs": "f5bf9aaff2bad909fae2135580f3896754882ac5d3f7ffb6168197c7c7e1ba0b",
+      "crates/logex-server/src/storage_metrics.rs": "60b3527593e7130c6f1d0f43a65d6bb271b70778eecf6c37db0f2a02f73843f9",
+      "crates/logex-server/src/ws.rs": "eb8a61c96aaa825eb0c50346bfecf1651603743183ec5c9e769754812d0c02e7",
+      "crates/logex-server/tests/consistency.rs": "61f87da9feb177c0cd90f50d446048bbdb1ae7be447c29cac501af9264380737",
+      "crates/logex-storage/Cargo.toml": "a58ad967fc7b67e8d974c0a755422a7ae2d462962d6345194c838aaf9f837e80",
+      "crates/logex-storage/src/bundle.rs": "d101622a6cc7e933f5955b97c6a9813c5752381ab97be37f1d0ce8b065005a04",
+      "crates/logex-storage/src/column.rs": "c8d7c713b91b275845f52a02f8855eaab403fff4200aa9a3b1566e8b9397bdb7",
+      "crates/logex-storage/src/column_artifact.rs": "ffb09ced8539970a8141dbcdd6f5ed4faeb01b154f86228497807b7004be24de",
+      "crates/logex-storage/src/compression.rs": "f45971831d8bf70800f324b9f63dc40bc5a2c89280d97b9a629e7604301d7abe",
+      "crates/logex-storage/src/durability.rs": "7cac9766d0d19460c1067d8b06965f00abe5156d0b651762a9dfcb1128e81caa",
+      "crates/logex-storage/src/index_checkpoint.rs": "1338c9e33928139fa042bb94d27ead46376bc334976d456f2c5d33055de5c940",
+      "crates/logex-storage/src/lib.rs": "f9423ea275d27d56b55bee6b6332ad67ab57638b0fe0b0280667328ba63e1437",
+      "crates/logex-storage/src/native/catalog.rs": "28b708738ce72cb951c0f7796a02443917e4143bf497075e8aeffe12b22bee75",
+      "crates/logex-storage/src/native/filter.rs": "597c668be531e099bbd6fa9612fa4e74746553b77c63d67f386748551bcc9c9c",
+      "crates/logex-storage/src/native/mod.rs": "f6ad3a8fed95b8f55aafe266464f59c5afdb49ee9f2e478fce0a2c45c9f058fd",
+      "crates/logex-storage/src/native/recovery.rs": "f1275e81497d3d9a4a6fa5bfa2e8d39ee9440575b62d3a5cb550b6616b9e6350",
+      "crates/logex-storage/src/native/segment.rs": "472991c1a702a3c6b8f3dbbc6ced32d36acb92f2c9c4380877f760de86666fd0",
+      "crates/logex-storage/src/native/storage.rs": "07d686499c121e8f0ca490f4e85238cb1ff7a37b5cb027fb090ead70ca000071",
+      "crates/logex-storage/src/page.rs": "5abe8d31f386e94dd3823a094c486fa4ae6a7b5bdd2ef122e249a0ccfdd51d32",
+      "crates/logex-storage/src/partition.rs": "a2c9962276e72ef518226237e767753cd1f88b1cdf48b4ebc28279e33323894d",
+      "crates/logex-storage/src/reader.rs": "70c62ef7e0fd46001f439a2b10e386e72934853b7d7c1b9af72b42b435bc84e3",
+      "crates/logex-storage/src/segment_reader.rs": "1ad08e0db61c68eb365d27f0f75dbc274c81aedb1346c34fd7e3359c0c9befc8",
+      "crates/logex-storage/src/state.rs": "c16e73e2f79523fea58ea0d3b47413bdc826ccbb99cd9036a8c58fd67cdd3f7f",
+      "crates/logex-storage/src/wal.rs": "51f09f4fc5b3627117b3e08eed01a3b4cbb21fefc7e2b396ce300f6d3c6a4637",
+      "crates/logex-storage/tests/ingestion_publication.rs": "ffaf6e6a5175048b6110ff49b2f1b99eba851a4bce3b7dd2a21f46f2406866ae",
+      "crates/logex-sync/Cargo.toml": "e6fbc9b705966cbde6b115920ff25382fc5a36a36c9b2ebfabaa18a642d5afa2",
+      "crates/logex-sync/src/engine/anchored.rs": "af1d2b98ec2ac951ca8333202bd09eda872cbf012844f6190fefb115c147077e",
+      "crates/logex-sync/src/engine/helpers.rs": "42c7dec60e2047c2ac9cb2171f77b57f9b3fc95c8d9675ba0070f5a6818dc88b",
+      "crates/logex-sync/src/engine/historical.rs": "d212dad25d1cc887047a98d6ff89c9f182d5a0d7a88176fba37e9426f733a00b",
+      "crates/logex-sync/src/engine/ingest.rs": "936204bc39c3ea014ada56c4bcf7b7247ec7beb2c72734cf454b000ec0e0f75b",
+      "crates/logex-sync/src/engine/live.rs": "0391d41a7c35a532a8ccc2227100b52d8631453746a5f08368ce68751ce7eb5f",
+      "crates/logex-sync/src/engine/mod.rs": "453509e1f64d7e519de2db4b298ca212d0b00d898bf9b06cef2ce905a1821920",
+      "crates/logex-sync/src/extract.rs": "371d174ac05044c2889c3155806bc00f93047fbb9fee28ab172182b5e3b5abfa",
+      "crates/logex-sync/src/head_tracker.rs": "3ab5ddd49595d6f8f9d863599cab4108c6f41fdd2f8ac85566b6c606fe7e5cbf",
+      "crates/logex-sync/src/lib.rs": "222455fc519556742b5315b40a021020b77587e6510ab04e788b52560c0f4b6f",
+      "crates/logex-sync/src/p2p/mod.rs": "e4ba28680152c8a75ff66c460500f17583b5df5bc7c048ae21e8d629fb0b0851",
+      "crates/logex-sync/src/p2p/peer_manager/lifecycle.rs": "95486bb6f80822d36de6593b34a6827852833d61b8821118df3c3e9c1d5cd6eb",
+      "crates/logex-sync/src/p2p/peer_manager/mod.rs": "f08285672917b6ea0390821825e05ef338d7c7c6d6b56b5e0a81d6ba874ee7a2",
+      "crates/logex-sync/src/p2p/peer_manager/requests.rs": "72523f5b7aae25703023a0fcce37c7becb0751bc8f34c72b3f172a63ed65ef87",
+      "crates/logex-sync/src/p2p/peer_manager/state.rs": "25945a5b0eba2de5bd74b38fbfd98c41089d0e96b126c79fc9ea2ce1b62702ee",
+      "crates/logex-sync/src/p2p/persistence.rs": "37f6300be755285a449f51c9844c6f2da9e996d9f50cfaefd9e125c26dceafa8",
+      "crates/logex-sync/src/p2p/serve_cache.rs": "6a591cfd39679972990f8e42eba63e15034ee013391601f40cc4b735f7a9355e",
+      "crates/logex-sync/src/primitives.rs": "b656669b0802d7e58495bafff902e08644e5b640d72db219b4a5dc031e0f2031",
+      "crates/logex-sync/src/progress.rs": "aa93744a7dbb1bff4bbdb0dcfaf099ed1c2d85a5bb458edf497cb575b285db89",
+      "crates/logex-sync/src/validation.rs": "c395c7c3d01af52bb61bf2a374aff12ae7cedeb3d96398d159ca1f270375e1ee",
+      "crates/logex-types/Cargo.toml": "a83fb766442578126afed84af02363a17ddfe6c16d794e7bdec0919262ceec8a",
+      "crates/logex-types/src/consensus.rs": "80af9a68a75d4c85f292d4e0de168f0088f3b975a85988e434ad9f8ded5ba563",
+      "crates/logex-types/src/lib.rs": "e739e7ba447bb5ee56372b14c5121f038fb4631ff01d59c2015a56f529635aaa",
+      "crates/logex-types/src/log_row.rs": "e1256215e34688acac04b0dc1dcd4ed0d18fbd66667e768bc3087076da8b81ee",
+      "crates/logex-types/src/partition.rs": "d1f5a087d07164b02fbbd0521d1084478b2ca6fa5c8be93a1ad2a5f0bfadddb8",
+      "crates/logex-types/src/sync.rs": "cf67a604309ede4f5565e1a8c1ffc1ffea6587727e6b68f02f918469cedd599a",
+      "rust-toolchain.toml": "9fdf6a644a249a8bb0417289da8894eecb0de8cdcae1a8267327ea24fa75a276"
+    },
+    "patch": "diff --git a/crates/logex-storage/src/segment_reader.rs b/crates/logex-storage/src/segment_reader.rs\nindex c4825ef8..c4efef6c 100644\n--- a/crates/logex-storage/src/segment_reader.rs\n+++ b/crates/logex-storage/src/segment_reader.rs\n@@ -277,7 +277,7 @@ impl SegmentReader {\n     }\n \n     pub fn read_log_rows(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<LogRow>> {\n-        self.materialize_log_rows(row_ids, self.read_var_bytes(\"data\", row_ids)?)\n+        self.materialize_log_rows(row_ids, None)\n     }\n \n     /// Materialize a small maintenance candidate without trusting compressed\n@@ -327,13 +327,13 @@ impl SegmentReader {\n             }\n             data.extend(page);\n         }\n-        self.materialize_log_rows(None, data)\n+        self.materialize_log_rows(None, Some(data))\n     }\n \n     fn materialize_log_rows(\n         &self,\n         row_ids: Option<&[u32]>,\n-        data: Vec<Bytes>,\n+        data: Option<Vec<Bytes>>,\n     ) -> io::Result<Vec<LogRow>> {\n         let addresses = self.read_address(row_ids)?;\n         let block_numbers = self.read_u64(\"block_number\", row_ids)?;\n@@ -346,6 +346,10 @@ impl SegmentReader {\n         let topic1s = self.read_nullable_b256(\"topic1\", row_ids)?;\n         let topic2s = self.read_nullable_b256(\"topic2\", row_ids)?;\n         let topic3s = self.read_nullable_b256(\"topic3\", row_ids)?;\n+        let data = match data {\n+            Some(data) => data,\n+            None => self.read_var_bytes(\"data\", row_ids)?,\n+        };\n         let data_lens = self.read_u32(\"data_len\", row_ids)?;\n         let sources = self.read_u8(\"source\", row_ids)?;\n \n"
+  },
+  "gates": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.7723192500416189
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 5.372339374967851
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 5.015431125066243
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 142.43497379205655
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 9.202232083072886
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 46.216908790986054
+    }
+  ],
+  "workspace_tests": {
+    "passed": 917,
+    "ignored": 10
+  },
+  "builds": [
+    {
+      "kind": "environment",
+      "source": "isolated-repack",
+      "archive_sha256": "f69bd5c3201fd5443f5b27e044c0b0faac6d71372daa589c0c7b828dd7ce9f56",
+      "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0\n",
+      "hardware": "Mac14,15\n17179869184\n8\n",
+      "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83\n",
+      "runner_source": "from pathlib import Path\nimport hashlib,json,subprocess,time,shutil,os\nos.chdir(\"/Users/tdenisenko/code/logex\")\nos.environ[\"CARGO_TARGET_DIR\"]=\"/Users/tdenisenko/code/logex/target\"\nroot=Path('/private/tmp')\nrecords=[{'kind':'environment','source':'isolated-repack','archive_sha256':'f69bd5c3201fd5443f5b27e044c0b0faac6d71372daa589c0c7b828dd7ce9f56','rustc':subprocess.check_output(['rustc','-Vv'],text=True),'hardware':subprocess.check_output(['sysctl','-n','hw.model','hw.memsize','hw.ncpu'],text=True),'os':subprocess.check_output(['sw_vers'],text=True),'runner_source':Path(__file__).read_text()}]\nsource_hashes=json.loads(Path('/tmp/logex-repack-read-order-archive.json').read_text())['source_hashes']\nfor path,digest in source_hashes.items(): assert hashlib.sha256(Path(path).read_bytes()).hexdigest()==digest,path\nfor label,package,target in [('storage','logex-storage',['--lib']),('publication','logex-storage',['--test','ingestion_publication']),('query','logex-query',['--test','audit_harness'])]:\n binary=root/('logex-bundled-repack-read-order-'+label+'-tests');assert not binary.exists()\n command=['cargo','test','-p',package,'--release',*target,'--locked','--no-run','--message-format=json'];start=time.monotonic();print('Building',label,flush=True)\n r=subprocess.run(command,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE);(root/('logex-bundled-repack-read-order-build-'+label+'.log')).write_text(r.stderr)\n if r.returncode:raise RuntimeError(r.stderr)\n matches=[json.loads(x)['executable']for x in r.stdout.splitlines()if json.loads(x).get('executable')];assert len(matches)==1\n shutil.copy2(matches[0],binary)\n if label=='storage':\n  inventory=subprocess.check_output([str(binary),'--list'],text=True)\n  for test in ['sparse_repacking_preserves_readers_indexes_coverage_and_future_writes', 'sparse_repacking_interruption_keeps_an_exact_catalog_generation', 'integer_codecs_round_trip_full_domain_and_reject_truncation', 'log_rows_reject_inconsistent_data_lengths', 'table_records_bound_decoding_and_round_trip_both_codecs', 'valid_checksums_cannot_bypass_table_record_bounds', 'raw_projection_keeps_its_prefix_across_append_and_retirement','interrupted_block_profile_rewrite_preserves_the_published_generation','interrupted_full_profile_rewrite_preserves_the_published_generation','rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality']:\n   assert test in inventory,test\n  assert hashlib.sha256(binary.read_bytes()).hexdigest()!='2f1d4c9414a5565611cc4c102e5db9dbe22681e67def5207dd1630662a886dd7'\n record={'kind':'build','name':label,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'command':command,'elapsed_seconds':time.monotonic()-start};records.append(record)\n (root/'logex-bundled-repack-read-order-build.jsonl').write_text(''.join(json.dumps(r)+'\\n'for r in records));print(record,flush=True)\n\nfor path,digest in source_hashes.items(): assert hashlib.sha256(Path(path).read_bytes()).hexdigest()==digest,path\n"
+    },
+    {
+      "kind": "build",
+      "name": "storage",
+      "binary_sha256": "eab167c9920b0f44b825dd7f4555b5840cecc16f4eb74d7b3a0ed974942b0828",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--release",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "elapsed_seconds": 10.341882124892436
+    },
+    {
+      "kind": "build",
+      "name": "publication",
+      "binary_sha256": "f6c37f8c1be6d0ad0fb616c1ccd152a678b3301a17535dbc62ca2f58ab028bb6",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--release",
+        "--test",
+        "ingestion_publication",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "elapsed_seconds": 0.27097016701009125
+    },
+    {
+      "kind": "build",
+      "name": "query",
+      "binary_sha256": "2f63479be7b078cd7abc76fd8967881300df2e2b8493652940fe0dd58512fc70",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--release",
+        "--test",
+        "audit_harness",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "elapsed_seconds": 25.46430891705677
+    }
+  ]
+}
