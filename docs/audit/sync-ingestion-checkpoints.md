@@ -486,3 +486,58 @@ manifest/catalog phases, repeated rewind/retry, exact page/row results and spars
 multi-batch workloads. Existing readers support explicit per-page row counts;
 no page-boundary assumption or reduction in integrity checks may be introduced.
 Full format/checksum and snapshot-lifetime review remain required audit work.
+
+
+## Compressed historical staging candidate
+
+Historical staging now uses the existing compressed encoders directly, appending
+pages to the active historical segment. The dense threshold, target row count
+and block-span limit are unchanged. Previously committed payload bytes and page
+index entries are immutable; indexes, nullable bitmaps and canonical bits are
+published through the existing replacement batch before the manifest. The catalog
+remains the durable row/progress boundary. Startup validates that complete prefix,
+rewinds unpublished tails, and preserves healthy compressed segments. WAL replay
+uses the catalog's active segment, replacing the old inference that compression
+implies finalization. Background query indexing already excludes this segment.
+
+The [publication regression](baselines/2026-09-11-page-append-publication-before.log)
+initially exposed five rows through a reader holding a two-row manifest. Readers
+now validate and clip page indexes to their captured row boundary; selected reads
+also enforce that boundary. Page payload reads check actual file bounds before
+allocation and checked arithmetic prevents offset wrap. Tests preserve prior
+noncanonical bits and exact payload/index prefixes, keep sixteen medium batches
+in one segment, reject twelve malformed metadata/prefix cases without mutation,
+and simulate seven append/publication crash states with repeated reopen and retry.
+Main-thread failure matrices now include both small appends and rotation. Raw
+layout assumptions in old fixtures were updated without dropping row/recovery
+assertions. Full current workspace/platform validation is still required.
+
+The [original comparison](baselines/2026-09-11-page-append-original-comparison.jsonl)
+uses fixture v3, five alternating pairs with three iterations for short/large
+workloads, and three pairs for sustained history. Finalization and checkpoint
+costs are included, and all exact row/progress/reopen oracles pass:
+
+| Workload | Original median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live, 128 blocks × 128 rows | 2,849.237 ms | 548.022 ms | -80.77% |
+| Short history, one 128-block chunk | 14.237 ms | 12.989 ms | -8.77% |
+| Sustained history, sixteen 128-block chunks | 273.934 ms | 123.813 ms | -54.80% |
+| Large history, 512 blocks × 1,024 rows | 60.787 ms | 67.158 ms | +10.48% |
+
+The [sparse comparison](baselines/2026-09-11-page-append-sparse-comparison.jsonl)
+uses three alternating pairs with three iterations and one row per nonempty block:
+
+| Workload | Original median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| 128 blocks, one chunk | 6.247 ms | 11.097 ms | +77.63% |
+| 2,048 blocks, sixteen 128-block chunks | 46.703 ms | 69.125 ms | +48.01% |
+| 8,192 blocks, four 2,048-block chunks | 19.388 ms | 26.909 ms | +38.79% |
+
+Every sixteenth block is empty. These are local APFS storage-call measurements,
+not network sync throughput. Binary hashes, captured source diff, hardware,
+toolchain, cache conditions, samples, p95 and process peak RSS are in the artifacts.
+The original historical path omitted fsync; that does not waive the user's 10%
+limit. **The candidate still fails acceptance and PR #130 must not merge.**
+Profile the fixed small-file publication cost before selecting another change;
+large encoding allocations and page/index growth also need measurement. Broader
+format checksums, query snapshot lifetime and repair remain unfinished audit work.

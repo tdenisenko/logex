@@ -218,7 +218,7 @@ impl SegmentReader {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor)?;
+        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
             Some(ids) => {
@@ -264,7 +264,7 @@ impl SegmentReader {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor)?;
+        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
             Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
@@ -291,7 +291,7 @@ impl SegmentReader {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor)?;
+        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
             Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
@@ -318,7 +318,7 @@ impl SegmentReader {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor)?;
+        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
             Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
@@ -349,7 +349,7 @@ impl SegmentReader {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor)?;
+        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
             Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
@@ -385,6 +385,7 @@ impl SegmentReader {
     fn read_compacted_page_index(
         &self,
         descriptor: &ColumnDescriptor,
+        row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<PageIndexEntry>> {
         let path = descriptor.page_index_path.as_ref().ok_or_else(|| {
             io::Error::new(
@@ -393,13 +394,66 @@ impl SegmentReader {
             )
         })?;
         let data = fs::read(self.dir.join(path))?;
-        read_page_index(&data)
+        let mut entries = read_page_index(&data)?;
+        let visible_rows = self.read_row_count()?;
+        let required_rows = row_ids
+            .and_then(|ids| ids.iter().max())
+            .map_or(visible_rows, |&last| u64::from(last) + 1);
+        if required_rows > visible_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "row exceeds manifest boundary",
+            ));
+        }
+        let mut rows = 0u64;
+        let mut offset = 0u64;
+        let mut visible_entries = 0;
+        for entry in &entries {
+            if rows >= required_rows {
+                break;
+            }
+            if entry.first_row != rows
+                || entry.offset != offset
+                || entry.row_count == 0
+                || entry.row_count > descriptor.page_rows
+                || entry.encoded_len == 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "page index does not describe a contiguous manifest prefix",
+                ));
+            }
+            rows = rows
+                .checked_add(u64::from(entry.row_count))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "page row range overflow")
+                })?;
+            offset = offset
+                .checked_add(u64::from(entry.encoded_len))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "page byte range overflow")
+                })?;
+            visible_entries += 1;
+        }
+        if rows < required_rows || rows > visible_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "page index does not cover the exact manifest row boundary",
+            ));
+        }
+        // An append can replace its index before publishing a new manifest.
+        // Existing readers retain their captured row boundary and page prefix.
+        entries.truncate(visible_entries);
+        Ok(entries)
     }
 
     fn slice_page<'a>(&self, data: &'a [u8], entry: &PageIndexEntry) -> io::Result<&'a [u8]> {
-        let start = entry.offset as usize;
-        let end = start + entry.encoded_len as usize;
-        data.get(start..end).ok_or_else(|| {
+        let bounds = usize::try_from(entry.offset).ok().and_then(|start| {
+            start
+                .checked_add(entry.encoded_len as usize)
+                .map(|end| start..end)
+        });
+        bounds.and_then(|range| data.get(range)).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "compacted page is out of bounds",
@@ -413,6 +467,17 @@ impl SegmentReader {
         entry: &PageIndexEntry,
     ) -> io::Result<Vec<u8>> {
         let mut file = File::open(self.dir.join(&descriptor.data_path))?;
+        let file_len = file.metadata()?.len();
+        if entry
+            .offset
+            .checked_add(u64::from(entry.encoded_len))
+            .is_none_or(|end| end > file_len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted page is out of bounds",
+            ));
+        }
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut payload = vec![0u8; entry.encoded_len as usize];
         file.read_exact(&mut payload)?;

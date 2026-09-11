@@ -12,7 +12,7 @@ use logex_types::LogRow;
 use crate::column::{ColumnFile, ColumnFileHeader, NullBitmap};
 use crate::page::{
     PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
-    encode_var_bytes_page, write_page_index,
+    encode_var_bytes_page, read_page_index, write_page_index,
 };
 use crate::reader::{ColumnReader, RawBytesColumn, RawFixedColumn};
 use crate::segment_reader::SegmentReader;
@@ -49,6 +49,235 @@ const RAW_BITMAP_COLUMNS: &[&str] = &[
     "canonical.bitmap",
 ];
 
+/// Existing page payloads and index entries form an immutable append prefix.
+/// Only the small indexes and bitmaps are replaced before manifest publication.
+struct PageOutput<'a> {
+    dir: &'a Path,
+    existing_rows: u64,
+    previous: std::collections::BTreeMap<String, ExistingPages>,
+    canonical: Option<NullBitmap>,
+    replacements: Option<durability::ReplacementBatch>,
+}
+
+struct ExistingPages {
+    column: ColumnDescriptor,
+    entries: Vec<PageIndexEntry>,
+    encoded_bytes: u64,
+    nulls: Option<NullBitmap>,
+}
+
+impl<'a> PageOutput<'a> {
+    fn new(dir: &'a Path) -> Self {
+        Self {
+            dir,
+            existing_rows: 0,
+            previous: Default::default(),
+            canonical: None,
+            replacements: None,
+        }
+    }
+
+    fn append(
+        dir: &'a Path,
+        manifest: &SegmentManifest,
+        row_count: usize,
+        publication: Publication,
+    ) -> std::io::Result<Self> {
+        manifest
+            .row_count
+            .checked_add(row_count as u64)
+            .filter(|&rows| rows <= u64::from(u32::MAX))
+            .ok_or_else(|| std::io::Error::other("row count exceeds segment addressing"))?;
+        let (mut output, tail) = Self::inspect(dir, manifest)?;
+        if tail {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "compacted segment has an unpublished tail; reopen before appending",
+            ));
+        }
+        output.replacements = Some(durability::ReplacementBatch::new(publication));
+        Ok(output)
+    }
+
+    /// Inspect the complete committed prefix without interpreting appended
+    /// pages as committed data. A malformed or missing prefix is never repairable
+    /// merely by truncation; preserve it for verified recovery instead.
+    fn inspect(dir: &'a Path, manifest: &SegmentManifest) -> std::io::Result<(Self, bool)> {
+        let invalid = |reason: &str| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot append compacted segment {}: {reason}",
+                    manifest.segment_id
+                ),
+            )
+        };
+        if manifest.format_version != super::catalog::STORAGE_FORMAT_VERSION
+            || manifest.kind != SegmentKind::Sealed
+            || manifest.canonical_rows_path != "canonical.bitmap"
+            || !columns_match_current_profile(&manifest.columns)
+        {
+            return Err(invalid("columns do not use the current compaction profile"));
+        }
+        let mut previous = std::collections::BTreeMap::new();
+        let mut tail = false;
+        for column in &manifest.columns {
+            // Persisted paths must select only known column artifacts inside
+            // this segment. Do not turn malformed metadata into arbitrary writes.
+            let suffix = format!("/{}.pages", column.name);
+            let base = column
+                .data_path
+                .strip_suffix(&suffix)
+                .filter(|base| {
+                    matches!(*base, "columns" | "columns_profile_v2")
+                        || (*base == "columns_block_number_v2" && column.name == "block_number")
+                })
+                .ok_or_else(|| invalid("invalid column data path"))?;
+            let index = format!("{base}/{}.pages.idx", column.name);
+            let is_topic = matches!(
+                column.name.as_str(),
+                "topic0" | "topic1" | "topic2" | "topic3"
+            );
+            let null_path = is_topic.then(|| format!("{base}/{}.null", column.name));
+            if column.page_rows != DEFAULT_PAGE_ROWS
+                || column.page_index_path.as_deref() != Some(index.as_str())
+                || column.null_bitmap_path != null_path
+            {
+                return Err(invalid("invalid column index/bitmap descriptor"));
+            }
+            let mut entries = read_page_index(&fs::read(dir.join(&index))?)?;
+            let mut rows = 0u64;
+            let mut offset = 0u64;
+            let mut prefix_entries = 0;
+            for entry in &entries {
+                if rows == manifest.row_count {
+                    break;
+                }
+                if entry.first_row != rows
+                    || entry.offset != offset
+                    || entry.row_count == 0
+                    || entry.row_count > DEFAULT_PAGE_ROWS
+                    || entry.encoded_len == 0
+                {
+                    return Err(invalid("page index does not describe a contiguous prefix"));
+                }
+                rows = rows
+                    .checked_add(u64::from(entry.row_count))
+                    .ok_or_else(|| invalid("page row overflow"))?;
+                offset = offset
+                    .checked_add(u64::from(entry.encoded_len))
+                    .ok_or_else(|| invalid("page offset overflow"))?;
+                prefix_entries += 1;
+            }
+            let file_len = fs::metadata(dir.join(&column.data_path))?.len();
+            if rows != manifest.row_count || file_len < offset {
+                return Err(invalid("page prefix length does not match the manifest"));
+            }
+            tail |= prefix_entries != entries.len() || file_len != offset;
+            entries.truncate(prefix_entries);
+            let nulls = null_path
+                .map(|path| read_bitmap_prefix(&dir.join(path), manifest.row_count))
+                .transpose()?;
+            tail |= nulls.as_ref().is_some_and(|bitmap| bitmap.len() != rows);
+            previous.insert(
+                column.name.clone(),
+                ExistingPages {
+                    column: column.clone(),
+                    entries,
+                    encoded_bytes: offset,
+                    nulls,
+                },
+            );
+        }
+        let canonical = read_bitmap_prefix(&dir.join("canonical.bitmap"), manifest.row_count)?;
+        tail |= canonical.len() != manifest.row_count;
+        Ok((
+            Self {
+                dir,
+                existing_rows: manifest.row_count,
+                previous,
+                canonical: Some(canonical),
+                replacements: None,
+            },
+            tail,
+        ))
+    }
+
+    fn metadata(
+        &self,
+        path: &Path,
+        write: impl FnOnce(&mut BufWriter<File>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if let Some(replacements) = &self.replacements {
+            replacements.write(path, write)
+        } else {
+            let mut writer = BufWriter::new(File::create(path)?);
+            write(&mut writer)?;
+            writer.flush()
+        }
+    }
+
+    fn previous_nulls(&self, name: &str) -> std::io::Result<NullBitmap> {
+        self.previous
+            .get(name)
+            .map(|previous| {
+                previous.nulls.clone().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "nullable column is missing its bitmap",
+                    )
+                })
+            })
+            .unwrap_or_else(|| Ok(NullBitmap::new()))
+    }
+
+    fn append_canonical(&self, count: usize) -> std::io::Result<()> {
+        let mut bitmap = self
+            .canonical
+            .clone()
+            .ok_or_else(|| std::io::Error::other("missing canonical append prefix"))?;
+        for _ in 0..count {
+            bitmap.push(true);
+        }
+        self.metadata(&self.dir.join("canonical.bitmap"), |writer| {
+            bitmap.write_to(writer)
+        })
+    }
+
+    fn finish(self) -> std::io::Result<()> {
+        self.replacements
+            .map(durability::ReplacementBatch::publish)
+            .unwrap_or(Ok(()))
+    }
+}
+
+fn read_bitmap_prefix(path: &Path, rows: u64) -> std::io::Result<NullBitmap> {
+    let bytes = fs::read(path)?;
+    let bitmap = NullBitmap::read_from(&bytes).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid bitmap {}", path.display()),
+        )
+    })?;
+    if bitmap.len() < rows || bytes.len() as u64 != 8 + bitmap.len().div_ceil(8) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "bitmap {} does not match the committed row count",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bitmap)
+}
+
+pub(crate) fn compacted_segment_has_uncommitted_tail(
+    dir: &Path,
+    manifest: &SegmentManifest,
+) -> std::io::Result<bool> {
+    PageOutput::inspect(dir, manifest).map(|(_, tail)| tail)
+}
+
 #[cfg(test)]
 pub(crate) fn append_rows(
     segment_dir: &Path,
@@ -79,12 +308,44 @@ pub(crate) fn write_compacted_rows(
     fs::create_dir_all(segment_dir.join("columns"))?;
     ColumnFile::write_canonical_bitmap(segment_dir, rows.len() as u64)?;
 
+    let output = PageOutput::new(segment_dir);
+    let columns = write_compacted_values(&output, rows)?;
+    output.finish()?;
+    Ok(columns)
+}
+
+pub(crate) fn append_compacted_rows(
+    segment_dir: &Path,
+    existing_rows: u64,
+    rows: &[LogRow],
+    publication: Publication,
+) -> std::io::Result<Vec<ColumnDescriptor>> {
+    let manifest: SegmentManifest =
+        serde_json::from_slice(&fs::read(segment_dir.join("segment.json"))?)
+            .map_err(std::io::Error::other)?;
+    if manifest.row_count != existing_rows {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "historical append manifest changed",
+        ));
+    }
+    let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication)?;
+    output.append_canonical(rows.len())?;
+    let columns = write_compacted_values(&output, rows)?;
+    output.finish()?;
+    Ok(columns)
+}
+
+fn write_compacted_values(
+    output: &PageOutput<'_>,
+    rows: &[LogRow],
+) -> std::io::Result<Vec<ColumnDescriptor>> {
     thread::scope(|scope| {
         let address =
-            scope.spawn(|| compact_address_values(segment_dir, rows.iter().map(|row| row.address)));
+            scope.spawn(|| compact_address_values(output, rows.iter().map(|row| row.address)));
         let block_number = scope.spawn(|| {
             compact_u64_values(
-                segment_dir,
+                output,
                 "block_number",
                 CompressionCodec::DeltaZigZag,
                 rows.iter().map(|row| row.block_number),
@@ -92,7 +353,7 @@ pub(crate) fn write_compacted_rows(
         });
         let block_hash = scope.spawn(|| {
             compact_b256_values(
-                segment_dir,
+                output,
                 "block_hash",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.block_hash),
@@ -100,7 +361,7 @@ pub(crate) fn write_compacted_rows(
         });
         let timestamp = scope.spawn(|| {
             compact_u64_values(
-                segment_dir,
+                output,
                 "timestamp",
                 CompressionCodec::DeltaOfDelta,
                 rows.iter().map(|row| row.timestamp),
@@ -108,7 +369,7 @@ pub(crate) fn write_compacted_rows(
         });
         let tx_hash = scope.spawn(|| {
             compact_b256_values(
-                segment_dir,
+                output,
                 "tx_hash",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.tx_hash),
@@ -116,7 +377,7 @@ pub(crate) fn write_compacted_rows(
         });
         let tx_index = scope.spawn(|| {
             compact_u32_values(
-                segment_dir,
+                output,
                 "tx_index",
                 CompressionCodec::Zstd,
                 rows.iter().map(|row| row.tx_index),
@@ -124,7 +385,7 @@ pub(crate) fn write_compacted_rows(
         });
         let log_index = scope.spawn(|| {
             compact_u32_values(
-                segment_dir,
+                output,
                 "log_index",
                 CompressionCodec::Zstd,
                 rows.iter().map(|row| row.log_index),
@@ -132,7 +393,7 @@ pub(crate) fn write_compacted_rows(
         });
         let data_len = scope.spawn(|| {
             compact_u32_values(
-                segment_dir,
+                output,
                 "data_len",
                 CompressionCodec::Zstd,
                 rows.iter().map(|row| row.data_len),
@@ -140,7 +401,7 @@ pub(crate) fn write_compacted_rows(
         });
         let source = scope.spawn(|| {
             compact_u8_values(
-                segment_dir,
+                output,
                 "source",
                 CompressionCodec::Dictionary,
                 rows.iter().map(|row| row.source as u8),
@@ -148,7 +409,7 @@ pub(crate) fn write_compacted_rows(
         });
         let topic0 = scope.spawn(|| {
             compact_nullable_b256_values(
-                segment_dir,
+                output,
                 "topic0",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.topic0),
@@ -156,7 +417,7 @@ pub(crate) fn write_compacted_rows(
         });
         let topic1 = scope.spawn(|| {
             compact_nullable_b256_values(
-                segment_dir,
+                output,
                 "topic1",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.topic1),
@@ -164,7 +425,7 @@ pub(crate) fn write_compacted_rows(
         });
         let topic2 = scope.spawn(|| {
             compact_nullable_b256_values(
-                segment_dir,
+                output,
                 "topic2",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.topic2),
@@ -172,13 +433,13 @@ pub(crate) fn write_compacted_rows(
         });
         let topic3 = scope.spawn(|| {
             compact_nullable_b256_values(
-                segment_dir,
+                output,
                 "topic3",
                 CompressionCodec::AdaptiveFixed,
                 rows.iter().map(|row| row.topic3),
             )
         });
-        let data = scope.spawn(|| compact_data_values(segment_dir, rows));
+        let data = scope.spawn(|| compact_data_values(output, rows));
 
         Ok(vec![
             join_column_worker(address)?,
@@ -381,42 +642,38 @@ pub(crate) fn compact_ingest_segment(
     fs::create_dir_all(segment_dir.join("columns"))?;
     verify_raw_segment_files_complete(descriptor, &segment_dir)?;
 
+    let output = PageOutput::new(&segment_dir);
     let columns = thread::scope(|scope| {
-        let address = scope.spawn(|| compact_address_column(&segment_dir));
-        let block_number = scope.spawn(|| {
-            compact_u64_column(&segment_dir, "block_number", CompressionCodec::DeltaZigZag)
-        });
-        let block_hash = scope.spawn(|| {
-            compact_b256_column(&segment_dir, "block_hash", CompressionCodec::AdaptiveFixed)
-        });
-        let timestamp = scope.spawn(|| {
-            compact_u64_column(&segment_dir, "timestamp", CompressionCodec::DeltaOfDelta)
-        });
-        let tx_hash = scope.spawn(|| {
-            compact_b256_column(&segment_dir, "tx_hash", CompressionCodec::AdaptiveFixed)
-        });
+        let address = scope.spawn(|| compact_address_column(&output));
+        let block_number = scope
+            .spawn(|| compact_u64_column(&output, "block_number", CompressionCodec::DeltaZigZag));
+        let block_hash = scope
+            .spawn(|| compact_b256_column(&output, "block_hash", CompressionCodec::AdaptiveFixed));
+        let timestamp = scope
+            .spawn(|| compact_u64_column(&output, "timestamp", CompressionCodec::DeltaOfDelta));
+        let tx_hash = scope
+            .spawn(|| compact_b256_column(&output, "tx_hash", CompressionCodec::AdaptiveFixed));
         let tx_index =
-            scope.spawn(|| compact_u32_column(&segment_dir, "tx_index", CompressionCodec::Zstd));
+            scope.spawn(|| compact_u32_column(&output, "tx_index", CompressionCodec::Zstd));
         let log_index =
-            scope.spawn(|| compact_u32_column(&segment_dir, "log_index", CompressionCodec::Zstd));
+            scope.spawn(|| compact_u32_column(&output, "log_index", CompressionCodec::Zstd));
         let data_len =
-            scope.spawn(|| compact_u32_column(&segment_dir, "data_len", CompressionCodec::Zstd));
+            scope.spawn(|| compact_u32_column(&output, "data_len", CompressionCodec::Zstd));
         let source =
-            scope.spawn(|| compact_u8_column(&segment_dir, "source", CompressionCodec::Dictionary));
+            scope.spawn(|| compact_u8_column(&output, "source", CompressionCodec::Dictionary));
         let topic0 = scope.spawn(|| {
-            compact_nullable_b256_column(&segment_dir, "topic0", CompressionCodec::AdaptiveFixed)
+            compact_nullable_b256_column(&output, "topic0", CompressionCodec::AdaptiveFixed)
         });
         let topic1 = scope.spawn(|| {
-            compact_nullable_b256_column(&segment_dir, "topic1", CompressionCodec::AdaptiveFixed)
+            compact_nullable_b256_column(&output, "topic1", CompressionCodec::AdaptiveFixed)
         });
         let topic2 = scope.spawn(|| {
-            compact_nullable_b256_column(&segment_dir, "topic2", CompressionCodec::AdaptiveFixed)
+            compact_nullable_b256_column(&output, "topic2", CompressionCodec::AdaptiveFixed)
         });
         let topic3 = scope.spawn(|| {
-            compact_nullable_b256_column(&segment_dir, "topic3", CompressionCodec::AdaptiveFixed)
+            compact_nullable_b256_column(&output, "topic3", CompressionCodec::AdaptiveFixed)
         });
-        let data =
-            scope.spawn(|| compact_data_column(&segment_dir, CompressionCodec::AdaptiveBytes));
+        let data = scope.spawn(|| compact_data_column(&output, CompressionCodec::AdaptiveBytes));
         Ok::<_, std::io::Error>(vec![
             join_column_worker(address)?,
             join_column_worker(block_number)?,
@@ -434,6 +691,8 @@ pub(crate) fn compact_ingest_segment(
             join_column_worker(data)?,
         ])
     })?;
+
+    output.finish()?;
 
     persist_ingest_manifest_with_columns(paths, descriptor, columns, publication)?;
     remove_raw_hot_files(&segment_dir)?;
@@ -505,12 +764,14 @@ fn recompact_block_number_profile(
     fs::create_dir_all(tmp_dir.join("columns"))?;
 
     let values = SegmentReader::open(&segment_dir)?.read_u64("block_number", None)?;
+    let output = PageOutput::new(&tmp_dir);
     let mut block_number_column = compact_u64_values(
-        &tmp_dir,
+        &output,
         "block_number",
         CompressionCodec::DeltaZigZag,
         values,
     )?;
+    output.finish()?;
     let target_dir_name = "columns_block_number_v2";
     let target_dir = segment_dir.join(target_dir_name);
     if target_dir.exists() {
@@ -671,24 +932,24 @@ fn nullable_column(base_name: &str) -> ColumnDescriptor {
     }
 }
 
-fn compact_address_column(segment_dir: &Path) -> std::io::Result<ColumnDescriptor> {
-    compact_fixed_column::<20>(segment_dir, "address", CompressionCodec::AdaptiveFixed)
+fn compact_address_column(output: &PageOutput<'_>) -> std::io::Result<ColumnDescriptor> {
+    compact_fixed_column::<20>(output, "address", CompressionCodec::AdaptiveFixed)
 }
 
 fn compact_fixed_column<const WIDTH: usize>(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let column = RawFixedColumn::<WIDTH>::open(&segment_dir.join(format!("{name}.col")))?;
+    let column = RawFixedColumn::<WIDTH>::open(&output.dir.join(format!("{name}.col")))?;
     let values = column.values();
-    write_encoded_pages(segment_dir, name, codec, values.len(), |range| {
+    write_encoded_pages(output, name, codec, values.len(), |range| {
         encode_fixed_width_page(values[range].as_flattened(), WIDTH, codec)
     })
 }
 
 fn compact_address_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     values: impl IntoIterator<Item = Address>,
 ) -> std::io::Result<ColumnDescriptor> {
     let values: Vec<_> = values.into_iter().collect();
@@ -697,7 +958,7 @@ fn compact_address_values(
         raw.extend_from_slice(value.as_slice());
     }
     write_encoded_pages(
-        segment_dir,
+        output,
         "address",
         CompressionCodec::AdaptiveFixed,
         raw.len() / 20,
@@ -712,7 +973,7 @@ fn compact_address_values(
 }
 
 fn compact_b256_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: impl IntoIterator<Item = B256>,
@@ -722,26 +983,26 @@ fn compact_b256_values(
     for value in values {
         raw.extend_from_slice(value.as_slice());
     }
-    write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
+    write_encoded_pages(output, name, codec, raw.len() / 32, |range| {
         encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
     })
 }
 
 fn compact_b256_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    compact_fixed_column::<32>(segment_dir, name, codec)
+    compact_fixed_column::<32>(output, name, codec)
 }
 
 fn compact_nullable_b256_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let mut column = RawFixedColumn::<32>::open(&segment_dir.join(format!("{name}.col")))?;
-    let nulls = column.read_nulls(&segment_dir.join(format!("{name}.null")))?;
+    let mut column = RawFixedColumn::<32>::open(&output.dir.join(format!("{name}.col")))?;
+    let nulls = column.read_nulls(&output.dir.join(format!("{name}.null")))?;
     // Match the typed encoder's canonical zero slots for absent values, even
     // if an input file contains nonzero bytes under an unset presence bit.
     for (row, value) in column.values_mut().iter_mut().enumerate() {
@@ -750,21 +1011,21 @@ fn compact_nullable_b256_column(
         }
     }
     let values = column.values();
-    let descriptor = write_encoded_pages(segment_dir, name, codec, values.len(), |range| {
+    let descriptor = write_encoded_pages(output, name, codec, values.len(), |range| {
         encode_fixed_width_page(values[range].as_flattened(), 32, codec)
     })?;
-    write_compacted_nulls(segment_dir, descriptor, &nulls)
+    write_compacted_nulls(output, descriptor, &nulls)
 }
 
 fn compact_nullable_b256_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: impl IntoIterator<Item = Option<B256>>,
 ) -> std::io::Result<ColumnDescriptor> {
     let values: Vec<_> = values.into_iter().collect();
     let mut raw = Vec::with_capacity(values.len() * 32);
-    let mut nulls = NullBitmap::new();
+    let mut nulls = output.previous_nulls(name)?;
     for value in values {
         match value {
             Some(value) => {
@@ -778,96 +1039,97 @@ fn compact_nullable_b256_values(
         }
     }
 
-    let descriptor = write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
+    let descriptor = write_encoded_pages(output, name, codec, raw.len() / 32, |range| {
         encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
     })?;
-    write_compacted_nulls(segment_dir, descriptor, &nulls)
+    write_compacted_nulls(output, descriptor, &nulls)
 }
 
 fn write_compacted_nulls(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     mut descriptor: ColumnDescriptor,
     nulls: &NullBitmap,
 ) -> std::io::Result<ColumnDescriptor> {
-    let null_rel = format!("columns/{}.null", descriptor.name);
-    let null_file = File::create(segment_dir.join(&null_rel))?;
-    let mut null_writer = BufWriter::new(null_file);
-    nulls.write_to(&mut null_writer)?;
-    null_writer.flush()?;
+    let null_rel = output
+        .previous
+        .get(&descriptor.name)
+        .and_then(|previous| previous.column.null_bitmap_path.clone())
+        .unwrap_or_else(|| format!("columns/{}.null", descriptor.name));
+    output.metadata(&output.dir.join(&null_rel), |writer| nulls.write_to(writer))?;
     descriptor.null_bitmap_path = Some(null_rel);
     Ok(descriptor)
 }
 
 fn compact_u64_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_u64(segment_dir, &format!("{name}.col"), None)?;
-    compact_u64_values(segment_dir, name, codec, values)
+    let values = ColumnReader::read_u64(output.dir, &format!("{name}.col"), None)?;
+    compact_u64_values(output, name, codec, values)
 }
 
 fn compact_u64_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: impl IntoIterator<Item = u64>,
 ) -> std::io::Result<ColumnDescriptor> {
     let values: Vec<_> = values.into_iter().collect();
-    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+    write_typed_pages(output, name, codec, &values, |slice| {
         encode_u64_page(slice, codec)
     })
 }
 
 fn compact_u32_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_u32(segment_dir, &format!("{name}.col"), None)?;
-    compact_u32_values(segment_dir, name, codec, values)
+    let values = ColumnReader::read_u32(output.dir, &format!("{name}.col"), None)?;
+    compact_u32_values(output, name, codec, values)
 }
 
 fn compact_u32_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: impl IntoIterator<Item = u32>,
 ) -> std::io::Result<ColumnDescriptor> {
     let values: Vec<_> = values.into_iter().collect();
-    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+    write_typed_pages(output, name, codec, &values, |slice| {
         encode_u32_page(slice, codec)
     })
 }
 
 fn compact_u8_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_u8(segment_dir, &format!("{name}.col"), None)?;
-    compact_u8_values(segment_dir, name, codec, values)
+    let values = ColumnReader::read_u8(output.dir, &format!("{name}.col"), None)?;
+    compact_u8_values(output, name, codec, values)
 }
 
 fn compact_u8_values(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: impl IntoIterator<Item = u8>,
 ) -> std::io::Result<ColumnDescriptor> {
     let values: Vec<_> = values.into_iter().collect();
-    write_typed_pages(segment_dir, name, codec, &values, |slice| {
+    write_typed_pages(output, name, codec, &values, |slice| {
         encode_u8_page(slice, codec)
     })
 }
 
 fn compact_data_column(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let column = RawBytesColumn::open(&segment_dir.join("data.col"))?;
+    let column = RawBytesColumn::open(&output.dir.join("data.col"))?;
     let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
-    write_encoded_pages(segment_dir, "data", codec, column.row_count(), |range| {
+    write_encoded_pages(output, "data", codec, column.row_count(), |range| {
         values.clear();
         for row in range {
             values.push(column.row(row)?);
@@ -876,12 +1138,15 @@ fn compact_data_column(
     })
 }
 
-fn compact_data_values(segment_dir: &Path, rows: &[LogRow]) -> std::io::Result<ColumnDescriptor> {
+fn compact_data_values(
+    output: &PageOutput<'_>,
+    rows: &[LogRow],
+) -> std::io::Result<ColumnDescriptor> {
     // Borrow payloads for one page instead of cloning the entire column before
     // compression. This bounds temporary references and avoids Bytes refcounts.
     let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
     write_typed_pages(
-        segment_dir,
+        output,
         "data",
         CompressionCodec::AdaptiveBytes,
         rows,
@@ -918,7 +1183,7 @@ fn rewrite_column_path(path: &str, dir_name: &str) -> String {
 }
 
 fn write_encoded_pages<F>(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     row_count: usize,
@@ -928,7 +1193,7 @@ where
     F: FnMut(Range<usize>) -> std::io::Result<Vec<u8>>,
 {
     let (data_path, index_path, page_rows) =
-        write_pages(segment_dir, name, row_count, &mut encode_page)?;
+        write_pages(output, name, row_count, &mut encode_page)?;
     Ok(ColumnDescriptor {
         name: name.to_owned(),
         codec,
@@ -940,7 +1205,7 @@ where
 }
 
 fn write_typed_pages<'a, T, F>(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     codec: CompressionCodec,
     values: &'a [T],
@@ -949,10 +1214,9 @@ fn write_typed_pages<'a, T, F>(
 where
     F: FnMut(&'a [T]) -> std::io::Result<Vec<u8>>,
 {
-    let (data_path, index_path, page_rows) =
-        write_pages(segment_dir, name, values.len(), |range| {
-            encode_page(&values[range])
-        })?;
+    let (data_path, index_path, page_rows) = write_pages(output, name, values.len(), |range| {
+        encode_page(&values[range])
+    })?;
     Ok(ColumnDescriptor {
         name: name.to_owned(),
         codec,
@@ -964,7 +1228,7 @@ where
 }
 
 fn write_pages<F>(
-    segment_dir: &Path,
+    output: &PageOutput<'_>,
     name: &str,
     row_count: usize,
     mut encode_page: F,
@@ -973,31 +1237,59 @@ where
     F: FnMut(Range<usize>) -> std::io::Result<Vec<u8>>,
 {
     let page_rows = DEFAULT_PAGE_ROWS;
-    let data_rel = format!("columns/{name}.pages");
-    let index_rel = format!("columns/{name}.pages.idx");
-    let data_path = segment_dir.join(&data_rel);
-    let index_path = segment_dir.join(&index_rel);
-    let mut writer = BufWriter::new(File::create(&data_path)?);
-    let mut entries = Vec::new();
-    let mut offset = 0u64;
+    let previous = output.previous.get(name);
+    let data_rel = previous
+        .map(|p| p.column.data_path.clone())
+        .unwrap_or_else(|| format!("columns/{name}.pages"));
+    let index_rel = previous
+        .and_then(|p| p.column.page_index_path.clone())
+        .unwrap_or_else(|| format!("columns/{name}.pages.idx"));
+    let data_path = output.dir.join(&data_rel);
+    let index_path = output.dir.join(&index_rel);
+    let file = if previous.is_some() {
+        fs::OpenOptions::new().append(true).open(&data_path)?
+    } else {
+        File::create(&data_path)?
+    };
+    let mut writer = BufWriter::new(file);
+    let mut entries = previous.map(|p| p.entries.clone()).unwrap_or_default();
+    let mut offset = previous.map_or(0, |p| p.encoded_bytes);
 
     let mut start = 0usize;
     while start < row_count {
-        let end = (start + page_rows as usize).min(row_count);
+        let end = start.saturating_add(page_rows as usize).min(row_count);
         let encoded = encode_page(start..end)?;
+        let encoded_len = u32::try_from(encoded.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "encoded page exceeds page-index length",
+            )
+        })?;
+        let first_row = output
+            .existing_rows
+            .checked_add(start as u64)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "page row offset overflow")
+            })?;
+        let next_offset = offset.checked_add(u64::from(encoded_len)).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "page byte offset overflow",
+            )
+        })?;
         writer.write_all(&encoded)?;
         entries.push(PageIndexEntry {
-            first_row: start as u64,
+            first_row,
             row_count: (end - start) as u32,
             offset,
-            encoded_len: encoded.len() as u32,
+            encoded_len,
         });
-        offset += encoded.len() as u64;
+        offset = next_offset;
         start = end;
     }
     writer.flush()?;
-
-    fs::write(index_path, write_page_index(&entries))?;
+    let index = write_page_index(&entries);
+    output.metadata(&index_path, |writer| writer.write_all(&index))?;
     Ok((data_rel, index_rel, page_rows))
 }
 
@@ -1369,6 +1661,159 @@ mod tests {
     }
 
     #[test]
+    fn appended_pages_wait_for_manifest_publication() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        paths.ensure_base_dirs().unwrap();
+        let mut descriptor = SegmentDescriptor {
+            id: 7,
+            generation: 0,
+            kind: SegmentKind::Sealed,
+            relative_path: PathBuf::from("segments/s_0000000000000007"),
+            manifest_relative_path: PathBuf::from("segments/s_0000000000000007/segment.json"),
+            min_block: None,
+            max_block: None,
+            min_timestamp: None,
+            max_timestamp: None,
+            row_count: 0,
+        };
+        let dir = paths.segment_dir(descriptor.id);
+        let rows = &descending_rows()[..5];
+        let columns = write_compacted_rows(&dir, &rows[..2]).unwrap();
+        apply_rows_to_descriptor(&mut descriptor, &rows[..2]);
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns.clone()).unwrap();
+        let mut bits = NullBitmap::new();
+        bits.push(false);
+        bits.push(true);
+        ColumnFile::replace_canonical_bitmap(&dir, &bits).unwrap();
+        let snapshot = SegmentReader::open(&dir).unwrap();
+        let payloads: Vec<_> = columns
+            .iter()
+            .map(|column| fs::read(dir.join(&column.data_path)).unwrap())
+            .collect();
+        let indexes: Vec<_> = columns
+            .iter()
+            .map(|column| {
+                read_page_index(
+                    &fs::read(dir.join(column.page_index_path.as_ref().unwrap())).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let appended = append_compacted_rows(&dir, 2, &rows[2..], Publication::Ordered).unwrap();
+        for ((column, payload), index) in columns.iter().zip(payloads).zip(indexes) {
+            assert!(
+                fs::read(dir.join(&column.data_path))
+                    .unwrap()
+                    .starts_with(&payload)
+            );
+            let after = read_page_index(
+                &fs::read(dir.join(column.page_index_path.as_ref().unwrap())).unwrap(),
+            )
+            .unwrap();
+            assert!(after.starts_with(&index));
+        }
+        assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
+        assert!(snapshot.read_log_rows(Some(&[2])).is_err());
+        apply_rows_to_descriptor(&mut descriptor, &rows[2..]);
+        persist_segment_manifest_with_columns(&paths, &descriptor, appended).unwrap();
+        assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
+        let current = SegmentReader::open(&dir).unwrap();
+        assert_eq!(current.read_log_rows(None).unwrap(), rows);
+        let bits = current.read_canonical().unwrap();
+        assert!(!bits.is_present(0));
+        for row in 1..5 {
+            assert!(bits.is_present(row));
+        }
+    }
+
+    #[test]
+    fn compacted_append_rejects_bad_metadata_without_mutating_files() {
+        use crate::native::{NativeStorage, NativeStorageConfig};
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1_000,
+            ..Default::default()
+        })
+        .unwrap();
+        let rows = &descending_rows()[..5];
+        storage.write_historical_batch(&rows[..2]).unwrap();
+        storage.checkpoint().unwrap();
+        let dir = storage.segment_path(storage.active_historical_segment_id().unwrap());
+        let original: SegmentManifest =
+            serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
+        let paths: Vec<_> = original
+            .columns
+            .iter()
+            .flat_map(|c| {
+                [
+                    Some(c.data_path.clone()),
+                    c.page_index_path.clone(),
+                    c.null_bitmap_path.clone(),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .chain(["canonical.bitmap".to_owned()])
+            .collect();
+        let files: Vec<_> = paths
+            .iter()
+            .map(|p| fs::read(dir.join(p)).unwrap())
+            .collect();
+        for case in 0..12 {
+            let mut manifest = original.clone();
+            match case {
+                0 => manifest.format_version += 1,
+                1 => manifest.kind = SegmentKind::Hot,
+                2 => manifest.columns[0].data_path = "../address.pages".into(),
+                3 => manifest.columns[0].page_index_path = Some("../index".into()),
+                4 => manifest.canonical_rows_path = "../canonical.bitmap".into(),
+                5 => manifest.columns[0].page_rows = u32::MAX,
+                6 => manifest.columns[0].codec = CompressionCodec::None,
+                7 => manifest.columns[0] = manifest.columns[1].clone(),
+                8 => manifest.columns.last_mut().unwrap().null_bitmap_path = Some("../null".into()),
+                9 => {
+                    let path = dir.join(&original.columns[0].data_path);
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                }
+                10 => {
+                    let path = dir.join(original.columns[0].page_index_path.as_ref().unwrap());
+                    let mut entries = read_page_index(&fs::read(&path).unwrap()).unwrap();
+                    entries[0].row_count += 1;
+                    fs::write(path, write_page_index(&entries)).unwrap();
+                }
+                11 => fs::write(dir.join("canonical.bitmap"), [0u8; 8]).unwrap(),
+                _ => unreachable!(),
+            }
+            let json = serde_json::to_vec(&manifest).unwrap();
+            fs::write(dir.join("segment.json"), &json).unwrap();
+            let before: Vec<_> = paths
+                .iter()
+                .map(|p| fs::read(dir.join(p)).unwrap())
+                .collect();
+            assert!(
+                append_compacted_rows(&dir, 2, &rows[2..], Publication::Deferred).is_err(),
+                "case {case}"
+            );
+            assert_eq!(fs::read(dir.join("segment.json")).unwrap(), json);
+            for ((path, before), original) in paths.iter().zip(before).zip(&files) {
+                assert_eq!(
+                    fs::read(dir.join(path)).unwrap(),
+                    before,
+                    "case {case}: {path}"
+                );
+                fs::write(dir.join(path), original).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn borrowed_fixed_compaction_matches_typed_pages_across_page_boundary() {
         let tmp = TempDir::new().unwrap();
         let raw_dir = tmp.path().join("raw");
@@ -1402,14 +1847,22 @@ mod tests {
         fs::write(path, bytes).unwrap();
         for (actual, expected) in [
             (
-                compact_address_column(&raw_dir).unwrap(),
-                compact_address_values(&typed_dir, rows.iter().map(|r| r.address)).unwrap(),
+                compact_address_column(&PageOutput::new(&raw_dir)).unwrap(),
+                compact_address_values(
+                    &PageOutput::new(&typed_dir),
+                    rows.iter().map(|r| r.address),
+                )
+                .unwrap(),
             ),
             (
-                compact_b256_column(&raw_dir, "block_hash", CompressionCodec::AdaptiveFixed)
-                    .unwrap(),
+                compact_b256_column(
+                    &PageOutput::new(&raw_dir),
+                    "block_hash",
+                    CompressionCodec::AdaptiveFixed,
+                )
+                .unwrap(),
                 compact_b256_values(
-                    &typed_dir,
+                    &PageOutput::new(&typed_dir),
                     "block_hash",
                     CompressionCodec::AdaptiveFixed,
                     rows.iter().map(|r| r.block_hash),
@@ -1417,10 +1870,14 @@ mod tests {
                 .unwrap(),
             ),
             (
-                compact_nullable_b256_column(&raw_dir, "topic0", CompressionCodec::AdaptiveFixed)
-                    .unwrap(),
+                compact_nullable_b256_column(
+                    &PageOutput::new(&raw_dir),
+                    "topic0",
+                    CompressionCodec::AdaptiveFixed,
+                )
+                .unwrap(),
                 compact_nullable_b256_values(
-                    &typed_dir,
+                    &PageOutput::new(&typed_dir),
                     "topic0",
                     CompressionCodec::AdaptiveFixed,
                     rows.iter().map(|r| r.topic0),
@@ -1472,7 +1929,7 @@ mod tests {
         let rows = descending_rows();
         let mut columns = write_compacted_rows(&segment_dir, &rows).unwrap();
         let legacy_block_number = compact_u64_values(
-            &segment_dir,
+            &PageOutput::new(&segment_dir),
             "block_number",
             CompressionCodec::Delta,
             rows.iter().map(|row| row.block_number),
