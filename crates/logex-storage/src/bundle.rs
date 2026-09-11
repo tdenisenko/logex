@@ -19,6 +19,7 @@ const MAX_TABLE_BYTES: u32 = 4 * 1024 * 1024;
 const MAX_TABLE_DEPTH: u32 = 32;
 pub(crate) const MAX_ROWS: u64 = MAX_EXTENTS as u64 * 16_384;
 const INDEX_BYTES: usize = MAX_EXTENTS * crate::page::PAGE_INDEX_ENTRY_BYTES;
+const READ_AHEAD_BYTES: usize = 64 * 1024;
 
 fn inline_index(id: u8) -> bool {
     (14..28).contains(&id)
@@ -70,9 +71,63 @@ struct Stream {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BundleReader {
-    file: Arc<Mutex<File>>,
+    file: Arc<Mutex<ReadWindow>>,
     reference: BundleReference,
     streams: Arc<BTreeMap<u8, Stream>>,
+}
+
+#[derive(Debug)]
+struct ReadWindow {
+    file: File,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+impl ReadWindow {
+    fn read_extent(
+        &mut self,
+        extent: &Extent,
+        snapshot_end: u64,
+        read_ahead: bool,
+    ) -> io::Result<Vec<u8>> {
+        if !read_ahead {
+            // Preserve the direct path for large or physically isolated pages.
+            // Reading unrelated columns would add copying without saving I/O.
+            let mut bytes = buffer(extent.len as usize)?;
+            self.file.seek(SeekFrom::Start(extent.offset))?;
+            self.file.read_exact(&mut bytes)?;
+            if crc32fast::hash(&bytes) != extent.checksum {
+                return Err(invalid("bundle extent checksum mismatch"));
+            }
+            return Ok(bytes);
+        }
+        let end = extent.offset + u64::from(extent.len); // validated by decode_table
+        if extent.offset < self.offset || end > self.offset + self.bytes.len() as u64 {
+            // Small pages are interleaved with other columns and table records.
+            // Read a bounded physical window instead of seeking for every page
+            // header and payload. Large extents read exactly their own bytes.
+            let offset = extent.offset / READ_AHEAD_BYTES as u64 * READ_AHEAD_BYTES as u64;
+            let end = offset
+                .saturating_add(READ_AHEAD_BYTES as u64)
+                .max(end)
+                .min(snapshot_end);
+            let len = (end - offset) as usize;
+            // Invalidate before I/O: a short read must not expose a partly
+            // overwritten old cache on retry. Never read an unpublished suffix.
+            self.bytes.clear();
+            self.offset = offset;
+            let mut bytes = buffer(len)?;
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.read_exact(&mut bytes)?;
+            self.bytes = bytes;
+        }
+        let start = (extent.offset - self.offset) as usize;
+        let bytes = &self.bytes[start..start + extent.len as usize];
+        if crc32fast::hash(bytes) != extent.checksum {
+            return Err(invalid("bundle extent checksum mismatch"));
+        }
+        Ok(bytes.to_vec())
+    }
 }
 
 impl BundleReader {
@@ -160,7 +215,11 @@ impl BundleReader {
             }
         }
         Ok(Self {
-            file: Arc::new(Mutex::new(file)),
+            file: Arc::new(Mutex::new(ReadWindow {
+                file,
+                offset: 0,
+                bytes: Vec::new(),
+            })),
             reference: reference.clone(),
             streams: Arc::new(streams),
         })
@@ -182,12 +241,12 @@ impl BundleReader {
         }
         let mut output = buffer(len)?;
         let mut logical = 0;
-        for extent in &stream.extents {
+        for (index, extent) in stream.extents.iter().enumerate() {
             let next = logical + u64::from(extent.len); // validated by decode_table
             let start = range.start.max(logical);
             let end = range.end.min(next);
             if start < end {
-                let bytes = self.read_extent(extent)?;
+                let bytes = self.read_extent(&stream.extents, index)?;
                 let destination = (start - range.start) as usize;
                 let local = (start - logical) as usize;
                 let count = (end - start) as usize;
@@ -203,9 +262,16 @@ impl BundleReader {
     }
 
     pub(crate) fn verify_all(&self) -> io::Result<()> {
+        // An explicit integrity check must inspect the backing file again,
+        // even if a previous query cached valid bytes from this snapshot.
+        self.file
+            .lock()
+            .map_err(|_| invalid("bundle reader lock poisoned"))?
+            .bytes
+            .clear();
         for stream in self.streams.values() {
-            for extent in &stream.extents {
-                self.read_extent(extent)?;
+            for index in 0..stream.extents.len() {
+                self.read_extent(&stream.extents, index)?;
             }
         }
         Ok(())
@@ -217,20 +283,20 @@ impl BundleReader {
             .ok_or_else(|| invalid("missing bundle stream"))
     }
 
-    fn read_extent(&self, extent: &Extent) -> io::Result<Vec<u8>> {
+    fn read_extent(&self, extents: &[Extent], index: usize) -> io::Result<Vec<u8>> {
         // Tables bound each extent before allocation. Verify even a partial
         // selection against the whole extent, at most MAX_EXTENT_BYTES.
-        let mut bytes = buffer(extent.len as usize)?;
+        let extent = &extents[index];
+        // Table validation orders physical extents. Read ahead only where
+        // nearby extents of this column can reuse the physical window.
+        let read_ahead = extents
+            .get(index + 1)
+            .is_some_and(|next| next.offset - extent.offset < 4 * 1024);
         let mut file = self
             .file
             .lock()
             .map_err(|_| invalid("bundle reader lock poisoned"))?;
-        file.seek(SeekFrom::Start(extent.offset))?;
-        file.read_exact(&mut bytes)?;
-        if crc32fast::hash(&bytes) != extent.checksum {
-            return Err(invalid("bundle extent checksum mismatch"));
-        }
-        Ok(bytes)
+        file.read_extent(extent, self.reference.end()?, read_ahead)
     }
 }
 
@@ -287,6 +353,7 @@ impl BundleWriter {
                 .file
                 .lock()
                 .map_err(|_| invalid("bundle reader lock poisoned"))?
+                .file
                 .metadata()?;
             let opened = file.metadata()?;
             if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
@@ -711,6 +778,71 @@ mod tests {
         assert_eq!(reader.read_stream(1).unwrap(), vec![9; 1024 * 24]);
         reader.verify_all().unwrap();
         assert!(fs::metadata(path).unwrap().len() < 1024 * 1024);
+    }
+
+    #[test]
+    fn sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let writer = BundleWriter::create(&path).unwrap();
+        let expected: Vec<u8> = (0..2 * READ_AHEAD_BYTES + 31)
+            .map(|n| ((n * 17) ^ (n / READ_AHEAD_BYTES)) as u8)
+            .collect();
+        for bytes in expected.chunks(97) {
+            writer.append_data(0, bytes).unwrap();
+        }
+        let first = writer.finish(1).unwrap();
+        let reader = BundleReader::open(&path, &first).unwrap();
+        // Selection spans read-ahead boundaries and partial extents. A warm
+        // second read must match the independently generated bytes exactly.
+        for _ in 0..2 {
+            assert_eq!(reader.read_stream(0).unwrap(), expected);
+            for start in [0, 96, READ_AHEAD_BYTES - 17, 2 * READ_AHEAD_BYTES - 17] {
+                assert_eq!(
+                    reader
+                        .read_range(0, start as u64..(start + 29) as u64)
+                        .unwrap(),
+                    expected[start..start + 29]
+                );
+            }
+        }
+        let writer = BundleWriter::append(&path, &first).unwrap();
+        writer.append_data(0, b"unpublished suffix").unwrap();
+        writer.finish(2).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(first.end().unwrap())
+            .unwrap();
+        // A fresh window must never depend on bytes after its pinned snapshot.
+        let reader = BundleReader::open(&path, &first).unwrap();
+        assert_eq!(reader.read_stream(0).unwrap(), expected);
+        let mut bytes = fs::read(&path).unwrap();
+        reader.read_range(0, 0..29).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(READ_AHEAD_BYTES as u64)
+            .unwrap();
+        let start = READ_AHEAD_BYTES + 100;
+        let range = start as u64..(start + 29) as u64;
+        assert!(reader.read_range(0, range.clone()).is_err());
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            reader.read_range(0, range).unwrap(),
+            expected[start..start + 29]
+        );
+        bytes[FILE_MAGIC.len()] ^= 1;
+        fs::write(&path, &bytes).unwrap();
+        assert!(reader.verify_all().is_err());
+        assert!(
+            BundleReader::open(&path, &first)
+                .unwrap()
+                .read_stream(0)
+                .is_err()
+        );
     }
 
     #[test]

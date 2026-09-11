@@ -160,3 +160,11 @@ and generic API costs from the other comparison also remain visible.
 The extended harness passes formatting, workspace check, strict Clippy, its
 ordinary fixture, and both release fixtures' exact oracles.
 [Validation](baselines/2026-09-11-publication-lifecycle-validation.json).
+
+
+The [read-cost follow-up](bundle-read-costs.md) now measures a bounded nearby-extent
+read window. All six local gates pass (896 tests/nine ignored); sparse read/reopen
+medians improve about 40% against this integrated candidate while mixed workloads
+remain within 2%. The focused 45-sample repeat confirms the read/tail gain; final platform checks remain. No table
+compression or logical-offset lookup change is retained, and metadata growth is
+still unresolved.

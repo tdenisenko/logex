@@ -1,0 +1,91 @@
+{
+  "base": "d511586881ccb5a724e4f4694d8642cde3244d7d",
+  "changes": "bounded density-aware read-ahead, complete checksums retained, cache refill/recheck regression",
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.7695051250047982
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 8.815832208027132
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 4.99187437503133
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 129.3768372500199
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 13.478560124989599
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 45.69985400000587
+    }
+  ],
+  "test_totals": {
+    "passed": 896,
+    "failed": 0,
+    "ignored": 9
+  },
+  "refill_test_before": "Disabling cache invalidation causes retry to fail with a stale-cache checksum mismatch; original invalidation restored in finally. The strengthened test passes afterward. This is a guard proof for the new cache, not a claim that the original uncached reader had this bug.",
+  "refill_proof_runner": "from pathlib import Path\nimport subprocess,json\nsource=Path('crates/logex-storage/src/bundle.rs');original=source.read_text()\nneedle='''            self.bytes.clear();\n            self.offset = offset;''';assert original.count(needle)==1\ncommand=['cargo','test','-p','logex-storage','--lib','--locked','bundle::tests::sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity','--','--exact','--nocapture']\ntry:\n source.write_text(original.replace(needle,'            self.offset = offset;'))\n with open('/tmp/logex-read-window-refill-before.log','w')as log:result=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)\n before=Path('/tmp/logex-read-window-refill-before.log').read_text()\n assert result.returncode!=0 and 'test result: FAILED'in before and 'bundle extent checksum mismatch'in before\n print('Missing cache invalidation reproduces failed-read retry corruption',flush=True)\nfinally:\n source.write_text(original)\n print('Cache invalidation restored',flush=True)\nwith open('/tmp/logex-read-window-refill-after.log','w')as log:result=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)\nassert result.returncode==0\nprint('Complete regression passes with invalidation restored',flush=True)\n",
+  "refill_after_log": "   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.07s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 1 test\ntest bundle::tests::sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.03s\n\n",
+  "cleanup": "Removed unhelpful logical-offset/binary-search experiment and indiscriminate/large-extent caching. No format/dependency change. Existing immutable reader, malformed table, corruption, recovery and query tests retained."
+}
