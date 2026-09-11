@@ -20,5 +20,6 @@ tracing = { workspace = true }
 parking_lot = "0.12"
 
 [dev-dependencies]
+alloy-consensus = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }

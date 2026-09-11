@@ -5196,6 +5196,7 @@ dependencies = [
 name = "logex-query"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "async-trait",
  "datafusion",

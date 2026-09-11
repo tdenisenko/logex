@@ -15,7 +15,7 @@ use super::segment::append_rows;
 use crate::durability::{self, Publication};
 use crate::state::SyncHead;
 use crate::wal::{EncodedWalBatch, WriteAheadLog};
-use crate::{ColumnFile, ColumnFileHeader, ColumnReader, NullBitmap, SegmentReader};
+use crate::{ColumnFile, ColumnFileHeader, NullBitmap, SegmentReader};
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
@@ -745,7 +745,16 @@ impl NativeStorage {
                     "catalog and manifest segment identities disagree",
                 ));
             }
-            if active && segment.row_count == 0 && manifest.is_none() {
+            // A first bundle may have reached disk before its derived manifest.
+            // The catalog's empty prefix remains authoritative in either case.
+            if active
+                && segment.row_count == 0
+                && (manifest.is_none()
+                    || manifest
+                        .as_ref()
+                        .is_some_and(|manifest| manifest.column_bundle.is_some())
+                    || dir.join(crate::column_artifact::BUNDLE_PATH).try_exists()?)
+            {
                 self.restore_committed_prefix(segment)?;
                 continue;
             }
@@ -1101,55 +1110,79 @@ impl NativeStorage {
         if rows.is_empty() {
             return Ok(());
         }
-
         let target_rows = self.config.hot_target_rows.max(1);
         let mut offset = 0usize;
         while offset < rows.len() {
             let hot_id = self.ensure_active_hot_segment()?;
-
-            let remaining_capacity = {
-                let descriptor = self
-                    .catalog
-                    .segments
-                    .iter()
-                    .find(|segment| segment.id == hot_id)
-                    .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
-                target_rows.saturating_sub(descriptor.row_count)
-            };
-
+            let segment_index = self
+                .catalog
+                .segments
+                .iter()
+                .position(|segment| segment.id == hot_id)
+                .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
+            let descriptor = &self.catalog.segments[segment_index];
+            let existing_rows = descriptor.row_count;
+            let remaining_capacity = target_rows.saturating_sub(existing_rows);
             if remaining_capacity == 0 {
                 self.seal_hot_segment()?;
                 continue;
             }
-
-            let take = remaining_capacity.min((rows.len() - offset) as u64) as usize;
-            let chunk = &rows[offset..offset + take];
+            let mut take = remaining_capacity.min((rows.len() - offset) as u64) as usize;
             let hot_dir = self.paths.segment_dir(hot_id);
+            // Sync creates immutable bundles directly. Keep an existing raw
+            // prefix in its current representation, including row-only WAL users.
+            let bundled = descriptor.column_bundle.is_some()
+                || (existing_rows == 0 && self.pending_ingestion.is_some());
+            let mut inspected = None;
+            if bundled {
+                (take, inspected) = super::segment::bundled_row_capacity(
+                    &hot_dir,
+                    descriptor.column_bundle.as_ref(),
+                    &rows[offset..offset + take],
+                )?;
+                if take == 0 {
+                    if existing_rows == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "row exceeds bundle capacity",
+                        ));
+                    }
+                    self.seal_hot_segment()?;
+                    continue;
+                }
+            }
+            let chunk = &rows[offset..offset + take];
             let publication = self.segment_publication(hot_id);
-
-            let should_seal = {
-                let descriptor = self
-                    .catalog
-                    .segments
-                    .iter_mut()
-                    .find(|segment| segment.id == hot_id)
-                    .ok_or_else(|| std::io::Error::other("active hot segment is missing"))?;
-
-                append_ingest_rows(&hot_dir, descriptor.row_count, chunk, publication)?;
-                apply_rows_to_descriptor(descriptor, chunk);
-                let should_seal = descriptor.row_count >= target_rows;
-                persist_ingest_manifest(&self.paths, descriptor, publication)?;
-                should_seal
+            let columns = if bundled {
+                Some(if existing_rows == 0 {
+                    write_bundled_rows(&hot_dir, chunk)?
+                } else {
+                    append_compacted_rows(&hot_dir, existing_rows, chunk, publication, inspected)?
+                })
+            } else {
+                append_ingest_rows(&hot_dir, existing_rows, chunk, publication)?;
+                None
             };
-
+            let descriptor = &mut self.catalog.segments[segment_index];
+            apply_rows_to_descriptor(descriptor, chunk);
+            let should_seal = descriptor.row_count >= target_rows;
+            if let Some(columns) = columns {
+                let columns = columns.apply_to(descriptor);
+                persist_ingest_manifest_with_columns(
+                    &self.paths,
+                    descriptor,
+                    columns,
+                    publication,
+                )?;
+            } else {
+                persist_ingest_manifest(&self.paths, descriptor, publication)?;
+            }
             self.persist_catalog()?;
             offset += take;
-
             if should_seal {
                 self.seal_hot_segment()?;
             }
         }
-
         Ok(())
     }
 
@@ -1974,12 +2007,13 @@ impl NativeStorage {
         }
 
         let segment_dir = self.paths.segment_dir(hot_id);
-        let physical_rows = ColumnReader::read_row_count(&segment_dir)?;
+        let reader = SegmentReader::open(&segment_dir)?;
+        let physical_rows = reader.read_row_count()?;
         if physical_rows != descriptor.row_count {
             return Ok(());
         }
 
-        let canonical_len = SegmentReader::open(&segment_dir)?.read_canonical_len()?;
+        let canonical_len = reader.read_canonical_len()?;
         if canonical_len != descriptor.row_count {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2625,6 +2659,235 @@ mod tests {
         }
     }
 
+    fn ingest_test_initial_batch(
+        storage: &mut NativeStorage,
+        historical: bool,
+        rows: &[LogRow],
+        header: &Header,
+    ) -> io::Result<()> {
+        if historical {
+            storage.ingest_historical_batch(rows, header).map(|_| ())
+        } else {
+            storage.ingest_canonical_batch(rows, header, std::slice::from_ref(header), None)
+        }
+    }
+
+    #[test]
+    fn live_ingestion_bundles_fresh_segments_and_preserves_reader_snapshots() {
+        let dir = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: dir.path().to_owned(),
+            hot_target_rows: 10,
+            ..Default::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let prior = ingestion_header(99, B256::ZERO);
+        let first = ingestion_header(100, prior.hash_slow());
+        let second = ingestion_header(101, first.hash_slow());
+        let initial = ingestion_rows(3, &first);
+        let incoming = ingestion_rows(13, &second);
+        ingest_test_batch(&mut storage, false, &initial, &first, &prior).unwrap();
+        storage.checkpoint().unwrap();
+        let id = storage.catalog.active_hot_segment.unwrap();
+        assert!(
+            storage
+                .catalog
+                .active_hot_segment()
+                .unwrap()
+                .column_bundle
+                .is_some()
+        );
+        let snapshot = SegmentReader::open(&storage.segment_path(id)).unwrap();
+        ingest_test_batch(&mut storage, false, &incoming, &second, &first).unwrap();
+        storage.checkpoint().unwrap();
+        assert_eq!(snapshot.read_log_rows(None).unwrap(), initial);
+        assert_eq!(snapshot.read_canonical_len().unwrap(), 3);
+        assert!(snapshot.read_log_rows(Some(&[3])).is_err());
+        assert_eq!(storage.mark_non_canonical(first.hash_slow()).unwrap(), 3);
+        assert!((0..3).all(|row| snapshot.read_canonical().unwrap().is_present(row)));
+        let mut expected = initial;
+        expected.extend(incoming);
+        drop(storage);
+        for _ in 0..2 {
+            let storage = NativeStorage::open(config.clone()).unwrap();
+            assert_eq!(read_ingestion_rows(&storage), expected);
+            assert_eq!(storage.sync_head().unwrap().block_number, second.number);
+            for segment in storage
+                .segments()
+                .iter()
+                .filter(|segment| segment.row_count > 0)
+            {
+                assert!(segment.column_bundle.is_some());
+                let path = storage.segment_path(segment.id);
+                assert!(!path.join("address.col").exists());
+                assert!(!path.join("canonical.bitmap").exists());
+                let reader = SegmentReader::open(&path).unwrap();
+                let bits = reader.read_canonical().unwrap();
+                for (id, row) in reader.read_log_rows(None).unwrap().iter().enumerate() {
+                    assert_eq!(bits.is_present(id as u64), row.block_number != first.number);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_first_bundle_recovers_each_publication_and_empty_raw_cleanup_failure() {
+        for recovered_empty in [false, true] {
+            let mut steps = 0;
+            for failure in std::iter::once(usize::MAX).chain(0..) {
+                if failure != usize::MAX && failure >= steps {
+                    break;
+                }
+                let dir = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: dir.path().to_owned(),
+                    ..Default::default()
+                };
+                let prior = ingestion_header(99, B256::ZERO);
+                let header = ingestion_header(100, prior.hash_slow());
+                let rows = ingestion_rows(3, &header);
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                if recovered_empty {
+                    ingest_test_batch(&mut storage, false, &rows, &header, &prior).unwrap();
+                    drop(storage);
+                    storage = NativeStorage::open(config.clone()).unwrap();
+                    assert_eq!(storage.total_rows(), 0);
+                    let id = storage.catalog.active_hot_segment.unwrap();
+                    assert!(storage.segment_path(id).join("address.col").exists());
+                }
+                durability::inject_failure(failure);
+                let result = ingest_test_batch(&mut storage, false, &rows, &header, &prior)
+                    .and_then(|_| storage.checkpoint());
+                let events = durability::take_events();
+                if failure == usize::MAX {
+                    result.unwrap();
+                    steps = events.len();
+                    assert!(steps > 0);
+                    assert_eq!(
+                        events
+                            .iter()
+                            .any(|(op, _)| *op == "bundle_remove_empty_raw_artifact"),
+                        recovered_empty
+                    );
+                } else {
+                    assert!(result.is_err(), "{failure}: {events:?}");
+                    assert!(storage.ensure_writable().is_err());
+                }
+                drop(storage);
+                let mut recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("empty={recovered_empty}, failure={failure}: {events:?}: {error}")
+                });
+                if recovered.sync_head().is_none() {
+                    assert!(read_ingestion_rows(&recovered).is_empty());
+                    ingest_test_batch(&mut recovered, false, &rows, &header, &prior).unwrap();
+                    recovered.checkpoint().unwrap();
+                }
+                assert_eq!(read_ingestion_rows(&recovered), rows);
+                assert_eq!(
+                    recovered.sync_head().unwrap().block_hash,
+                    header.hash_slow()
+                );
+                let id = recovered.catalog.active_hot_segment.unwrap();
+                let path = recovered.segment_path(id);
+                assert!(!path.join("address.col").exists());
+                assert!(!path.join("canonical.bitmap").exists());
+                drop(recovered);
+                for _ in 0..2 {
+                    assert_eq!(
+                        read_ingestion_rows(&NativeStorage::open(config.clone()).unwrap()),
+                        rows
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wal_append_to_live_bundle_recovers_each_publication_failure() {
+        for incoming_count in [2, 13] {
+            let mut steps = 0;
+            for failure in std::iter::once(usize::MAX).chain(0..) {
+                if failure != usize::MAX && failure >= steps {
+                    break;
+                }
+                let dir = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: dir.path().to_owned(),
+                    hot_target_rows: 10,
+                    ..Default::default()
+                };
+                let prior = ingestion_header(99, B256::ZERO);
+                let header = ingestion_header(100, prior.hash_slow());
+                let initial = ingestion_rows(3, &header);
+                let next = ingestion_header(101, header.hash_slow());
+                let incoming = ingestion_rows(incoming_count, &next);
+                let mut expected = initial.clone();
+                expected.extend(incoming.clone());
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                ingest_test_batch(&mut storage, false, &initial, &header, &prior).unwrap();
+                storage.checkpoint_durable().unwrap();
+                storage.mark_non_canonical(header.hash_slow()).unwrap();
+                assert!(
+                    storage
+                        .catalog
+                        .active_hot_segment()
+                        .unwrap()
+                        .column_bundle
+                        .is_some()
+                );
+                durability::inject_failure(failure);
+                let result = storage
+                    .write_batch(&incoming)
+                    .and_then(|_| storage.checkpoint());
+                let events = durability::take_events();
+                if failure == usize::MAX {
+                    assert!(result.is_ok(), "{events:?}");
+                    steps = events.len();
+                    assert!(steps > 0);
+                } else {
+                    assert!(result.is_err(), "{failure}: {events:?}");
+                    assert!(storage.ensure_writable().is_err());
+                }
+                let wal = storage.wal.read_all().unwrap();
+                drop(storage);
+                let mut recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("rows={incoming_count}, failure={failure}: {events:?}: {error}")
+                });
+                let actual = read_ingestion_rows(&recovered);
+                if result.is_ok() || !wal.is_empty() {
+                    assert_eq!(actual, expected, "failure={failure}");
+                } else {
+                    assert!(actual == initial || actual == expected, "failure={failure}");
+                }
+                if actual == initial {
+                    recovered.write_batch(&incoming).unwrap();
+                    recovered.checkpoint().unwrap();
+                }
+                drop(recovered);
+                for _ in 0..2 {
+                    let recovered = NativeStorage::open(config.clone()).unwrap();
+                    assert_eq!(read_ingestion_rows(&recovered), expected);
+                    assert!(recovered.wal.is_empty().unwrap());
+                    for segment in recovered
+                        .segments()
+                        .iter()
+                        .filter(|segment| segment.row_count > 0)
+                    {
+                        let reader =
+                            SegmentReader::open(&recovered.segment_path(segment.id)).unwrap();
+                        let bits = reader.read_canonical().unwrap();
+                        for (id, row) in reader.read_log_rows(None).unwrap().iter().enumerate() {
+                            assert_eq!(
+                                bits.is_present(id as u64),
+                                row.block_number != header.number
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn published_ingestion_orders_data_and_catalog_before_subsequent_writes() {
         for historical in [false, true] {
@@ -2852,6 +3115,9 @@ mod tests {
             let mut storage = NativeStorage::open(config.clone()).unwrap();
             let prior = ingestion_header(99, B256::ZERO);
             let header = ingestion_header(100, prior.hash_slow());
+            // Keep a real raw compaction candidate as sync now creates bundles.
+            storage.write_batch(&ingestion_rows(1, &prior)).unwrap();
+            storage.checkpoint().unwrap();
             ingest_test_batch(
                 &mut storage,
                 false,
@@ -3319,12 +3585,13 @@ mod tests {
         )
         .unwrap();
         let hot = storage.segment_path(storage.catalog.active_hot_segment.unwrap());
-        let before = fs::read(hot.join("data.col")).unwrap();
+        let artifact = hot.join(crate::column_artifact::BUNDLE_PATH);
+        let before = fs::read(&artifact).unwrap();
         drop(storage);
         let original = fs::read(dir.path().join(damaged)).unwrap();
         fs::write(dir.path().join(damaged), b"{}").unwrap();
         assert!(NativeStorage::open(config.clone()).is_err());
-        assert_eq!(fs::read(hot.join("data.col")).unwrap(), before);
+        assert_eq!(fs::read(&artifact).unwrap(), before);
         fs::write(dir.path().join(damaged), original).unwrap();
         assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
     }
@@ -3332,15 +3599,7 @@ mod tests {
     #[test]
     fn ingestion_discards_damaged_segments_that_have_no_committed_rows() {
         for historical in [false, true] {
-            let damaged = if historical {
-                [
-                    "segment.json",
-                    crate::column_artifact::BUNDLE_PATH,
-                    "canonical.bitmap",
-                ]
-            } else {
-                ["segment.json", "address.col", "data.col"]
-            };
+            let damaged = ["segment.json", crate::column_artifact::BUNDLE_PATH];
             for damage in damaged {
                 let dir = TempDir::new().unwrap();
                 let config = NativeStorageConfig {
@@ -3894,59 +4153,74 @@ mod tests {
 
     #[test]
     fn committed_bundle_corruption_is_preserved_before_rollback() {
-        for damage in 0..3 {
-            let tmp = TempDir::new().unwrap();
-            let config = NativeStorageConfig {
-                data_dir: tmp.path().to_owned(),
-                hot_target_rows: 1_000,
-                ..Default::default()
-            };
-            let mut storage = NativeStorage::open(config.clone()).unwrap();
-            let prior = ingestion_header(100, B256::ZERO);
-            let next = ingestion_header(99, B256::ZERO);
-            storage
-                .ingest_historical_batch(&ingestion_rows(3, &prior), &prior)
+        for historical in [false, true] {
+            for damage in 0..3 {
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    hot_target_rows: 1_000,
+                    ..Default::default()
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let prior = ingestion_header(100, B256::ZERO);
+                let next = ingestion_header(if historical { 99 } else { 101 }, prior.hash_slow());
+                ingest_test_initial_batch(
+                    &mut storage,
+                    historical,
+                    &ingestion_rows(3, &prior),
+                    &prior,
+                )
                 .unwrap();
-            storage.checkpoint().unwrap();
-            let id = storage.active_historical_segment_id().unwrap();
-            let reference = storage
-                .segments()
-                .iter()
-                .find(|segment| segment.id == id)
-                .unwrap()
-                .column_bundle
-                .clone()
+                storage.checkpoint().unwrap();
+                let id = if historical {
+                    storage.active_historical_segment_id().unwrap()
+                } else {
+                    storage.catalog.active_hot_segment.unwrap()
+                };
+                let reference = storage
+                    .segments()
+                    .iter()
+                    .find(|segment| segment.id == id)
+                    .unwrap()
+                    .column_bundle
+                    .clone()
+                    .unwrap();
+                ingest_test_batch(
+                    &mut storage,
+                    historical,
+                    &ingestion_rows(3, &next),
+                    &next,
+                    &prior,
+                )
                 .unwrap();
-            storage
-                .ingest_historical_batch(&ingestion_rows(3, &next), &next)
-                .unwrap();
-            let dir = storage.segment_path(id);
-            let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
-            let mut bytes = fs::read(&bundle_path).unwrap();
-            match damage {
-                // The canonical bitmap is the first payload written to a new
-                // bundle, before the column workers. Its CRC must fail closed.
-                0 => bytes[8] ^= 1,
-                1 => bytes[reference.table_offset as usize] ^= 1,
-                2 => bytes.truncate(reference.end().unwrap() as usize - 1),
-                _ => unreachable!(),
-            }
-            fs::write(&bundle_path, &bytes).unwrap();
-            let paths = [
-                bundle_path,
-                dir.join("segment.json"),
-                storage.paths.catalog_path(),
-            ];
-            let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
-            drop(storage);
-            assert!(NativeStorage::open(config).is_err(), "damage {damage}");
-            for (path, bytes) in paths.iter().zip(before) {
-                assert_eq!(
-                    fs::read(path).unwrap(),
-                    bytes,
-                    "damage {damage}: {}",
-                    path.display()
-                );
+                let dir = storage.segment_path(id);
+                let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
+                let mut bytes = fs::read(&bundle_path).unwrap();
+                match damage {
+                    // The canonical bitmap is the first payload written to a new
+                    // bundle, before the column workers. Its CRC must fail closed.
+                    0 => bytes[8] ^= 1,
+                    1 => bytes[reference.table_offset as usize] ^= 1,
+                    2 => bytes.truncate(reference.end().unwrap() as usize - 1),
+                    _ => unreachable!(),
+                }
+                fs::write(&bundle_path, &bytes).unwrap();
+                let paths = [
+                    bundle_path,
+                    dir.join("segment.json"),
+                    storage.paths.catalog_path(),
+                ];
+                let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+                drop(storage);
+                assert!(NativeStorage::open(config).is_err(), "damage {damage}");
+                for (path, bytes) in paths.iter().zip(before) {
+                    assert_eq!(
+                        fs::read(path).unwrap(),
+                        bytes,
+                        "damage {damage}: {}",
+                        path.display()
+                    );
+                }
             }
         }
     }
@@ -4004,289 +4278,329 @@ mod tests {
     }
 
     #[test]
-    fn historical_bundle_rotates_before_its_extent_capacity_is_exhausted() {
-        use crate::bundle::{BundleWriter, MAX_EXTENTS};
-        use crate::column_artifact::{BUNDLE_PATH, COLUMN_NAMES, ColumnArtifacts};
-        let tmp = TempDir::new().unwrap();
-        let config = NativeStorageConfig {
-            data_dir: tmp.path().to_owned(),
-            hot_target_rows: 1_000_000,
-            ..Default::default()
-        };
-        let mut storage = NativeStorage::open(config.clone()).unwrap();
-        let mut initial = make_rows(1, 100);
-        let mut seed = 37u64;
-        initial[0].data = (0..8192)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                (seed >> 32) as u8
-            })
-            .collect::<Vec<_>>()
-            .into();
-        initial[0].data_len = 8192;
-        storage.write_historical_batch(&initial).unwrap();
-        storage.checkpoint().unwrap();
-        let id = storage.active_historical_segment_id().unwrap();
-        let dir = storage.segment_path(id);
-        let manifest: SegmentManifest =
-            serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
-        let artifacts = ColumnArtifacts::open(&dir, Some(&manifest)).unwrap();
-        let staged = dir.join("fragmented.bundle");
-        let writer = BundleWriter::create(&staged).unwrap();
-        for (id, name) in COLUMN_NAMES.iter().enumerate() {
-            let data = artifacts.read(&format!("columns/{name}.pages")).unwrap();
-            if id == 13 {
-                assert!(data.len() > MAX_EXTENTS);
-                for byte in &data[..MAX_EXTENTS - 1] {
-                    writer.append_data(id as u8, &[*byte]).unwrap();
-                }
-                writer
-                    .append_data(id as u8, &data[MAX_EXTENTS - 1..])
-                    .unwrap();
-            } else {
-                writer.append_data(id as u8, &data).unwrap();
-            }
-            writer
-                .append_data(
-                    id as u8 + 14,
-                    &artifacts
-                        .read(&format!("columns/{name}.pages.idx"))
-                        .unwrap()[crate::page::PAGE_INDEX_HEADER_BYTES..],
-                )
-                .unwrap();
-            if (9..13).contains(&id) {
-                writer
-                    .replace_metadata(
-                        id as u8 + 19,
-                        &crate::column_artifact::encode_bitmap(
-                            &artifacts.read(&format!("columns/{name}.null")).unwrap(),
-                            manifest.row_count,
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-        }
-        writer
-            .replace_metadata(
-                crate::column_artifact::CANONICAL_STREAM,
-                &crate::column_artifact::encode_bitmap(
-                    &artifacts.read("canonical.bitmap").unwrap(),
-                    manifest.row_count,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let reference = writer.finish(1).unwrap();
-        drop(artifacts);
-        fs::rename(staged, dir.join(BUNDLE_PATH)).unwrap();
-        let descriptor = storage
-            .catalog
-            .segments
-            .iter_mut()
-            .find(|segment| segment.id == id)
-            .unwrap();
-        descriptor.column_bundle = Some(reference);
-        persist_segment_manifest(&storage.paths, descriptor).unwrap();
-        storage.persist_catalog().unwrap();
-        drop(storage);
-        let mut storage = NativeStorage::open(config.clone()).unwrap();
-        let incoming = make_rows(2, 99);
-        storage.write_historical_batch(&incoming).unwrap();
-        storage.checkpoint().unwrap();
-        assert_ne!(storage.active_historical_segment_id(), Some(id));
-        assert_eq!(storage.sealed_partition_metas().len(), 2);
-        let mut actual = Vec::new();
-        for segment in storage.segments() {
-            if segment.row_count > 0 {
-                actual.extend(
-                    SegmentReader::open(&storage.segment_path(segment.id))
-                        .unwrap()
-                        .read_log_rows(None)
-                        .unwrap(),
-                );
-            }
-        }
-        initial.extend(incoming);
-        assert_eq!(actual, initial);
-        drop(storage);
-        assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
-    }
-
-    #[test]
-    fn historical_page_append_recovery_preserves_the_checkpoint_at_each_phase() {
-        for phase in 0..10 {
+    fn bundles_rotate_before_their_extent_capacity_is_exhausted() {
+        for historical in [false, true] {
+            use crate::bundle::{BundleWriter, MAX_EXTENTS};
+            use crate::column_artifact::{BUNDLE_PATH, COLUMN_NAMES, ColumnArtifacts};
             let tmp = TempDir::new().unwrap();
             let config = NativeStorageConfig {
                 data_dir: tmp.path().to_owned(),
-                hot_target_rows: 1_000,
+                hot_target_rows: 1_000_000,
                 ..Default::default()
             };
-            let prior = ingestion_header(100, B256::ZERO);
-            let next = ingestion_header(99, B256::ZERO);
-            let initial = ingestion_rows(3, &prior);
-            let incoming = ingestion_rows(5, &next);
             let mut storage = NativeStorage::open(config.clone()).unwrap();
-            storage.ingest_historical_batch(&initial, &prior).unwrap();
+            let header = ingestion_header(100, B256::ZERO);
+            let mut initial = ingestion_rows(1, &header);
+            let mut seed = 37u64;
+            initial[0].data = (0..8192)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (seed >> 32) as u8
+                })
+                .collect::<Vec<_>>()
+                .into();
+            initial[0].data_len = 8192;
+            ingest_test_initial_batch(&mut storage, historical, &initial, &header).unwrap();
             storage.checkpoint().unwrap();
-            storage.mark_non_canonical(prior.hash_slow()).unwrap();
-            let id = storage.active_historical_segment_id().unwrap();
+            let id = if historical {
+                storage.active_historical_segment_id().unwrap()
+            } else {
+                storage.catalog.active_hot_segment.unwrap()
+            };
             let dir = storage.segment_path(id);
-            let manifest_bytes = fs::read(dir.join("segment.json")).unwrap();
-            let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
-            let old_bundle = fs::read(&bundle_path).unwrap();
-            assert!(!dir.join("canonical.bitmap").exists());
-            storage.ingest_historical_batch(&incoming, &next).unwrap();
-            let current: SegmentManifest =
+            let manifest: SegmentManifest =
                 serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
-            let new_reference = current.column_bundle.as_ref().unwrap();
-            assert!(fs::read(&bundle_path).unwrap().starts_with(&old_bundle));
-            if phase == 9 {
-                storage.checkpoint().unwrap();
+            let artifacts = ColumnArtifacts::open(&dir, Some(&manifest)).unwrap();
+            let staged = dir.join("fragmented.bundle");
+            let writer = BundleWriter::create(&staged).unwrap();
+            for (id, name) in COLUMN_NAMES.iter().enumerate() {
+                let data = artifacts.read(&format!("columns/{name}.pages")).unwrap();
+                if id == 13 {
+                    assert!(data.len() > MAX_EXTENTS);
+                    for byte in &data[..MAX_EXTENTS - 1] {
+                        writer.append_data(id as u8, &[*byte]).unwrap();
+                    }
+                    writer
+                        .append_data(id as u8, &data[MAX_EXTENTS - 1..])
+                        .unwrap();
+                } else {
+                    writer.append_data(id as u8, &data).unwrap();
+                }
+                writer
+                    .append_data(
+                        id as u8 + 14,
+                        &artifacts
+                            .read(&format!("columns/{name}.pages.idx"))
+                            .unwrap()[crate::page::PAGE_INDEX_HEADER_BYTES..],
+                    )
+                    .unwrap();
+                if (9..13).contains(&id) {
+                    writer
+                        .replace_metadata(
+                            id as u8 + 19,
+                            &crate::column_artifact::encode_bitmap(
+                                &artifacts.read(&format!("columns/{name}.null")).unwrap(),
+                                manifest.row_count,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
             }
-            drop(storage);
-            // The catalog alone commits rows and canonical state. The
-            // derived manifest may be absent, malformed or newer than a torn
-            // bundle suffix without changing the retained checkpoint.
-            if phase < 4 {
-                fs::write(dir.join("segment.json"), &manifest_bytes).unwrap();
-            } else if phase == 4 {
-                fs::remove_file(dir.join("segment.json")).unwrap();
-            } else if phase == 5 {
-                fs::write(dir.join("segment.json"), b"{torn metadata").unwrap();
-            } else if phase == 6 {
-                let mut forged = current.clone();
-                forged.segment_id += 1;
-                forged.canonical_rows_path = "../unrelated".into();
-                fs::write(
-                    dir.join("segment.json"),
-                    serde_json::to_vec(&forged).unwrap(),
+            writer
+                .replace_metadata(
+                    crate::column_artifact::CANONICAL_STREAM,
+                    &crate::column_artifact::encode_bitmap(
+                        &artifacts.read("canonical.bitmap").unwrap(),
+                        manifest.row_count,
+                    )
+                    .unwrap(),
                 )
                 .unwrap();
-            }
-            let tail_end = match phase {
-                0 => Some(old_bundle.len() as u64 + 1),
-                1 => Some(new_reference.table_offset),
-                2 | 7 => Some(new_reference.table_offset + u64::from(new_reference.table_len) / 2),
-                _ => None,
+            let reference = writer.finish(1).unwrap();
+            drop(artifacts);
+            fs::rename(staged, dir.join(BUNDLE_PATH)).unwrap();
+            let descriptor = storage
+                .catalog
+                .segments
+                .iter_mut()
+                .find(|segment| segment.id == id)
+                .unwrap();
+            descriptor.column_bundle = Some(reference);
+            persist_segment_manifest(&storage.paths, descriptor).unwrap();
+            storage.persist_catalog().unwrap();
+            drop(storage);
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let next = ingestion_header(if historical { 99 } else { 101 }, header.hash_slow());
+            let incoming = ingestion_rows(2, &next);
+            ingest_test_batch(&mut storage, historical, &incoming, &next, &header).unwrap();
+            storage.checkpoint().unwrap();
+            let active = if historical {
+                storage.active_historical_segment_id()
+            } else {
+                storage.catalog.active_hot_segment
             };
-            if let Some(end) = tail_end {
-                fs::OpenOptions::new()
-                    .write(true)
-                    .open(&bundle_path)
-                    .unwrap()
-                    .set_len(end)
+            assert_ne!(active, Some(id));
+            assert_eq!(
+                storage
+                    .segments()
+                    .iter()
+                    .filter(|s| s.row_count > 0)
+                    .count(),
+                2
+            );
+            let mut actual = Vec::new();
+            for segment in storage.segments() {
+                if segment.row_count > 0 {
+                    actual.extend(
+                        SegmentReader::open(&storage.segment_path(segment.id))
+                            .unwrap()
+                            .read_log_rows(None)
+                            .unwrap(),
+                    );
+                }
+            }
+            initial.extend(incoming);
+            assert_eq!(actual, initial);
+            drop(storage);
+            assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
+        }
+    }
+
+    #[test]
+    fn bundled_append_recovery_preserves_the_checkpoint_at_each_phase() {
+        for historical in [false, true] {
+            for phase in 0..10 {
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    hot_target_rows: 1_000,
+                    ..Default::default()
+                };
+                let prior = ingestion_header(100, B256::ZERO);
+                let next = ingestion_header(if historical { 99 } else { 101 }, prior.hash_slow());
+                let initial = ingestion_rows(3, &prior);
+                let incoming = ingestion_rows(5, &next);
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                ingest_test_initial_batch(&mut storage, historical, &initial, &prior).unwrap();
+                storage.checkpoint().unwrap();
+                storage.mark_non_canonical(prior.hash_slow()).unwrap();
+                let id = if historical {
+                    storage.active_historical_segment_id().unwrap()
+                } else {
+                    storage.catalog.active_hot_segment.unwrap()
+                };
+                let dir = storage.segment_path(id);
+                let manifest_bytes = fs::read(dir.join("segment.json")).unwrap();
+                let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
+                let old_bundle = fs::read(&bundle_path).unwrap();
+                assert!(!dir.join("canonical.bitmap").exists());
+                ingest_test_batch(&mut storage, historical, &incoming, &next, &prior).unwrap();
+                let current: SegmentManifest =
+                    serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
+                let new_reference = current.column_bundle.as_ref().unwrap();
+                assert!(fs::read(&bundle_path).unwrap().starts_with(&old_bundle));
+                if phase == 9 {
+                    storage.checkpoint().unwrap();
+                }
+                drop(storage);
+                // The catalog alone commits rows and canonical state. The
+                // derived manifest may be absent, malformed or newer than a torn
+                // bundle suffix without changing the retained checkpoint.
+                if phase < 4 {
+                    fs::write(dir.join("segment.json"), &manifest_bytes).unwrap();
+                } else if phase == 4 {
+                    fs::remove_file(dir.join("segment.json")).unwrap();
+                } else if phase == 5 {
+                    fs::write(dir.join("segment.json"), b"{torn metadata").unwrap();
+                } else if phase == 6 {
+                    let mut forged = current.clone();
+                    forged.segment_id += 1;
+                    forged.canonical_rows_path = "../unrelated".into();
+                    fs::write(
+                        dir.join("segment.json"),
+                        serde_json::to_vec(&forged).unwrap(),
+                    )
                     .unwrap();
-            }
-            for restart in 0..2 {
-                let recovered = NativeStorage::open(config.clone())
-                    .unwrap_or_else(|error| panic!("phase {phase}, restart {restart}: {error}"));
-                let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
-                let mut expected = initial.clone();
-                if phase == 9 {
-                    expected.extend(incoming.clone());
                 }
-                assert_eq!(
-                    reader.read_log_rows(None).unwrap(),
-                    expected,
-                    "phase {phase}"
-                );
-                let canonical = reader.read_canonical().unwrap();
-                for row in 0..expected.len() {
-                    assert_eq!(canonical.is_present(row as u64), row >= initial.len());
-                }
-                assert_eq!(
-                    recovered.historical_floor().unwrap().block_number,
-                    if phase == 9 { 99 } else { 100 }
-                );
-                if phase < 9 {
-                    assert_eq!(fs::read(&bundle_path).unwrap(), old_bundle);
-                }
-                if phase == 9 {
-                    // A clean restart must preserve the compressed representation.
-                    assert!(bundle_path.exists());
-                    assert!(!dir.join("address.col").exists());
-                }
-            }
-            if phase < 9 {
-                let mut recovered = NativeStorage::open(config.clone()).unwrap();
-                recovered.ingest_historical_batch(&incoming, &next).unwrap();
-                recovered.checkpoint().unwrap();
-                drop(recovered);
-                let recovered = NativeStorage::open(config).unwrap();
-                assert_eq!(recovered.total_rows(), 8);
-                let mut expected = initial;
-                expected.extend(incoming);
-                assert_eq!(
-                    SegmentReader::open(&recovered.segment_path(id))
+                let tail_end = match phase {
+                    0 => Some(old_bundle.len() as u64 + 1),
+                    1 => Some(new_reference.table_offset),
+                    2 | 7 => {
+                        Some(new_reference.table_offset + u64::from(new_reference.table_len) / 2)
+                    }
+                    _ => None,
+                };
+                if let Some(end) = tail_end {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&bundle_path)
                         .unwrap()
-                        .read_log_rows(None)
-                        .unwrap(),
-                    expected
-                );
+                        .set_len(end)
+                        .unwrap();
+                }
+                for restart in 0..2 {
+                    let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                        panic!("phase {phase}, restart {restart}: {error}")
+                    });
+                    let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
+                    let mut expected = initial.clone();
+                    if phase == 9 {
+                        expected.extend(incoming.clone());
+                    }
+                    assert_eq!(
+                        reader.read_log_rows(None).unwrap(),
+                        expected,
+                        "phase {phase}"
+                    );
+                    let canonical = reader.read_canonical().unwrap();
+                    for row in 0..expected.len() {
+                        assert_eq!(canonical.is_present(row as u64), row >= initial.len());
+                    }
+                    assert_eq!(
+                        if historical {
+                            recovered.historical_floor().unwrap().block_number
+                        } else {
+                            recovered.sync_head().unwrap().block_number
+                        },
+                        if phase == 9 { next.number } else { 100 }
+                    );
+                    if phase < 9 {
+                        assert_eq!(fs::read(&bundle_path).unwrap(), old_bundle);
+                    }
+                    if phase == 9 {
+                        // A clean restart must preserve the compressed representation.
+                        assert!(bundle_path.exists());
+                        assert!(!dir.join("address.col").exists());
+                    }
+                }
+                if phase < 9 {
+                    let mut recovered = NativeStorage::open(config.clone()).unwrap();
+                    ingest_test_batch(&mut recovered, historical, &incoming, &next, &prior)
+                        .unwrap();
+                    recovered.checkpoint().unwrap();
+                    drop(recovered);
+                    let recovered = NativeStorage::open(config).unwrap();
+                    assert_eq!(recovered.total_rows(), 8);
+                    let mut expected = initial;
+                    expected.extend(incoming);
+                    assert_eq!(
+                        SegmentReader::open(&recovered.segment_path(id))
+                            .unwrap()
+                            .read_log_rows(None)
+                            .unwrap(),
+                        expected
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn bundled_reorg_recovers_each_publication_failure_and_preserves_snapshots() {
-        let mut steps = 0;
-        for failure in std::iter::once(usize::MAX).chain(0..) {
-            if failure != usize::MAX && failure >= steps {
-                break;
-            }
-            let tmp = TempDir::new().unwrap();
-            let config = NativeStorageConfig {
-                data_dir: tmp.path().to_owned(),
-                hot_target_rows: 1_000,
-                ..Default::default()
-            };
-            let header = ingestion_header(100, B256::ZERO);
-            let rows = ingestion_rows(3, &header);
-            let mut storage = NativeStorage::open(config.clone()).unwrap();
-            storage.ingest_historical_batch(&rows, &header).unwrap();
-            storage.checkpoint().unwrap();
-            let id = storage.active_historical_segment_id().unwrap();
-            let snapshot = SegmentReader::open(&storage.segment_path(id)).unwrap();
-            let catalog = storage.paths.catalog_path();
-            let before = fs::read(&catalog).unwrap();
-            durability::inject_failure(failure);
-            let result = storage.mark_non_canonical(header.hash_slow());
-            let events = durability::take_events();
-            if failure == usize::MAX {
-                assert_eq!(result.unwrap(), 3);
-                steps = events.len();
-                assert!(steps > 0);
-            } else {
-                assert!(result.is_err(), "failure {failure}: {events:?}");
-                assert!(storage.ensure_writable().is_err());
-            }
-            let committed = fs::read(&catalog).unwrap() != before;
-            drop(storage);
-            for restart in 0..2 {
-                let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
-                    panic!("failure {failure}, restart {restart}: {events:?}: {error}")
-                });
-                let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
-                assert_eq!(reader.read_log_rows(None).unwrap(), rows);
-                let bits = reader.read_canonical().unwrap();
-                assert_eq!(bits.len(), 3);
-                for row in 0..3 {
-                    assert_eq!(bits.is_present(row), !committed);
-                    assert!(snapshot.read_canonical().unwrap().is_present(row));
+        for historical in [false, true] {
+            let mut steps = 0;
+            for failure in std::iter::once(usize::MAX).chain(0..) {
+                if failure != usize::MAX && failure >= steps {
+                    break;
                 }
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    hot_target_rows: 1_000,
+                    ..Default::default()
+                };
+                let header = ingestion_header(100, B256::ZERO);
+                let rows = ingestion_rows(3, &header);
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                ingest_test_initial_batch(&mut storage, historical, &rows, &header).unwrap();
+                storage.checkpoint().unwrap();
+                let id = if historical {
+                    storage.active_historical_segment_id().unwrap()
+                } else {
+                    storage.catalog.active_hot_segment.unwrap()
+                };
+                let snapshot = SegmentReader::open(&storage.segment_path(id)).unwrap();
+                let catalog = storage.paths.catalog_path();
+                let before = fs::read(&catalog).unwrap();
+                durability::inject_failure(failure);
+                let result = storage.mark_non_canonical(header.hash_slow());
+                let events = durability::take_events();
+                if failure == usize::MAX {
+                    assert_eq!(result.unwrap(), 3);
+                    steps = events.len();
+                    assert!(steps > 0);
+                } else {
+                    assert!(result.is_err(), "failure {failure}: {events:?}");
+                    assert!(storage.ensure_writable().is_err());
+                }
+                let committed = fs::read(&catalog).unwrap() != before;
+                drop(storage);
+                for restart in 0..2 {
+                    let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                        panic!("failure {failure}, restart {restart}: {events:?}: {error}")
+                    });
+                    let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
+                    assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+                    let bits = reader.read_canonical().unwrap();
+                    assert_eq!(bits.len(), 3);
+                    for row in 0..3 {
+                        assert_eq!(bits.is_present(row), !committed);
+                        assert!(snapshot.read_canonical().unwrap().is_present(row));
+                    }
+                }
+                let mut recovered = NativeStorage::open(config.clone()).unwrap();
+                assert_eq!(
+                    recovered.mark_non_canonical(header.hash_slow()).unwrap(),
+                    if committed { 0 } else { 3 }
+                );
+                drop(recovered);
+                let recovered = NativeStorage::open(config).unwrap();
+                let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
+                let bits = reader.read_canonical().unwrap();
+                assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+                assert!((0..3).all(|row| !bits.is_present(row)));
             }
-            let mut recovered = NativeStorage::open(config.clone()).unwrap();
-            assert_eq!(
-                recovered.mark_non_canonical(header.hash_slow()).unwrap(),
-                if committed { 0 } else { 3 }
-            );
-            drop(recovered);
-            let recovered = NativeStorage::open(config).unwrap();
-            let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
-            let bits = reader.read_canonical().unwrap();
-            assert_eq!(reader.read_log_rows(None).unwrap(), rows);
-            assert!((0..3).all(|row| !bits.is_present(row)));
         }
     }
 

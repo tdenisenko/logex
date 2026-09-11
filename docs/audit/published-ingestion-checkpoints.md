@@ -5,6 +5,11 @@ PR #130. The user authorizes bounded verified re-ingestion, engineering judgment
 and fresh incompatible directories, while retaining the 10% ingestion ceiling.
 No production directory or service uses this implementation.
 
+The current [live-bundle successor](live-segment-bundles.md) adds catalog v7 /
+segment v5 support for hot bundles while retaining the publication contract below.
+The measurements here describe the preceding implementation unless explicitly
+identified otherwise; its Intel ExFAT live failure remains recorded.
+
 ## Contract and recovery boundary
 
 Generic row-only writes retain their WAL-backed durable contract. Combined sync
@@ -210,8 +215,8 @@ This diagnostic did not establish a safe general companion-name exclusion policy
 In particular, current `collect_indexes` lists arbitrary files as Custom indexes,
 including companions; that classification needs review in the index audit.
 
-The next isolated feasibility probe is live reuse of the existing immutable bundle
-representation, reducing the number of column files and replacements. No such
-production change is implemented or accepted by this record. It would require
-catalog compatibility, zero-row rollback, generic WAL transitions, reorg/snapshot,
-index/compaction and query-cost validation in addition to ingestion performance.
+The [live bundle probe](live-segment-bundles.md) improves the formerly failing
+Intel profile by 37.50% against the original baseline. Integration and expanded
+recovery tests are underway, with separate performance/platform acceptance still
+required. It reuses the immutable representation to reduce column files and
+replacements, including first-bundle rollback and generic WAL transitions.

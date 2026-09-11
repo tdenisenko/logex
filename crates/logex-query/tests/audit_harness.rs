@@ -231,6 +231,11 @@ async fn query_cases(
     let start = Instant::now();
     let actual = execute_log_filter(storage, &filter()).unwrap();
     let elapsed = start.elapsed();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "native filter omitted or duplicated matching rows"
+    );
     assert_eq!(actual, expected);
     samples.record("native_filter", iteration, elapsed, expected.len());
 
@@ -429,6 +434,74 @@ async fn ordered_sql_crosses_compacted_page_boundaries() {
     storage.finalize_historical_segment().unwrap();
     // LIMIT 1000 spans the tail page and the previous 16,384-row page.
     query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+}
+
+#[tokio::test]
+async fn live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg() {
+    let mut rows = fixture(17_000, Profile::Dense);
+    let mut headers = Vec::new();
+    let mut parent_hash = B256::ZERO;
+    for block in rows.chunks_mut(128) {
+        let header = alloy_consensus::Header {
+            number: block[0].block_number,
+            timestamp: block[0].timestamp,
+            parent_hash,
+            ..Default::default()
+        };
+        parent_hash = header.hash_slow();
+        for row in block {
+            row.block_hash = parent_hash;
+        }
+        headers.push(header);
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 10_000,
+        compaction_safety_margin_blocks: 0,
+    };
+    let mut storage = PartitionManager::open(config.clone()).unwrap();
+    let mut start = 0;
+    for end in [8_192, 16_512, rows.len()] {
+        let through = end.div_ceil(128);
+        storage
+            .ingest_canonical_batch(
+                &rows[start..end],
+                &headers[through - 1],
+                &headers[..through],
+                None,
+            )
+            .unwrap();
+        storage.checkpoint().unwrap();
+        let expected = expected_matches(&rows[..end]);
+        // This also checks the previous hot indexes after its next append.
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+        for partition in storage
+            .sealed_partitions()
+            .iter()
+            .chain(std::iter::once(storage.hot_partition()))
+        {
+            if partition.meta.row_count > 0 {
+                assert!(!partition.meta.path.join("address.col").exists());
+                IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+            }
+        }
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+        start = end;
+    }
+    let removed = rows[0].block_hash;
+    assert_eq!(storage.mark_non_canonical(removed).unwrap(), 128);
+    let remaining: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.block_hash != removed)
+        .collect();
+    let expected = expected_matches(&remaining);
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    drop(storage);
+    for _ in 0..2 {
+        let storage = PartitionManager::open(config.clone()).unwrap();
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    }
 }
 
 #[tokio::test]

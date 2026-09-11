@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 4;
-pub const CATALOG_FORMAT_VERSION: u32 = 6;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT006";
+pub const STORAGE_FORMAT_VERSION: u32 = 5;
+pub const CATALOG_FORMAT_VERSION: u32 = 7;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT007";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -374,7 +374,7 @@ impl NativeStorageCatalog {
         for segment in &self.segments {
             if let Some(reference) = &segment.column_bundle {
                 reference.end()?;
-                if reference.row_count != segment.row_count || segment.kind != SegmentKind::Sealed {
+                if reference.row_count != segment.row_count {
                     return Err(invalid_catalog("invalid catalog bundle checkpoint"));
                 }
             }

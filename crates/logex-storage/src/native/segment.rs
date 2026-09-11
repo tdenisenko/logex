@@ -146,7 +146,7 @@ impl<'a> PageOutput<'a> {
             )
         };
         if manifest.format_version != super::catalog::STORAGE_FORMAT_VERSION
-            || manifest.kind != SegmentKind::Sealed
+            || (manifest.kind != SegmentKind::Sealed && manifest.column_bundle.is_none())
             || manifest.canonical_rows_path != "canonical.bitmap"
             || !columns_match_current_profile(&manifest.columns)
         {
@@ -452,6 +452,8 @@ pub(crate) fn write_compacted_rows(
     Ok(columns)
 }
 
+/// Start a segment with no committed rows. Empty raw files left by a previous
+/// rollback are disposable; nonempty raw prefixes must use their append path.
 pub(crate) fn write_bundled_rows(
     segment_dir: &Path,
     rows: &[LogRow],
@@ -464,10 +466,23 @@ pub(crate) fn write_bundled_rows(
     ));
     output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
-    Ok(EncodedColumns {
+    let encoded = EncodedColumns {
         columns,
         bundle: output.finish()?,
-    })
+    };
+    for name in RAW_FIXED_COLUMNS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(std::iter::once("data.col"))
+        .chain(RAW_BITMAP_COLUMNS.iter().copied())
+    {
+        let path = segment_dir.join(name);
+        if path.try_exists()? {
+            durability::checkpoint("bundle_remove_empty_raw_artifact", &path)?;
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(encoded)
 }
 
 /// Reserve worst-case compressed extents before writing any part of a batch.
@@ -559,7 +574,7 @@ pub(crate) fn append_compacted_rows(
     if manifest.row_count != existing_rows {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "historical append manifest changed",
+            "segment append manifest changed",
         ));
     }
     let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication, inspected)?;
@@ -2077,6 +2092,7 @@ mod tests {
                 let mut manifest = original.clone();
                 match case {
                     0 => manifest.format_version += 1,
+                    1 if bundled => manifest.column_bundle.as_mut().unwrap().row_count += 1,
                     1 => manifest.kind = SegmentKind::Hot,
                     2 => manifest.columns[0].data_path = "../address.pages".into(),
                     3 => manifest.columns[0].page_index_path = Some("../index".into()),

@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::bundle::{BundleReader, MAX_EXTENTS, MAX_ROWS};
-use crate::native::{STORAGE_FORMAT_VERSION, SegmentKind, SegmentManifest};
+use crate::native::{STORAGE_FORMAT_VERSION, SegmentManifest};
 use crate::page::{PAGE_INDEX_ENTRY_BYTES, frame_page_index};
 
 pub(crate) const CANONICAL_STREAM: u8 = 32;
@@ -85,7 +85,6 @@ impl ColumnArtifacts {
             })
             .map(|(manifest, reference)| {
                 if manifest.format_version != STORAGE_FORMAT_VERSION
-                    || manifest.kind != SegmentKind::Sealed
                     || manifest.row_count != reference.row_count
                     || manifest.canonical_rows_path != "canonical.bitmap"
                     || manifest.columns.len() != COLUMN_NAMES.len()
