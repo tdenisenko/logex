@@ -1,0 +1,57 @@
+--- a/crates/logex-storage/src/native/segment.rs
++++ b/crates/logex-storage/src/native/segment.rs
+@@ -1971,6 +1971,35 @@
+                 }
+             })
+             .collect()
++    }
++
++    #[test]
++    fn raw_compaction_preserves_a_captured_reader() {
++        let tmp = TempDir::new().unwrap();
++        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
++        let config = super::super::catalog::NativeStorageConfig {
++            data_dir: tmp.path().to_owned(),
++            ..Default::default()
++        };
++        let (mut catalog, _) =
++            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
++        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
++        let dir = paths.segment_dir(descriptor.id);
++        let rows = &descending_rows()[..50];
++        append_rows(&dir, 0, rows).unwrap();
++        apply_rows_to_descriptor(&mut descriptor, rows);
++        persist_segment_manifest(&paths, &descriptor).unwrap();
++        let captured = SegmentReader::open(&dir).unwrap();
++        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
++        compact_segment(&paths, &descriptor).unwrap();
++        assert_eq!(
++            SegmentReader::open(&dir)
++                .unwrap()
++                .read_log_rows(None)
++                .unwrap(),
++            rows
++        );
++        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+     }
+ 
+     #[test]
+@@ -2363,6 +2392,7 @@
+         columns[block_number_index] = legacy_block_number.clone();
+         persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+ 
++        let captured = SegmentReader::open(&segment_dir).unwrap();
+         let old_size = fs::metadata(segment_dir.join(&legacy_block_number.data_path))
+             .unwrap()
+             .len();
+@@ -2382,6 +2412,10 @@
+             "old_size={old_size} new_size={new_size}"
+         );
+ 
++        assert_eq!(
++            captured.read_u64("block_number", None).unwrap(),
++            rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
++        );
+         let reread = SegmentReader::open(&segment_dir)
+             .unwrap()
+             .read_u64("block_number", None)

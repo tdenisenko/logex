@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (/Users/tdenisenko/code/logex/target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::segment::tests::rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality ... 
+thread 'native::segment::tests::rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality' (38932913) panicked at crates/logex-storage/src/native/segment.rs:2500:66:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    native::segment::tests::rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 196 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

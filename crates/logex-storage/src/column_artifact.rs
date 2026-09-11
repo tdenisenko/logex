@@ -1,8 +1,10 @@
 //! Resolve the fixed logical column schema through one captured bundle table.
-use std::fs;
-use std::io;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::bundle::{BundleReader, MAX_EXTENTS, MAX_ROWS};
 use crate::native::{STORAGE_FORMAT_VERSION, SegmentManifest};
@@ -57,11 +59,99 @@ pub(crate) fn stream_id(path: &str) -> io::Result<u8> {
 pub(crate) struct ColumnArtifacts {
     dir: PathBuf,
     bundle: Option<BundleReader>,
+    pinned: Option<Arc<BTreeMap<String, Mutex<File>>>>,
 }
 
 impl ColumnArtifacts {
     pub(crate) fn open(dir: &Path, manifest: Option<&SegmentManifest>) -> io::Result<Self> {
+        // Writer-side inspection already owns the source publication lifecycle.
+        // Query readers use open_projected to retain physical artifacts.
         Self::open_inspected(dir, manifest, None)
+    }
+
+    pub(crate) fn open_projected(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+        projection: Option<&[&str]>,
+    ) -> io::Result<Self> {
+        if projection.is_some_and(|names| names.iter().any(|name| !COLUMN_NAMES.contains(name))) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown projected column",
+            ));
+        }
+        let includes = |name: &str| projection.is_none_or(|names| names.contains(&name));
+        let mut artifacts = Self::open_inspected(dir, manifest, None)?;
+        if artifacts.bundle.is_none() {
+            if let Some(manifest) = manifest {
+                let mut names = std::collections::BTreeSet::new();
+                for column in &manifest.columns {
+                    if (column.null_bitmap_path.is_some()
+                        && !matches!(
+                            column.name.as_str(),
+                            "topic0" | "topic1" | "topic2" | "topic3"
+                        ))
+                        || !COLUMN_NAMES.contains(&column.name.as_str())
+                        || !names.insert(&column.name)
+                    {
+                        return Err(invalid("unknown or repeated column in captured schema"));
+                    }
+                }
+            }
+            let paths: Vec<String> = if let Some(manifest) = manifest {
+                manifest
+                    .columns
+                    .iter()
+                    .filter(|column| includes(&column.name))
+                    .flat_map(|column| {
+                        std::iter::once(column.data_path.clone())
+                            .chain(column.page_index_path.iter().cloned())
+                            .chain(column.null_bitmap_path.iter().cloned())
+                    })
+                    .chain(std::iter::once(manifest.canonical_rows_path.clone()))
+                    .collect()
+            } else {
+                COLUMN_NAMES
+                    .iter()
+                    // A manifest-less reader still obtains its row count from address.
+                    .filter(|name| **name == "address" || includes(name))
+                    .map(|name| format!("{name}.col"))
+                    .chain(
+                        (0..4)
+                            .filter(|id| includes(&format!("topic{id}")))
+                            .map(|id| format!("topic{id}.null")),
+                    )
+                    .chain(std::iter::once("canonical.bitmap".to_owned()))
+                    .collect()
+            };
+            let mut files = BTreeMap::new();
+            for path in paths {
+                if path.is_empty()
+                    || Path::new(&path)
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err(invalid(
+                        "captured column path must remain relative to its segment",
+                    ));
+                }
+                if let std::collections::btree_map::Entry::Vacant(entry) = files.entry(path) {
+                    match File::open(dir.join(entry.key())) {
+                        Ok(file) => {
+                            entry.insert(Mutex::new(file));
+                        }
+                        Err(error)
+                            if error.kind() == io::ErrorKind::NotFound
+                                && manifest.is_none_or(|m| {
+                                    m.row_count == 0 || *entry.key() == m.canonical_rows_path
+                                }) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            artifacts.pinned = Some(Arc::new(files));
+        }
+        Ok(artifacts)
     }
 
     pub(crate) fn open_inspected(
@@ -124,6 +214,7 @@ impl ColumnArtifacts {
         Ok(Self {
             dir: dir.to_owned(),
             bundle,
+            pinned: None,
         })
     }
 
@@ -155,25 +246,57 @@ impl ColumnArtifacts {
                     _ => bundle.read_stream(id),
                 }
             }
-            None => fs::read(self.dir.join(path)),
+            None => {
+                if let Some(files) = &self.pinned {
+                    let mut file = pinned_file(files, path)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    let mut bytes = Vec::new();
+                    let len = usize::try_from(file.metadata()?.len())
+                        .map_err(|_| invalid("captured column exceeds address space"))?;
+                    bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+                    file.read_to_end(&mut bytes)?;
+                    Ok(bytes)
+                } else {
+                    fs::read(self.dir.join(path))
+                }
+            }
         }
     }
 
     pub(crate) fn len(&self, path: &str) -> io::Result<u64> {
         match &self.bundle {
             Some(bundle) => bundle.stream_len(stream_id(path)?),
-            None => Ok(fs::metadata(self.dir.join(path))?.len()),
+            None => match &self.pinned {
+                Some(files) => Ok(pinned_file(files, path)?.metadata()?.len()),
+                None => Ok(fs::metadata(self.dir.join(path))?.len()),
+            },
         }
     }
 
-    pub(crate) fn read_bundle_range(
-        &self,
-        path: &str,
-        range: Range<u64>,
-    ) -> Option<io::Result<Vec<u8>>> {
-        self.bundle
-            .as_ref()
-            .map(|bundle| stream_id(path).and_then(|id| bundle.read_range(id, range)))
+    pub(crate) fn read_range(&self, path: &str, range: Range<u64>) -> io::Result<Vec<u8>> {
+        if let Some(bundle) = &self.bundle {
+            return stream_id(path).and_then(|id| bundle.read_range(id, range));
+        }
+        let read = |file: &mut File| {
+            let len = range
+                .end
+                .checked_sub(range.start)
+                .and_then(|len| usize::try_from(len).ok())
+                .ok_or_else(|| invalid("invalid captured column range"))?;
+            if range.end > file.metadata()?.len() {
+                return Err(invalid("captured column range exceeds its file"));
+            }
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+            bytes.resize(len, 0);
+            file.seek(SeekFrom::Start(range.start))?;
+            file.read_exact(&mut bytes)?;
+            Ok(bytes)
+        };
+        match &self.pinned {
+            Some(files) => read(&mut *pinned_file(files, path)?),
+            None => read(&mut File::open(self.dir.join(path))?),
+        }
     }
 
     pub(crate) fn verify_bundle(&self) -> io::Result<()> {
@@ -181,6 +304,22 @@ impl ColumnArtifacts {
             .as_ref()
             .map_or(Ok(()), BundleReader::verify_all)
     }
+}
+
+fn pinned_file<'a>(
+    files: &'a BTreeMap<String, Mutex<File>>,
+    path: &str,
+) -> io::Result<std::sync::MutexGuard<'a, File>> {
+    files
+        .get(path)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "column is absent from captured files",
+            )
+        })?
+        .lock()
+        .map_err(|_| invalid("captured column lock poisoned"))
 }
 
 fn bitmap_bytes(rows: u64) -> io::Result<usize> {

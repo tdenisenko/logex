@@ -90,7 +90,7 @@ impl IndexBuildCheckpoint {
             TryLockError::Error(error) => error,
         })?;
         let lock = DirectoryLock(file);
-        let identity = Identity::read(&SegmentReader::open(dir)?)?;
+        let identity = Identity::read(&SegmentReader::open_projected(dir, &[])?)?;
         let previous = match read_checkpoint(&index_dir) {
             Ok(previous) => previous,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
@@ -115,7 +115,7 @@ impl IndexBuildCheckpoint {
     /// If ingestion advanced while building, leave indexes unpublished and
     /// report WouldBlock so the caller can retry against the new source state.
     pub fn publish(self) -> io::Result<()> {
-        if Identity::read(&SegmentReader::open(&self.dir)?)? != self.identity {
+        if Identity::read(&SegmentReader::open_projected(&self.dir, &[])?)? != self.identity {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "segment changed while building indexes; retry the build",

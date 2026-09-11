@@ -62,6 +62,14 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
     }
 
     fn open_prefix(path: &Path, prefix: Option<usize>) -> io::Result<Self> {
+        Self::from_bytes(path, fs::read(path)?, prefix)
+    }
+
+    pub(crate) fn from_bytes(
+        path: &Path,
+        mut data: Vec<u8>,
+        prefix: Option<usize>,
+    ) -> io::Result<Self> {
         const { assert!(WIDTH > 0, "raw column widths must be positive") };
         let invalid = |reason: &str| {
             io::Error::new(
@@ -69,7 +77,6 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
                 format!("invalid fixed column {}: {reason}", path.display()),
             )
         };
-        let mut data = fs::read(path)?;
         let header = ColumnFileHeader::read_from(&data).ok_or_else(|| invalid("corrupt header"))?;
         if header.version != COLUMN_VERSION || header.compression != 0 {
             return Err(invalid("unsupported raw column version or compression"));
@@ -111,26 +118,37 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
     }
 
     fn read_nulls_for_read(&self, path: &Path, row_ids: Option<&[u32]>) -> io::Result<NullBitmap> {
+        self.read_nulls_from_bytes(
+            path,
+            &fs::read(path)?,
+            row_ids.is_some_and(|ids| !ids.is_empty()),
+        )
+    }
+
+    pub(crate) fn read_nulls_from_bytes(
+        &self,
+        path: &Path,
+        data: &[u8],
+        selected_prefix: bool,
+    ) -> io::Result<NullBitmap> {
         let invalid = || {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("null bitmap {} does not match its column", path.display()),
             )
         };
-        let data = fs::read(path)?;
         let rows = self.values().len();
-        let bitmap_rows = usize::try_from(read_le_u64(&data, 0)?).map_err(|_| invalid())?;
-        let selected_prefix = row_ids.is_some_and(|ids| !ids.is_empty());
+        let bitmap_rows = usize::try_from(read_le_u64(data, 0)?).map_err(|_| invalid())?;
         if (selected_prefix && bitmap_rows < rows)
             || (!selected_prefix && bitmap_rows != rows)
             || Some(data.len()) != bitmap_rows.div_ceil(8).checked_add(8)
         {
             return Err(invalid());
         }
-        NullBitmap::read_from(&data).ok_or_else(invalid)
+        NullBitmap::read_from(data).ok_or_else(invalid)
     }
 
-    fn materialize<T>(
+    pub(crate) fn materialize<T>(
         &self,
         row_ids: Option<&[u32]>,
         mut decode: impl FnMut(usize, &[u8; WIDTH]) -> T,
@@ -176,13 +194,16 @@ pub(crate) struct RawBytesColumn {
 
 impl RawBytesColumn {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        Self::from_bytes(path, fs::read(path)?)
+    }
+
+    pub(crate) fn from_bytes(path: &Path, data: Vec<u8>) -> io::Result<Self> {
         let invalid = |reason: &str| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid variable column {}: {reason}", path.display()),
             )
         };
-        let data = fs::read(path)?;
         let header = ColumnFileHeader::read_from(&data).ok_or_else(|| invalid("corrupt header"))?;
         if header.version != COLUMN_VERSION || header.compression != 0 {
             return Err(invalid("unsupported raw column version or compression"));
@@ -221,6 +242,45 @@ impl RawBytesColumn {
             row_count,
             blob_start,
         })
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        row_ids: Option<&[u32]>,
+        visible_rows: Option<u64>,
+    ) -> io::Result<Vec<Bytes>> {
+        let visible =
+            usize::try_from(visible_rows.unwrap_or(self.row_count() as u64)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "visible raw row count exceeds address space",
+                )
+            })?;
+        if visible > self.row_count()
+            || row_ids.is_some_and(|ids| ids.iter().any(|&id| id as usize >= visible))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raw selection exceeds captured rows",
+            ));
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(row_ids.map_or(visible, <[u32]>::len))
+            .map_err(io::Error::other)?;
+        match row_ids {
+            Some(ids) => {
+                for &row in ids {
+                    values.push(Bytes::copy_from_slice(self.row(row as usize)?));
+                }
+            }
+            None => {
+                for row in 0..visible {
+                    values.push(Bytes::copy_from_slice(self.row(row)?));
+                }
+            }
+        }
+        Ok(values)
     }
 
     pub(crate) fn row_count(&self) -> usize {
@@ -326,23 +386,7 @@ impl ColumnReader {
         row_ids: Option<&[u32]>,
     ) -> std::io::Result<Vec<Bytes>> {
         let column = RawBytesColumn::open(&dir.join(name))?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(row_ids.map_or(column.row_count(), <[u32]>::len))
-            .map_err(io::Error::other)?;
-        match row_ids {
-            Some(ids) => {
-                for &row in ids {
-                    values.push(Bytes::copy_from_slice(column.row(row as usize)?));
-                }
-            }
-            None => {
-                for row in 0..column.row_count() {
-                    values.push(Bytes::copy_from_slice(column.row(row)?));
-                }
-            }
-        }
-        Ok(values)
+        column.materialize(row_ids, None)
     }
 
     /// Read the canonical bitmap.

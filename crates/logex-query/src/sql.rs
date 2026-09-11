@@ -600,7 +600,7 @@ fn order_and_truncate_row_ids(
     if row_ids.is_empty() {
         return Ok(());
     }
-    let reader = SegmentReader::open(path)?;
+    let reader = SegmentReader::open_projected(path, &["block_number", "tx_index", "log_index"])?;
     let blocks = reader.read_u64("block_number", Some(row_ids))?;
     let tx_indices = reader.read_u32("tx_index", Some(row_ids))?;
     let log_indices = reader.read_u32("log_index", Some(row_ids))?;
@@ -1126,7 +1126,7 @@ fn scan_native_count_partition(
         return Ok((BTreeMap::new(), row_ids.len() as u64));
     }
 
-    let reader = SegmentReader::open(path)?;
+    let reader = SegmentReader::open_projected(path, &["source"])?;
     let sources = reader.read_u8("source", Some(&row_ids))?;
     let mut counts = BTreeMap::new();
     for source in sources {
@@ -3310,7 +3310,11 @@ fn build_projected_batch(
             .map_err(std::io::Error::other);
     }
 
-    let reader = SegmentReader::open(dir)?;
+    let projection = projected_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let reader = SegmentReader::open_projected(dir, &projection)?;
     let mut arrays = Vec::with_capacity(projected_columns.len());
 
     for column in projected_columns {

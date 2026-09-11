@@ -2296,7 +2296,7 @@ fn verify_segment_integrity(
         ));
     }
 
-    let reader = SegmentReader::open(&dir)?;
+    let reader = SegmentReader::open_projected(&dir, &["block_number"])?;
     let row_count = reader.read_row_count()?;
     if row_count != descriptor.row_count {
         return Err(io::Error::new(

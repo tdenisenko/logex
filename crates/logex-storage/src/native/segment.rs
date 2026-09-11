@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use alloy_primitives::{Address, B256};
@@ -25,7 +26,7 @@ use super::catalog::{
 };
 
 const DEFAULT_PAGE_ROWS: u32 = 16_384;
-const RECOMPACTED_COLUMNS_DIR: &str = "columns_profile_v2";
+static NEXT_REWRITE: AtomicU64 = AtomicU64::new(0);
 const RAW_FIXED_COLUMNS: &[(&str, u64)] = &[
     ("address.col", 20),
     ("block_number.col", 8),
@@ -173,6 +174,7 @@ impl<'a> PageOutput<'a> {
                 .filter(|base| {
                     matches!(*base, "columns" | "columns_profile_v2")
                         || (*base == "columns_block_number_v2" && column.name == "block_number")
+                        || is_rewrite_column_dir(base)
                 })
                 .ok_or_else(|| invalid("invalid column data path"))?;
             let index = format!("{base}/{}.pages.idx", column.name);
@@ -983,25 +985,18 @@ fn recompact_segment(
     }
 
     let segment_dir = paths.segment_dir(descriptor.id);
-    let tmp_dir = segment_dir.join(".recompact_tmp");
-    if tmp_dir.exists() {
-        fs::remove_dir_all(&tmp_dir)?;
-    }
-
+    let old_columns = existing_columns(paths, descriptor.id)?
+        .ok_or_else(|| std::io::Error::other("missing compaction source manifest"))?;
     let rows = SegmentReader::open(&segment_dir)?.read_log_rows(None)?;
-    let mut columns = write_compacted_rows(&tmp_dir, &rows)?;
-    let target_columns = segment_dir.join(RECOMPACTED_COLUMNS_DIR);
-    if target_columns.exists() {
-        fs::remove_dir_all(&target_columns)?;
-    }
-    fs::rename(tmp_dir.join("columns"), &target_columns)?;
-    rewrite_column_dir(&mut columns, RECOMPACTED_COLUMNS_DIR);
-
+    let (rewrite_dir, column_dir) = create_rewrite_dir(&segment_dir)?;
+    let mut columns = write_compacted_rows(&rewrite_dir, &rows)?;
+    rewrite_column_dir(&mut columns, &column_dir);
+    // Canonicality stays at the segment's existing path. The all-present bitmap
+    // produced for this temporary row encoding must never replace reorg state.
+    remove_file_if_exists(rewrite_dir.join("canonical.bitmap"))?;
     persist_segment_manifest_with_columns(paths, descriptor, columns)?;
-
-    remove_superseded_column_dirs(&segment_dir, RECOMPACTED_COLUMNS_DIR)?;
-    if tmp_dir.exists() {
-        fs::remove_dir_all(tmp_dir)?;
+    for column in &old_columns {
+        remove_column_files(&segment_dir, column)?;
     }
 
     tracing::info!(
@@ -1025,14 +1020,11 @@ fn recompact_block_number_profile(
     };
 
     let segment_dir = paths.segment_dir(descriptor.id);
-    let tmp_dir = segment_dir.join(".block_number_recompact_tmp");
-    if tmp_dir.exists() {
-        fs::remove_dir_all(&tmp_dir)?;
-    }
-    fs::create_dir_all(tmp_dir.join("columns"))?;
-
-    let values = SegmentReader::open(&segment_dir)?.read_u64("block_number", None)?;
-    let output = PageOutput::new(&tmp_dir);
+    let values = SegmentReader::open_projected(&segment_dir, &["block_number"])?
+        .read_u64("block_number", None)?;
+    let (rewrite_dir, column_dir) = create_rewrite_dir(&segment_dir)?;
+    fs::create_dir(rewrite_dir.join("columns"))?;
+    let output = PageOutput::new(&rewrite_dir);
     let mut block_number_column = compact_u64_values(
         &output,
         "block_number",
@@ -1040,20 +1032,11 @@ fn recompact_block_number_profile(
         values,
     )?;
     output.finish()?;
-    let target_dir_name = "columns_block_number_v2";
-    let target_dir = segment_dir.join(target_dir_name);
-    if target_dir.exists() {
-        fs::remove_dir_all(&target_dir)?;
-    }
-    fs::rename(tmp_dir.join("columns"), &target_dir)?;
-    rewrite_column_path_descriptor(&mut block_number_column, target_dir_name);
+    rewrite_column_path_descriptor(&mut block_number_column, &column_dir);
 
     let old_column = std::mem::replace(&mut columns[block_column_index], block_number_column);
     persist_segment_manifest_with_columns(paths, descriptor, columns)?;
     remove_column_files(&segment_dir, &old_column)?;
-    if tmp_dir.exists() {
-        fs::remove_dir_all(tmp_dir)?;
-    }
 
     tracing::info!(
         segment_id = descriptor.id,
@@ -1866,22 +1849,42 @@ fn raw_segment_error(
     )
 }
 
-fn remove_superseded_column_dirs(segment_dir: &Path, active_dir: &str) -> std::io::Result<()> {
-    for entry in fs::read_dir(segment_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.starts_with("columns") && name != active_dir {
-            let _ = fs::remove_dir_all(entry.path());
+/// Never overwrite a path named by any earlier manifest. Exclusive creation also
+/// avoids adopting an abandoned generation or a symlink after a restart. Failed
+/// publications may leave unreferenced artifacts; they are not deleted blindly.
+fn create_rewrite_dir(segment_dir: &Path) -> std::io::Result<(PathBuf, String)> {
+    for _ in 0..32 {
+        let sequence = NEXT_REWRITE.fetch_add(1, Ordering::Relaxed);
+        let name = format!("columns_rewrite_{:08x}_{sequence:016x}", std::process::id());
+        let dir = segment_dir.join(&name);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok((dir, format!("{name}/columns"))),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
         }
     }
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate an unused compaction generation",
+    ))
+}
+
+fn is_rewrite_column_dir(path: &str) -> bool {
+    let Some(identity) = path
+        .strip_prefix("columns_rewrite_")
+        .and_then(|path| path.strip_suffix("/columns"))
+    else {
+        return false;
+    };
+    let Some((process, sequence)) = identity.split_once('_') else {
+        return false;
+    };
+    process.len() == 8
+        && sequence.len() == 16
+        && process
+            .bytes()
+            .chain(sequence.bytes())
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn remove_column_files(segment_dir: &Path, column: &ColumnDescriptor) -> std::io::Result<()> {
@@ -1891,6 +1894,29 @@ fn remove_column_files(segment_dir: &Path, column: &ColumnDescriptor) -> std::io
     }
     if let Some(path) = &column.page_index_path {
         remove_file_if_exists(segment_dir.join(path))?;
+    }
+    for path in std::iter::once(&column.data_path)
+        .chain(column.page_index_path.iter())
+        .chain(column.null_bitmap_path.iter())
+    {
+        let artifact = segment_dir.join(path);
+        let mut parent = artifact.parent();
+        while let Some(dir) =
+            parent.filter(|dir| *dir != segment_dir && dir.starts_with(segment_dir))
+        {
+            match fs::remove_dir(dir) {
+                Ok(()) => parent = dir.parent(),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(())
 }
@@ -1971,6 +1997,35 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn raw_compaction_preserves_a_captured_reader() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, _) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(descriptor.id);
+        let rows = &descending_rows()[..50];
+        append_rows(&dir, 0, rows).unwrap();
+        apply_rows_to_descriptor(&mut descriptor, rows);
+        persist_segment_manifest(&paths, &descriptor).unwrap();
+        let captured = SegmentReader::open(&dir).unwrap();
+        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+        compact_segment(&paths, &descriptor).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            rows
+        );
+        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
     }
 
     #[test]
@@ -2363,6 +2418,7 @@ mod tests {
         columns[block_number_index] = legacy_block_number.clone();
         persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
 
+        let captured = SegmentReader::open(&segment_dir).unwrap();
         let old_size = fs::metadata(segment_dir.join(&legacy_block_number.data_path))
             .unwrap()
             .len();
@@ -2382,6 +2438,10 @@ mod tests {
             "old_size={old_size} new_size={new_size}"
         );
 
+        assert_eq!(
+            captured.read_u64("block_number", None).unwrap(),
+            rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
+        );
         let reread = SegmentReader::open(&segment_dir)
             .unwrap()
             .read_u64("block_number", None)
@@ -2390,5 +2450,202 @@ mod tests {
             reread,
             rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
         );
+    }
+    fn legacy_rewrite_fixture(
+        full: bool,
+    ) -> (TempDir, StorageCatalogPaths, SegmentDescriptor, Vec<LogRow>) {
+        let tmp = TempDir::new().unwrap();
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        let (mut catalog, _) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(descriptor.id);
+        let rows = descending_rows()[..50].to_vec();
+        apply_rows_to_descriptor(&mut descriptor, &rows);
+        let mut columns = write_compacted_rows(&dir, &rows).unwrap();
+        for (name, values) in std::iter::once((
+            "block_number",
+            rows.iter().map(|r| r.block_number).collect::<Vec<_>>(),
+        ))
+        .chain(full.then(|| {
+            (
+                "timestamp",
+                rows.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
+            )
+        })) {
+            let column = compact_u64_values(
+                &PageOutput::new(&dir),
+                name,
+                CompressionCodec::Delta,
+                values,
+            )
+            .unwrap();
+            *columns.iter_mut().find(|c| c.name == name).unwrap() = column;
+        }
+        if full {
+            fs::rename(dir.join("columns"), dir.join("columns_profile_v2")).unwrap();
+            rewrite_column_dir(&mut columns, "columns_profile_v2");
+        } else {
+            fs::create_dir(dir.join("columns_block_number_v2")).unwrap();
+            let column = columns
+                .iter_mut()
+                .find(|c| c.name == "block_number")
+                .unwrap();
+            for path in [&column.data_path, column.page_index_path.as_ref().unwrap()] {
+                fs::rename(
+                    dir.join(path),
+                    dir.join(rewrite_column_path(path, "columns_block_number_v2")),
+                )
+                .unwrap();
+            }
+            rewrite_column_path_descriptor(column, "columns_block_number_v2");
+        }
+        let mut canonical = NullBitmap::new();
+        for row in 0..rows.len() {
+            canonical.push(row != 0);
+        }
+        ColumnFile::replace_canonical_bitmap(&dir, &canonical).unwrap();
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+        (tmp, paths, descriptor, rows)
+    }
+
+    #[test]
+    fn interrupted_block_profile_rewrite_preserves_the_published_generation() {
+        assert_interrupted_profile_rewrite(false);
+    }
+
+    #[test]
+    fn interrupted_full_profile_rewrite_preserves_the_published_generation() {
+        assert_interrupted_profile_rewrite(true);
+    }
+
+    fn assert_interrupted_profile_rewrite(full: bool) {
+        let (_tmp, paths, descriptor, _) = legacy_rewrite_fixture(full);
+        durability::inject_failure(usize::MAX);
+        compact_segment(&paths, &descriptor).unwrap();
+        let events = durability::take_events();
+        assert!(!events.is_empty());
+        println!(
+            "profile rewrite full={full}: {} injected publication boundaries",
+            events.len()
+        );
+        for failure in 0..events.len() {
+            let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(full);
+            let dir = paths.segment_dir(descriptor.id);
+            let captured = SegmentReader::open(&dir).unwrap();
+            durability::inject_failure(failure);
+            let result = compact_segment(&paths, &descriptor);
+            let observed = durability::take_events();
+            assert!(
+                result.is_err(),
+                "missing fault {failure} full={full}: {observed:?}"
+            );
+            let reopened = SegmentReader::open(&dir).unwrap();
+            assert_eq!(
+                reopened.read_log_rows(None).unwrap(),
+                rows,
+                "fault {failure} full={full}: {observed:?}"
+            );
+            assert!(!reopened.read_canonical().unwrap().is_present(0));
+            assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+            // Repeated maintenance must complete without adopting or deleting
+            // any incomplete previous output generation.
+            compact_segment(&paths, &descriptor).unwrap();
+            assert_eq!(
+                SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap(),
+                rows
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality() {
+        let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(true);
+        let dir = paths.segment_dir(descriptor.id);
+        fs::create_dir(dir.join("columns_user_notes")).unwrap();
+        fs::write(dir.join("columns_user_notes/keep"), b"unrelated").unwrap();
+        fs::write(dir.join("columns_profile_v2/keep"), b"unrelated").unwrap();
+        let captured = SegmentReader::open(&dir).unwrap();
+        compact_segment(&paths, &descriptor).unwrap();
+        assert_eq!(
+            fs::read(dir.join("columns_user_notes/keep")).unwrap(),
+            b"unrelated"
+        );
+        assert_eq!(
+            fs::read(dir.join("columns_profile_v2/keep")).unwrap(),
+            b"unrelated"
+        );
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+        assert!(!reader.read_canonical().unwrap().is_present(0));
+        // The new paths must remain valid for subsequent prefix inspection/appends.
+        append_compacted_rows(
+            &dir,
+            rows.len() as u64,
+            &rows[..1],
+            Publication::Ordered,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+    }
+
+    #[test]
+    fn raw_projection_keeps_its_prefix_across_append_and_retirement() {
+        let (_tmp, paths, mut descriptor, rows) = legacy_rewrite_fixture(false);
+        let dir = paths.segment_dir(descriptor.id);
+        // This fixture switches to raw columns before taking any snapshots.
+        fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
+        append_rows(&dir, 0, &rows[..2]).unwrap();
+        descriptor.row_count = 2;
+        persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
+        let reader =
+            SegmentReader::open_projected(&dir, &["block_number", "topic1", "data"]).unwrap();
+        assert!(reader.read_address(None).is_err());
+        append_rows(&dir, 2, &rows[2..]).unwrap();
+        assert_eq!(
+            reader.read_u64("block_number", None).unwrap(),
+            rows[..2].iter().map(|r| r.block_number).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reader.read_nullable_b256("topic1", None).unwrap(),
+            vec![None, None]
+        );
+        assert_eq!(
+            reader.read_var_bytes("data", None).unwrap(),
+            rows[..2].iter().map(|r| r.data.clone()).collect::<Vec<_>>()
+        );
+        assert!(reader.read_u64("block_number", Some(&[2])).is_err());
+        descriptor.row_count = rows.len() as u64;
+        persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
+        compact_segment(&paths, &descriptor).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let reader = reader.clone();
+                let rows = &rows;
+                scope.spawn(move || {
+                    for _ in 0..20 {
+                        assert_eq!(
+                            reader.read_u64("block_number", Some(&[1, 0, 1])).unwrap(),
+                            vec![
+                                rows[1].block_number,
+                                rows[0].block_number,
+                                rows[1].block_number
+                            ]
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(reader.read_canonical_len().unwrap(), 2);
+        assert!(SegmentReader::open_projected(&dir, &["../unknown"]).is_err());
     }
 }

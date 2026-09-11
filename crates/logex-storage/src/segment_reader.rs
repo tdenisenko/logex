@@ -1,5 +1,5 @@
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use alloy_primitives::{Address, B256, Bytes};
@@ -11,7 +11,8 @@ use crate::page::{
     PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
     decode_var_bytes_page, read_page_index,
 };
-use crate::{ColumnReader, NullBitmap};
+use crate::reader::{RawBytesColumn, RawFixedColumn};
+use crate::{ColumnFileHeader, NullBitmap};
 
 #[derive(Debug, Clone)]
 pub struct SegmentReader {
@@ -33,26 +34,97 @@ impl SegmentReader {
     }
 
     pub fn open(dir: &Path) -> io::Result<Self> {
-        let manifest = load_manifest(dir)?;
-        if manifest.as_ref().is_some_and(|manifest| {
-            manifest.format_version != crate::native::STORAGE_FORMAT_VERSION
-        }) {
+        Self::open_inner(dir, None)
+    }
+
+    /// Capture only the columns needed by a query, plus canonicality and row-count
+    /// metadata. Include predicate, ordering and output columns, including those
+    /// needed if an index is unavailable. Other columns may not be readable.
+    pub fn open_projected(dir: &Path, columns: &[&str]) -> io::Result<Self> {
+        Self::open_inner(dir, Some(columns))
+    }
+
+    fn open_inner(dir: &Path, projection: Option<&[&str]>) -> io::Result<Self> {
+        Self::open_manifest(dir, projection, load_manifest(dir)?)
+    }
+
+    fn open_manifest(
+        dir: &Path,
+        projection: Option<&[&str]>,
+        mut manifest: Option<SegmentManifest>,
+    ) -> io::Result<Self> {
+        for _ in 0..3 {
+            if manifest.as_ref().is_some_and(|manifest| {
+                manifest.format_version != crate::native::STORAGE_FORMAT_VERSION
+            }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsupported segment format",
+                ));
+            }
+            match ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection) {
+                Ok(artifacts) => {
+                    return Ok(Self {
+                        dir: dir.to_path_buf(),
+                        manifest,
+                        artifacts,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // Publication can retire old names during capture. Retry only
+                    // when there is evidence of a different manifest, never to
+                    // conceal a file missing from the same committed generation.
+                    let current = load_manifest(dir)?;
+                    if current == manifest {
+                        return Err(error);
+                    }
+                    manifest = current;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "segment changed repeatedly during capture; retry the read",
+        ))
+    }
+
+    fn raw_fixed<const WIDTH: usize>(
+        &self,
+        path: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<RawFixedColumn<WIDTH>> {
+        let visible = self.manifest.as_ref().map(|m| m.row_count);
+        let requested = row_ids
+            .and_then(|ids| ids.iter().max())
+            .map(|&id| u64::from(id) + 1);
+        if visible
+            .zip(requested)
+            .is_some_and(|(visible, required)| required > visible)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unsupported segment format",
+                "raw selection exceeds captured rows",
             ));
         }
-        let artifacts = ColumnArtifacts::open(dir, manifest.as_ref())?;
-        Ok(Self {
-            dir: dir.to_path_buf(),
-            manifest,
-            artifacts,
-        })
+        let prefix = requested
+            .or(visible)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw prefix exceeds address space",
+                )
+            })?;
+        RawFixedColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?, prefix)
     }
 
     pub fn read_address(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<Address>> {
         if self.compacted_column("address").is_none() {
-            return ColumnReader::read_address(&self.dir, row_ids);
+            return self
+                .raw_fixed::<20>("address.col", row_ids)?
+                .materialize(row_ids, |_, value| Address::from(*value));
         }
 
         self.read_fixed_width_values("address", 20, row_ids)?
@@ -63,7 +135,9 @@ impl SegmentReader {
 
     pub fn read_b256(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<B256>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_b256(&self.dir, raw_column_path(column), row_ids);
+            return self
+                .raw_fixed::<32>(raw_column_path(column), row_ids)?
+                .materialize(row_ids, |_, value| B256::from(*value));
         }
 
         self.read_fixed_width_values(column, 32, row_ids)?
@@ -78,7 +152,16 @@ impl SegmentReader {
         row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<Option<B256>>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_nullable_b256(&self.dir, column, row_ids);
+            let fixed = self.raw_fixed::<32>(&format!("{column}.col"), row_ids)?;
+            let path = format!("{column}.null");
+            let nulls = fixed.read_nulls_from_bytes(
+                &self.dir.join(&path),
+                &self.artifacts.read(&path)?,
+                self.manifest.is_some() || row_ids.is_some_and(|ids| !ids.is_empty()),
+            )?;
+            return fixed.materialize(row_ids, |row, value| {
+                nulls.is_present(row as u64).then(|| B256::from(*value))
+            });
         }
 
         let values = self.read_fixed_width_values(column, 32, row_ids)?;
@@ -111,38 +194,42 @@ impl SegmentReader {
 
     pub fn read_u64(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_u64(&self.dir, raw_column_path(column), row_ids);
+            return self
+                .raw_fixed::<8>(raw_column_path(column), row_ids)?
+                .materialize(row_ids, |_, value| u64::from_le_bytes(*value));
         }
         self.read_u64_values(column, row_ids)
     }
 
     pub fn read_u32(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_u32(&self.dir, raw_column_path(column), row_ids);
+            return self
+                .raw_fixed::<4>(raw_column_path(column), row_ids)?
+                .materialize(row_ids, |_, value| u32::from_le_bytes(*value));
         }
         self.read_u32_values(column, row_ids)
     }
 
     pub fn read_u8(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_u8(&self.dir, raw_column_path(column), row_ids);
+            return self
+                .raw_fixed::<1>(raw_column_path(column), row_ids)?
+                .materialize(row_ids, |_, value| value[0]);
         }
         self.read_u8_values(column, row_ids)
     }
 
     pub fn read_var_bytes(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<Bytes>> {
         if self.compacted_column(column).is_none() {
-            return ColumnReader::read_var_bytes(&self.dir, raw_column_path(column), row_ids);
+            let path = raw_column_path(column);
+            return RawBytesColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?)?
+                .materialize(row_ids, self.manifest.as_ref().map(|m| m.row_count));
         }
         self.read_var_bytes_values(column, row_ids)
     }
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
-        let data = if self.artifacts.bundle().is_some() {
-            self.artifacts.read("canonical.bitmap")?
-        } else {
-            fs::read(self.canonical_path())?
-        };
+        let data = self.artifacts.read(self.canonical_relative_path())?;
         NullBitmap::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
     }
@@ -151,12 +238,14 @@ impl SegmentReader {
         if self.artifacts.bundle().is_some() {
             return self.read_canonical().map(|bitmap| bitmap.len());
         }
-        let mut file = File::open(self.canonical_path())?;
-        let mut len_bytes = [0u8; 8];
-        file.read_exact(&mut len_bytes)?;
-        let len = u64::from_le_bytes(len_bytes);
+        let bytes = self
+            .artifacts
+            .read_range(self.canonical_relative_path(), 0..8)?;
+        let len = u64::from_le_bytes(bytes.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid captured bitmap header")
+        })?);
         let expected_len = 8 + len.div_ceil(8);
-        let actual_len = file.metadata()?.len();
+        let actual_len = self.artifacts.len(self.canonical_relative_path())?;
         if actual_len < expected_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -170,7 +259,15 @@ impl SegmentReader {
         if let Some(manifest) = &self.manifest {
             Ok(manifest.row_count)
         } else {
-            ColumnReader::read_row_count(&self.dir)
+            let data = self.artifacts.read("address.col")?;
+            ColumnFileHeader::read_from(&data)
+                .map(|header| header.row_count)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "corrupt captured row-count header",
+                    )
+                })
         }
     }
 
@@ -226,11 +323,10 @@ impl SegmentReader {
             .find(|column| column.name == name && column.page_index_path.is_some())
     }
 
-    fn canonical_path(&self) -> PathBuf {
+    fn canonical_relative_path(&self) -> &str {
         self.manifest
             .as_ref()
-            .map(|manifest| self.dir.join(&manifest.canonical_rows_path))
-            .unwrap_or_else(|| self.dir.join("canonical.bitmap"))
+            .map_or("canonical.bitmap", |manifest| &manifest.canonical_rows_path)
     }
 
     fn read_fixed_width_values(
@@ -494,28 +590,8 @@ impl SegmentReader {
             .offset
             .checked_add(u64::from(entry.encoded_len))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "page range overflow"))?;
-        if let Some(result) = self
-            .artifacts
-            .read_bundle_range(&descriptor.data_path, entry.offset..end)
-        {
-            return result;
-        }
-        let mut file = File::open(self.dir.join(&descriptor.data_path))?;
-        let file_len = file.metadata()?.len();
-        if entry
-            .offset
-            .checked_add(u64::from(entry.encoded_len))
-            .is_none_or(|end| end > file_len)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "compacted page is out of bounds",
-            ));
-        }
-        file.seek(SeekFrom::Start(entry.offset))?;
-        let mut payload = vec![0u8; entry.encoded_len as usize];
-        file.read_exact(&mut payload)?;
-        Ok(payload)
+        self.artifacts
+            .read_range(&descriptor.data_path, entry.offset..end)
     }
 }
 
@@ -724,9 +800,13 @@ mod tests {
         let rows = make_rows();
         ColumnFile::write_batch(&dir, &rows).unwrap();
         persist_segment_manifest(&paths, &descriptor).unwrap();
+        let before = load_manifest(&dir).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
 
-        let reader = SegmentReader::open(&dir).unwrap();
+        // Deterministically put publication between loading the old manifest
+        // and capturing its artifacts. Missing retired files must retry the new
+        // manifest, while missing files in the same generation remain errors.
+        let reader = SegmentReader::open_manifest(&dir, None, before).unwrap();
         assert_eq!(reader.read_canonical_len().unwrap(), rows.len() as u64);
         let reread = reader.read_log_rows(None).unwrap();
         assert_eq!(reread, rows);
@@ -735,6 +815,12 @@ mod tests {
         assert_eq!(selected[0], rows[1]);
         assert_eq!(selected[1], rows[7]);
         assert_eq!(selected[2], rows[12]);
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        fs::remove_file(dir.join(&manifest.columns[0].data_path)).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -142,7 +142,41 @@ pub fn candidate_row_ids(
     filter: &NativeLogFilter,
     use_indexes: bool,
 ) -> std::io::Result<Vec<u32>> {
-    let reader = SegmentReader::open(dir)?;
+    // Include every refinement column even when an index is currently available:
+    // a stale or busy index must be able to fall back to this same captured source.
+    let mut columns = Vec::new();
+    for (name, needed) in [
+        ("address", !filter.addresses.is_empty()),
+        ("block_hash", filter.block_hash.is_some()),
+        (
+            "block_number",
+            filter.from_block.is_some() || filter.to_block.is_some(),
+        ),
+        (
+            "timestamp",
+            filter.from_timestamp.is_some() || filter.to_timestamp.is_some(),
+        ),
+        ("data_len", filter.data_len.is_some()),
+        (
+            "data",
+            filter.data_min.is_some()
+                || filter.data_max.is_some()
+                || !filter.data_not_equals.is_empty(),
+        ),
+    ] {
+        if needed {
+            columns.push(name);
+        }
+    }
+    for (name, constraint) in ["topic0", "topic1", "topic2", "topic3"]
+        .into_iter()
+        .zip(&filter.topics)
+    {
+        if !matches!(constraint, TopicConstraint::Any) {
+            columns.push(name);
+        }
+    }
+    let reader = SegmentReader::open_projected(dir, &columns)?;
     candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false)
 }
 
