@@ -220,3 +220,20 @@ Intel profile by 37.50% against the original baseline. Integration and expanded
 recovery tests are underway, with separate performance/platform acceptance still
 required. It reuses the immutable representation to reduce column files and
 replacements, including first-bundle rollback and generic WAL transitions.
+
+
+## Deterministic count-bound validation
+
+The Linux Test job at e8e8e43e (run 34572705829) failed because the real five-second
+deadline fired while the count-bound test expected all 64 publications to remain
+in one window. It observed one batch in a new window when it expected 24. The
+other five jobs passed; all six jobs subsequently passed at 6ce06c13, but the
+wall-clock assumption remained fragile.
+
+Checkpoint tests now have a thread-local controlled clock. The count-bound case
+freezes time while preserving its origin/deadline/counter assertions; production
+still uses the real monotonic clock and the same five-second threshold. A past
+virtual instant makes the regression fail immediately if elapsed checks bypass
+the controlled clock. The before failure, seven passing checkpoint tests, strict
+Clippy/check/format results and six-job CI snapshot are retained in the
+[clock validation record](baselines/2026-09-11-checkpoint-clock.jsonl).

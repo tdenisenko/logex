@@ -132,6 +132,19 @@ impl SegmentCompactionPlan {
 // re-fetchable by sync. A valid oversized caller batch checkpoints before return.
 const CHECKPOINT_INGEST_BYTES: u64 = 32 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT_CLOCK: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+fn checkpoint_now() -> std::time::Instant {
+    #[cfg(test)]
+    if let Some(now) = CHECKPOINT_CLOCK.get() {
+        return now;
+    }
+    std::time::Instant::now()
+}
+
 struct PendingCheckpoint {
     journal: RecoveryJournal,
     bytes: u64,
@@ -518,7 +531,7 @@ impl NativeStorage {
                 },
                 bytes: 0,
                 batches: 0,
-                started_at: std::time::Instant::now(),
+                started_at: checkpoint_now(),
             });
         }
         let pending = self
@@ -562,7 +575,9 @@ impl NativeStorage {
         {
             bytes = bytes.saturating_add(pending.bytes);
             batches = batches.saturating_add(pending.batches);
-            if pending.started_at.elapsed() >= std::time::Duration::from_secs(5) {
+            if checkpoint_now().saturating_duration_since(pending.started_at)
+                >= std::time::Duration::from_secs(5)
+            {
                 return true;
             }
         }
@@ -1619,7 +1634,8 @@ impl NativeStorage {
             pending.journal.route() != route
                 || pending.bytes.saturating_add(batch.encoded_len()) > CHECKPOINT_INGEST_BYTES
                 || pending.rows.checked_add(batch.row_count).is_none()
-                || pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
+                || checkpoint_now().saturating_duration_since(pending.started_at)
+                    >= std::time::Duration::from_secs(5)
         }) {
             self.checkpoint()?;
         }
@@ -1655,7 +1671,7 @@ impl NativeStorage {
                 bytes: 0,
                 rows: 0,
                 checksum: EncodedWalBatch::checkpoint_checksum(),
-                started_at: std::time::Instant::now(),
+                started_at: checkpoint_now(),
             });
         }
         self.wal.append_encoded(&batch)?;
@@ -1734,19 +1750,22 @@ impl NativeStorage {
     pub fn checkpoint_if_due(&mut self) -> io::Result<bool> {
         self.ensure_writable()?;
         if self.pending_ingestion.as_ref().is_some_and(|pending| {
-            pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
+            checkpoint_now().saturating_duration_since(pending.started_at)
+                >= std::time::Duration::from_secs(5)
         }) {
             self.checkpoint_durable()?;
             return Ok(true);
         }
         if self.pending_checkpoint.as_ref().is_some_and(|pending| {
-            pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
+            checkpoint_now().saturating_duration_since(pending.started_at)
+                >= std::time::Duration::from_secs(5)
         }) {
             self.checkpoint_durable()?;
             return Ok(true);
         }
         if self.published_ingestion.as_ref().is_some_and(|published| {
-            published.started_at.elapsed() >= std::time::Duration::from_secs(5)
+            checkpoint_now().saturating_duration_since(published.started_at)
+                >= std::time::Duration::from_secs(5)
         }) {
             self.checkpoint_durable()?;
             return Ok(true);
@@ -3159,6 +3178,18 @@ mod tests {
 
     #[test]
     fn published_ingestion_bounds_survive_frequent_checkpoints() {
+        struct FrozenClock;
+        impl Drop for FrozenClock {
+            fn drop(&mut self) {
+                CHECKPOINT_CLOCK.set(None);
+            }
+        }
+        // This case isolates the count bound. A slow/loaded filesystem can
+        // legitimately trigger the independently tested five-second bound first.
+        CHECKPOINT_CLOCK.set(Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        ));
+        let _clock = FrozenClock;
         for historical in [false, true] {
             let dir = TempDir::new().unwrap();
             let config = NativeStorageConfig {
