@@ -681,6 +681,34 @@ pub(crate) fn take_events() -> Vec<(&'static str, std::path::PathBuf)> {
 mod tests {
     use super::*;
 
+    fn assert_only_test_files(dir: &Path, expected: &[&str]) {
+        let mut names: std::collections::BTreeSet<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        for &name in expected {
+            assert!(
+                names.remove(std::ffi::OsStr::new(name)),
+                "missing {name}: {names:?}"
+            );
+            #[cfg(target_vendor = "apple")]
+            {
+                // macOS may store metadata in an AppleDouble companion on
+                // ExFAT. Permit only a valid companion of an expected file;
+                // leaked replacement names (and their companions) still fail.
+                let companion = format!("._{name}");
+                if names.remove(std::ffi::OsStr::new(&companion)) {
+                    let metadata = fs::read(dir.join(&companion)).unwrap();
+                    assert!(
+                        metadata.starts_with(&[0, 5, 22, 7, 0, 2, 0, 0]),
+                        "invalid companion {companion}"
+                    );
+                }
+            }
+        }
+        assert!(names.is_empty(), "unexpected files: {names:?}");
+    }
+
     #[test]
     fn deferred_creation_preserves_existing_files_when_writes_fail() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,7 +729,7 @@ mod tests {
         assert_eq!(fs::read(&new).unwrap(), b"incomplete");
         // Recovery must discard this unpublished first-write artifact; no
         // previously published bytes were overwritten by either failure.
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_only_test_files(dir.path(), &["existing", "new"]);
     }
 
     #[cfg(target_vendor = "apple")]
@@ -747,7 +775,7 @@ mod tests {
         });
         assert!(result.is_err());
         drop(abandoned);
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_only_test_files(dir.path(), &["first", "second"]);
         for path in &paths {
             assert_eq!(fs::read(path).unwrap(), b"old");
         }
@@ -781,7 +809,7 @@ mod tests {
                     if was_renamed { b"new" } else { b"old" }
                 );
             }
-            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+            assert_only_test_files(dir.path(), &["first", "second"]);
         }
     }
 
@@ -916,7 +944,7 @@ mod tests {
                 b"original"
             };
             assert_eq!(fs::read(&path).unwrap(), expected);
-            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            assert_only_test_files(dir.path(), &["column"]);
             write_bytes(&path, b"recovered").unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"recovered");
         }
@@ -991,7 +1019,7 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(fs::read(path).unwrap(), b"original");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_only_test_files(dir.path(), &["column"]);
     }
 
     #[cfg(unix)]

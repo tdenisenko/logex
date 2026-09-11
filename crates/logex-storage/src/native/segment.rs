@@ -14,7 +14,7 @@ use crate::page::{
     PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
     encode_var_bytes_page, write_page_index,
 };
-use crate::reader::{ColumnReader, RawBytesColumn};
+use crate::reader::{ColumnReader, RawBytesColumn, RawFixedColumn};
 use crate::segment_reader::SegmentReader;
 
 use super::catalog::{
@@ -672,8 +672,19 @@ fn nullable_column(base_name: &str) -> ColumnDescriptor {
 }
 
 fn compact_address_column(segment_dir: &Path) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_address(segment_dir, None)?;
-    compact_address_values(segment_dir, values)
+    compact_fixed_column::<20>(segment_dir, "address", CompressionCodec::AdaptiveFixed)
+}
+
+fn compact_fixed_column<const WIDTH: usize>(
+    segment_dir: &Path,
+    name: &str,
+    codec: CompressionCodec,
+) -> std::io::Result<ColumnDescriptor> {
+    let column = RawFixedColumn::<WIDTH>::open(&segment_dir.join(format!("{name}.col")))?;
+    let values = column.values();
+    write_encoded_pages(segment_dir, name, codec, values.len(), |range| {
+        encode_fixed_width_page(values[range].as_flattened(), WIDTH, codec)
+    })
 }
 
 fn compact_address_values(
@@ -721,8 +732,7 @@ fn compact_b256_column(
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_b256(segment_dir, &format!("{name}.col"), None)?;
-    compact_b256_values(segment_dir, name, codec, values)
+    compact_fixed_column::<32>(segment_dir, name, codec)
 }
 
 fn compact_nullable_b256_column(
@@ -730,8 +740,20 @@ fn compact_nullable_b256_column(
     name: &str,
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values = ColumnReader::read_nullable_b256(segment_dir, name, None)?;
-    compact_nullable_b256_values(segment_dir, name, codec, values)
+    let mut column = RawFixedColumn::<32>::open(&segment_dir.join(format!("{name}.col")))?;
+    let nulls = column.read_nulls(&segment_dir.join(format!("{name}.null")))?;
+    // Match the typed encoder's canonical zero slots for absent values, even
+    // if an input file contains nonzero bytes under an unset presence bit.
+    for (row, value) in column.values_mut().iter_mut().enumerate() {
+        if !nulls.is_present(row as u64) {
+            value.fill(0);
+        }
+    }
+    let values = column.values();
+    let descriptor = write_encoded_pages(segment_dir, name, codec, values.len(), |range| {
+        encode_fixed_width_page(values[range].as_flattened(), 32, codec)
+    })?;
+    write_compacted_nulls(segment_dir, descriptor, &nulls)
 }
 
 fn compact_nullable_b256_values(
@@ -756,11 +778,18 @@ fn compact_nullable_b256_values(
         }
     }
 
-    let mut descriptor = write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
+    let descriptor = write_encoded_pages(segment_dir, name, codec, raw.len() / 32, |range| {
         encode_fixed_width_page(&raw[range.start * 32..range.end * 32], 32, codec)
     })?;
+    write_compacted_nulls(segment_dir, descriptor, &nulls)
+}
 
-    let null_rel = format!("columns/{name}.null");
+fn write_compacted_nulls(
+    segment_dir: &Path,
+    mut descriptor: ColumnDescriptor,
+    nulls: &NullBitmap,
+) -> std::io::Result<ColumnDescriptor> {
+    let null_rel = format!("columns/{}.null", descriptor.name);
     let null_file = File::create(segment_dir.join(&null_rel))?;
     let mut null_writer = BufWriter::new(null_file);
     nulls.write_to(&mut null_writer)?;
@@ -1337,6 +1366,87 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn borrowed_fixed_compaction_matches_typed_pages_across_page_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let raw_dir = tmp.path().join("raw");
+        let typed_dir = tmp.path().join("typed");
+        fs::create_dir_all(raw_dir.join("columns")).unwrap();
+        fs::create_dir_all(typed_dir.join("columns")).unwrap();
+        let mut rows: Vec<_> = descending_rows()
+            .into_iter()
+            .cycle()
+            .take(DEFAULT_PAGE_ROWS as usize + 3)
+            .collect();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.topic0 = (index % 3 == 0).then_some(row.tx_hash);
+        }
+        ColumnFile::write_batch_with_publication(&raw_dir, &rows, None, Publication::Deferred)
+            .unwrap();
+        // Absent slots may contain arbitrary bytes; the presence bit controls
+        // their meaning. Both encoders must produce the same zeroed payload.
+        let path = raw_dir.join("topic0.col");
+        let mut bytes = fs::read(&path).unwrap();
+        for (row, value) in bytes[ColumnFileHeader::SIZE..]
+            .as_chunks_mut::<32>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            if rows[row].topic0.is_none() {
+                value.fill(0xa5);
+            }
+        }
+        fs::write(path, bytes).unwrap();
+        for (actual, expected) in [
+            (
+                compact_address_column(&raw_dir).unwrap(),
+                compact_address_values(&typed_dir, rows.iter().map(|r| r.address)).unwrap(),
+            ),
+            (
+                compact_b256_column(&raw_dir, "block_hash", CompressionCodec::AdaptiveFixed)
+                    .unwrap(),
+                compact_b256_values(
+                    &typed_dir,
+                    "block_hash",
+                    CompressionCodec::AdaptiveFixed,
+                    rows.iter().map(|r| r.block_hash),
+                )
+                .unwrap(),
+            ),
+            (
+                compact_nullable_b256_column(&raw_dir, "topic0", CompressionCodec::AdaptiveFixed)
+                    .unwrap(),
+                compact_nullable_b256_values(
+                    &typed_dir,
+                    "topic0",
+                    CompressionCodec::AdaptiveFixed,
+                    rows.iter().map(|r| r.topic0),
+                )
+                .unwrap(),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            for relative in [
+                Some(actual.data_path),
+                actual.page_index_path,
+                actual.null_bitmap_path,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert_eq!(
+                    fs::read(raw_dir.join(&relative)).unwrap(),
+                    fs::read(typed_dir.join(&relative)).unwrap(),
+                    "{relative}"
+                );
+            }
+        }
     }
 
     #[test]

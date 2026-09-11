@@ -414,3 +414,24 @@ after initializing a catalog before installing the dangling WAL alias: catalog
 v3 correctly rejects such an artifact in an otherwise uninitialized directory.
 These are process-reopen/order checks, not physical power-cut certification.
 The complete storage suite on ExFAT is running before performance confirmation.
+
+
+At `83b5720e` (production identical to `260f5c64`), all six local workspace
+gates pass: 844 tests and eight ignored cases. The complete local ExFAT run
+reports 133 passed, four failed and three ignored: four cleanup tests assumed
+that only application files could exist. A focused diagnostic found `column`
+and `._column`, whose companion has the observed AppleDouble v2 header. The
+assertions now allow valid companions of expected files while still rejecting
+leftover temporary artifacts and their companions. No production cleanup or
+integrity rule was relaxed. All 32 focused ExFAT checks now pass (10 durability, 21 reader and one
+compaction oracle), including the new fixed-column/prefix behavior.
+The local long run used a Cargo output binary while later reader work rebuilt
+that path, so its process-spawn cases are preliminary; future full runs use an
+immutable copied executable. The Intel run uses such a copy and is still running.
+
+Fixed-width raw reader regressions reproduce B2-13 (count-allocation panics,
+invalid format/layout acceptance and out-of-bounds null results). The new byte
+view also removes typed-to-raw copies during compaction. Twenty-one reader cases,
+a page-boundary byte-equivalence oracle and strict storage Clippy pass on APFS.
+Original-baseline timing for the buffer change and isolated timing for this
+next representation change remain pending; none authorizes merge.

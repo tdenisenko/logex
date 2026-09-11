@@ -217,3 +217,33 @@ handling, verified offline repair and the integrated staging soak. The separate
 metadata file adds a compatibility condition for downgrade and durable writes
 have measurable cost. Only read-only metadata of the existing external volume
 was inspected; production data contents and services were not changed.
+
+
+### B2-13 — fixed raw readers trusted unbounded counts and nullable row bounds
+
+**Confirmed, unmerged fix.** A 17-byte raw header with `u64::MAX` rows causes
+capacity-overflow panics in address, hash and nullable-topic materialization.
+A nullable request outside the declared rows can return `None` instead of an
+error. Fixed readers also accepted unsupported versions/compression, and whole
+reads could ignore trailing bytes or missing bytes under null slots.
+The [count/layout reproducer](baselines/2026-09-11-fixed-layout-before.log) and
+[nullable bound reproducer](baselines/2026-09-11-null-bound-before.log) fail before
+the fix. This is a raw-reader/storage corruption finding, not a demonstrated
+network validation bypass; native startup separately checks many file lengths.
+
+A shared fixed-width byte view checks format and length arithmetic before
+allocating row results. Whole reads and compaction require the exact declared
+body and matching bitmap. Nonempty selected reads retain the established
+append-prefix behavior: requested rows must fit the declared and physical
+column and bitmap, while an unrelated growing tail need not yet be complete.
+This matters because fixed columns append in place. Empty selections still
+validate the whole layout. Repeated selection order, all six reader variants,
+five unfinished-append states and null bounds are covered explicitly.
+
+Raw address/hash/topic compaction borrows these validated bytes instead of
+materializing typed values and then serializing them back into another buffer.
+Absent slots are zeroed in memory to match the existing typed encoder. A
+multi-page byte oracle compares both encoders' data, page indexes, descriptors
+and null bitmaps. Query results still own their values; the complete raw file
+is read into memory. This does not resolve cross-column snapshot/file-lifetime
+races; those remain part of the query audit.
