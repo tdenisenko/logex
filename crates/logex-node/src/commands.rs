@@ -246,10 +246,8 @@ fn segment_matches_filters(
 }
 
 fn index_files_missing(path: &Path, profile: IndexBuildProfile) -> bool {
-    let index_dir = path.join("indexes");
-    IndexBuilder::required_index_files(profile)
-        .iter()
-        .any(|file_name| !index_dir.join(file_name).is_file())
+    // If inspection fails, let the selected build report the actionable error.
+    IndexBuilder::indexes_missing(path, profile).unwrap_or(true)
 }
 
 pub fn run_compact(config: PartitionManagerConfig, limit: Option<usize>) {

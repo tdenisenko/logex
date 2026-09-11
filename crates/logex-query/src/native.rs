@@ -9,7 +9,7 @@ use logex_index::{
     TRANSFER_BLOOM_FILE, TransferBloomReader, is_common_erc20_event_topic0, transfer_topic0,
 };
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
-use logex_storage::{PartitionManager, SegmentReader};
+use logex_storage::{IndexReadCheckpoint, PartitionManager, SegmentReader};
 use logex_types::{LogRow, PartitionMeta};
 
 #[derive(Debug, Clone, Default)]
@@ -142,23 +142,24 @@ pub fn candidate_row_ids(
     filter: &NativeLogFilter,
     use_indexes: bool,
 ) -> std::io::Result<Vec<u32>> {
-    candidate_row_ids_inner(dir, filter, use_indexes, false)
+    let reader = SegmentReader::open(dir)?;
+    candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false)
 }
 
-pub(crate) fn candidate_row_ids_after_bloom_prefilter(
+pub(crate) fn candidate_row_ids_for_reader(
     dir: &Path,
-    filter: &NativeLogFilter,
-    use_indexes: bool,
-) -> std::io::Result<Vec<u32>> {
-    candidate_row_ids_inner(dir, filter, use_indexes, true)
-}
-
-fn candidate_row_ids_inner(
-    dir: &Path,
+    reader: &SegmentReader,
     filter: &NativeLogFilter,
     use_indexes: bool,
     event_bloom_prechecked: bool,
 ) -> std::io::Result<Vec<u32>> {
+    let refine_filter = use_indexes;
+    let checkpoint = if use_indexes {
+        IndexReadCheckpoint::open(dir, reader)?
+    } else {
+        None
+    };
+    let use_indexes = checkpoint.is_some();
     if use_indexes
         && !event_bloom_prechecked
         && erc20_event_bloom_excludes(&dir.join("indexes"), filter)?
@@ -166,14 +167,16 @@ fn candidate_row_ids_inner(
         return Ok(Vec::new());
     }
 
-    let reader = SegmentReader::open(dir)?;
     let row_count = reader.read_row_count()?;
     if row_count == 0 {
         return Ok(Vec::new());
     }
 
     let bitmap = if use_indexes {
-        build_candidate_bitmap(dir, &reader, filter, row_count)?
+        build_candidate_bitmap(dir, reader, filter, row_count)?
+    } else if refine_filter {
+        refine_candidate_bitmap_from_columns(reader, filter, row_count, None)?
+            .unwrap_or_else(|| (0..row_count as u32).collect())
     } else {
         (0..row_count as u32).collect()
     };

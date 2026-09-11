@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use logex_storage::SegmentReader;
+use logex_storage::{IndexBuildCheckpoint, IndexReadCheckpoint, SegmentReader};
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
@@ -18,6 +18,21 @@ pub enum IndexBuildProfile {
 pub struct IndexBuilder;
 
 impl IndexBuilder {
+    pub fn indexes_missing(
+        partition_dir: &Path,
+        profile: IndexBuildProfile,
+    ) -> std::io::Result<bool> {
+        let reader = SegmentReader::open(partition_dir)?;
+        let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?;
+        if checkpoint.is_none() {
+            return Ok(true);
+        }
+        let index_dir = partition_dir.join("indexes");
+        Ok(Self::required_index_files(profile)
+            .iter()
+            .any(|name| !index_dir.join(name).is_file()))
+    }
+
     /// Build all indexes (primary + composite) for a partition.
     pub fn build_all_indexes(partition_dir: &Path) -> std::io::Result<()> {
         Self::build_indexes(partition_dir, IndexBuildProfile::All)
@@ -25,17 +40,19 @@ impl IndexBuilder {
 
     /// Build indexes for a partition using the requested index profile.
     pub fn build_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> std::io::Result<()> {
+        let checkpoint = Self::begin_publication(partition_dir)?;
         match profile {
             IndexBuildProfile::All => {
-                Self::build_primary_indexes(partition_dir)?;
+                Self::build_primary_indexes_unpublished(partition_dir)?;
                 CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
                 let index_dir = partition_dir.join("indexes");
                 Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
             IndexBuildProfile::LogQuery => {
-                Self::build_log_query_primary_indexes(partition_dir)?;
+                Self::build_log_query_primary_indexes_unpublished(partition_dir)?;
                 let index_dir = partition_dir.join("indexes");
                 CompositeIndexBuilder::build_log_query_indexes(partition_dir, &index_dir)?;
+                Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
             IndexBuildProfile::Erc20Transfer => {
                 let index_dir = partition_dir.join("indexes");
@@ -43,6 +60,7 @@ impl IndexBuilder {
                 Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
         }
+        checkpoint.publish()?;
         Ok(())
     }
 
@@ -51,6 +69,7 @@ impl IndexBuilder {
         partition_dir: &Path,
         profile: IndexBuildProfile,
     ) -> std::io::Result<()> {
+        let checkpoint = Self::begin_publication(partition_dir)?;
         let index_dir = partition_dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
 
@@ -68,7 +87,28 @@ impl IndexBuilder {
             }
         }
 
+        checkpoint.publish()?;
         Ok(())
+    }
+
+    fn begin_publication(partition_dir: &Path) -> std::io::Result<IndexBuildCheckpoint> {
+        let checkpoint = IndexBuildCheckpoint::begin(partition_dir)?;
+        if !checkpoint.can_reuse_existing() {
+            // Unpublished files can be incomplete or describe a previous row
+            // boundary. Preserve custom artifacts; rebuild all known query files.
+            for name in Self::required_index_files(IndexBuildProfile::All)
+                .iter()
+                .copied()
+                .chain([crate::TRANSFER_BLOOM_FILE])
+            {
+                match fs::remove_file(partition_dir.join("indexes").join(name)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(checkpoint)
     }
 
     pub fn required_index_files(profile: IndexBuildProfile) -> &'static [&'static str] {
@@ -102,6 +142,13 @@ impl IndexBuilder {
 
     /// Build the primary indexes needed by common log-query access paths.
     pub fn build_log_query_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
+        let checkpoint = Self::begin_publication(partition_dir)?;
+        Self::build_log_query_primary_indexes_unpublished(partition_dir)?;
+        checkpoint.publish()?;
+        Ok(())
+    }
+
+    fn build_log_query_primary_indexes_unpublished(partition_dir: &Path) -> std::io::Result<()> {
         let index_dir = partition_dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
 
@@ -147,6 +194,12 @@ impl IndexBuilder {
         if !index_dir.join("topic0_topic1.bptree").is_file() {
             CompositeIndexBuilder::build_topic0_topic1(partition_dir, index_dir)?;
         }
+        if !index_dir.join("address_topic0_topic1.bptree").is_file() {
+            CompositeIndexBuilder::build_address_topic0_topic1(partition_dir, index_dir)?;
+        }
+        if !index_dir.join("address_topic0_topic2.bptree").is_file() {
+            CompositeIndexBuilder::build_address_topic0_topic2(partition_dir, index_dir)?;
+        }
         Self::build_missing_erc20_transfer_indexes(partition_dir, index_dir)
     }
 
@@ -162,6 +215,13 @@ impl IndexBuilder {
 
     /// Build all primary indexes for a partition and write them to the indexes/ subdirectory.
     pub fn build_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
+        let checkpoint = Self::begin_publication(partition_dir)?;
+        Self::build_primary_indexes_unpublished(partition_dir)?;
+        checkpoint.publish()?;
+        Ok(())
+    }
+
+    fn build_primary_indexes_unpublished(partition_dir: &Path) -> std::io::Result<()> {
         let index_dir = partition_dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
 
@@ -315,6 +375,38 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn profiles_rebuild_stale_and_incomplete_indexes_before_publication() {
+        for profile in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let rows = make_test_rows();
+            ColumnFile::write_batch(dir.path(), &rows[..1]).unwrap();
+            assert!(IndexBuilder::indexes_missing(dir.path(), profile).unwrap());
+            IndexBuilder::build_indexes(dir.path(), profile).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), profile).unwrap());
+            ColumnFile::write_batch(dir.path(), &rows).unwrap();
+            assert!(IndexBuilder::indexes_missing(dir.path(), profile).unwrap());
+            IndexBuilder::build_missing_indexes(dir.path(), profile).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), profile).unwrap());
+            // A different profile must not resurrect stale files it did not rebuild.
+            IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+            let checkpoint = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+            fs::write(dir.path().join("indexes/address.bptree"), b"partial").unwrap();
+            drop(checkpoint);
+            assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+            IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+            let reader =
+                BTreeIndexReader::open(&dir.path().join("indexes/address.bptree")).unwrap();
+            let matches = reader.get(rows[0].address.as_slice()).unwrap();
+            assert_eq!(matches.len(), 2);
+        }
     }
 
     #[test]

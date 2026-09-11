@@ -38,8 +38,8 @@ use logex_storage::{PartitionManager, SegmentReader};
 
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids, candidate_row_ids_after_bloom_prefilter,
-    erc20_event_bloom_exclusions, matches_native_filter, partition_matches_filter,
+    StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader, erc20_event_bloom_exclusions,
+    matches_native_filter, partition_matches_filter,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -1785,18 +1785,27 @@ fn scan_native_data_sum_partition(
     }
     let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
     let mut row_bitmap = RoaringBitmap::new();
-    let bloom_exclusions =
-        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?;
+    let reader = SegmentReader::open(path)?;
+    let checkpoint = logex_storage::IndexReadCheckpoint::open(path, &reader)?;
+    let bloom_exclusions = if checkpoint.is_some() {
+        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?
+    } else {
+        None
+    };
     for (index, candidate_filter) in scan.candidate_filters.iter().enumerate() {
         let row_ids = if bloom_exclusions
             .as_ref()
             .is_some_and(|exclusions| exclusions.get(index).copied().unwrap_or(false))
         {
             Vec::new()
-        } else if bloom_exclusions.is_some() {
-            candidate_row_ids_after_bloom_prefilter(path, candidate_filter, true)?
         } else {
-            candidate_row_ids(path, candidate_filter, true)?
+            candidate_row_ids_for_reader(
+                path,
+                &reader,
+                candidate_filter,
+                true,
+                bloom_exclusions.is_some(),
+            )?
         };
         row_bitmap.extend(row_ids);
     }
@@ -1805,7 +1814,6 @@ fn scan_native_data_sum_partition(
         return Ok((groups, 0));
     }
 
-    let reader = SegmentReader::open(path)?;
     let mut total_scanned = 0u64;
     if scan.data_only {
         let states = groups

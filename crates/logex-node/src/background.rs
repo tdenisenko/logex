@@ -244,7 +244,7 @@ pub async fn run_background_indexer(
             let storage = state.storage.read().await;
             sealed_query_index_targets(&storage, sealed_index_limit)
         };
-        if sealed_index_scan_complete_for_max_id != sealed_max_id {
+        if sealed_index_scan_complete_for_max_id != sealed_max_id || !sealed_targets.is_empty() {
             if sealed_targets.is_empty() {
                 sealed_index_scan_complete_for_max_id = sealed_max_id;
             } else {
@@ -306,7 +306,9 @@ pub async fn run_background_indexer(
             }
         };
 
-        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current) {
+        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current)
+            || (current.row_count > 0 && query_indexes_missing(&current.path))
+        {
             let path = current.path.clone();
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
             {
@@ -493,7 +495,8 @@ fn index_build_error_is_transient(
     before: &HotIndexState,
     after: &HotIndexState,
 ) -> bool {
-    error.kind() == io::ErrorKind::InvalidData && before != after
+    error.kind() == io::ErrorKind::WouldBlock
+        || (error.kind() == io::ErrorKind::InvalidData && before != after)
 }
 
 fn should_rebuild_hot_indexes(
@@ -548,10 +551,8 @@ fn sealed_query_index_targets(
 }
 
 fn query_indexes_missing(path: &Path) -> bool {
-    let index_dir = path.join("indexes");
-    IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer)
-        .iter()
-        .any(|file_name| !index_dir.join(file_name).is_file())
+    // A failed freshness check is handled by the subsequent build's error path.
+    IndexBuilder::indexes_missing(path, IndexBuildProfile::Erc20Transfer).unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -604,10 +605,12 @@ mod tests {
         };
         let invalid = io::Error::new(io::ErrorKind::InvalidData, "corrupt header");
         let other = io::Error::new(io::ErrorKind::NotFound, "missing");
+        let busy = io::Error::new(io::ErrorKind::WouldBlock, "index reader or newer source");
 
         assert!(index_build_error_is_transient(&invalid, &before, &after));
         assert!(!index_build_error_is_transient(&invalid, &before, &before));
         assert!(!index_build_error_is_transient(&other, &before, &after));
+        assert!(index_build_error_is_transient(&busy, &before, &before));
     }
 
     #[test]
@@ -654,6 +657,9 @@ mod tests {
         for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer) {
             std::fs::write(indexes.join(file_name), []).unwrap();
         }
+        assert!(query_indexes_missing(tmp.path()));
+        logex_storage::ColumnFile::write_batch(tmp.path(), &[]).unwrap();
+        IndexBuilder::build_indexes(tmp.path(), IndexBuildProfile::Erc20Transfer).unwrap();
         assert!(!query_indexes_missing(tmp.path()));
     }
 

@@ -438,6 +438,15 @@ async fn ordered_sql_crosses_compacted_page_boundaries() {
 
 #[tokio::test]
 async fn live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg() {
+    assert_live_queries_through_indexed_append(true).await;
+}
+
+#[tokio::test]
+async fn live_raw_segments_preserve_queries_through_append_rotation_indexes_and_reorg() {
+    assert_live_queries_through_indexed_append(false).await;
+}
+
+async fn assert_live_queries_through_indexed_append(bundled: bool) {
     let mut rows = fixture(17_000, Profile::Dense);
     let mut headers = Vec::new();
     let mut parent_hash = B256::ZERO;
@@ -464,14 +473,18 @@ async fn live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg
     let mut start = 0;
     for end in [8_192, 16_512, rows.len()] {
         let through = end.div_ceil(128);
-        storage
-            .ingest_canonical_batch(
-                &rows[start..end],
-                &headers[through - 1],
-                &headers[..through],
-                None,
-            )
-            .unwrap();
+        if bundled {
+            storage
+                .ingest_canonical_batch(
+                    &rows[start..end],
+                    &headers[through - 1],
+                    &headers[..through],
+                    None,
+                )
+                .unwrap();
+        } else {
+            storage.write_batch(&rows[start..end]).unwrap();
+        }
         storage.checkpoint().unwrap();
         let expected = expected_matches(&rows[..end]);
         // This also checks the previous hot indexes after its next append.
@@ -482,7 +495,7 @@ async fn live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg
             .chain(std::iter::once(storage.hot_partition()))
         {
             if partition.meta.row_count > 0 {
-                assert!(!partition.meta.path.join("address.col").exists());
+                assert_eq!(partition.meta.path.join("address.col").exists(), !bundled);
                 IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
             }
         }

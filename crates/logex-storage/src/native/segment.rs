@@ -1919,6 +1919,9 @@ fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> 
         .into_iter()
         .filter_map(|path| {
             let file_name = path.file_name()?.to_str()?.to_owned();
+            if file_name == crate::index_checkpoint::INDEX_CHECKPOINT_FILE {
+                return None;
+            }
             let kind = match file_name.as_str() {
                 "address.bptree" => IndexKind::Address,
                 "topic0.bptree" => IndexKind::Topic0,

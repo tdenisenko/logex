@@ -77,13 +77,20 @@ segment and rotating it: native filtering returns 10,082 matches instead of
 11,322. The persisted index still describes 8,192 rows in the segment that has
 since grown to 10,000. Existing lookups do not verify index coverage against the
 reader. [Failing regression](baselines/2026-09-11-live-bundle-query-before.log).
-This new failure is not covered by the preceding green gates and must be fixed
-before merge. Index freshness must be checked without adding per-ingestion metadata
-writes; partial publication and concurrent rebuilds also need explicit handling.
+This failure was not covered by the preceding green gates. The subsequent
+[index-checkpoint fix](index-checkpoints.md) now passes both raw and bundled query
+regressions, including SQL counts/order, reorg and restart. It binds index
+publication to the source state without per-ingestion metadata writes.
 
-Integrated release ingestion comparisons are running. Current-tree gates,
-platform validation, query/startup cost, disk growth and write amplification
-remain acceptance work.
+The integrated storage comparison uses five alternating process pairs, three
+samples per process and the original v3 oracles. All ten measured medians meet
+the 10% ceiling: historical profiles range from -82.73% to +4.58% (large history);
+grouped live is -95.35%, per-block live -68.89%, one-row live -67.37%, and rich
+header live -70.05%. The benchmark binary predates the index-checkpoint follow-up.
+[Integrated storage record](baselines/2026-09-11-live-bundle-integrated-broad.jsonl).
+The combined index-checkpoint implementation passes all six local workspace
+gates (895 tests/nine ignored). CI/platform validation, query/startup/index cost,
+disk growth and write amplification remain acceptance work.
 PR #130 stays draft and unmerged. Broader query snapshot lifetime and index
 publication review are still required; the new reader tests do not complete those
 audit batches.

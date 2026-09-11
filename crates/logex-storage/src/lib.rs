@@ -3,6 +3,7 @@ mod column;
 mod column_artifact;
 pub mod compression;
 mod durability;
+mod index_checkpoint;
 pub mod native;
 mod page;
 mod partition;
@@ -13,6 +14,7 @@ mod wal;
 
 pub use bundle::BundleReference;
 pub use column::{ColumnFile, ColumnFileHeader, NullBitmap};
+pub use index_checkpoint::{IndexBuildCheckpoint, IndexReadCheckpoint};
 pub use page::PageIndexEntry;
 pub use partition::{Partition, PartitionManager, PartitionManagerConfig};
 pub use reader::{ColumnData, ColumnReader};
