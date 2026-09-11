@@ -482,24 +482,42 @@ pub(crate) fn bundled_row_capacity(
     let mut data_extents = capacity[13];
     let mut accepted = 0;
     while accepted < rows.len() && pages > 0 && data_extents > 0 {
-        let mut count = 0;
-        let mut raw_bytes = 16usize; // count and initial u64 offset, rounded up
-        let mut encoded_bound = 0;
-        for row in rows[accepted..].iter().take(DEFAULT_PAGE_ROWS as usize) {
-            let next = raw_bytes
-                .checked_add(row.data.len())
-                .and_then(|n| n.checked_add(8))
-                .ok_or_else(|| std::io::Error::other("variable page length overflow"))?;
-            let bound = zstd::zstd_safe::compress_bound(next)
-                .checked_add(1)
-                .ok_or_else(|| std::io::Error::other("compressed page bound overflow"))?;
-            if bound > data_extents * MAX_EXTENT_BYTES || bound > u32::MAX as usize {
-                break;
+        let page = &rows[accepted..rows.len().min(accepted + DEFAULT_PAGE_ROWS as usize)];
+        let raw_bytes = page
+            .iter()
+            .try_fold(16usize + page.len() * 8, |bytes, row| {
+                bytes
+                    .checked_add(row.data.len())
+                    .ok_or_else(|| std::io::Error::other("variable page length overflow"))
+            })?;
+        let full_bound = zstd::zstd_safe::compress_bound(raw_bytes)
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("compressed page bound overflow"))?;
+        let fits = |bound| bound <= data_extents * MAX_EXTENT_BYTES && bound <= u32::MAX as usize;
+        let (count, encoded_bound) = if fits(full_bound) {
+            (page.len(), full_bound)
+        } else {
+            // Only the final capacity-constrained page needs a row-wise check.
+            let mut count = 0;
+            let mut raw_bytes = 16usize;
+            let mut encoded_bound = 0;
+            for row in page {
+                let next = raw_bytes
+                    .checked_add(row.data.len())
+                    .and_then(|n| n.checked_add(8))
+                    .ok_or_else(|| std::io::Error::other("variable page length overflow"))?;
+                let bound = zstd::zstd_safe::compress_bound(next)
+                    .checked_add(1)
+                    .ok_or_else(|| std::io::Error::other("compressed page bound overflow"))?;
+                if !fits(bound) {
+                    break;
+                }
+                raw_bytes = next;
+                encoded_bound = bound;
+                count += 1;
             }
-            raw_bytes = next;
-            encoded_bound = bound;
-            count += 1;
-        }
+            (count, encoded_bound)
+        };
         if count == 0 {
             break;
         }

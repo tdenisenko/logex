@@ -1425,15 +1425,12 @@ impl NativeStorage {
             fs::remove_dir_all(&segment_dir)?;
         }
         fs::create_dir_all(&segment_dir)?;
-        persist_ingest_manifest(
-            &self.paths,
-            &descriptor,
-            self.segment_publication(descriptor.id),
-        )?;
+        // This allocation belongs to the pending row transaction. Publish its
+        // first complete manifest with the rows; an empty placeholder adds an
+        // unnecessary replacement and cannot represent a successful ingest.
         let segment_id = descriptor.id;
         self.catalog.segments.push(descriptor);
         self.catalog.active_historical_segment = Some(segment_id);
-        self.persist_catalog()?;
         Ok(segment_id)
     }
 
@@ -2664,7 +2661,13 @@ mod tests {
                         expected
                     );
                     if result.is_ok() {
-                        assert!(fail_after > 20);
+                        assert!(
+                            events.iter().any(|(operation, path)| {
+                                *operation == "rename_temporary"
+                                    && *path == dir.path().join("catalog.json")
+                            }),
+                            "successful matrix must publish the durable catalog: {events:?}"
+                        );
                         break;
                     }
                     assert!(fail_after < 499, "failure matrix did not finish");

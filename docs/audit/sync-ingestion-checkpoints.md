@@ -603,3 +603,74 @@ publication median changes 12.212 → 8.142 ms for 120 rows (-33.33%),
 are not ingestion speedups. The first two results support a shared-artifact
 prototype; the large change is within likely noise. Actual append/recovery/query
 and original-baseline acceptance remain required.
+
+
+## Integrated bundle comparison (2026-09-11, `75570eb2`)
+
+Catalog v4 / segment v2 connects the shared artifact to ingestion, readers and
+recovery. All six local gates pass: 865 tests, eight explicitly ignored, strict
+Clippy/check, doctests, formatting and release node build. CI run `34552619060`
+exposed a Linux-only test assumption (`fail_after > 20`) after the reduced file
+count shortened the failure matrix. The exact data/recovery oracles passed up to
+that assertion. Replace it with an explicit durable-catalog publication event,
+then rerun Linux CI; do not infer platform acceptance from local macOS success.
+
+Repeated original-versus-bundle release runs use the unchanged v3 fixture, fresh
+APFS directories, pinned executables, finalization/checkpoints and exact
+row/progress/reopen oracles. Short/large use five alternating pairs of three runs;
+the other profiles use three pairs of three. No local builds/tests ran during
+these timings. These measure storage calls, not peer-to-peer sync throughput.
+
+| Workload | Original median ms | Bundle median ms | Change |
+| --- | ---: | ---: | ---: |
+| Few logs: one 120-row chunk | 8.252292 | 9.635834 | +16.77% — fails |
+| Tiny chunks: sixteen 120-row chunks | 57.605667 | 23.925042 | -58.47% |
+| Sparse history: four 1,920-row chunks | 22.474500 | 13.962334 | -37.87% |
+| Short history: one 15,360-row chunk | 15.023792 | 10.873833 | -27.62% |
+| Grouped live | 3239.781458 | 580.346834 | -82.09% |
+| Sustained history: sixteen 15,360-row chunks | 278.226292 | 68.142208 | -75.51% |
+| Large history: one 491,520-row chunk | 62.903750 | 74.061125 | +17.74% — fails |
+
+The single-tiny and large cases still prevent acceptance under the user's 10%
+ceiling. Full records include p95, throughput, process peak RSS, environment,
+fixture digests, commit and binary hashes. Median process RSS in the combined
+short/live fixture was 659.4 MiB original versus 68.3 MiB candidate; large history
+was 1234.8 versus 1254.5 MiB. These are process high-water marks including fixture
+construction/oracles, not isolated ingestion memory. Physical disk/write
+amplification, query/startup effects and current ExFAT validation remain required.
+
+[Raw comparison](baselines/2026-09-11-bundle-original-comparison.jsonl),
+[local gates](baselines/2026-09-11-bundle-integration-gates.jsonl),
+[Linux failing-before assertion](baselines/2026-09-11-bundle-linux-matrix-before.log).
+
+Instrumented phases identify about 7 ms in large-batch capacity preflight, which
+called zstd's bound once per row. Computing it once per complete page, and only
+checking individual rows for the final capacity-constrained page, retains the
+same conservative bound. Five alternating pairs of three release runs against
+`75570eb2` improved large history from 73.779917 to 67.850542 ms (-8.04%). This is
+an isolated improvement; original-baseline confirmation remains required. Tiny
+batch time is still dominated by final checkpoint publication. The next isolated
+probe removes its empty first manifest, retaining first complete row/manifest
+publication and all commit/recovery checks.
+
+[Instrumented phases](baselines/2026-09-11-bundle-phase-profile.jsonl),
+[page-bound comparison](baselines/2026-09-11-bundle-page-bound-comparison.jsonl).
+Worker and nested durations overlap and must not be added together. Instrumented
+runs are diagnostic, separate from acceptance timing; instrumentation is removed.
+
+
+The bundled-format first-manifest probe now shows a consistent isolated saving:
+three alternating pairs of three runs for few logs/tiny chunks, five pairs for
+short history. Publishing the first complete historical manifest directly
+improves few logs 8.798708 → 7.863959 ms (-10.62%), tiny chunks 23.019625 →
+21.145625 ms (-8.14%), and short history 10.005208 → 9.030875 ms (-9.74%). The
+allocation remains part of the pending transaction; no empty catalog entry is
+published separately. Failure-matrix validation and a new original-baseline
+comparison are required before combined acceptance. This supersedes the earlier
+rejected empty-manifest probe only for the new bundled implementation.
+
+[First-manifest comparison](baselines/2026-09-11-bundle-first-manifest-comparison.jsonl).
+
+All six local gates also pass after both optimizations and the platform assertion
+correction: 865 tests/eight ignored, strict Clippy/check, formatting, doctests and
+release node build. [Gate results](baselines/2026-09-11-bundle-streamlined-gates.jsonl).
