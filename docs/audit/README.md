@@ -23,6 +23,19 @@ data and running deployments are not modified by the benchmark suite.
 | 11 | Offline automatic segment repair | Pending; dry-run, quarantine, verified refetch, resumable publication, exclusive access. |
 | 12 | Integrated regression and performance | Pending; repeated baselines, fault injection, platform validation and a 24-hour staging soak. |
 
+## Offline completion boundary
+
+The remaining work is partitioned into the review areas above and outcome-based
+items in the local roadmap. Continue each area through a recorded disposition:
+verified without changes, fixed with regression evidence, or explicitly blocked
+with the remaining condition. A merged fix does not close the rest of its area.
+The next storage review starts with [page row-count validation](page-row-count.md).
+
+Complete deterministic offline validation and merge implementation PRs before
+starting an actual live sync. Live-sync acceptance and the minimum 24-hour
+staging soak are subsequent release gates. Synthetic fixtures do not substitute
+for those gates; this ledger must not imply release readiness before they pass.
+
 Finish and merge each coherent task before starting the next. Record severity,
 reproducer, validation, and measured tradeoffs in its PR. Critical findings can
 change the order. The intentionally ignored root `ROADMAP.md` remains local.
