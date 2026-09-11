@@ -1,0 +1,8 @@
+{"gate": 0, "command": ["cargo", "fmt", "--all", "--", "--check"], "exit": 0, "seconds": 0.8, "log": "/private/tmp/logex-audit-page-count-gate-0.log"}
+{"gate": 1, "command": ["cargo", "check", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 5.35, "log": "/private/tmp/logex-audit-page-count-gate-1.log"}
+{"gate": 2, "command": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], "exit": 0, "seconds": 5.09, "log": "/private/tmp/logex-audit-page-count-gate-2.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 101, "seconds": 15.72, "log": "/private/tmp/logex-audit-page-count-gate-3.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 128.0, "log": "/private/tmp/logex-audit-page-count-gate-3-permitted.log"}
+{"gate": 4, "command": ["cargo", "test", "--workspace", "--doc", "--locked"], "exit": 0, "seconds": 8.59, "log": "/private/tmp/logex-audit-page-count-gate-4-permitted.log"}
+{"gate": 5, "command": ["cargo", "build", "-p", "logex-node", "--release", "--locked"], "exit": 0, "seconds": 53.31, "log": "/private/tmp/logex-audit-page-count-gate-5-permitted.log"}
+{"gate": 6, "command": ["cargo", "test", "-p", "logex-query", "--test", "audit_harness", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 27.98, "log": "/private/tmp/logex-audit-page-count-gate-6-permitted.log"}

@@ -43,7 +43,9 @@ All eight segment-reader tests pass after it. All six local gates pass: 923
 workspace tests, 10 deliberately ignored benchmarks/subprocess entries, doc
 tests, formatting, checking, warning-free workspace Clippy and release node build.
 The initial sandboxed suite could not bind loopback mock servers; rerunning with
-socket access passed. Linux/macOS CI and the release comparison remain pending.
+socket access passed. The [release comparison](baselines/2026-09-12-page-row-count.md) passes: no
+repeatable median regression above 5% was established. Linux/macOS CI remains
+pending in the implementation PR.
 
 Reviewed the touched helper and all four callers for obsolete paths: none need
 removal. Typed integer decoders retain their existing length validation; the
