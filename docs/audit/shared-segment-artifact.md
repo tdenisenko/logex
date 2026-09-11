@@ -267,8 +267,9 @@ large-history cost also exceeds the 5% investigation threshold. No merge.
 
 
 The initial format's isolated ExFAT suite passed 167 tests/three ignored and all
-32 cross-mount combinations; the image was detached afterward. Final ExFAT
-validation for the later guard and bitmap fixes is running. The guard prevents
+32 cross-mount combinations; the image was detached afterward. The [final ExFAT run](baselines/2026-09-11-immutable-canonical-exfat.jsonl)
+passes 170 tests/three ignored and all 32 cross-mount cases for the guard and bitmap
+fixes; its disposable image is detached. The guard prevents
 a valid stale manifest from seeding a second canonical update and restoring flags
 that an earlier reorg had cleared. The new regression fails with that guard removed
 and passes with it restored; reopen reconstructs the manifest from the current
@@ -289,3 +290,35 @@ locked all-target check, strict Clippy, doctests and release build.
 The [growth probe](baselines/2026-09-11-immutable-canonical-growth.jsonl) retains
 exact row/reopen oracles and records reachable/stale artifact bytes. Its single-run
 timings are diagnostic, and allocated bytes do not measure physical writes.
+
+
+A [bounded reusable worker-pool diagnostic](baselines/2026-09-11-pooled-column-diagnostic.jsonl)
+was rejected. Seven alternating pairs × five release samples preserve the same
+fixture, codecs, exact oracles and full checkpoint guarantees; initial pool creation
+remains timed. Tiny/short medians change by -0.77%/-0.07%, while large history is
++4.36%. The pool used the already locked `rayon-core` version and at most the smaller
+of available CPUs and 14 workers. Production retains its existing scoped threads;
+all temporary source and direct dependency changes were restored.
+
+
+Final `683bcdf8` [confirmation](baselines/2026-09-11-immutable-canonical-final-confirmation.jsonl)
+uses nine alternating process pairs × seven samples with all exact oracles passing.
+Tiny finalized history remains a failure: 6.138167 → 7.718250 ms (+25.74%).
+Large history is 64.197041 → 65.904458 ms (+2.66%); its p95 is 75.684416 →
+87.873375 ms (+16.10%), so tail stability still needs investigation. These results
+include the final reference and padding fixes and supersede the earlier smaller
+confirmation for those two profiles. All six Linux/macOS CI jobs pass in run
+[34564722924](https://github.com/tdenisenko/logex/actions/runs/34564722924).
+The performance ceiling remains unmet and PR #130 remains a draft.
+
+
+A [pre-publication full-flush feasibility experiment](baselines/2026-09-11-prepublish-flush-diagnostic.jsonl)
+compares nine rotating triplets × seven samples. Original/current/diagnostic
+medians are 6.304083/8.135500/6.825333 ms; the diagnostic is +8.27% versus original
+and -16.10% versus current. Exact clean-reopen oracles pass. This is **not a retained
+fix or recovery proof**: flushing data and the temporary catalog before renaming
+it, then doing ordinary directory fsync, allows the latest acknowledged progress
+marker to disappear on power loss. Existing checkpoint guarantees and hard
+WAL/reorg/maintenance boundaries need a separate correctness design, including
+rollback of an additional completed epoch, before this can be considered. All
+temporary source was restored; no node or production directory used this variant.
