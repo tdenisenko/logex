@@ -237,7 +237,40 @@ retains its existing rules; this is not a new per-batch ingestion lock.
 The regression passes with the guard, then retries compaction and checks exact
 rows. All 11 focused compaction tests and strict storage Clippy pass, followed
 by all six workspace gates (906 tests/nine ignored, documentation tests and the
-release node build). Targeted ARM/Intel lock validation and a compaction/query
-cost comparison are pending for this additional change.
-[Local validation](baselines/2026-09-11-compaction-owner-local-validation.json). The completed `ee502b56`
-results above remain evidence for that earlier source, not this follow-up.
+release node build). All six Linux/macOS CI jobs pass at `a0c3aa64` in run
+34600712890. Both ARM/Intel disposable ExFAT runs pass all 11 compaction tests
+and five query integration tests/one ignored, then detach their matched images.
+These targeted runs supplement the preceding full `ee502b56` platform suites.
+[Local validation](baselines/2026-09-11-compaction-owner-local-validation.json),
+[CI](baselines/2026-09-11-compaction-owner-ci.json), and
+[platform source, binaries and results](baselines/2026-09-11-compaction-owner-platform-validation.jsonl).
+
+Five alternating process pairs, three fresh datasets each, compare the exact
+`a0c3aa64` release binaries against `ee502b56` with the same parameters above.
+Compaction medians change -0.06% dense/+0.16% sparse. Query/lifecycle medians
+stay within +4.6%; dense index p95 rises 8.54%. Sparse warm startup p95 rises
+20.51% (14.064 to 16.948 ms) despite a +0.32% median (12.625 to 12.665 ms).
+That observation prompted a larger confirmation; it is retained in the record.
+[Initial query comparison](baselines/2026-09-11-compaction-owner-query.jsonl).
+
+The independent sparse confirmation uses 15 alternating process pairs with three
+fresh datasets each, **45 samples per revision**, without concurrent local builds
+or tests. Warm startup median changes -0.71% (12.693 to 12.603 ms); p95 changes
++3.08% (13.935 to 14.364 ms). The earlier larger startup tail does not repeat.
+Compaction median changes -0.96%, generic live/history -0.87%/-0.13%, and index
+construction +0.10%. All query/lifecycle median and p95 regressions are below 5%.
+Every exact native/SQL/reopen oracle passes, and no sample is discarded.
+[Complete confirmation](baselines/2026-09-11-compaction-owner-sparse-confirmation.jsonl).
+
+The separate combined-sync comparison has 15 samples per profile: ingestion
+medians change +0.70% mixed history, -0.76% mixed live and +0.16% sparse history.
+Read/reopen medians stay within +2.2%; mixed-live reopen p95 rises 5.23% and
+remains recorded. Logical bytes and median OS-attributed writes are unchanged.
+All exact rows/progress/reopen oracles pass. This supports retaining the ownership
+guard without a material ingestion cost; it does not resolve the older costs
+against the original baseline or establish P2P/staging acceptance.
+[Complete sync comparison](baselines/2026-09-11-compaction-owner-sync.jsonl).
+
+The confirmed compaction/refresh publication and captured-reader bugs are fixed.
+Safe bundle reclamation and broader query/reorg snapshot behavior remain open;
+PR #130 stays draft until its remaining correctness and performance work passes.
