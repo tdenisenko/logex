@@ -25,8 +25,7 @@ use super::segment::{
     append_compacted_rows, append_ingest_rows, apply_ordered_rows_to_descriptor,
     apply_rows_to_descriptor, compact_ingest_segment, compact_segment, persist_ingest_manifest,
     persist_ingest_manifest_with_columns, persist_segment_manifest,
-    segment_uses_current_compaction_profile, verify_raw_segment_files_complete,
-    write_compacted_rows,
+    segment_uses_current_compaction_profile, verify_raw_segment_files_complete, write_bundled_rows,
 };
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
@@ -685,6 +684,10 @@ impl NativeStorage {
                     "catalog and manifest segment identities disagree",
                 ));
             }
+            if segment.column_bundle.is_some() {
+                super::segment::restore_bundled_checkpoint(&self.paths, segment)?;
+                continue;
+            }
             if active && segment.row_count == 0 && manifest.is_none() {
                 self.restore_committed_prefix(segment)?;
                 continue;
@@ -749,6 +752,9 @@ impl NativeStorage {
     }
 
     fn restore_committed_prefix(&self, start: &SegmentDescriptor) -> io::Result<()> {
+        if start.column_bundle.is_some() {
+            return super::segment::restore_bundled_checkpoint(&self.paths, start);
+        }
         let dir = self.paths.segment_dir(start.id);
         let mut rows = Vec::new();
         let mut canonical = NullBitmap::new();
@@ -853,14 +859,25 @@ impl NativeStorage {
         target_rows: usize,
     ) -> std::io::Result<Vec<PartitionMeta>> {
         let mut appended = Vec::new();
-        for chunk in rows.chunks(target_rows) {
+        let mut remaining = rows;
+        while !remaining.is_empty() {
             let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed)?;
             let segment_dir = self.paths.segment_dir(descriptor.id);
+            let candidate = &remaining[..remaining.len().min(target_rows)];
+            let take = super::segment::bundled_row_capacity(&segment_dir, None, candidate)?;
+            if take == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "row exceeds bundle capacity",
+                ));
+            }
+            let chunk = &candidate[..take];
             if segment_dir.exists() {
                 fs::remove_dir_all(&segment_dir)?;
             }
-            let columns = write_compacted_rows(&segment_dir, chunk)?;
+            let columns = write_bundled_rows(&segment_dir, chunk)?;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
+            let columns = columns.apply_to(&mut descriptor);
             persist_ingest_manifest_with_columns(
                 &self.paths,
                 &descriptor,
@@ -869,6 +886,7 @@ impl NativeStorage {
             )?;
             appended.push(self.partition_meta(&descriptor));
             self.catalog.segments.push(descriptor);
+            remaining = &remaining[take..];
         }
         if !appended.is_empty() {
             self.persist_catalog()?;
@@ -900,7 +918,26 @@ impl NativeStorage {
             }
 
             let remaining_rows = rows.len() - offset;
-            let take = remaining_capacity.min(remaining_rows);
+            let mut take = remaining_capacity.min(remaining_rows);
+            let segment_dir = self.paths.segment_dir(segment_id);
+            let reference = self.catalog.segments[segment_index].column_bundle.as_ref();
+            if existing_rows == 0 || reference.is_some() {
+                take = super::segment::bundled_row_capacity(
+                    &segment_dir,
+                    reference,
+                    &rows[offset..offset + take],
+                )?;
+                if take == 0 {
+                    if existing_rows == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "row exceeds bundle capacity",
+                        ));
+                    }
+                    self.finalize_historical_segment()?;
+                    continue;
+                }
+            }
             let chunk = &rows[offset..offset + take];
             if existing_rows > 0
                 && historical_segment_would_exceed_block_span(
@@ -912,10 +949,9 @@ impl NativeStorage {
                 continue;
             }
 
-            let segment_dir = self.paths.segment_dir(segment_id);
             let publication = self.segment_publication(segment_id);
             let columns = if existing_rows == 0 {
-                write_compacted_rows(&segment_dir, chunk)?
+                write_bundled_rows(&segment_dir, chunk)?
             } else {
                 if !super::segment::segment_is_compacted(&self.paths, segment_id)? {
                     compact_ingest_segment(
@@ -929,6 +965,7 @@ impl NativeStorage {
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
                 apply_ordered_rows_to_descriptor(descriptor, chunk);
+                let columns = columns.apply_to(descriptor);
                 persist_ingest_manifest_with_columns(
                     &self.paths,
                     descriptor,
@@ -2676,6 +2713,14 @@ mod tests {
                     let recovered = NativeStorage::open(config).unwrap_or_else(|error| panic!("historical={historical}, rollback failure={fail_after}, events={events:?}: {error}"));
                     assert_eq!(read_ingestion_rows(&recovered), initial);
                     if success {
+                        if historical && next_count == 5 {
+                            assert!(
+                                events
+                                    .iter()
+                                    .any(|(op, _)| *op == "bundle_trim_uncommitted_tail"),
+                                "bundled rollback must trim its append suffix: {events:?}"
+                            );
+                        }
                         assert!(
                             events.iter().any(|(op, _)| matches!(
                                 *op,
@@ -2733,7 +2778,16 @@ mod tests {
     #[test]
     fn ingestion_discards_damaged_segments_that_have_no_committed_rows() {
         for historical in [false, true] {
-            for damage in ["segment.json", "address.col", "data.col"] {
+            let damaged = if historical {
+                [
+                    "segment.json",
+                    crate::column_artifact::BUNDLE_PATH,
+                    "canonical.bitmap",
+                ]
+            } else {
+                ["segment.json", "address.col", "data.col"]
+            };
+            for damage in damaged {
                 let dir = TempDir::new().unwrap();
                 let config = NativeStorageConfig {
                     data_dir: dir.path().to_owned(),
@@ -3175,7 +3229,11 @@ mod tests {
 
         let first_segment = storage.segment_path(sealed[0].id);
         assert!(!first_segment.join("address.col").exists());
-        assert!(first_segment.join("columns/address.pages").exists());
+        assert!(
+            first_segment
+                .join(crate::column_artifact::BUNDLE_PATH)
+                .exists()
+        );
 
         let reader = SegmentReader::open(&first_segment).unwrap();
         assert_eq!(reader.read_log_rows(None).unwrap(), rows[..10].to_vec());
@@ -3185,7 +3243,11 @@ mod tests {
             .unwrap();
         assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
         assert!(!first_segment.join("address.col").exists());
-        assert!(first_segment.join("columns/address.pages").exists());
+        assert!(
+            first_segment
+                .join(crate::column_artifact::BUNDLE_PATH)
+                .exists()
+        );
         assert!(storage.active_historical_segment_id().is_some());
 
         drop(storage);
@@ -3221,9 +3283,206 @@ mod tests {
 
         let segment_dir = storage.segment_path(sealed[0].id);
         assert!(!segment_dir.join("address.col").exists());
-        assert!(segment_dir.join("columns/address.pages").exists());
+        assert!(
+            segment_dir
+                .join(crate::column_artifact::BUNDLE_PATH)
+                .exists()
+        );
         let reader = SegmentReader::open(&segment_dir).unwrap();
         assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+    }
+
+    #[test]
+    fn committed_bundle_corruption_is_preserved_before_rollback() {
+        for damage in 0..3 {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 1_000,
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let prior = ingestion_header(100, B256::ZERO);
+            let next = ingestion_header(99, B256::ZERO);
+            storage
+                .ingest_historical_batch(&ingestion_rows(3, &prior), &prior)
+                .unwrap();
+            storage.checkpoint().unwrap();
+            let id = storage.active_historical_segment_id().unwrap();
+            let reference = storage
+                .segments()
+                .iter()
+                .find(|segment| segment.id == id)
+                .unwrap()
+                .column_bundle
+                .clone()
+                .unwrap();
+            storage
+                .ingest_historical_batch(&ingestion_rows(3, &next), &next)
+                .unwrap();
+            let dir = storage.segment_path(id);
+            let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
+            let mut bytes = fs::read(&bundle_path).unwrap();
+            match damage {
+                0 => bytes[8] ^= 1,
+                1 => bytes[reference.table_offset as usize] ^= 1,
+                2 => bytes.truncate(reference.end().unwrap() as usize - 1),
+                _ => unreachable!(),
+            }
+            fs::write(&bundle_path, &bytes).unwrap();
+            let paths = [
+                bundle_path,
+                dir.join("segment.json"),
+                dir.join("canonical.bitmap"),
+                storage.paths.catalog_path(),
+            ];
+            let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+            drop(storage);
+            assert!(NativeStorage::open(config).is_err(), "damage {damage}");
+            for (path, bytes) in paths.iter().zip(before) {
+                assert_eq!(
+                    fs::read(path).unwrap(),
+                    bytes,
+                    "damage {damage}: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_readers_keep_their_snapshot_across_historical_appends() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1_000_000,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut rows = make_rows(32_773, 100);
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.topic1 = (index % 3 == 0).then(|| B256::repeat_byte(index as u8));
+            row.topic2 = (index % 5 == 0).then(|| B256::repeat_byte((index >> 8) as u8));
+        }
+        storage.write_historical_batch(&rows[..16_385]).unwrap();
+        storage.checkpoint().unwrap();
+        let id = storage.active_historical_segment_id().unwrap();
+        let snapshot = SegmentReader::open(&storage.segment_path(id)).unwrap();
+        storage.write_historical_batch(&rows[16_385..]).unwrap();
+        assert_eq!(storage.active_historical_segment_id(), Some(id));
+        assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..16_385]);
+        let selected = [16_384, 0, 16_383, 16_384, 7];
+        assert_eq!(
+            snapshot.read_log_rows(Some(&selected)).unwrap(),
+            selected
+                .iter()
+                .map(|id| rows[*id as usize].clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(snapshot.read_log_rows(Some(&[16_385])).is_err());
+        assert_eq!(
+            SegmentReader::open(&storage.segment_path(id))
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            rows
+        );
+    }
+
+    #[test]
+    fn historical_bundle_rotates_before_its_extent_capacity_is_exhausted() {
+        use crate::bundle::{BundleWriter, MAX_EXTENTS};
+        use crate::column_artifact::{BUNDLE_PATH, COLUMN_NAMES, ColumnArtifacts};
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1_000_000,
+            ..Default::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let mut initial = make_rows(1, 100);
+        let mut seed = 37u64;
+        initial[0].data = (0..8192)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (seed >> 32) as u8
+            })
+            .collect::<Vec<_>>()
+            .into();
+        initial[0].data_len = 8192;
+        storage.write_historical_batch(&initial).unwrap();
+        storage.checkpoint().unwrap();
+        let id = storage.active_historical_segment_id().unwrap();
+        let dir = storage.segment_path(id);
+        let manifest: SegmentManifest =
+            serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
+        let artifacts = ColumnArtifacts::open(&dir, Some(&manifest)).unwrap();
+        let staged = dir.join("fragmented.bundle");
+        let writer = BundleWriter::create(&staged).unwrap();
+        for (id, name) in COLUMN_NAMES.iter().enumerate() {
+            let data = artifacts.read(&format!("columns/{name}.pages")).unwrap();
+            if id == 13 {
+                assert!(data.len() > MAX_EXTENTS);
+                for byte in &data[..MAX_EXTENTS - 1] {
+                    writer.append_data(id as u8, &[*byte]).unwrap();
+                }
+                writer
+                    .append_data(id as u8, &data[MAX_EXTENTS - 1..])
+                    .unwrap();
+            } else {
+                writer.append_data(id as u8, &data).unwrap();
+            }
+            writer
+                .replace_metadata(
+                    id as u8 + 14,
+                    &artifacts
+                        .read(&format!("columns/{name}.pages.idx"))
+                        .unwrap(),
+                )
+                .unwrap();
+            if (9..13).contains(&id) {
+                writer
+                    .replace_metadata(
+                        id as u8 + 19,
+                        &artifacts.read(&format!("columns/{name}.null")).unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+        let reference = writer.finish(1).unwrap();
+        drop(artifacts);
+        fs::rename(staged, dir.join(BUNDLE_PATH)).unwrap();
+        let descriptor = storage
+            .catalog
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == id)
+            .unwrap();
+        descriptor.column_bundle = Some(reference);
+        persist_segment_manifest(&storage.paths, descriptor).unwrap();
+        storage.persist_catalog().unwrap();
+        drop(storage);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let incoming = make_rows(2, 99);
+        storage.write_historical_batch(&incoming).unwrap();
+        storage.checkpoint().unwrap();
+        assert_ne!(storage.active_historical_segment_id(), Some(id));
+        assert_eq!(storage.sealed_partition_metas().len(), 2);
+        let mut actual = Vec::new();
+        for segment in storage.segments() {
+            if segment.row_count > 0 {
+                actual.extend(
+                    SegmentReader::open(&storage.segment_path(segment.id))
+                        .unwrap()
+                        .read_log_rows(None)
+                        .unwrap(),
+                );
+            }
+        }
+        initial.extend(incoming);
+        assert_eq!(actual, initial);
+        drop(storage);
+        assert_eq!(NativeStorage::open(config).unwrap().total_rows(), 3);
     }
 
     #[test]
@@ -3246,53 +3505,38 @@ mod tests {
             let id = storage.active_historical_segment_id().unwrap();
             let dir = storage.segment_path(id);
             let manifest_bytes = fs::read(dir.join("segment.json")).unwrap();
-            let manifest: SegmentManifest = serde_json::from_slice(&manifest_bytes).unwrap();
-            let paths: Vec<_> = manifest
-                .columns
-                .iter()
-                .flat_map(|c| {
-                    [
-                        Some(c.data_path.clone()),
-                        c.page_index_path.clone(),
-                        c.null_bitmap_path.clone(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                })
-                .chain(["canonical.bitmap".to_owned(), "segment.json".to_owned()])
-                .collect();
-            let old: Vec<_> = paths
-                .iter()
-                .map(|path| (path.clone(), fs::read(dir.join(path)).unwrap()))
-                .collect();
+            let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
+            let old_bundle = fs::read(&bundle_path).unwrap();
+            let old_canonical = fs::read(dir.join("canonical.bitmap")).unwrap();
             storage.ingest_historical_batch(&incoming, &next).unwrap();
+            let current: SegmentManifest =
+                serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
+            let new_reference = current.column_bundle.as_ref().unwrap();
+            assert!(fs::read(&bundle_path).unwrap().starts_with(&old_bundle));
             if phase == 6 {
                 storage.checkpoint().unwrap();
             }
             drop(storage);
-            // Payload-only interruption, one index, one bitmap, all indexes/
-            // bitmaps, new manifest, durable catalog. Phase zero also tears the
-            // uncommitted payload itself; the original prefix remains intact.
+            // A torn first extent, all payload without a table, a torn table,
+            // complete table with old metadata, new canonical bits, new manifest,
+            // and a durable catalog. Only the last phase commits the new rows.
             if phase < 5 {
-                for (path, bytes) in &old {
-                    let keep_new = path.ends_with(".pages")
-                        || (phase >= 2 && path == "columns/address.pages.idx")
-                        || (phase >= 3 && path == "columns/topic0.null")
-                        || (phase >= 4 && path != "segment.json");
-                    if !keep_new {
-                        fs::write(dir.join(path), bytes).unwrap();
-                    }
+                fs::write(dir.join("segment.json"), &manifest_bytes).unwrap();
+                if phase < 4 {
+                    fs::write(dir.join("canonical.bitmap"), &old_canonical).unwrap();
                 }
-                if phase == 0 {
-                    let path = "columns/address.pages";
-                    let old_len = old.iter().find(|(p, _)| p == path).unwrap().1.len();
-                    fs::OpenOptions::new()
-                        .write(true)
-                        .open(dir.join(path))
-                        .unwrap()
-                        .set_len(old_len as u64 + 1)
-                        .unwrap();
-                }
+                let tail_end = match phase {
+                    0 => old_bundle.len() as u64 + 1,
+                    1 => new_reference.table_offset,
+                    2 => new_reference.table_offset + u64::from(new_reference.table_len) / 2,
+                    _ => new_reference.end().unwrap(),
+                };
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&bundle_path)
+                    .unwrap()
+                    .set_len(tail_end)
+                    .unwrap();
             }
             for restart in 0..2 {
                 let recovered = NativeStorage::open(config.clone())
@@ -3315,11 +3559,12 @@ mod tests {
                     recovered.historical_floor().unwrap().block_number,
                     if phase == 6 { 99 } else { 100 }
                 );
+                if phase < 6 {
+                    assert_eq!(fs::read(&bundle_path).unwrap(), old_bundle);
+                }
                 if phase == 6 {
                     // A clean restart must preserve the compressed representation.
-                    for (path, _) in &old {
-                        assert!(dir.join(path).exists());
-                    }
+                    assert!(bundle_path.exists());
                     assert!(!dir.join("address.col").exists());
                 }
             }
@@ -3405,7 +3650,7 @@ mod tests {
         assert!(
             storage
                 .segment_path(active_segment)
-                .join("columns/address.pages")
+                .join(crate::column_artifact::BUNDLE_PATH)
                 .exists()
         );
 
@@ -3423,7 +3668,7 @@ mod tests {
         assert!(
             storage
                 .segment_path(active_segment)
-                .join("columns/address.pages")
+                .join(crate::column_artifact::BUNDLE_PATH)
                 .exists()
         );
     }

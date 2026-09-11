@@ -1,6 +1,6 @@
 # Shared segment artifact prototype
 
-Status: design/prototype work within unmerged PR #130. The user permits a fresh
+Status: integrated, unaccepted candidate within unmerged PR #130. The user permits a fresh
 sync and breaking storage changes to meet the ingestion performance constraint.
 Existing production directories and the protected external volume remain outside
 this work. The equal-bytes probe in `sync-ingestion-checkpoints.md` supports
@@ -60,8 +60,11 @@ and must not be treated as an implementation or migration artifact.
 
 ## Current low-level implementation
 
-`bundle.rs` is currently compiled only for tests. It is not used for ingestion,
-querying or startup, and the node's format versions have not changed yet.
+`bundle.rs` is now connected to historical ingestion, SegmentReader and catalog
+recovery. Catalog v4 (`LXCAT004`) and segment v2 intentionally reject older
+formats without rewriting them. New historical segments use
+`columns/segment.bundle`; raw live columns and their existing compaction path
+remain supported. This candidate is not accepted for deployment.
 
 The prototype uses `LXBND001` file magic and immutable `LXBT0001` tables. A
 reference stores row count, table offset, table length and CRC32. Tables encode
@@ -87,9 +90,33 @@ tables, interrupted fragment/table writes and retry, four deterministic seeds of
 mixed operations compared with an independent model, reordered-fragment rejection,
 open-file lifetime after replacement, and capacity/invalid-operation behavior.
 
-Still required before activation: typed manifest/catalog references and version
-rejection, complete schema checks for all expected column streams, proactive
-rotation before the fragment bound, storage-level rollback publication, all
-existing ingestion/query/compaction paths, physical disk/write-amplification
-measurements, and original-baseline performance/platform acceptance. Low-level
-snapshot tests do not establish whole-query snapshot isolation.
+The catalog and manifest hold the same typed `BundleReference`, pinned alongside
+their row count. The fixed logical schema resolves 14 data streams, 14 page indexes
+and four null bitmaps; incomplete/duplicated schemas, unknown paths and incompatible
+codecs fail explicitly. No per-column bundle sidecars are needed. Encoders run on
+the existing scoped workers; the shared writer serializes only compressed writes.
+The canonical bitmap remains separate for existing reorg behavior.
+
+Startup verifies the catalog-pinned table, every committed extent checksum, all
+page-index prefixes and bitmap lengths before changing that segment. An actual
+rollback durably restores the canonical prefix and manifest before truncating the
+uncommitted suffix. Healthy reopen preserves the artifact byte for byte. CRC does
+not authenticate chain data, and startup verification cost must be measured.
+
+Before an append, fixed-column page counts and zstd's worst-case variable-data
+bound reserve fragment capacity. A full artifact is finalized and a new segment
+allocated; the previous target-row and block-span coalescing limits still apply.
+Old tables and replaced metadata remain inside committed artifacts, so physical
+size and write amplification remain acceptance measurements.
+
+Integration regressions cover old readers across page boundaries and metadata
+updates, capacity-driven rotation, committed corruption preserved before rollback,
+seven interrupted payload/table/manifest/catalog phases, exact surviving committed
+bytes, repeated reopen/retry and both per-column/bundled malformed append metadata.
+The existing commit and rollback failure matrices also exercise bundled segments.
+Whole-query snapshot lifetime and reorg isolation remain separate batch-7 work.
+
+Still required for acceptance: complete workspace/platform gates, original-baseline
+ingestion comparisons, query/startup effects, physical disk/write-amplification
+measurements and isolated ExFAT/cross-device validation. The 10% performance ceiling
+is unchanged, and PR #130 remains draft.

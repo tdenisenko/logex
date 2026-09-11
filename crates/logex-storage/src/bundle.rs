@@ -1,5 +1,4 @@
-//! Prototype immutable compressed-artifact snapshots. This module is test-only
-//! until the manifest/catalog integration and performance gates are complete.
+//! Immutable compressed-artifact snapshots, committed by the storage catalog.
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -13,17 +12,17 @@ const FILE_MAGIC: &[u8; 8] = b"LXBND001";
 const TABLE_MAGIC: &[u8; 8] = b"LXBT0001";
 const DATA_STREAMS: u8 = 14;
 const STREAMS: u8 = 32;
-const MAX_EXTENT_BYTES: usize = 1024 * 1024;
-const MAX_EXTENTS: usize = 4096;
+pub(crate) const MAX_EXTENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_EXTENTS: usize = 4096;
 const MAX_TABLE_BYTES: u32 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct BundleReference {
-    pub(crate) row_count: u64,
-    pub(crate) table_offset: u64,
-    pub(crate) table_len: u32,
-    pub(crate) checksum: u32,
+pub struct BundleReference {
+    pub row_count: u64,
+    pub table_offset: u64,
+    pub table_len: u32,
+    pub checksum: u32,
 }
 
 impl BundleReference {
@@ -62,6 +61,21 @@ pub(crate) struct BundleReader {
 }
 
 impl BundleReader {
+    pub(crate) fn remaining_data_extents(&self) -> io::Result<[usize; 14]> {
+        let mut remaining = [0; 14];
+        for (id, count) in remaining.iter_mut().enumerate() {
+            *count = MAX_EXTENTS - self.stream(id as u8)?.extents.len();
+        }
+        Ok(remaining)
+    }
+    pub(crate) fn stream_len(&self, id: u8) -> io::Result<u64> {
+        Ok(self.stream(id)?.len)
+    }
+
+    pub(crate) fn has_complete_schema(&self) -> bool {
+        self.streams.len() == usize::from(STREAMS)
+    }
+
     pub(crate) fn open(path: &Path, reference: &BundleReference) -> io::Result<Self> {
         let mut file = File::open(path)?;
         let end = reference.end()?;

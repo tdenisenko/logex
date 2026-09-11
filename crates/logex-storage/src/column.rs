@@ -23,7 +23,7 @@ pub struct ColumnFileHeader {
 }
 
 impl ColumnFileHeader {
-    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+    pub fn write_to(&self, w: &mut (impl Write + ?Sized)) -> io::Result<()> {
         w.write_all(COLUMN_MAGIC)?;
         w.write_all(&self.version.to_le_bytes())?;
         w.write_all(&self.row_count.to_le_bytes())?;
@@ -104,7 +104,7 @@ impl NullBitmap {
         self.len
     }
 
-    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+    pub fn write_to(&self, w: &mut (impl Write + ?Sized)) -> io::Result<()> {
         w.write_all(&self.len.to_le_bytes())?;
         w.write_all(&self.bits)?;
         Ok(())

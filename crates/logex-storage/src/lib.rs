@@ -1,6 +1,6 @@
-#[cfg(test)]
 mod bundle;
 mod column;
+mod column_artifact;
 pub mod compression;
 mod durability;
 pub mod native;
@@ -11,6 +11,7 @@ mod segment_reader;
 mod state;
 mod wal;
 
+pub use bundle::BundleReference;
 pub use column::{ColumnFile, ColumnFileHeader, NullBitmap};
 pub use page::PageIndexEntry;
 pub use partition::{Partition, PartitionManager, PartitionManagerConfig};

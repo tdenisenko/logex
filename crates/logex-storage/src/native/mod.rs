@@ -3,6 +3,7 @@ mod filter;
 mod recovery;
 mod segment;
 mod storage;
+pub(crate) use segment::current_column_profile;
 
 pub use catalog::{
     CATALOG_FORMAT_VERSION, ColumnDescriptor, CompressionCodec, IndexKind, NativeStorageCatalog,

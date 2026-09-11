@@ -1,3 +1,5 @@
+use crate::bundle::{BundleReference, BundleWriter};
+use crate::column_artifact::{BUNDLE_PATH, ColumnArtifacts, stream_id};
 use crate::durability::{self, Publication};
 use std::fs;
 use std::fs::File;
@@ -57,6 +59,19 @@ struct PageOutput<'a> {
     previous: std::collections::BTreeMap<String, ExistingPages>,
     canonical: Option<NullBitmap>,
     replacements: Option<durability::ReplacementBatch>,
+    bundle: Option<(BundleWriter, u64)>,
+}
+
+pub(crate) struct EncodedColumns {
+    columns: Vec<ColumnDescriptor>,
+    bundle: Option<BundleReference>,
+}
+
+impl EncodedColumns {
+    pub(crate) fn apply_to(self, descriptor: &mut SegmentDescriptor) -> Vec<ColumnDescriptor> {
+        descriptor.column_bundle = self.bundle;
+        self.columns
+    }
 }
 
 struct ExistingPages {
@@ -74,6 +89,7 @@ impl<'a> PageOutput<'a> {
             previous: Default::default(),
             canonical: Some(NullBitmap::new()),
             replacements: None,
+            bundle: None,
         }
     }
 
@@ -96,6 +112,12 @@ impl<'a> PageOutput<'a> {
             ));
         }
         output.replacements = Some(durability::ReplacementBatch::new(publication));
+        if let Some(reference) = &manifest.column_bundle {
+            output.bundle = Some((
+                BundleWriter::append(&dir.join(BUNDLE_PATH), reference)?,
+                manifest.row_count + row_count as u64,
+            ));
+        }
         Ok(output)
     }
 
@@ -120,7 +142,17 @@ impl<'a> PageOutput<'a> {
             return Err(invalid("columns do not use the current compaction profile"));
         }
         let mut previous = std::collections::BTreeMap::new();
-        let mut tail = false;
+        let artifacts = ColumnArtifacts::open(dir, Some(manifest))?;
+        let mut tail = manifest
+            .column_bundle
+            .as_ref()
+            .map(|reference| {
+                Ok::<_, std::io::Error>(
+                    fs::metadata(dir.join(BUNDLE_PATH))?.len() != reference.end()?,
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
         for column in &manifest.columns {
             // Persisted paths must select only known column artifacts inside
             // this segment. Do not turn malformed metadata into arbitrary writes.
@@ -145,7 +177,7 @@ impl<'a> PageOutput<'a> {
             {
                 return Err(invalid("invalid column index/bitmap descriptor"));
             }
-            let mut entries = read_page_index(&fs::read(dir.join(&index))?)?;
+            let mut entries = read_page_index(&artifacts.read(&index)?)?;
             let mut rows = 0u64;
             let mut offset = 0u64;
             let mut prefix_entries = 0;
@@ -169,15 +201,25 @@ impl<'a> PageOutput<'a> {
                     .ok_or_else(|| invalid("page offset overflow"))?;
                 prefix_entries += 1;
             }
-            let file_len = fs::metadata(dir.join(&column.data_path))?.len();
+            let file_len = artifacts.len(&column.data_path)?;
             if rows != manifest.row_count || file_len < offset {
                 return Err(invalid("page prefix length does not match the manifest"));
             }
-            tail |= prefix_entries != entries.len() || file_len != offset;
+            let extra_entries = prefix_entries != entries.len();
+            tail |= extra_entries || file_len != offset;
             entries.truncate(prefix_entries);
             let nulls = null_path
-                .map(|path| read_bitmap_prefix(&dir.join(path), manifest.row_count))
+                .map(|path| parse_bitmap_prefix(&artifacts.read(&path)?, manifest.row_count))
                 .transpose()?;
+            if manifest.column_bundle.is_some()
+                && (extra_entries
+                    || file_len != offset
+                    || nulls.as_ref().is_some_and(|bitmap| bitmap.len() != rows))
+            {
+                return Err(invalid(
+                    "bundle streams do not match their immutable row boundary",
+                ));
+            }
             tail |= nulls.as_ref().is_some_and(|bitmap| bitmap.len() != rows);
             previous.insert(
                 column.name.clone(),
@@ -198,6 +240,7 @@ impl<'a> PageOutput<'a> {
                 previous,
                 canonical: Some(canonical),
                 replacements: None,
+                bundle: None,
             },
             tail,
         ))
@@ -206,10 +249,22 @@ impl<'a> PageOutput<'a> {
     fn metadata(
         &self,
         path: &Path,
-        write: impl FnOnce(&mut BufWriter<File>) -> std::io::Result<()>,
+        write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
+        if let Some((bundle, _)) = &self.bundle
+            && path != self.dir.join("canonical.bitmap")
+        {
+            let relative = path
+                .strip_prefix(self.dir)
+                .ok()
+                .and_then(Path::to_str)
+                .ok_or_else(|| std::io::Error::other("invalid column artifact path"))?;
+            let mut bytes = Vec::new();
+            write(&mut bytes)?;
+            return bundle.replace_metadata(stream_id(relative)?, &bytes);
+        }
         if let Some(replacements) = &self.replacements {
-            replacements.write(path, write)
+            replacements.write(path, |writer| write(writer))
         } else {
             let mut writer = BufWriter::new(File::create(path)?);
             write(&mut writer)?;
@@ -244,28 +299,30 @@ impl<'a> PageOutput<'a> {
         })
     }
 
-    fn finish(self) -> std::io::Result<()> {
+    fn finish(self) -> std::io::Result<Option<BundleReference>> {
+        let reference = self
+            .bundle
+            .map(|(bundle, rows)| bundle.finish(rows))
+            .transpose()?;
         self.replacements
             .map(durability::ReplacementBatch::publish)
-            .unwrap_or(Ok(()))
+            .unwrap_or(Ok(()))?;
+        Ok(reference)
     }
 }
 
 fn read_bitmap_prefix(path: &Path, rows: u64) -> std::io::Result<NullBitmap> {
     let bytes = fs::read(path)?;
-    let bitmap = NullBitmap::read_from(&bytes).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid bitmap {}", path.display()),
-        )
-    })?;
+    parse_bitmap_prefix(&bytes, rows)
+}
+
+fn parse_bitmap_prefix(bytes: &[u8], rows: u64) -> std::io::Result<NullBitmap> {
+    let bitmap = NullBitmap::read_from(bytes)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid bitmap"))?;
     if bitmap.len() < rows || bytes.len() as u64 != 8 + bitmap.len().div_ceil(8) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "bitmap {} does not match the committed row count",
-                path.display()
-            ),
+            "bitmap does not match the committed row count",
         ));
     }
     Ok(bitmap)
@@ -276,6 +333,78 @@ pub(crate) fn compacted_segment_has_uncommitted_tail(
     manifest: &SegmentManifest,
 ) -> std::io::Result<bool> {
     PageOutput::inspect(dir, manifest).map(|(_, tail)| tail)
+}
+
+/// Restore only the append suffix. The catalog identifies the complete immutable
+/// table, so recovery never has to decompress and rewrite committed column data.
+pub(crate) fn restore_bundled_checkpoint(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<()> {
+    let dir = paths.segment_dir(descriptor.id);
+    let reference = descriptor
+        .column_bundle
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("missing catalog bundle reference"))?;
+    let columns = current_column_profile()
+        .iter()
+        .map(|(name, codec)| ColumnDescriptor {
+            name: (*name).to_owned(),
+            codec: *codec,
+            page_rows: DEFAULT_PAGE_ROWS,
+            data_path: format!("columns/{name}.pages"),
+            page_index_path: Some(format!("columns/{name}.pages.idx")),
+            null_bitmap_path: matches!(*name, "topic0" | "topic1" | "topic2" | "topic3")
+                .then(|| format!("columns/{name}.null")),
+        })
+        .collect();
+    let prefix = SegmentManifest {
+        column_bundle: Some(reference.clone()),
+        format_version: super::catalog::STORAGE_FORMAT_VERSION,
+        segment_id: descriptor.id,
+        generation: descriptor.generation,
+        kind: descriptor.kind,
+        min_block: descriptor.min_block,
+        max_block: descriptor.max_block,
+        min_timestamp: descriptor.min_timestamp,
+        max_timestamp: descriptor.max_timestamp,
+        row_count: descriptor.row_count,
+        canonical_rows_path: "canonical.bitmap".to_owned(),
+        columns,
+        indexes: collect_indexes(&dir)?,
+    };
+    let artifacts = ColumnArtifacts::open(&dir, Some(&prefix))?;
+    artifacts.verify_bundle()?;
+    let (inspected, tail) = PageOutput::inspect(&dir, &prefix)?;
+    let previous: Option<SegmentManifest> =
+        match fs::read(paths.segment_manifest_path(descriptor.id)) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+    if !tail && previous.as_ref() == Some(&prefix) {
+        return Ok(());
+    }
+    // Validate all committed bytes before modifying either the manifest or bitmap.
+    let canonical = inspected
+        .canonical
+        .ok_or_else(|| std::io::Error::other("missing canonical prefix"))?;
+    if canonical.len() != descriptor.row_count {
+        let mut trimmed = NullBitmap::new();
+        for row in 0..descriptor.row_count {
+            trimmed.push(canonical.is_present(row));
+        }
+        ColumnFile::replace_canonical_bitmap(&dir, &trimmed)?;
+    }
+    persist_segment_manifest_with_columns(paths, descriptor, prefix.columns)?;
+    let path = dir.join(BUNDLE_PATH);
+    let file = fs::OpenOptions::new().write(true).open(&path)?;
+    if file.metadata()?.len() != reference.end()? {
+        durability::checkpoint("bundle_trim_uncommitted_tail", &path)?;
+        file.set_len(reference.end()?)?;
+        durability::sync_file_and_directory(&file, &path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -316,12 +445,80 @@ pub(crate) fn write_compacted_rows(
     Ok(columns)
 }
 
+pub(crate) fn write_bundled_rows(
+    segment_dir: &Path,
+    rows: &[LogRow],
+) -> std::io::Result<EncodedColumns> {
+    fs::create_dir_all(segment_dir.join("columns"))?;
+    let mut output = PageOutput::new(segment_dir);
+    output.bundle = Some((
+        BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?,
+        rows.len() as u64,
+    ));
+    output.append_canonical(rows.len())?;
+    let columns = write_compacted_values(&output, rows)?;
+    Ok(EncodedColumns {
+        columns,
+        bundle: output.finish()?,
+    })
+}
+
+/// Reserve worst-case compressed extents before writing any part of a batch.
+/// All fixed columns fit in one extent per page under the current profile.
+/// Variable bytes use zstd's bound over the larger u64-offset representation.
+pub(crate) fn bundled_row_capacity(
+    dir: &Path,
+    reference: Option<&BundleReference>,
+    rows: &[LogRow],
+) -> std::io::Result<usize> {
+    use crate::bundle::{BundleReader, MAX_EXTENT_BYTES, MAX_EXTENTS};
+    let capacity = reference
+        .map(|reference| {
+            BundleReader::open(&dir.join(BUNDLE_PATH), reference)?.remaining_data_extents()
+        })
+        .transpose()?
+        .unwrap_or([MAX_EXTENTS; 14]);
+    let mut pages = capacity[..13].iter().copied().min().unwrap_or(0);
+    let mut data_extents = capacity[13];
+    let mut accepted = 0;
+    while accepted < rows.len() && pages > 0 && data_extents > 0 {
+        let mut count = 0;
+        let mut raw_bytes = 16usize; // count and initial u64 offset, rounded up
+        let mut encoded_bound = 0;
+        for row in rows[accepted..].iter().take(DEFAULT_PAGE_ROWS as usize) {
+            let next = raw_bytes
+                .checked_add(row.data.len())
+                .and_then(|n| n.checked_add(8))
+                .ok_or_else(|| std::io::Error::other("variable page length overflow"))?;
+            let bound = zstd::zstd_safe::compress_bound(next)
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("compressed page bound overflow"))?;
+            if bound > data_extents * MAX_EXTENT_BYTES || bound > u32::MAX as usize {
+                break;
+            }
+            raw_bytes = next;
+            encoded_bound = bound;
+            count += 1;
+        }
+        if count == 0 {
+            break;
+        }
+        accepted += count;
+        pages -= 1;
+        data_extents -= encoded_bound.div_ceil(MAX_EXTENT_BYTES);
+        if count < DEFAULT_PAGE_ROWS as usize {
+            break;
+        }
+    }
+    Ok(accepted)
+}
+
 pub(crate) fn append_compacted_rows(
     segment_dir: &Path,
     existing_rows: u64,
     rows: &[LogRow],
     publication: Publication,
-) -> std::io::Result<Vec<ColumnDescriptor>> {
+) -> std::io::Result<EncodedColumns> {
     let manifest: SegmentManifest =
         serde_json::from_slice(&fs::read(segment_dir.join("segment.json"))?)
             .map_err(std::io::Error::other)?;
@@ -334,8 +531,10 @@ pub(crate) fn append_compacted_rows(
     let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication)?;
     output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
-    output.finish()?;
-    Ok(columns)
+    Ok(EncodedColumns {
+        columns,
+        bundle: output.finish()?,
+    })
 }
 
 fn write_compacted_values(
@@ -591,6 +790,7 @@ fn persist_manifest(
     fs::create_dir_all(&segment_dir)?;
 
     let manifest = SegmentManifest {
+        column_bundle: descriptor.column_bundle.clone(),
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
         segment_id: descriptor.id,
         generation: descriptor.generation,
@@ -853,7 +1053,7 @@ fn columns_match_current_profile(columns: &[ColumnDescriptor]) -> bool {
         })
 }
 
-fn current_column_profile() -> &'static [(&'static str, CompressionCodec)] {
+pub(crate) fn current_column_profile() -> &'static [(&'static str, CompressionCodec)] {
     &[
         ("address", CompressionCodec::AdaptiveFixed),
         ("block_number", CompressionCodec::DeltaZigZag),
@@ -1248,12 +1448,16 @@ where
         .unwrap_or_else(|| format!("columns/{name}.pages.idx"));
     let data_path = output.dir.join(&data_rel);
     let index_path = output.dir.join(&index_rel);
-    let file = if previous.is_some() {
-        fs::OpenOptions::new().append(true).open(&data_path)?
+    let mut writer = if output.bundle.is_some() {
+        None
     } else {
-        File::create(&data_path)?
+        let file = if previous.is_some() {
+            fs::OpenOptions::new().append(true).open(&data_path)?
+        } else {
+            File::create(&data_path)?
+        };
+        Some(BufWriter::new(file))
     };
-    let mut writer = BufWriter::new(file);
     let mut entries = previous.map(|p| p.entries.clone()).unwrap_or_default();
     let mut offset = previous.map_or(0, |p| p.encoded_bytes);
 
@@ -1279,7 +1483,11 @@ where
                 "page byte offset overflow",
             )
         })?;
-        writer.write_all(&encoded)?;
+        if let Some((bundle, _)) = &output.bundle {
+            bundle.append_data(stream_id(&data_rel)?, &encoded)?;
+        } else if let Some(writer) = &mut writer {
+            writer.write_all(&encoded)?;
+        }
         entries.push(PageIndexEntry {
             first_row,
             row_count: (end - start) as u32,
@@ -1289,7 +1497,9 @@ where
         offset = next_offset;
         start = end;
     }
-    writer.flush()?;
+    if let Some(writer) = &mut writer {
+        writer.flush()?;
+    }
     let index = write_page_index(&entries);
     output.metadata(&index_path, |writer| writer.write_all(&index))?;
     Ok((data_rel, index_rel, page_rows))
@@ -1668,6 +1878,7 @@ mod tests {
         let paths = StorageCatalogPaths::new(tmp.path().to_owned());
         paths.ensure_base_dirs().unwrap();
         let mut descriptor = SegmentDescriptor {
+            column_bundle: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1718,6 +1929,7 @@ mod tests {
         assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
         assert!(snapshot.read_log_rows(Some(&[2])).is_err());
         apply_rows_to_descriptor(&mut descriptor, &rows[2..]);
+        let appended = appended.apply_to(&mut descriptor);
         persist_segment_manifest_with_columns(&paths, &descriptor, appended).unwrap();
         assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
         let current = SegmentReader::open(&dir).unwrap();
@@ -1731,86 +1943,124 @@ mod tests {
 
     #[test]
     fn compacted_append_rejects_bad_metadata_without_mutating_files() {
-        use crate::native::{NativeStorage, NativeStorageConfig};
-        let tmp = TempDir::new().unwrap();
-        let mut storage = NativeStorage::open(NativeStorageConfig {
-            data_dir: tmp.path().to_owned(),
-            hot_target_rows: 1_000,
-            ..Default::default()
-        })
-        .unwrap();
-        let rows = &descending_rows()[..5];
-        storage.write_historical_batch(&rows[..2]).unwrap();
-        storage.checkpoint().unwrap();
-        let dir = storage.segment_path(storage.active_historical_segment_id().unwrap());
-        let original: SegmentManifest =
-            serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
-        let paths: Vec<_> = original
-            .columns
-            .iter()
-            .flat_map(|c| {
-                [
-                    Some(c.data_path.clone()),
-                    c.page_index_path.clone(),
-                    c.null_bitmap_path.clone(),
-                ]
-                .into_iter()
-                .flatten()
-            })
-            .chain(["canonical.bitmap".to_owned()])
-            .collect();
-        let files: Vec<_> = paths
-            .iter()
-            .map(|p| fs::read(dir.join(p)).unwrap())
-            .collect();
-        for case in 0..12 {
-            let mut manifest = original.clone();
-            match case {
-                0 => manifest.format_version += 1,
-                1 => manifest.kind = SegmentKind::Hot,
-                2 => manifest.columns[0].data_path = "../address.pages".into(),
-                3 => manifest.columns[0].page_index_path = Some("../index".into()),
-                4 => manifest.canonical_rows_path = "../canonical.bitmap".into(),
-                5 => manifest.columns[0].page_rows = u32::MAX,
-                6 => manifest.columns[0].codec = CompressionCodec::None,
-                7 => manifest.columns[0] = manifest.columns[1].clone(),
-                8 => manifest.columns.last_mut().unwrap().null_bitmap_path = Some("../null".into()),
-                9 => {
-                    let path = dir.join(&original.columns[0].data_path);
-                    fs::OpenOptions::new()
-                        .write(true)
-                        .open(path)
-                        .unwrap()
-                        .set_len(0)
-                        .unwrap();
-                }
-                10 => {
-                    let path = dir.join(original.columns[0].page_index_path.as_ref().unwrap());
-                    let mut entries = read_page_index(&fs::read(&path).unwrap()).unwrap();
-                    entries[0].row_count += 1;
-                    fs::write(path, write_page_index(&entries)).unwrap();
-                }
-                11 => fs::write(dir.join("canonical.bitmap"), [0u8; 8]).unwrap(),
-                _ => unreachable!(),
-            }
-            let json = serde_json::to_vec(&manifest).unwrap();
-            fs::write(dir.join("segment.json"), &json).unwrap();
-            let before: Vec<_> = paths
+        for bundled in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+            paths.ensure_base_dirs().unwrap();
+            let config = super::super::catalog::NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            };
+            let (mut catalog, _) =
+                super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+            let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+            let dir = paths.segment_dir(descriptor.id);
+            let rows = &descending_rows()[..5];
+            apply_rows_to_descriptor(&mut descriptor, &rows[..2]);
+            let columns = if bundled {
+                write_bundled_rows(&dir, &rows[..2])
+                    .unwrap()
+                    .apply_to(&mut descriptor)
+            } else {
+                write_compacted_rows(&dir, &rows[..2]).unwrap()
+            };
+            persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+            let original: SegmentManifest =
+                serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
+            let paths: Vec<String> = if bundled {
+                vec![BUNDLE_PATH.to_owned(), "canonical.bitmap".to_owned()]
+            } else {
+                original
+                    .columns
+                    .iter()
+                    .flat_map(|column| {
+                        [
+                            Some(column.data_path.clone()),
+                            column.page_index_path.clone(),
+                            column.null_bitmap_path.clone(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                    })
+                    .chain(["canonical.bitmap".to_owned()])
+                    .collect()
+            };
+            let files: Vec<_> = paths
                 .iter()
                 .map(|p| fs::read(dir.join(p)).unwrap())
                 .collect();
-            assert!(
-                append_compacted_rows(&dir, 2, &rows[2..], Publication::Deferred).is_err(),
-                "case {case}"
-            );
-            assert_eq!(fs::read(dir.join("segment.json")).unwrap(), json);
-            for ((path, before), original) in paths.iter().zip(before).zip(&files) {
-                assert_eq!(
-                    fs::read(dir.join(path)).unwrap(),
-                    before,
-                    "case {case}: {path}"
+            for case in 0..12 {
+                let mut manifest = original.clone();
+                match case {
+                    0 => manifest.format_version += 1,
+                    1 => manifest.kind = SegmentKind::Hot,
+                    2 => manifest.columns[0].data_path = "../address.pages".into(),
+                    3 => manifest.columns[0].page_index_path = Some("../index".into()),
+                    4 => manifest.canonical_rows_path = "../canonical.bitmap".into(),
+                    5 => manifest.columns[0].page_rows = u32::MAX,
+                    6 => manifest.columns[0].codec = CompressionCodec::None,
+                    7 => manifest.columns[0] = manifest.columns[1].clone(),
+                    8 => {
+                        manifest.columns.last_mut().unwrap().null_bitmap_path =
+                            Some("../null".into())
+                    }
+                    9 => {
+                        let path = dir.join(if bundled {
+                            BUNDLE_PATH
+                        } else {
+                            &original.columns[0].data_path
+                        });
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open(path)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap();
+                    }
+                    10 => {
+                        let index = original.columns[0].page_index_path.as_ref().unwrap();
+                        let artifacts = ColumnArtifacts::open(&dir, Some(&original)).unwrap();
+                        let mut entries = read_page_index(&artifacts.read(index).unwrap()).unwrap();
+                        entries[0].row_count += 1;
+                        if bundled {
+                            let writer = BundleWriter::append(
+                                &dir.join(BUNDLE_PATH),
+                                original.column_bundle.as_ref().unwrap(),
+                            )
+                            .unwrap();
+                            writer
+                                .replace_metadata(
+                                    stream_id(index).unwrap(),
+                                    &write_page_index(&entries),
+                                )
+                                .unwrap();
+                            manifest.column_bundle = Some(writer.finish(2).unwrap());
+                        } else {
+                            fs::write(dir.join(index), write_page_index(&entries)).unwrap();
+                        }
+                    }
+                    11 => fs::write(dir.join("canonical.bitmap"), [0u8; 8]).unwrap(),
+                    _ => unreachable!(),
+                }
+                let json = serde_json::to_vec(&manifest).unwrap();
+                fs::write(dir.join("segment.json"), &json).unwrap();
+                let before: Vec<_> = paths
+                    .iter()
+                    .map(|p| fs::read(dir.join(p)).unwrap())
+                    .collect();
+                assert!(
+                    append_compacted_rows(&dir, 2, &rows[2..], Publication::Deferred).is_err(),
+                    "case {case}"
                 );
-                fs::write(dir.join(path), original).unwrap();
+                assert_eq!(fs::read(dir.join("segment.json")).unwrap(), json);
+                for ((path, before), original) in paths.iter().zip(before).zip(&files) {
+                    assert_eq!(
+                        fs::read(dir.join(path)).unwrap(),
+                        before,
+                        "case {case}: {path}"
+                    );
+                    fs::write(dir.join(path), original).unwrap();
+                }
             }
         }
     }
@@ -1914,6 +2164,7 @@ mod tests {
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
         let descriptor = SegmentDescriptor {
+            column_bundle: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use alloy_primitives::{Address, B256, Bytes};
 use logex_types::{LogRow, Source};
 
+use crate::column_artifact::ColumnArtifacts;
 use crate::native::{ColumnDescriptor, SegmentManifest};
 use crate::page::{
     PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
@@ -16,6 +17,7 @@ use crate::{ColumnReader, NullBitmap};
 pub struct SegmentReader {
     dir: PathBuf,
     manifest: Option<SegmentManifest>,
+    artifacts: ColumnArtifacts,
 }
 
 #[derive(Debug, Clone)]
@@ -27,9 +29,20 @@ struct PageSelection {
 
 impl SegmentReader {
     pub fn open(dir: &Path) -> io::Result<Self> {
+        let manifest = load_manifest(dir)?;
+        if manifest.as_ref().is_some_and(|manifest| {
+            manifest.format_version != crate::native::STORAGE_FORMAT_VERSION
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported segment format",
+            ));
+        }
+        let artifacts = ColumnArtifacts::open(dir, manifest.as_ref())?;
         Ok(Self {
             dir: dir.to_path_buf(),
-            manifest: load_manifest(dir)?,
+            manifest,
+            artifacts,
         })
     }
 
@@ -244,7 +257,7 @@ impl SegmentReader {
                 materialize_selected(result)
             }
             None => {
-                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                let data = self.artifacts.read(&descriptor.data_path)?;
                 let mut result = Vec::with_capacity(self.read_row_count()? as usize);
                 for entry in page_index {
                     let page = decode_fixed_width_page(
@@ -275,7 +288,7 @@ impl SegmentReader {
                 )
             }),
             None => {
-                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                let data = self.artifacts.read(&descriptor.data_path)?;
                 read_selected_pages(None, &page_index, |entry| {
                     decode_u64_page(
                         self.slice_page(&data, entry)?,
@@ -302,7 +315,7 @@ impl SegmentReader {
                 )
             }),
             None => {
-                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                let data = self.artifacts.read(&descriptor.data_path)?;
                 read_selected_pages(None, &page_index, |entry| {
                     decode_u32_page(
                         self.slice_page(&data, entry)?,
@@ -329,7 +342,7 @@ impl SegmentReader {
                 )
             }),
             None => {
-                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                let data = self.artifacts.read(&descriptor.data_path)?;
                 read_selected_pages(None, &page_index, |entry| {
                     decode_u8_page(
                         self.slice_page(&data, entry)?,
@@ -359,7 +372,7 @@ impl SegmentReader {
                 )
             }),
             None => {
-                let data = fs::read(self.dir.join(&descriptor.data_path))?;
+                let data = self.artifacts.read(&descriptor.data_path)?;
                 read_selected_pages(None, &page_index, |entry| {
                     decode_var_bytes_page(self.slice_page(&data, entry)?, descriptor.codec)
                 })
@@ -377,7 +390,7 @@ impl SegmentReader {
                 format!("nullable column {column} is missing a null bitmap"),
             )
         })?;
-        let data = fs::read(self.dir.join(null_path))?;
+        let data = self.artifacts.read(null_path)?;
         NullBitmap::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt null bitmap"))
     }
@@ -393,7 +406,7 @@ impl SegmentReader {
                 "compacted column is missing a page index",
             )
         })?;
-        let data = fs::read(self.dir.join(path))?;
+        let data = self.artifacts.read(path)?;
         let mut entries = read_page_index(&data)?;
         let visible_rows = self.read_row_count()?;
         let required_rows = row_ids
@@ -466,6 +479,16 @@ impl SegmentReader {
         descriptor: &ColumnDescriptor,
         entry: &PageIndexEntry,
     ) -> io::Result<Vec<u8>> {
+        let end = entry
+            .offset
+            .checked_add(u64::from(entry.encoded_len))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "page range overflow"))?;
+        if let Some(result) = self
+            .artifacts
+            .read_bundle_range(&descriptor.data_path, entry.offset..end)
+        {
+            return result;
+        }
         let mut file = File::open(self.dir.join(&descriptor.data_path))?;
         let file_len = file.metadata()?.len();
         if entry
@@ -670,6 +693,7 @@ mod tests {
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
         let descriptor = SegmentDescriptor {
+            column_bundle: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -774,6 +798,7 @@ mod tests {
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
         let descriptor = SegmentDescriptor {
+            column_bundle: None,
             id: 2,
             generation: 0,
             kind: SegmentKind::Sealed,

@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 1;
-pub const CATALOG_FORMAT_VERSION: u32 = 3;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT003";
+pub const STORAGE_FORMAT_VERSION: u32 = 2;
+pub const CATALOG_FORMAT_VERSION: u32 = 4;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT004";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -113,6 +113,8 @@ pub enum IndexKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_bundle: Option<crate::BundleReference>,
     pub id: u64,
     pub generation: u64,
     pub kind: SegmentKind,
@@ -131,6 +133,8 @@ pub struct SegmentDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_bundle: Option<crate::BundleReference>,
     pub format_version: u32,
     pub segment_id: u64,
     pub generation: u64,
@@ -368,6 +372,12 @@ impl NativeStorageCatalog {
             validate_cached_headers(std::slice::from_ref(header))?;
         }
         for segment in &self.segments {
+            if let Some(reference) = &segment.column_bundle {
+                reference.end()?;
+                if reference.row_count != segment.row_count || segment.kind != SegmentKind::Sealed {
+                    return Err(invalid_catalog("invalid catalog bundle checkpoint"));
+                }
+            }
             let relative = PathBuf::from(SEGMENTS_DIR).join(format!("s_{:016}", segment.id));
             if !ids.insert(segment.id)
                 || segment.id >= self.next_segment_id
@@ -426,6 +436,7 @@ impl NativeStorageCatalog {
         let relative_path = PathBuf::from(SEGMENTS_DIR).join(format!("s_{id:016}"));
         let manifest_relative_path = relative_path.join("segment.json");
         Ok(SegmentDescriptor {
+            column_bundle: None,
             id,
             generation: 0,
             kind,
@@ -476,7 +487,7 @@ fn invalid_catalog(message: impl Into<String>) -> io::Error {
 fn frame_lengths(prefix: &[u8]) -> io::Result<(usize, usize)> {
     if prefix.len() < CATALOG_PREFIX_BYTES || &prefix[..8] != CATALOG_MAGIC {
         return Err(invalid_catalog(
-            "invalid or unsupported catalog; format 3 requires a new data directory",
+            "invalid or unsupported catalog; format 4 requires a new data directory",
         ));
     }
     // The fixed prefix was checked before these exact-width conversions.
@@ -639,6 +650,18 @@ mod tests {
         legacy["format_version"] = 1.into();
         legacy.as_object_mut().unwrap().remove("state");
         let bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(paths.catalog_path(), &bytes).unwrap();
+        assert!(NativeStorageCatalog::open_or_create(&config).is_err());
+        assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
+
+        // The previous checksummed format also remains untouched. Its magic
+        // and metadata version are both old, with an otherwise valid checksum.
+        let mut previous = catalog.clone();
+        previous.format_version = 3;
+        let mut bytes = encode_frame(&serde_json::to_vec(&previous).unwrap(), &[]).unwrap();
+        bytes[..8].copy_from_slice(b"LXCAT003");
+        let checksum = frame_checksum(&bytes);
+        bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
         fs::write(paths.catalog_path(), &bytes).unwrap();
         assert!(NativeStorageCatalog::open_or_create(&config).is_err());
         assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);

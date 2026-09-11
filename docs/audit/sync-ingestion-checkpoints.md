@@ -5,7 +5,8 @@ sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.
 The user permits incompatible changes if they materially help performance and
 is willing to perform a fresh sync. The current candidate changes the catalog
-format to version 3; segment/column encodings remain version 1. No existing
+format to version 4 and segment manifests to version 2; compressed page codecs
+remain unchanged. Historical segments now use the [shared artifact candidate](shared-segment-artifact.md). No existing
 production dataset has been reset or modified.
 
 ## Behavior and invariants
@@ -34,13 +35,14 @@ it is not a hard wall-clock deadline. Route changes, generic durable writes,
 standalone metadata updates and relevant maintenance boundaries checkpoint first.
 Detached compaction plans exclude the epoch's affected segments.
 
-## Catalog version 3 recovery protocol
+## Catalog version 4 recovery protocol
 
 The checksummed catalog is the single durable authority for segment row counts,
-allocation IDs, canonical head/header window, chain anchors and historical progress.
+allocation IDs, bundled column table references, canonical head/header window,
+chain anchors and historical progress.
 The legacy filename `catalog.json` is deliberately retained: older binaries must
 fail to parse the new bytes at their known path rather than create another catalog.
-Its contents are now a binary frame: eight-byte `LXCAT003` magic, two little-endian
+Its contents are now a binary frame: eight-byte `LXCAT004` magic, two little-endian
 32-bit lengths (metadata and header list), a CRC32, JSON metadata and a canonical
 RLP list of the complete recent headers. The checksum covers the first 16 prefix
 bytes and both payloads. It detects accidental corruption, not malicious tampering.
@@ -72,7 +74,9 @@ that shortcut for recovery, coverage or query state.
    committed rows/progress by adopting newer manifests. Missing committed
    artifacts fail explicitly. Damage confined to wholly uncommitted segments can
    be discarded, including malformed initial-hot manifests and partial columns.
-5. Publish each restored raw prefix durably before removing obsolete compressed
+5. Bundled historical prefixes are restored from their catalog-pinned immutable
+   table and fully verified before trimming an uncommitted suffix. Raw recovery
+   publishes each restored prefix durably before removing obsolete compressed
    pages. The catalog remains unchanged, so an interrupted rollback repeats
    safely. The existing verified sync path re-fetches from its restored head/floor.
 
