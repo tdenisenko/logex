@@ -53,6 +53,24 @@ pub async fn run_background_indexer(
             _ = ticker.tick() => {}
         }
 
+        // Small live epochs must also checkpoint when the node becomes idle.
+        // Keep filesystem work off async workers and run before compaction/index
+        // selection so newly durable sealed segments become eligible together.
+        let storage = Arc::clone(&state.storage);
+        match tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due())
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "storage checkpoint failed; writes require recovery");
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "storage checkpoint worker failed");
+                continue;
+            }
+        }
+
         {
             let active_sync_status = sync_is_active(&state);
             let historical_incomplete = historical_sync_is_incomplete(&state).await;
@@ -226,39 +244,26 @@ pub async fn run_background_indexer(
             let storage = state.storage.read().await;
             sealed_query_index_targets(&storage, sealed_index_limit)
         };
-        if sealed_index_scan_complete_for_max_id != sealed_max_id {
+        if sealed_index_scan_complete_for_max_id != sealed_max_id || !sealed_targets.is_empty() {
             if sealed_targets.is_empty() {
                 sealed_index_scan_complete_for_max_id = sealed_max_id;
             } else {
                 let target_count = sealed_targets.len();
-                let result = tokio::task::spawn_blocking(move || -> io::Result<Vec<u64>> {
-                    let mut indexed = Vec::with_capacity(sealed_targets.len());
-                    for target in sealed_targets {
+                let result = tokio::task::spawn_blocking(move || -> io::Result<usize> {
+                    let mut indexed = 0;
+                    for path in sealed_targets {
                         IndexBuilder::build_missing_indexes(
-                            &target.path,
+                            &path,
                             IndexBuildProfile::Erc20Transfer,
                         )?;
-                        indexed.push(target.segment_id);
+                        indexed += 1;
                     }
                     Ok(indexed)
                 })
                 .await;
 
                 match result {
-                    Ok(Ok(indexed_segment_ids)) => {
-                        let indexed = indexed_segment_ids.len();
-                        {
-                            let mut storage = state.storage.write().await;
-                            for segment_id in indexed_segment_ids {
-                                if let Err(e) = storage.refresh_segment_manifest(segment_id) {
-                                    tracing::warn!(
-                                        error = %e,
-                                        segment_id,
-                                        "failed to refresh segment manifest after sealed index build"
-                                    );
-                                }
-                            }
-                        }
+                    Ok(Ok(indexed)) => {
                         tracing::info!(
                             indexed,
                             target_count,
@@ -288,21 +293,13 @@ pub async fn run_background_indexer(
             }
         };
 
-        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current) {
+        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current)
+            || (current.row_count > 0 && query_indexes_missing(&current.path))
+        {
             let path = current.path.clone();
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
             {
                 Ok(Ok(())) => {
-                    {
-                        let mut storage = state.storage.write().await;
-                        if let Err(e) = storage.refresh_segment_indexes(current.partition_id) {
-                            tracing::warn!(
-                                error = %e,
-                                partition_id = current.partition_id,
-                                "failed to refresh segment manifest after hot index rebuild"
-                            );
-                        }
-                    }
                     tracing::debug!(
                         partition_id = current.partition_id,
                         rows = current.row_count,
@@ -475,7 +472,8 @@ fn index_build_error_is_transient(
     before: &HotIndexState,
     after: &HotIndexState,
 ) -> bool {
-    error.kind() == io::ErrorKind::InvalidData && before != after
+    error.kind() == io::ErrorKind::WouldBlock
+        || (error.kind() == io::ErrorKind::InvalidData && before != after)
 }
 
 fn should_rebuild_hot_indexes(
@@ -493,16 +491,10 @@ fn should_rebuild_hot_indexes(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SealedIndexTarget {
-    segment_id: u64,
-    path: PathBuf,
-}
-
 fn sealed_query_index_targets(
     storage: &PartitionManager,
     limit: usize,
-) -> (Option<u64>, Vec<SealedIndexTarget>) {
+) -> (Option<u64>, Vec<PathBuf>) {
     let max_segment_id = storage
         .sealed_partitions()
         .iter()
@@ -520,20 +512,15 @@ fn sealed_query_index_targets(
         .filter(|partition| Some(partition.meta.id) != active_historical_segment)
         .filter(|partition| query_indexes_missing(&partition.meta.path))
         .take(limit)
-        .map(|partition| SealedIndexTarget {
-            segment_id: partition.meta.id,
-            path: partition.meta.path.clone(),
-        })
+        .map(|partition| partition.meta.path.clone())
         .collect();
 
     (max_segment_id, targets)
 }
 
 fn query_indexes_missing(path: &Path) -> bool {
-    let index_dir = path.join("indexes");
-    IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer)
-        .iter()
-        .any(|file_name| !index_dir.join(file_name).is_file())
+    // A failed freshness check is handled by the subsequent build's error path.
+    IndexBuilder::indexes_missing(path, IndexBuildProfile::Erc20Transfer).unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -586,10 +573,12 @@ mod tests {
         };
         let invalid = io::Error::new(io::ErrorKind::InvalidData, "corrupt header");
         let other = io::Error::new(io::ErrorKind::NotFound, "missing");
+        let busy = io::Error::new(io::ErrorKind::WouldBlock, "index reader or newer source");
 
         assert!(index_build_error_is_transient(&invalid, &before, &after));
         assert!(!index_build_error_is_transient(&invalid, &before, &before));
         assert!(!index_build_error_is_transient(&other, &before, &after));
+        assert!(index_build_error_is_transient(&busy, &before, &before));
     }
 
     #[test]
@@ -636,6 +625,9 @@ mod tests {
         for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer) {
             std::fs::write(indexes.join(file_name), []).unwrap();
         }
+        assert!(query_indexes_missing(tmp.path()));
+        logex_storage::ColumnFile::write_batch(tmp.path(), &[]).unwrap();
+        IndexBuilder::build_indexes(tmp.path(), IndexBuildProfile::Erc20Transfer).unwrap();
         assert!(!query_indexes_missing(tmp.path()));
     }
 

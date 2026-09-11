@@ -1,0 +1,21 @@
+Commit: 75570eb2def275e71e27882301ed4a72b07f9834
+CI run: 34552619060, Linux Test job 103118482652
+2026-09-11T01:57:56.6698688Z test native::storage::tests::ingestion_checkpoint_recovers_each_main_thread_failure_atomically ... FAILED
+2026-09-11T01:57:56.6699321Z 
+2026-09-11T01:57:56.6699428Z failures:
+2026-09-11T01:57:56.6699591Z 
+2026-09-11T01:57:56.6700053Z ---- native::storage::tests::ingestion_checkpoint_recovers_each_main_thread_failure_atomically stdout ----
+2026-09-11T01:57:56.6700652Z 
+2026-09-11T01:57:56.6701432Z thread 'native::storage::tests::ingestion_checkpoint_recovers_each_main_thread_failure_atomically' (5171) panicked at crates/logex-storage/src/native/storage.rs:2667:25:
+2026-09-11T01:57:56.6702749Z assertion failed: fail_after > 20
+2026-09-11T01:57:56.6703289Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-09-11T01:57:56.6703700Z 
+2026-09-11T01:57:56.6703704Z 
+2026-09-11T01:57:56.6703820Z failures:
+2026-09-11T01:57:56.6704324Z     native::storage::tests::ingestion_checkpoint_recovers_each_main_thread_failure_atomically
+2026-09-11T01:57:56.6704819Z 
+2026-09-11T01:57:56.6705188Z test result: FAILED. 155 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 19.82s
+2026-09-11T01:57:56.6705682Z 
+2026-09-11T01:57:56.6800322Z [1m[91merror[0m: test failed, to rerun pass `-p logex-storage --lib`
+2026-09-11T01:57:56.6949658Z ##[error]Process completed with exit code 101.
+2026-09-11T01:57:56.7076450Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

@@ -34,7 +34,9 @@ data directory is opened.
 
 ## What is measured
 
-- Live storage ingestion, including its WAL and metadata writes.
+- Live storage ingestion, including its WAL, segment/catalog publication and
+  final checkpoint. Sync-engine canonical-header, anchor and coverage-state
+  publication are not part of this fixture.
 - Index construction and manifest publication, separate from compaction.
 - Eligible segment compaction and startup/reopen validation.
 - Native filters, SQL count and ordered/limited queries, warmed once per path.
@@ -92,3 +94,102 @@ batches. No speedup is claimed by adding this harness.
 Checked extraction fixtures and release comparisons are documented in the
 [extraction audit](extraction-boundaries.md) and its
 [baseline report](baselines/2026-09-09-extraction.md).
+
+## Sync storage publication
+
+The separate `logex-storage` integration fixture includes the live canonical
+header/anchor writes and historical floor updates omitted by the row-only
+benchmark. See its [findings and baseline](ingestion-publication.md).
+The current fixture follows the [combined sync APIs](sync-ingestion-checkpoints.md),
+with final checkpoint cost included. Comparisons with older separate-call
+revisions must record that API/durability-strategy difference; inputs and final
+row/progress oracles remain equivalent.
+
+```sh
+cargo test -p logex-storage --test ingestion_publication --release --locked --no-run
+cargo test -p logex-storage --test ingestion_publication --release --locked -- \
+  --ignored --nocapture --test-threads=1
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LOGEX_PUBLICATION_BLOCKS` | 128 | Measured complete blocks |
+| `LOGEX_PUBLICATION_ROWS_PER_BLOCK` | 128 | Rows in each nonempty block |
+| `LOGEX_PUBLICATION_WARM_HEADERS` | 8192 | Untimed prior header-window setup |
+| `LOGEX_PUBLICATION_HISTORY_BLOCKS` | 2048 | Maximum complete blocks per historical call |
+| `LOGEX_PUBLICATION_HISTORY_CACHED_HEAD` | 0 | `1` seeds the retained canonical head/header window before historical timing (fixture v5) and verifies it remains unchanged after backfill/reopen; useful for backfill while live state exists |
+| `LOGEX_PUBLICATION_SEGMENT_ROWS` | 1000000 | Segment row target |
+| `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
+| `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
+| `LOGEX_PUBLICATION_PAYLOAD` | transfer | `transfer` preserves fixture v3's 32-byte data; `mixed` selects fixture v4, varying 0–1024 bytes with independently hashed words |
+| `LOGEX_PUBLICATION_READ_MODE` | full | `full` reads whole columns; `selected` passes all row IDs through the page-selection path used by query callers. Both validate identical rows before and after reopen; ingestion inputs and timing are unchanged. |
+| `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
+| `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
+| `LOGEX_PUBLICATION_DURABLE_CHECKPOINT` | 0 | `1` uses `checkpoint_durable()` for the final checkpoint and any per-block checkpoint. Report this separately from bounded ordered publication; both include exact clean-reopen oracles. |
+
+Numeric sizes and repetition counts must be positive. Every sixteenth block is empty.
+Live profiles hold the production 8,192-header window. Historical profiles seed
+only their floor/anchor unless `LOGEX_PUBLICATION_HISTORY_CACHED_HEAD=1`; earlier
+historical measurements therefore exclude publication of a retained live cache.
+Neither mode warms an existing million-row hot
+segment; that additional write-amplification scenario remains to be measured.
+It prints individual timings and exact fixture identifiers, with no in-process
+summary or claim of end-to-end P2P throughput.
+
+The `lifecycle` records supplement ingestion timing with logical/allocated file
+bytes, file and segment counts, warm reopen time, full-row validation time, and
+OS-attributed process writes. Collection is outside the ingestion timer. Full-row
+validation includes materialization, sorting and comparison with the independent
+oracle; it is not query latency. The existing `full_row_validation_ms` field
+means validation of all rows in either `read_mode`; selected mode also includes
+building the row-ID vector. It does not include SQL planning, predicate matching
+or index lookup. Report the mode and compare identical modes for optimization
+acceptance. A same-binary full-versus-selected comparison diagnoses caller cost
+and is not an old-versus-new performance result. See the
+[selection investigation](bundle-selected-reads.md).
+Unix allocated bytes use `stat` blocks and exclude
+directory/filesystem metadata. The process write counters are
+[Apple's `proc_pid_rusage` v2](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
+([matching structure](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h))
+and [Linux `/proc/self/io` `write_bytes`](https://www.kernel.org/doc/html/latest/filesystems/proc.html#proc-pid-io-display-the-io-accounting-fields).
+They do not measure device/NAND write amplification: delayed writeback can be
+charged after sampling, and Linux counts page dirtying before writeout or later
+truncation. Compare on the same OS/filesystem with identical checkpoint policy.
+Other platforms report an unavailable counter rather than zero.
+
+The small CI fixture includes mixed payloads, rotation, empty blocks and exact
+reopen checks, both with and without the cached historical head. Cached history
+also checks the exact retained headers, head hash and indexed anchor. Transfer
+fixture v3 inputs remain unchanged for earlier comparisons.
+
+For the separate CPU-only cached-header codec diagnostic, use:
+
+```sh
+cargo test -p logex-storage --test ingestion_publication --release --locked \
+  benchmark_cached_header_encoding -- --ignored --nocapture --test-threads=1
+```
+
+This compares JSON, RLP and JSON followed by LZ4 on 8,192 minimal/populated headers,
+with exact RLP round trips. Its fixed codec order and absence of persistence mean
+it cannot establish ingestion performance acceptance. Use paired publication
+runs with both header profiles to validate the actual storage change.
+
+To reproduce the original production baseline with fixture v3, copy
+`crates/logex-storage/tests/ingestion_publication.rs` from `3f457987` into an
+isolated checkout of `09a63f55`, then apply the
+[baseline-only adapter](baselines/2026-09-11-publication-v3-baseline.patch).
+It restores the old separate-call sequence, removes the new codec-only diagnostic,
+and leaves baseline production code/dependencies unchanged. Build both revisions
+with the same pinned release profile and match fixture digests and tip hashes.
+
+
+For the later lifecycle/mixed-payload harness, the
+[baseline-only adapter](baselines/2026-09-11-publication-lifecycle-baseline.patch)
+is against the harness at the corresponding audit commit. Copy that harness into
+an isolated `09a63f55` checkout, apply this adapter, and add `libc = "0.2"` under
+`[target.'cfg(target_os = "macos")'.dev-dependencies]`. The existing lockfile gains
+only `libc` in `logex-storage`'s dependency list; no dependency version changes.
+The adapter preserves every fixture/oracle and restores the original separate
+calls, rejects the unsupported strong-checkpoint option, and omits the unrelated
+new header-codec diagnostic. Record both source and binary hashes. The original
+production APIs publish on each call; current final checkpoint cost remains timed.

@@ -133,8 +133,11 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     }
 
     let dict_start = 8;
-    let dict_end = dict_start + dict_size * item_size;
-    if data.len() < dict_end + 1 {
+    let dict_end = dict_size
+        .checked_mul(item_size)
+        .and_then(|n| n.checked_add(dict_start))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "dictionary size overflow"))?;
+    if dict_end >= data.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "dict data truncated",
@@ -147,7 +150,13 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
 
     let indices = bitunpack_u32(&data[packed_start..], row_count, bits_needed)?;
 
-    let mut result = Vec::with_capacity(row_count * item_size);
+    let output_len = row_count.checked_mul(item_size).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dictionary output size overflow",
+        )
+    })?;
+    let mut result = Vec::with_capacity(output_len);
     for idx in indices {
         let offset = idx as usize * item_size;
         result.extend_from_slice(&dict_bytes[offset..offset + item_size]);
@@ -191,7 +200,14 @@ pub fn delta_encode(values: &[u64]) -> Vec<u8> {
 
 pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
     if row_count == 0 {
-        return Ok(Vec::new());
+        return if data.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nonempty encoding for zero rows",
+            ))
+        };
     }
     if data.len() < 9 {
         return Err(io::Error::new(
@@ -257,7 +273,14 @@ pub fn signed_delta_encode(values: &[u64]) -> Vec<u8> {
 
 pub fn signed_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
     if row_count == 0 {
-        return Ok(Vec::new());
+        return if data.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nonempty encoding for zero rows",
+            ))
+        };
     }
     if data.len() < 9 {
         return Err(io::Error::new(
@@ -299,13 +322,14 @@ pub fn delta_of_delta_encode(values: &[u64]) -> Vec<u8> {
     }
 
     let base = values[0];
-    let first_delta = values[1] as i64 - values[0] as i64;
+    // Match signed-delta's modular representation over the complete u64 domain.
+    let first_delta = values[1].wrapping_sub(values[0]) as i64;
 
     let mut dds: Vec<i64> = Vec::with_capacity(values.len().saturating_sub(2));
     let mut prev_delta = first_delta;
     for i in 2..values.len() {
-        let delta = values[i] as i64 - values[i - 1] as i64;
-        dds.push(delta - prev_delta);
+        let delta = values[i].wrapping_sub(values[i - 1]) as i64;
+        dds.push(delta.wrapping_sub(prev_delta));
         prev_delta = delta;
     }
 
@@ -329,7 +353,14 @@ pub fn delta_of_delta_encode(values: &[u64]) -> Vec<u8> {
 
 pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
     if row_count == 0 {
-        return Ok(Vec::new());
+        return if data.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nonempty encoding for zero rows",
+            ))
+        };
     }
     if data.len() < 8 {
         return Err(io::Error::new(
@@ -344,7 +375,14 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dod header truncated"))?,
     );
     if row_count == 1 {
-        return Ok(vec![base]);
+        return if data.len() == 8 {
+            Ok(vec![base])
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "timestamp singleton has trailing bytes",
+            ))
+        };
     }
 
     if data.len() < 17 {
@@ -366,13 +404,13 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
 
     let mut result = Vec::with_capacity(row_count);
     result.push(base);
-    let mut prev_val = (base as i64 + first_delta) as u64;
+    let mut prev_val = base.wrapping_add(first_delta as u64);
     result.push(prev_val);
 
     let mut prev_delta = first_delta;
     for &dd in &dds {
-        let delta = prev_delta + dd;
-        prev_val = (prev_val as i64 + delta) as u64;
+        let delta = prev_delta.wrapping_add(dd);
+        prev_val = prev_val.wrapping_add(delta as u64);
         result.push(prev_val);
         prev_delta = delta;
     }
@@ -394,6 +432,31 @@ pub fn zstd_compress_level(data: &[u8], level: i32) -> io::Result<Vec<u8>> {
 
 pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd::decode_all(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Bound output independently of the size advertised by an untrusted frame.
+pub(crate) fn zstd_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
+    let mut decoder = zstd::bulk::Decompressor::new()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // Decompression writes directly into a bounded output allocation. In
+    // contrast to streaming, its history uses that same output buffer.
+    decoder
+        .decompress(data, limit)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
+    let size = data
+        .get(..4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated LZ4 size"))?;
+    let size = u32::from_le_bytes([size[0], size[1], size[2], size[3]]) as usize;
+    if size > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded page exceeds its byte budget",
+        ));
+    }
+    lz4_decompress(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -435,9 +498,28 @@ fn bitpack_u32(values: &[u32], bits: u8, out: &mut Vec<u8>) {
     }
 }
 
+fn validate_packed_bits(data: &[u8], count: usize, bits: u8, width: u8) -> io::Result<()> {
+    let bit_len = count
+        .checked_mul(usize::from(bits))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packed bit count overflow"))?;
+    if bits == 0
+        || bits > width
+        || data.len() != bit_len.div_ceil(8)
+        || (!bit_len.is_multiple_of(8)
+            && data.last().is_some_and(|byte| *byte >> (bit_len % 8) != 0))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid packed width, length or padding",
+        ));
+    }
+    Ok(())
+}
+
 fn bitunpack_u32(data: &[u8], count: usize, bits: u8) -> io::Result<Vec<u32>> {
-    if count == 0 || bits == 0 {
-        return Ok(vec![0; count]);
+    validate_packed_bits(data, count, bits, 32)?;
+    if count == 0 {
+        return Ok(Vec::new());
     }
     let bits = bits as u32;
     let mask = (1u64 << bits) - 1;
@@ -489,8 +571,9 @@ fn bitpack_u64(values: &[u64], bits: u8, out: &mut Vec<u8>) {
 }
 
 fn bitunpack_u64(data: &[u8], count: usize, bits: u8) -> io::Result<Vec<u64>> {
-    if count == 0 || bits == 0 {
-        return Ok(vec![0; count]);
+    validate_packed_bits(data, count, bits, 64)?;
+    if count == 0 {
+        return Ok(Vec::new());
     }
     let bits = bits as u32;
     let mask: u128 = if bits >= 64 {
@@ -528,6 +611,65 @@ fn zigzag_decode(v: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_decoders_reject_missing_bits_and_invalid_widths() {
+        assert!(bitunpack_u32(&[], 1, 1).is_err());
+        assert!(bitunpack_u64(&[], 1, 1).is_err());
+        for bits in [0, 33, 64, 255] {
+            assert!(bitunpack_u32(&[0; 32], 1, bits).is_err());
+        }
+        for bits in [0, 65, 255] {
+            assert!(bitunpack_u64(&[0; 32], 1, bits).is_err());
+        }
+        assert!(bitunpack_u32(&[128], 1, 1).is_err());
+        assert!(bitunpack_u64(&[0, 0], 1, 1).is_err());
+        assert!(bitunpack_u64(&[], usize::MAX, 64).is_err());
+        let encoded = dict_encode_raw(&[1, 2, 3], 1);
+        assert!(dict_decode(&encoded[..encoded.len() - 1], 3, 1).is_err());
+    }
+
+    #[test]
+    fn integer_codecs_round_trip_full_domain_and_reject_truncation() {
+        let mut seed = 53u64;
+        for len in [0, 1, 2, 3, 7, 8, 63, 64, 129] {
+            let values: Vec<_> = (0..len)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    seed
+                })
+                .collect();
+            for codec in [
+                crate::native::CompressionCodec::Delta,
+                crate::native::CompressionCodec::DeltaZigZag,
+                crate::native::CompressionCodec::DeltaOfDelta,
+            ] {
+                let encoded = crate::page::encode_u64_page(&values, codec).unwrap();
+                assert_eq!(
+                    crate::page::decode_u64_page(&encoded, len, codec).unwrap(),
+                    values
+                );
+                for end in 0..encoded.len() {
+                    assert!(
+                        crate::page::decode_u64_page(&encoded[..end], len, codec).is_err(),
+                        "{codec:?}/{len}/{end}"
+                    );
+                }
+                let mut trailing = encoded;
+                trailing.push(0);
+                assert!(crate::page::decode_u64_page(&trailing, len, codec).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_codec_round_trips_extreme_differences() {
+        let values = [0, u64::MAX, 0, i64::MAX as u64, i64::MIN as u64, 17];
+        assert_eq!(
+            delta_of_delta_decode(&delta_of_delta_encode(&values), values.len()).unwrap(),
+            values
+        );
+    }
 
     #[test]
     fn test_dict_roundtrip_20b() {

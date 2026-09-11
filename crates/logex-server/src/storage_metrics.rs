@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 
@@ -249,11 +249,6 @@ enum SizeCacheKey {
     Path(PathBuf),
 }
 
-#[derive(Debug, Deserialize)]
-struct CatalogSizeSnapshot {
-    active_hot_segment: Option<u64>,
-}
-
 fn dir_size_bytes(root: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> {
     let segments_dir = root.join("segments");
     let (active_hot_segment, cache_segments) = match active_hot_segment_path(root) {
@@ -344,16 +339,10 @@ impl DirSizeWalk<'_> {
 }
 
 fn active_hot_segment_path(root: &Path) -> io::Result<Option<PathBuf>> {
-    let catalog_path = root.join("catalog.json");
-    let json = match fs::read(&catalog_path) {
-        Ok(json) => json,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let catalog: CatalogSizeSnapshot = serde_json::from_slice(&json).map_err(io::Error::other)?;
-    Ok(catalog
-        .active_hot_segment
-        .map(|id| root.join("segments").join(format!("s_{id:016}"))))
+    Ok(
+        logex_storage::native::NativeStorageCatalog::active_hot_segment_hint(root)?
+            .map(|id| root.join("segments").join(format!("s_{id:016}"))),
+    )
 }
 
 fn cacheable_segment_dir(
@@ -768,11 +757,23 @@ mod tests {
     }
 
     fn write_active_hot_catalog(root: &Path, active_hot_segment: u64) {
-        fs::write(
-            root.join("catalog.json"),
-            format!(r#"{{"active_hot_segment":{active_hot_segment}}}"#),
-        )
-        .expect("catalog");
+        use logex_storage::native::{
+            CATALOG_FORMAT_VERSION, NativeStorageCatalog, SegmentKind, StorageCatalogPaths,
+        };
+        let mut catalog = NativeStorageCatalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            state: Default::default(),
+            hot_target_rows: 1_000_000,
+            next_segment_id: active_hot_segment,
+            active_hot_segment: None,
+            active_historical_segment: None,
+            anchors: Default::default(),
+            segments: Vec::new(),
+        };
+        catalog.register_segment(SegmentKind::Hot).unwrap();
+        catalog
+            .persist(&StorageCatalogPaths::new(root.to_owned()))
+            .expect("catalog");
     }
 
     fn create_segment(root: &Path, segment_id: u64, rows_len: usize) -> PathBuf {

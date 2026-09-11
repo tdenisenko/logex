@@ -1,0 +1,7 @@
+{"candidate": "224a9d30", "notes": "All six local gates for the compact catalog, payload borrowing, four initial workers and validated raw layout. Serial single-page compaction was reverted. Loopback fixture tests run outside sandbox."}
+{"gate": "fmt", "returncode": 0, "elapsed_seconds": 0.7557847090065479}
+{"gate": "check", "returncode": 0, "elapsed_seconds": 9.290519665984903}
+{"gate": "clippy", "returncode": 0, "elapsed_seconds": 7.353327499993611}
+{"gate": "test", "returncode": 0, "elapsed_seconds": 143.90455104096327}
+{"gate": "doc", "returncode": 0, "elapsed_seconds": 12.934543624985963}
+{"gate": "release", "returncode": 0, "elapsed_seconds": 48.973656916001346}

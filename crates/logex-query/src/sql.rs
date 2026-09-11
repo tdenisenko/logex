@@ -38,8 +38,8 @@ use logex_storage::{PartitionManager, SegmentReader};
 
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids, candidate_row_ids_after_bloom_prefilter,
-    erc20_event_bloom_exclusions, matches_native_filter, partition_matches_filter,
+    StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader, erc20_event_bloom_exclusions,
+    matches_native_filter, partition_matches_filter,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -600,7 +600,7 @@ fn order_and_truncate_row_ids(
     if row_ids.is_empty() {
         return Ok(());
     }
-    let reader = SegmentReader::open(path)?;
+    let reader = SegmentReader::open_projected(path, &["block_number", "tx_index", "log_index"])?;
     let blocks = reader.read_u64("block_number", Some(row_ids))?;
     let tx_indices = reader.read_u32("tx_index", Some(row_ids))?;
     let log_indices = reader.read_u32("log_index", Some(row_ids))?;
@@ -1126,7 +1126,7 @@ fn scan_native_count_partition(
         return Ok((BTreeMap::new(), row_ids.len() as u64));
     }
 
-    let reader = SegmentReader::open(path)?;
+    let reader = SegmentReader::open_projected(path, &["source"])?;
     let sources = reader.read_u8("source", Some(&row_ids))?;
     let mut counts = BTreeMap::new();
     for source in sources {
@@ -1785,18 +1785,27 @@ fn scan_native_data_sum_partition(
     }
     let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
     let mut row_bitmap = RoaringBitmap::new();
-    let bloom_exclusions =
-        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?;
+    let reader = SegmentReader::open(path)?;
+    let checkpoint = logex_storage::IndexReadCheckpoint::open(path, &reader)?;
+    let bloom_exclusions = if checkpoint.is_some() {
+        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?
+    } else {
+        None
+    };
     for (index, candidate_filter) in scan.candidate_filters.iter().enumerate() {
         let row_ids = if bloom_exclusions
             .as_ref()
             .is_some_and(|exclusions| exclusions.get(index).copied().unwrap_or(false))
         {
             Vec::new()
-        } else if bloom_exclusions.is_some() {
-            candidate_row_ids_after_bloom_prefilter(path, candidate_filter, true)?
         } else {
-            candidate_row_ids(path, candidate_filter, true)?
+            candidate_row_ids_for_reader(
+                path,
+                &reader,
+                candidate_filter,
+                true,
+                bloom_exclusions.is_some(),
+            )?
         };
         row_bitmap.extend(row_ids);
     }
@@ -1805,7 +1814,6 @@ fn scan_native_data_sum_partition(
         return Ok((groups, 0));
     }
 
-    let reader = SegmentReader::open(path)?;
     let mut total_scanned = 0u64;
     if scan.data_only {
         let states = groups
@@ -3302,7 +3310,11 @@ fn build_projected_batch(
             .map_err(std::io::Error::other);
     }
 
-    let reader = SegmentReader::open(dir)?;
+    let projection = projected_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let reader = SegmentReader::open_projected(dir, &projection)?;
     let mut arrays = Vec::with_capacity(projected_columns.len());
 
     for column in projected_columns {
@@ -4329,9 +4341,7 @@ mod tests {
         .unwrap();
         storage.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4359,9 +4369,7 @@ mod tests {
         rows[1].source = Source::Trace;
         storage.write_batch(&rows).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4414,9 +4422,7 @@ mod tests {
             ])
             .unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4449,9 +4455,7 @@ mod tests {
             ])
             .unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
 
         let rows = storage
             .hot_partition()

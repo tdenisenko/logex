@@ -1,0 +1,34 @@
+warning: field `origin` is never read
+   --> crates/logex-storage/src/native/storage.rs:171:5
+    |
+170 | struct PublishedIngestion {
+    |        ------------------ field in this struct
+171 |     origin: IngestionOrigin,
+    |     ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `logex-storage` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened ... FAILED
+
+failures:
+
+---- native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened stdout ----
+
+thread 'native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened' (22068893) panicked at crates/logex-storage/src/native/storage.rs:2838:13:
+assertion failed: storage.raw_segment_compaction_plan(8).unwrap().is_empty()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 177 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

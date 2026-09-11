@@ -1,0 +1,22 @@
+{
+  "kind": "pre_fix_reproducer",
+  "source": "ingestion_publication fixture helpers; temporary interrupted_publication_* tests removed after the run",
+  "revisions": {
+    "base": {
+      "commit": "09a63f55",
+      "evidence": [
+        "test interrupted_publication_historical_reproducer ... publication gap: historical=true, expected_rows=3, actual_rows=6",
+        "test interrupted_publication_live_reproducer ... publication gap: historical=false, expected_rows=3, actual_rows=6",
+        "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.07s"
+      ]
+    },
+    "candidate": {
+      "commit": "ff728ea3",
+      "evidence": [
+        "test interrupted_publication_historical_reproducer ... publication gap: historical=true, expected_rows=3, actual_rows=6",
+        "test interrupted_publication_live_reproducer ... publication gap: historical=false, expected_rows=3, actual_rows=6",
+        "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.26s"
+      ]
+    }
+  }
+}

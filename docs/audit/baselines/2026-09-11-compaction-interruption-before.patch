@@ -1,0 +1,92 @@
+--- a/crates/logex-storage/src/native/segment.rs
++++ b/crates/logex-storage/src/native/segment.rs
+@@ -2391,4 +2391,88 @@
+             rows.iter().map(|row| row.block_number).collect::<Vec<_>>()
+         );
+     }
+-}
++    fn legacy_rewrite_fixture(full: bool) -> (TempDir, StorageCatalogPaths, SegmentDescriptor, Vec<LogRow>) {
++        let tmp = TempDir::new().unwrap();
++        let config = super::super::catalog::NativeStorageConfig {
++            data_dir: tmp.path().to_owned(), ..Default::default()
++        };
++        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
++        let (mut catalog, _) = super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
++        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
++        let dir = paths.segment_dir(descriptor.id);
++        let rows = descending_rows()[..50].to_vec();
++        apply_rows_to_descriptor(&mut descriptor, &rows);
++        let mut columns = write_compacted_rows(&dir, &rows).unwrap();
++        for (name, values) in std::iter::once(("block_number", rows.iter().map(|r| r.block_number).collect::<Vec<_>>()))
++            .chain(full.then(|| ("timestamp", rows.iter().map(|r| r.timestamp).collect::<Vec<_>>()))) {
++            let column = compact_u64_values(&PageOutput::new(&dir), name, CompressionCodec::Delta, values).unwrap();
++            *columns.iter_mut().find(|c| c.name == name).unwrap() = column;
++        }
++        if full {
++            fs::rename(dir.join("columns"), dir.join("columns_profile_v2")).unwrap();
++            rewrite_column_dir(&mut columns, "columns_profile_v2");
++        } else {
++            fs::create_dir(dir.join("columns_block_number_v2")).unwrap();
++            let column = columns.iter_mut().find(|c| c.name == "block_number").unwrap();
++            for path in [&column.data_path, column.page_index_path.as_ref().unwrap()] {
++                fs::rename(dir.join(path), dir.join(rewrite_column_path(path, "columns_block_number_v2"))).unwrap();
++            }
++            rewrite_column_path_descriptor(column, "columns_block_number_v2");
++        }
++        let mut canonical = NullBitmap::new();
++        for row in 0..rows.len() { canonical.push(row != 0); }
++        ColumnFile::replace_canonical_bitmap(&dir, &canonical).unwrap();
++        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
++        (tmp, paths, descriptor, rows)
++    }
++
++    #[test]
++    fn interrupted_profile_rewrites_preserve_the_published_generation() {
++        for full in [false, true] {
++            let (_tmp, paths, descriptor, _) = legacy_rewrite_fixture(full);
++            durability::inject_failure(usize::MAX);
++            compact_segment(&paths, &descriptor).unwrap();
++            let events = durability::take_events();
++            assert!(!events.is_empty());
++            for failure in 0..events.len() {
++                let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(full);
++                let dir = paths.segment_dir(descriptor.id);
++                let captured = SegmentReader::open(&dir).unwrap();
++                durability::inject_failure(failure);
++                let result = compact_segment(&paths, &descriptor);
++                let observed = durability::take_events();
++                assert!(result.is_err(), "missing fault {failure} full={full}: {observed:?}");
++                let reopened = SegmentReader::open(&dir).unwrap();
++                assert_eq!(reopened.read_log_rows(None).unwrap(), rows, "fault {failure} full={full}: {observed:?}");
++                assert!(!reopened.read_canonical().unwrap().is_present(0));
++                assert_eq!(captured.read_log_rows(None).unwrap(), rows);
++                // Repeated maintenance must complete without adopting or deleting
++                // any incomplete previous output generation.
++                compact_segment(&paths, &descriptor).unwrap();
++                assert_eq!(SegmentReader::open(&dir).unwrap().read_log_rows(None).unwrap(), rows);
++            }
++        }
++    }
++
++    #[test]
++    fn rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality() {
++        let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(true);
++        let dir = paths.segment_dir(descriptor.id);
++        fs::create_dir(dir.join("columns_user_notes")).unwrap();
++        fs::write(dir.join("columns_user_notes/keep"), b"unrelated").unwrap();
++        fs::write(dir.join("columns_profile_v2/keep"), b"unrelated").unwrap();
++        let captured = SegmentReader::open(&dir).unwrap();
++        compact_segment(&paths, &descriptor).unwrap();
++        assert_eq!(fs::read(dir.join("columns_user_notes/keep")).unwrap(), b"unrelated");
++        assert_eq!(fs::read(dir.join("columns_profile_v2/keep")).unwrap(), b"unrelated");
++        let reader = SegmentReader::open(&dir).unwrap();
++        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
++        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
++        assert!(!reader.read_canonical().unwrap().is_present(0));
++        // The new paths must remain valid for subsequent prefix inspection/appends.
++        append_compacted_rows(&dir, rows.len() as u64, &rows[..1], Publication::Ordered, None).unwrap();
++        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
++    }
++
++
++}

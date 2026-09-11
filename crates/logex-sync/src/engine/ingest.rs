@@ -216,27 +216,13 @@ impl SyncEngine {
         let count = rows.len() as u64;
 
         let mut storage = self.storage.write().await;
-        if !rows.is_empty() {
-            storage
-                .write_batch(&rows)
-                .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
-
-            if let Some(ref subs) = self.subscriptions {
-                subs.notify(&rows);
-            }
-        }
-        match anchor {
-            Some(anchor) => {
-                storage
-                    .record_verified_canonical_state(anchor, header, recent_headers)
-                    .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?;
-                storage
-                    .record_historical_floor(header)
-                    .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
-            }
-            None => storage
-                .record_canonical_state(header, recent_headers)
-                .map_err(|e| eyre::eyre!("storage metadata error: {e}"))?,
+        storage
+            .ingest_canonical_batch(&rows, header, recent_headers, anchor)
+            .map_err(|e| eyre::eyre!("storage ingestion error: {e}"))?;
+        if !rows.is_empty()
+            && let Some(ref subs) = self.subscriptions
+        {
+            subs.notify(&rows);
         }
 
         Ok(count)
@@ -271,7 +257,7 @@ impl SyncEngine {
 
         self.peers.remove_cached_blocks(&reorg.reverted_hashes);
 
-        let storage = self.storage.write().await;
+        let mut storage = self.storage.write().await;
         let mut total_reverted = 0u64;
         for hash in &reorg.reverted_hashes {
             total_reverted += storage
@@ -430,15 +416,9 @@ async fn write_extracted_historical_chunk(
     tokio::task::spawn_blocking(move || -> Result<HistoricalChunkWriteOutcome> {
         let write_started = std::time::Instant::now();
         let mut storage = storage.blocking_write();
-        if !extracted.rows.is_empty() {
-            storage
-                .write_historical_batch(&extracted.rows)
-                .map_err(|e| eyre::eyre!("storage write error: {e}"))?;
-        }
-
         storage
-            .record_historical_floor(&extracted.lowest_header)
-            .map_err(|e| eyre::eyre!("historical metadata error: {e}"))?;
+            .ingest_historical_batch(&extracted.rows, &extracted.lowest_header)
+            .map_err(|e| eyre::eyre!("historical storage ingestion error: {e}"))?;
         Ok(HistoricalChunkWriteOutcome {
             floor: storage.historical_floor(),
             anchor: storage.historical_anchor(),

@@ -1,0 +1,31 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "audit_harness") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.09s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/audit_harness.rs (target/debug/build/logex-query/4b4d5936523f25a9/out/audit_harness-4b4d5936523f25a9)
+
+running 1 test
+test live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg ... FAILED
+
+failures:
+
+---- live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg stdout ----
+
+thread 'live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg' (22543548) panicked at crates/logex-query/tests/audit_harness.rs:234:5:
+assertion `left == right` failed: native filter omitted or duplicated matching rows
+  left: 10082
+ right: 11322
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.41s
+
+error: test failed, to rerun pass `-p logex-query --test audit_harness`

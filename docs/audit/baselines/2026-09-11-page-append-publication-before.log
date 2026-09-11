@@ -1,0 +1,26 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.38s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::segment::tests::appended_pages_wait_for_manifest_publication ... FAILED
+
+failures:
+
+---- native::segment::tests::appended_pages_wait_for_manifest_publication stdout ----
+
+thread 'native::segment::tests::appended_pages_wait_for_manifest_publication' (19357713) panicked at crates/logex-storage/src/native/segment.rs:1682:9:
+assertion `left == right` failed
+  left: [LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0000000000000000000000000000000000000000000000000000000000000000, tx_index: 0, log_index: 0, address: 0x0000000000000000000000000000000000000000, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }, LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 1, log_index: 1, address: 0x0101010101010101010101010101010101010101, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }, LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0202020202020202020202020202020202020202020202020202020202020202, tx_index: 2, log_index: 2, address: 0x0202020202020202020202020202020202020202, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }, LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0303030303030303030303030303030303030303030303030303030303030303, tx_index: 3, log_index: 3, address: 0x0303030303030303030303030303030303030303, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }, LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0404040404040404040404040404040404040404040404040404040404040404, tx_index: 0, log_index: 4, address: 0x0404040404040404040404040404040404040404, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }]
+ right: [LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0000000000000000000000000000000000000000000000000000000000000000, tx_index: 0, log_index: 0, address: 0x0000000000000000000000000000000000000000, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }, LogRow { block_number: 2000, block_hash: 0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3, timestamp: 1700000000, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 1, log_index: 1, address: 0x0101010101010101010101010101010101010101, topic0: Some(0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd), topic1: None, topic2: None, topic3: None, data: 0xcafe, data_len: 2, source: Receipt }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native::segment::tests::appended_pages_wait_for_manifest_publication
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 146 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

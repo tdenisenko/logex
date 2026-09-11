@@ -4,7 +4,7 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, Bytes};
 
-use crate::column::{ColumnFileHeader, NullBitmap};
+use crate::column::{COLUMN_VERSION, ColumnFileHeader, NullBitmap};
 
 /// Read a little-endian u64 from a byte slice at the given offset.
 fn read_le_u64(data: &[u8], offset: usize) -> io::Result<u64> {
@@ -15,17 +15,6 @@ fn read_le_u64(data: &[u8], offset: usize) -> io::Result<u64> {
         .try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slice conversion failed"))?;
     Ok(u64::from_le_bytes(bytes))
-}
-
-/// Read a little-endian u32 from a byte slice at the given offset.
-fn read_le_u32(data: &[u8], offset: usize) -> io::Result<u32> {
-    let end = offset + 4;
-    let bytes: [u8; 4] = data
-        .get(offset..end)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "read out of bounds"))?
-        .try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slice conversion failed"))?;
-    Ok(u32::from_le_bytes(bytes))
 }
 
 fn checked_slice(data: &[u8], offset: usize, len: usize) -> io::Result<&[u8]> {
@@ -44,6 +33,273 @@ fn checked_range(data: &[u8], start: usize, end: usize) -> io::Result<&[u8]> {
         ));
     }
     checked_slice(data, start, end - start)
+}
+
+/// A validated whole fixed-width column, or a bounds-checked selected prefix.
+/// The file buffer owns the bytes; page encoders can borrow them directly.
+pub(crate) struct RawFixedColumn<const WIDTH: usize> {
+    data: Vec<u8>,
+}
+
+impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        Self::open_prefix(path, None)
+    }
+
+    fn open_for_read(path: &Path, row_ids: Option<&[u32]>) -> io::Result<Self> {
+        let prefix = row_ids
+            .and_then(|ids| ids.iter().max())
+            .map(|&row| {
+                usize::try_from(u64::from(row) + 1).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "selected column prefix exceeds address space",
+                    )
+                })
+            })
+            .transpose()?;
+        Self::open_prefix(path, prefix)
+    }
+
+    fn open_prefix(path: &Path, prefix: Option<usize>) -> io::Result<Self> {
+        Self::from_bytes(path, fs::read(path)?, prefix)
+    }
+
+    pub(crate) fn from_bytes(
+        path: &Path,
+        mut data: Vec<u8>,
+        prefix: Option<usize>,
+    ) -> io::Result<Self> {
+        const { assert!(WIDTH > 0, "raw column widths must be positive") };
+        let invalid = |reason: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid fixed column {}: {reason}", path.display()),
+            )
+        };
+        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| invalid("corrupt header"))?;
+        if header.version != COLUMN_VERSION || header.compression != 0 {
+            return Err(invalid("unsupported raw column version or compression"));
+        }
+        let rows = usize::try_from(header.row_count).map_err(|_| invalid("row count overflow"))?;
+        let byte_len = |rows: usize| {
+            rows.checked_mul(WIDTH)
+                .and_then(|len| len.checked_add(ColumnFileHeader::SIZE))
+        };
+        let declared_len = byte_len(rows).ok_or_else(|| invalid("column length overflow"))?;
+        if let Some(prefix) = prefix {
+            // Fixed columns append in place. A query selecting an already
+            // published prefix can race with a later append's header/tail.
+            // Validate every requested slot without requiring that unrelated
+            // tail to be complete. Whole reads and compaction stay strict.
+            let prefix_len = byte_len(prefix).ok_or_else(|| invalid("selected prefix overflow"))?;
+            if prefix > rows || prefix_len > data.len() {
+                return Err(invalid("selected rows exceed the column bounds"));
+            }
+            data.truncate(prefix_len);
+        } else if declared_len != data.len() {
+            return Err(invalid("row count does not match the complete file body"));
+        }
+        Ok(Self { data })
+    }
+
+    pub(crate) fn values(&self) -> &[[u8; WIDTH]] {
+        self.data[ColumnFileHeader::SIZE..].as_chunks::<WIDTH>().0
+    }
+
+    pub(crate) fn values_mut(&mut self) -> &mut [[u8; WIDTH]] {
+        self.data[ColumnFileHeader::SIZE..]
+            .as_chunks_mut::<WIDTH>()
+            .0
+    }
+
+    pub(crate) fn read_nulls(&self, path: &Path) -> io::Result<NullBitmap> {
+        self.read_nulls_for_read(path, None)
+    }
+
+    fn read_nulls_for_read(&self, path: &Path, row_ids: Option<&[u32]>) -> io::Result<NullBitmap> {
+        self.read_nulls_from_bytes(
+            path,
+            &fs::read(path)?,
+            row_ids.is_some_and(|ids| !ids.is_empty()),
+        )
+    }
+
+    pub(crate) fn read_nulls_from_bytes(
+        &self,
+        path: &Path,
+        data: &[u8],
+        selected_prefix: bool,
+    ) -> io::Result<NullBitmap> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("null bitmap {} does not match its column", path.display()),
+            )
+        };
+        let rows = self.values().len();
+        let bitmap_rows = usize::try_from(read_le_u64(data, 0)?).map_err(|_| invalid())?;
+        if (selected_prefix && bitmap_rows < rows)
+            || (!selected_prefix && bitmap_rows != rows)
+            || Some(data.len()) != bitmap_rows.div_ceil(8).checked_add(8)
+        {
+            return Err(invalid());
+        }
+        NullBitmap::read_from(data).ok_or_else(invalid)
+    }
+
+    pub(crate) fn materialize<T>(
+        &self,
+        row_ids: Option<&[u32]>,
+        mut decode: impl FnMut(usize, &[u8; WIDTH]) -> T,
+    ) -> io::Result<Vec<T>> {
+        let values = self.values();
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(row_ids.map_or(values.len(), <[u32]>::len))
+            .map_err(io::Error::other)?;
+        match row_ids {
+            Some(ids) => {
+                for &id in ids {
+                    let row = id as usize;
+                    let value = values.get(row).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "fixed column row id out of bounds",
+                        )
+                    })?;
+                    result.push(decode(row, value));
+                }
+            }
+            None => {
+                result.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(row, value)| decode(row, value)),
+                );
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Validated raw offset table with payloads borrowed from one owned file buffer.
+/// Compaction borrows a page at a time; public query results still own each value.
+pub(crate) struct RawBytesColumn {
+    data: Vec<u8>,
+    row_count: usize,
+    blob_start: usize,
+}
+
+impl RawBytesColumn {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        Self::from_bytes(path, fs::read(path)?)
+    }
+
+    pub(crate) fn from_bytes(path: &Path, data: Vec<u8>) -> io::Result<Self> {
+        let invalid = |reason: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid variable column {}: {reason}", path.display()),
+            )
+        };
+        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| invalid("corrupt header"))?;
+        if header.version != COLUMN_VERSION || header.compression != 0 {
+            return Err(invalid("unsupported raw column version or compression"));
+        }
+        let row_count =
+            usize::try_from(header.row_count).map_err(|_| invalid("row count overflow"))?;
+        let blob_start = row_count
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(8))
+            .and_then(|size| size.checked_add(ColumnFileHeader::SIZE))
+            .filter(|&size| size <= data.len())
+            .ok_or_else(|| invalid("overflowing or truncated offset table"))?;
+        // Validate before allocating row results, including unselected offsets.
+        // The file buffer bounds both the count and every later offset conversion.
+        let blob_len = (data.len() - blob_start) as u64;
+        let mut previous = 0;
+        for (index, bytes) in data[ColumnFileHeader::SIZE..blob_start]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            let offset = u64::from_le_bytes(*bytes);
+            if (index == 0 && offset != 0) || offset < previous || offset > blob_len {
+                return Err(invalid(
+                    "offsets must start at zero and remain within the payload",
+                ));
+            }
+            previous = offset;
+        }
+        if previous != blob_len {
+            return Err(invalid("final offset does not match the payload length"));
+        }
+        Ok(Self {
+            data,
+            row_count,
+            blob_start,
+        })
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        row_ids: Option<&[u32]>,
+        visible_rows: Option<u64>,
+    ) -> io::Result<Vec<Bytes>> {
+        let visible =
+            usize::try_from(visible_rows.unwrap_or(self.row_count() as u64)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "visible raw row count exceeds address space",
+                )
+            })?;
+        if visible > self.row_count()
+            || row_ids.is_some_and(|ids| ids.iter().any(|&id| id as usize >= visible))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raw selection exceeds captured rows",
+            ));
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(row_ids.map_or(visible, <[u32]>::len))
+            .map_err(io::Error::other)?;
+        match row_ids {
+            Some(ids) => {
+                for &row in ids {
+                    values.push(Bytes::copy_from_slice(self.row(row as usize)?));
+                }
+            }
+            None => {
+                for row in 0..visible {
+                    values.push(Bytes::copy_from_slice(self.row(row)?));
+                }
+            }
+        }
+        Ok(values)
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    pub(crate) fn row(&self, row: usize) -> io::Result<&[u8]> {
+        if row >= self.row_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "variable column row id out of bounds",
+            ));
+        }
+        // open() proved the complete table fits in this immutable buffer.
+        let position = ColumnFileHeader::SIZE + row * 8;
+        let start = read_le_u64(&self.data, position)? as usize;
+        let end = read_le_u64(&self.data, position + 8)? as usize;
+        checked_range(&self.data[self.blob_start..], start, end)
+    }
 }
 
 /// Typed column data returned from reads.
@@ -78,187 +334,49 @@ impl ColumnData {
 pub struct ColumnReader;
 
 impl ColumnReader {
-    /// Read the address column, returning values at the given row indices.
+    /// Read the address column, preserving the requested row order.
     /// If `row_ids` is None, returns all rows.
-    pub fn read_address(dir: &Path, row_ids: Option<&[u32]>) -> std::io::Result<Vec<Address>> {
-        let data = fs::read(dir.join("address.col"))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
-
-        let body = &data[ColumnFileHeader::SIZE..];
-        let item_size = 20; // Address is 20 bytes
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let offset = id as usize * item_size;
-                    result.push(Address::from_slice(checked_slice(body, offset, item_size)?));
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * item_size;
-                    result.push(Address::from_slice(checked_slice(body, offset, item_size)?));
-                }
-                Ok(result)
-            }
-        }
+    pub fn read_address(dir: &Path, row_ids: Option<&[u32]>) -> io::Result<Vec<Address>> {
+        RawFixedColumn::<20>::open_for_read(&dir.join("address.col"), row_ids)?
+            .materialize(row_ids, |_, value| Address::from(*value))
     }
 
-    /// Read a 32-byte hash column (block_hash, tx_hash) — non-nullable.
-    pub fn read_b256(
-        dir: &Path,
-        name: &str,
-        row_ids: Option<&[u32]>,
-    ) -> std::io::Result<Vec<B256>> {
-        let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
-
-        let body = &data[ColumnFileHeader::SIZE..];
-        let item_size = 32;
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let offset = id as usize * item_size;
-                    result.push(B256::from_slice(checked_slice(body, offset, item_size)?));
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * item_size;
-                    result.push(B256::from_slice(checked_slice(body, offset, item_size)?));
-                }
-                Ok(result)
-            }
-        }
+    /// Read a non-nullable 32-byte hash column (block_hash, tx_hash).
+    pub fn read_b256(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<B256>> {
+        RawFixedColumn::<32>::open_for_read(&dir.join(name), row_ids)?
+            .materialize(row_ids, |_, value| B256::from(*value))
     }
 
-    /// Read a nullable 32-byte topic column with its null bitmap.
+    /// Read a nullable 32-byte topic column with its matching null bitmap.
     pub fn read_nullable_b256(
         dir: &Path,
         base_name: &str,
         row_ids: Option<&[u32]>,
-    ) -> std::io::Result<Vec<Option<B256>>> {
-        let col_data = fs::read(dir.join(format!("{base_name}.col")))?;
-        let null_data = fs::read(dir.join(format!("{base_name}.null")))?;
-
-        let header = ColumnFileHeader::read_from(&col_data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
-        let nulls = NullBitmap::read_from(&null_data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt null bitmap")
-        })?;
-
-        let body = &col_data[ColumnFileHeader::SIZE..];
-        let item_size = 32;
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let offset = id as usize * item_size;
-                    if nulls.is_present(id as u64) {
-                        result.push(Some(B256::from_slice(checked_slice(
-                            body, offset, item_size,
-                        )?)));
-                    } else {
-                        result.push(None);
-                    }
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * item_size;
-                    if nulls.is_present(i as u64) {
-                        result.push(Some(B256::from_slice(checked_slice(
-                            body, offset, item_size,
-                        )?)));
-                    } else {
-                        result.push(None);
-                    }
-                }
-                Ok(result)
-            }
-        }
+    ) -> io::Result<Vec<Option<B256>>> {
+        let column =
+            RawFixedColumn::<32>::open_for_read(&dir.join(format!("{base_name}.col")), row_ids)?;
+        let nulls = column.read_nulls_for_read(&dir.join(format!("{base_name}.null")), row_ids)?;
+        column.materialize(row_ids, |row, value| {
+            nulls.is_present(row as u64).then(|| B256::from(*value))
+        })
     }
 
     /// Read a u64 column (block_number, timestamp).
-    pub fn read_u64(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> std::io::Result<Vec<u64>> {
-        let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt header"))?;
-
-        let body = &data[ColumnFileHeader::SIZE..];
-
-        match row_ids {
-            Some(ids) => ids
-                .iter()
-                .map(|&id| read_le_u64(body, id as usize * 8))
-                .collect(),
-            None => (0..header.row_count as usize)
-                .map(|i| read_le_u64(body, i * 8))
-                .collect(),
-        }
+    pub fn read_u64(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
+        RawFixedColumn::<8>::open_for_read(&dir.join(name), row_ids)?
+            .materialize(row_ids, |_, value| u64::from_le_bytes(*value))
     }
 
     /// Read a u32 column (tx_index, log_index, data_len).
-    pub fn read_u32(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> std::io::Result<Vec<u32>> {
-        let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt header"))?;
-
-        let body = &data[ColumnFileHeader::SIZE..];
-
-        match row_ids {
-            Some(ids) => ids
-                .iter()
-                .map(|&id| read_le_u32(body, id as usize * 4))
-                .collect(),
-            None => (0..header.row_count as usize)
-                .map(|i| read_le_u32(body, i * 4))
-                .collect(),
-        }
+    pub fn read_u32(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
+        RawFixedColumn::<4>::open_for_read(&dir.join(name), row_ids)?
+            .materialize(row_ids, |_, value| u32::from_le_bytes(*value))
     }
 
     /// Read the source column (u8).
-    pub fn read_u8(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> std::io::Result<Vec<u8>> {
-        let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
-
-        let body = &data[ColumnFileHeader::SIZE..];
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    result.push(*body.get(id as usize).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "row id out of bounds")
-                    })?);
-                }
-                Ok(result)
-            }
-            None => {
-                let count = header.row_count as usize;
-                Ok(checked_slice(body, 0, count)?.to_vec())
-            }
-        }
+    pub fn read_u8(dir: &Path, name: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
+        RawFixedColumn::<1>::open_for_read(&dir.join(name), row_ids)?
+            .materialize(row_ids, |_, value| value[0])
     }
 
     /// Read the variable-length data column.
@@ -267,51 +385,8 @@ impl ColumnReader {
         name: &str,
         row_ids: Option<&[u32]>,
     ) -> std::io::Result<Vec<Bytes>> {
-        let data = fs::read(dir.join(name))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
-        })?;
-
-        let row_count = header.row_count as usize;
-        let offsets_start = ColumnFileHeader::SIZE;
-        let offsets_size = (row_count + 1) * 8;
-        let blob_start = offsets_start + offsets_size;
-
-        // Parse offset array
-        let mut offsets = Vec::with_capacity(row_count + 1);
-        for i in 0..=row_count {
-            offsets.push(read_le_u64(&data, offsets_start + i * 8)?);
-        }
-
-        let blob = &data[blob_start..];
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = Vec::with_capacity(ids.len());
-                for &id in ids {
-                    let id = id as usize;
-                    if id + 1 >= offsets.len() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "row id out of bounds",
-                        ));
-                    }
-                    let start = offsets[id] as usize;
-                    let end = offsets[id + 1] as usize;
-                    result.push(Bytes::copy_from_slice(checked_range(blob, start, end)?));
-                }
-                Ok(result)
-            }
-            None => {
-                let mut result = Vec::with_capacity(row_count);
-                for i in 0..row_count {
-                    let start = offsets[i] as usize;
-                    let end = offsets[i + 1] as usize;
-                    result.push(Bytes::copy_from_slice(checked_range(blob, start, end)?));
-                }
-                Ok(result)
-            }
-        }
+        let column = RawBytesColumn::open(&dir.join(name))?;
+        column.materialize(row_ids, None)
     }
 
     /// Read the canonical bitmap.
@@ -568,5 +643,330 @@ mod tests {
 
         let error = ColumnReader::read_var_bytes(&dir, "data.col", None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+    #[test]
+    fn variable_column_rejects_malformed_layout_before_allocation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("data.col");
+        let mut valid = Vec::new();
+        ColumnFileHeader {
+            version: 1,
+            row_count: 2,
+            compression: 0,
+        }
+        .write_to(&mut valid)
+        .unwrap();
+        for offset in [0u64, 1, 3] {
+            valid.extend_from_slice(&offset.to_le_bytes());
+        }
+        valid.extend_from_slice(b"abc");
+        for damage in 0..9 {
+            let mut bytes = valid.clone();
+            match damage {
+                0 => bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes()),
+                1 => bytes[4..8].copy_from_slice(&2u32.to_le_bytes()),
+                2 => bytes[16] = 1,
+                3 => bytes[17..25].copy_from_slice(&1u64.to_le_bytes()),
+                4 => bytes[25..33].copy_from_slice(&4u64.to_le_bytes()),
+                5 => bytes.truncate(ColumnFileHeader::SIZE + 8),
+                6 => bytes[33..41].copy_from_slice(&2u64.to_le_bytes()),
+                7 => bytes[25..33].copy_from_slice(&u64::MAX.to_le_bytes()),
+                8 => {
+                    bytes[8..16].copy_from_slice(&3u64.to_le_bytes());
+                    bytes.splice(33..33, 0u64.to_le_bytes());
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&path, bytes).unwrap();
+            for selection in [None, Some(&[0][..]), Some(&[][..])] {
+                let result = std::panic::catch_unwind(|| {
+                    ColumnReader::read_var_bytes(tmp.path(), "data.col", selection)
+                });
+                assert!(
+                    result.is_ok(),
+                    "damage {damage} panicked before rejecting its layout"
+                );
+                assert_eq!(
+                    result.unwrap().unwrap_err().kind(),
+                    io::ErrorKind::InvalidData,
+                    "damage {damage}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn variable_column_preserves_empty_payloads_and_selected_order() {
+        let tmp = TempDir::new().unwrap();
+        let mut bytes = Vec::new();
+        ColumnFileHeader {
+            version: 1,
+            row_count: 3,
+            compression: 0,
+        }
+        .write_to(&mut bytes)
+        .unwrap();
+        for offset in [0u64, 1, 1, 3] {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes.extend_from_slice(b"abc");
+        fs::write(tmp.path().join("data.col"), bytes).unwrap();
+        let expected = vec![
+            Bytes::from_static(b"a"),
+            Bytes::new(),
+            Bytes::from_static(b"bc"),
+        ];
+        assert_eq!(
+            ColumnReader::read_var_bytes(tmp.path(), "data.col", None).unwrap(),
+            expected
+        );
+        assert_eq!(
+            ColumnReader::read_var_bytes(tmp.path(), "data.col", Some(&[2, 0, 2, 1])).unwrap(),
+            vec![
+                expected[2].clone(),
+                expected[0].clone(),
+                expected[2].clone(),
+                expected[1].clone()
+            ]
+        );
+    }
+    #[test]
+    fn all_null_column_extensions_preserve_new_and_replaced_file_bytes() {
+        for publication in [
+            crate::durability::Publication::Ordered,
+            crate::durability::Publication::Deferred,
+        ] {
+            for replace in [false, true] {
+                for count in [0, 1, 9, 513] {
+                    let tmp = TempDir::new().unwrap();
+                    if replace {
+                        ColumnFile::write_batch(tmp.path(), &make_test_rows(1024)).unwrap();
+                    }
+                    let mut rows = make_test_rows(count);
+                    for row in &mut rows {
+                        row.topic0 = None;
+                        row.topic1 = None;
+                        row.topic2 = None;
+                        row.topic3 = None;
+                    }
+                    ColumnFile::write_batch_with_publication(tmp.path(), &rows, None, publication)
+                        .unwrap();
+                    for name in ["topic0", "topic1", "topic2", "topic3"] {
+                        let data = fs::read(tmp.path().join(format!("{name}.col"))).unwrap();
+                        assert_eq!(
+                            ColumnFileHeader::read_from(&data).unwrap().row_count,
+                            count as u64
+                        );
+                        assert_eq!(&data[ColumnFileHeader::SIZE..], vec![0; count * 32]);
+                        assert_eq!(
+                            ColumnReader::read_nullable_b256(tmp.path(), name, None).unwrap(),
+                            vec![None; count]
+                        );
+                    }
+                    assert_eq!(ColumnReader::read_log_rows(tmp.path(), None).unwrap(), rows);
+                    let restored = make_test_rows(3);
+                    ColumnFile::write_batch_with_publication(
+                        tmp.path(),
+                        &restored,
+                        None,
+                        publication,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        ColumnReader::read_log_rows(tmp.path(), None).unwrap(),
+                        restored
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn fixed_columns_validate_layout_before_materializing_rows() {
+        let dir = TempDir::new().unwrap();
+        type ReadColumn = fn(&Path, Option<&[u32]>) -> io::Result<()>;
+        let readers: [(&str, usize, ReadColumn); 6] = [
+            ("address.col", 20, |dir, ids| {
+                ColumnReader::read_address(dir, ids).map(drop)
+            }),
+            ("block_hash.col", 32, |dir, ids| {
+                ColumnReader::read_b256(dir, "block_hash.col", ids).map(drop)
+            }),
+            ("block_number.col", 8, |dir, ids| {
+                ColumnReader::read_u64(dir, "block_number.col", ids).map(drop)
+            }),
+            ("tx_index.col", 4, |dir, ids| {
+                ColumnReader::read_u32(dir, "tx_index.col", ids).map(drop)
+            }),
+            ("source.col", 1, |dir, ids| {
+                ColumnReader::read_u8(dir, "source.col", ids).map(drop)
+            }),
+            ("topic0.col", 32, |dir, ids| {
+                ColumnReader::read_nullable_b256(dir, "topic0", ids).map(drop)
+            }),
+        ];
+        let mut failures = Vec::new();
+        for (name, width, read) in readers {
+            for damage in [
+                "count-overflow",
+                "version",
+                "compression",
+                "truncated",
+                "trailing",
+            ] {
+                let mut bytes = Vec::new();
+                ColumnFileHeader {
+                    version: if damage == "version" {
+                        COLUMN_VERSION + 1
+                    } else {
+                        COLUMN_VERSION
+                    },
+                    row_count: if damage == "count-overflow" {
+                        u64::MAX
+                    } else {
+                        1
+                    },
+                    compression: u8::from(damage == "compression"),
+                }
+                .write_to(&mut bytes)
+                .unwrap();
+                bytes.extend(vec![
+                    0;
+                    match damage {
+                        "count-overflow" => 0,
+                        "truncated" => width - 1,
+                        "trailing" => width + 1,
+                        _ => width,
+                    }
+                ]);
+                fs::write(dir.path().join(name), bytes).unwrap();
+                fs::write(
+                    dir.path().join("topic0.null"),
+                    [1u64.to_le_bytes().as_slice(), &[0]].concat(),
+                )
+                .unwrap();
+                for ids in [None, Some([0].as_slice()), Some([].as_slice())] {
+                    if damage == "trailing" && ids.is_some_and(|ids| !ids.is_empty()) {
+                        assert!(read(dir.path(), ids).is_ok());
+                        continue;
+                    }
+                    let result = std::panic::catch_unwind(|| read(dir.path(), ids));
+                    if !matches!(result, Ok(Err(ref error)) if error.kind() == io::ErrorKind::InvalidData)
+                    {
+                        failures.push(format!("{name}: {damage}, selection={ids:?}: {result:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn nullable_columns_reject_mismatched_bitmaps_and_out_of_bounds_nulls() {
+        let dir = TempDir::new().unwrap();
+        let mut rows = make_test_rows(1);
+        rows[0].topic0 = None;
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        assert_eq!(
+            ColumnReader::read_nullable_b256(dir.path(), "topic0", Some(&[1]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        for len in [0u64, 2] {
+            fs::write(
+                dir.path().join("topic0.null"),
+                [len.to_le_bytes().as_slice(), &[0][..usize::from(len > 0)]].concat(),
+            )
+            .unwrap();
+            for ids in [None, Some([0].as_slice()), Some([].as_slice())] {
+                if len == 2 && ids.is_some_and(|ids| !ids.is_empty()) {
+                    assert_eq!(
+                        ColumnReader::read_nullable_b256(dir.path(), "topic0", ids).unwrap(),
+                        vec![None]
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    ColumnReader::read_nullable_b256(dir.path(), "topic0", ids)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
+    }
+    #[test]
+    fn fixed_columns_preserve_empty_and_repeated_selection_order() {
+        let dir = TempDir::new().unwrap();
+        let mut rows = make_test_rows(17);
+        for (index, row) in rows.iter_mut().enumerate() {
+            if index % 2 == 0 {
+                row.topic0 = None;
+            }
+        }
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        for ids in [&[][..], &[16, 0, 16, 8, 1][..]] {
+            assert_eq!(
+                ColumnReader::read_log_rows(dir.path(), Some(ids)).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    #[test]
+    fn selected_fixed_prefix_survives_an_unfinished_append() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows(2);
+        let ids = [1, 0, 1];
+        let expected: Vec<_> = ids.iter().map(|&i| rows[i as usize].clone()).collect();
+        for stage in [
+            "header-ahead",
+            "partial-tail",
+            "body-ahead",
+            "bitmap-lags",
+            "bitmap-ahead",
+        ] {
+            ColumnFile::write_batch(dir.path(), &rows).unwrap();
+            for (name, width) in [
+                ("address.col", 20),
+                ("block_hash.col", 32),
+                ("block_number.col", 8),
+                ("tx_index.col", 4),
+                ("source.col", 1),
+                ("topic0.col", 32),
+            ] {
+                let path = dir.path().join(name);
+                let mut bytes = fs::read(&path).unwrap();
+                let declared = if matches!(stage, "body-ahead" | "bitmap-ahead") {
+                    2u64
+                } else {
+                    3
+                };
+                bytes[8..16].copy_from_slice(&declared.to_le_bytes());
+                let extra = match stage {
+                    "partial-tail" => width - 1,
+                    "body-ahead" | "bitmap-lags" => width,
+                    _ => 0,
+                };
+                bytes.extend(vec![0; extra]);
+                fs::write(path, bytes).unwrap();
+            }
+            if stage == "bitmap-ahead" {
+                let path = dir.path().join("topic0.null");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[..8].copy_from_slice(&3u64.to_le_bytes());
+                fs::write(path, bytes).unwrap();
+            }
+            assert_eq!(
+                ColumnReader::read_log_rows(dir.path(), Some(&ids)).unwrap(),
+                expected,
+                "{stage}"
+            );
+            assert!(
+                ColumnReader::read_nullable_b256(dir.path(), "topic0", None).is_err(),
+                "{stage}"
+            );
+        }
     }
 }

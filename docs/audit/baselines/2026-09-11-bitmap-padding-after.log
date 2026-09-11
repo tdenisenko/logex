@@ -1,0 +1,12 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 2 tests
+test column::tests::bitmap_padding_cannot_become_present_rows_after_append ... ok
+test column::tests::bitmap_out_of_range_set_cannot_change_future_rows ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.00s
+

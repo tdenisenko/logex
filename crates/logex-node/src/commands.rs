@@ -35,7 +35,7 @@ struct IndexTarget {
 }
 
 pub fn run_build_indexes(config: PartitionManagerConfig, options: BuildIndexesOptions) {
-    let mut storage = match PartitionManager::open(config) {
+    let storage = match PartitionManager::open(config) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to open storage");
@@ -73,16 +73,6 @@ pub fn run_build_indexes(config: PartitionManagerConfig, options: BuildIndexesOp
         }
     };
 
-    for target in &indexed_segments {
-        if let Err(e) = storage.refresh_segment_manifest(target.segment_id) {
-            tracing::error!(
-                error = %e,
-                segment_id = target.segment_id,
-                "failed to refresh segment manifest after index build"
-            );
-            std::process::exit(1);
-        }
-    }
     let indexed = indexed_segments.len();
     println!("Indexed {indexed} segment(s)");
 }
@@ -246,10 +236,8 @@ fn segment_matches_filters(
 }
 
 fn index_files_missing(path: &Path, profile: IndexBuildProfile) -> bool {
-    let index_dir = path.join("indexes");
-    IndexBuilder::required_index_files(profile)
-        .iter()
-        .any(|file_name| !index_dir.join(file_name).is_file())
+    // If inspection fails, let the selected build report the actionable error.
+    IndexBuilder::indexes_missing(path, profile).unwrap_or(true)
 }
 
 pub fn run_compact(config: PartitionManagerConfig, limit: Option<usize>) {
@@ -354,4 +342,109 @@ pub fn run_info(config: PartitionManagerConfig) {
 
 fn consensus_state_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("cl").join("consensus_state.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, B256, Bytes};
+    use logex_storage::SegmentReader;
+    use logex_types::{LogRow, Source};
+
+    #[test]
+    fn index_command_preserves_source_artifacts_and_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = PartitionManagerConfig {
+            data_dir: tmp.path().to_owned(),
+            partition_target_rows: 32,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let rows = (0..66)
+            .map(|index| LogRow {
+                block_number: 100 + index,
+                block_hash: B256::with_last_byte(index as u8),
+                timestamp: 1_700_000_000 + index * 12,
+                tx_hash: B256::with_last_byte(index as u8),
+                tx_index: 0,
+                log_index: 0,
+                address: Address::repeat_byte(0x44),
+                topic0: Some(B256::repeat_byte(0x55)),
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: Bytes::new(),
+                data_len: 0,
+                source: Source::Receipt,
+            })
+            .collect::<Vec<_>>();
+        let mut storage = PartitionManager::open(config.clone()).unwrap();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint_durable().unwrap();
+        storage.mark_non_canonical(rows[7].block_hash).unwrap();
+        let tip = rows.last().unwrap();
+        storage
+            .record_sync_head(tip.block_number, tip.block_hash, tip.timestamp)
+            .unwrap();
+        let head = storage.sync_head();
+        let paths = storage
+            .sealed_partitions()
+            .iter()
+            .chain(std::iter::once(storage.hot_partition()))
+            .filter(|partition| partition.meta.row_count != 0)
+            .map(|partition| partition.meta.path.clone())
+            .collect::<Vec<_>>();
+        let mut artifacts = vec![config.data_dir.join("catalog.json")];
+        for path in &paths {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    artifacts.push(entry.path());
+                }
+            }
+        }
+        let before = artifacts
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        drop(storage);
+        for missing_only in [false, true, false] {
+            run_build_indexes(
+                config.clone(),
+                BuildIndexesOptions {
+                    sealed: true,
+                    hot: true,
+                    profile: IndexProfile::All,
+                    missing_only,
+                    limit: None,
+                    jobs: 2,
+                    from_block: None,
+                    to_block: None,
+                    from_timestamp: None,
+                    to_timestamp: None,
+                },
+            );
+            let reopened = PartitionManager::open(config.clone()).unwrap();
+            assert_eq!(reopened.total_rows(), rows.len() as u64);
+            assert_eq!(reopened.sync_head(), head);
+            let mut actual = Vec::new();
+            for path in &paths {
+                assert!(!IndexBuilder::indexes_missing(path, IndexBuildProfile::All).unwrap());
+                let reader = SegmentReader::open(path).unwrap();
+                let part = reader.read_log_rows(None).unwrap();
+                let canonical = reader.read_canonical().unwrap();
+                for (index, row) in part.iter().enumerate() {
+                    assert_eq!(canonical.is_present(index as u64), row.block_number != 107);
+                }
+                actual.extend(part);
+            }
+            actual.sort_by_key(|row| row.block_number);
+            assert_eq!(actual, rows);
+            for (path, bytes) in &before {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
+            }
+        }
+    }
 }

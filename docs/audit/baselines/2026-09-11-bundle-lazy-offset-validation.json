@@ -1,0 +1,101 @@
+{
+  "source_base": "a0559acd81d06e345e37ced7dbbd334a8a700340",
+  "candidate": "lazy bundle selection lookup and explicit read-mode benchmark",
+  "commands": [
+    {
+      "name": "focused",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 8.503845207975246
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.8443048750050366
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 5.1555012909229845
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 5.120336208958179
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 117.40440379199572
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 10.908821249962784
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 50.836757124983706
+    }
+  ],
+  "tests_passed": 900,
+  "tests_ignored": 9,
+  "bundle_tests_passed": 19,
+  "new_test": "selected_ranges_keep_each_stream_and_snapshot_independent",
+  "runner_source": "from pathlib import Path\nimport json,subprocess,time\nsubprocess.run(['cargo','fmt','--all'],check=True)\ncommands=[('focused',['cargo','test','-p','logex-storage','--lib','--locked','bundle::tests']),('fmt',['cargo','fmt','--all','--','--check']),('check',['cargo','check','--workspace','--all-targets','--locked']),('clippy',['cargo','clippy','--workspace','--all-targets','--locked','--','-D','warnings']),('test',['cargo','test','--workspace','--all-targets','--locked']),('doc',['cargo','test','--workspace','--doc','--locked']),('release',['cargo','build','-p','logex-node','--release','--locked'])]\nrecords=[]\nfor name,command in commands:\n print('Running',name,flush=True);start=time.monotonic()\n with open('/tmp/logex-lazy-offset-gate-'+name+'.log','w')as log:r=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)\n record={'name':name,'command':command,'exit_code':r.returncode,'elapsed_seconds':time.monotonic()-start};records.append(record)\n Path('/tmp/logex-lazy-offset-gates.json').write_text(json.dumps(records,indent=2));print(record,flush=True)\n if r.returncode:raise SystemExit(r.returncode)\n"
+}

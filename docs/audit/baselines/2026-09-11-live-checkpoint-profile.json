@@ -1,0 +1,163 @@
+{
+  "candidate": "57c1e67e",
+  "acceptance_benchmark": false,
+  "notes": "Temporary release unit-test timing scopes; three 128-block runs with a checkpoint after every block. Helper times overlap and are not exclusive CPU costs. Full header-window encoding costs ~8 ms/block; final synchronization costs ~7.5-8 ms/block. Instrumentation removed.",
+  "samples": [
+    {
+      "elapsed_ms": 3360.38075,
+      "iteration": 0,
+      "kind": "live_profile",
+      "phases": [
+        [
+          "append_ingest_rows",
+          120,
+          346.319914
+        ],
+        [
+          "begin_ingestion",
+          128,
+          0.126298
+        ],
+        [
+          "checkpoint_ingestion",
+          128,
+          2754.006669
+        ],
+        [
+          "encode",
+          128,
+          1020.9286660000001
+        ],
+        [
+          "flush_file",
+          3720,
+          292.277773
+        ],
+        [
+          "ingest_canonical_batch",
+          128,
+          605.7518779999999
+        ],
+        [
+          "order_file",
+          366,
+          329.770935
+        ],
+        [
+          "persist_manifest",
+          120,
+          202.51579
+        ],
+        [
+          "sync_directory",
+          128,
+          1014.854253
+        ]
+      ]
+    },
+    {
+      "elapsed_ms": 3773.029125,
+      "iteration": 1,
+      "kind": "live_profile",
+      "phases": [
+        [
+          "append_ingest_rows",
+          120,
+          506.49457899999993
+        ],
+        [
+          "begin_ingestion",
+          128,
+          0.127458
+        ],
+        [
+          "checkpoint_ingestion",
+          128,
+          2948.455172
+        ],
+        [
+          "encode",
+          128,
+          1081.141037
+        ],
+        [
+          "flush_file",
+          3720,
+          300.34335
+        ],
+        [
+          "ingest_canonical_batch",
+          128,
+          823.9571639999999
+        ],
+        [
+          "order_file",
+          366,
+          643.779963
+        ],
+        [
+          "persist_manifest",
+          120,
+          259.459416
+        ],
+        [
+          "sync_directory",
+          128,
+          986.791709
+        ]
+      ]
+    },
+    {
+      "elapsed_ms": 3238.237541,
+      "iteration": 2,
+      "kind": "live_profile",
+      "phases": [
+        [
+          "append_ingest_rows",
+          120,
+          343.66875400000004
+        ],
+        [
+          "begin_ingestion",
+          128,
+          0.13012500000000002
+        ],
+        [
+          "checkpoint_ingestion",
+          128,
+          2653.310249
+        ],
+        [
+          "encode",
+          128,
+          1007.091667
+        ],
+        [
+          "flush_file",
+          3720,
+          301.53497
+        ],
+        [
+          "ingest_canonical_batch",
+          128,
+          584.3280400000001
+        ],
+        [
+          "order_file",
+          366,
+          318.113666
+        ],
+        [
+          "persist_manifest",
+          120,
+          187.172752
+        ],
+        [
+          "sync_directory",
+          128,
+          954.417867
+        ]
+      ]
+    }
+  ]
+}

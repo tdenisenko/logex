@@ -1,0 +1,74 @@
+{
+  "revision": "aefbc0db with temporary test-only timing scopes",
+  "instrumented": true,
+  "acceptance_benchmark": false,
+  "notes": "Single release run for attribution. Profile scopes aggregate syscall-helper durations, including concurrent workers; these are not mutually exclusive CPU times. Same publication fixture inputs; origin setup excluded. Temporary instrumentation removed after capture.",
+  "samples": [
+    {
+      "append_io": [
+        [
+          "flush_file",
+          48,
+          13.446792
+        ],
+        [
+          "order_file",
+          4,
+          2.754791
+        ],
+        [
+          "sync_directory",
+          1,
+          4.264375
+        ]
+      ],
+      "append_ms": 24.170875000000002,
+      "blocks": 128,
+      "finish_io": [
+        [
+          "flush_file",
+          60,
+          0.151585
+        ],
+        [
+          "order_file",
+          6,
+          5.473374
+        ],
+        [
+          "sync_directory",
+          5,
+          17.597542
+        ]
+      ],
+      "finish_ms": 32.639041,
+      "kind": "profile",
+      "rows": 15360
+    },
+    {
+      "append_io": [
+        [
+          "flush_file",
+          43,
+          0.302664
+        ],
+        [
+          "order_file",
+          8,
+          8.210001
+        ],
+        [
+          "sync_directory",
+          6,
+          19.850541
+        ]
+      ],
+      "append_ms": 156.96312500000002,
+      "blocks": 2048,
+      "finish_io": [],
+      "finish_ms": 4.2e-05,
+      "kind": "profile",
+      "rows": 491520
+    }
+  ]
+}

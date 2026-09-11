@@ -1,0 +1,101 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.24s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+
+thread 'reader::tests::fixed_columns_validate_layout_before_materializing_rows' (19184244) panicked at /rustc/fb6531d550e0075b9eb9a51464f404805eec87d9/library/alloc/src/raw_vec/mod.rs:28:5:
+capacity overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'reader::tests::fixed_columns_validate_layout_before_materializing_rows' (19184244) panicked at /rustc/fb6531d550e0075b9eb9a51464f404805eec87d9/library/alloc/src/raw_vec/mod.rs:28:5:
+capacity overflow
+
+thread 'reader::tests::fixed_columns_validate_layout_before_materializing_rows' (19184244) panicked at /rustc/fb6531d550e0075b9eb9a51464f404805eec87d9/library/alloc/src/raw_vec/mod.rs:28:5:
+capacity overflow
+
+thread 'reader::tests::fixed_columns_validate_layout_before_materializing_rows' (19184244) panicked at crates/logex-storage/src/reader.rs:788:9:
+address.col: count-overflow, selection=None: Err(Any { .. })
+address.col: count-overflow, selection=Some([]): Ok(Ok(()))
+address.col: version, selection=None: Ok(Ok(()))
+address.col: version, selection=Some([0]): Ok(Ok(()))
+address.col: version, selection=Some([]): Ok(Ok(()))
+address.col: compression, selection=None: Ok(Ok(()))
+address.col: compression, selection=Some([0]): Ok(Ok(()))
+address.col: compression, selection=Some([]): Ok(Ok(()))
+address.col: truncated, selection=Some([]): Ok(Ok(()))
+address.col: trailing, selection=None: Ok(Ok(()))
+address.col: trailing, selection=Some([0]): Ok(Ok(()))
+address.col: trailing, selection=Some([]): Ok(Ok(()))
+block_hash.col: count-overflow, selection=None: Err(Any { .. })
+block_hash.col: count-overflow, selection=Some([]): Ok(Ok(()))
+block_hash.col: version, selection=None: Ok(Ok(()))
+block_hash.col: version, selection=Some([0]): Ok(Ok(()))
+block_hash.col: version, selection=Some([]): Ok(Ok(()))
+block_hash.col: compression, selection=None: Ok(Ok(()))
+block_hash.col: compression, selection=Some([0]): Ok(Ok(()))
+block_hash.col: compression, selection=Some([]): Ok(Ok(()))
+block_hash.col: truncated, selection=Some([]): Ok(Ok(()))
+block_hash.col: trailing, selection=None: Ok(Ok(()))
+block_hash.col: trailing, selection=Some([0]): Ok(Ok(()))
+block_hash.col: trailing, selection=Some([]): Ok(Ok(()))
+block_number.col: count-overflow, selection=Some([]): Ok(Ok(()))
+block_number.col: version, selection=None: Ok(Ok(()))
+block_number.col: version, selection=Some([0]): Ok(Ok(()))
+block_number.col: version, selection=Some([]): Ok(Ok(()))
+block_number.col: compression, selection=None: Ok(Ok(()))
+block_number.col: compression, selection=Some([0]): Ok(Ok(()))
+block_number.col: compression, selection=Some([]): Ok(Ok(()))
+block_number.col: truncated, selection=Some([]): Ok(Ok(()))
+block_number.col: trailing, selection=None: Ok(Ok(()))
+block_number.col: trailing, selection=Some([0]): Ok(Ok(()))
+block_number.col: trailing, selection=Some([]): Ok(Ok(()))
+tx_index.col: count-overflow, selection=Some([]): Ok(Ok(()))
+tx_index.col: version, selection=None: Ok(Ok(()))
+tx_index.col: version, selection=Some([0]): Ok(Ok(()))
+tx_index.col: version, selection=Some([]): Ok(Ok(()))
+tx_index.col: compression, selection=None: Ok(Ok(()))
+tx_index.col: compression, selection=Some([0]): Ok(Ok(()))
+tx_index.col: compression, selection=Some([]): Ok(Ok(()))
+tx_index.col: truncated, selection=Some([]): Ok(Ok(()))
+tx_index.col: trailing, selection=None: Ok(Ok(()))
+tx_index.col: trailing, selection=Some([0]): Ok(Ok(()))
+tx_index.col: trailing, selection=Some([]): Ok(Ok(()))
+source.col: count-overflow, selection=Some([]): Ok(Ok(()))
+source.col: version, selection=None: Ok(Ok(()))
+source.col: version, selection=Some([0]): Ok(Ok(()))
+source.col: version, selection=Some([]): Ok(Ok(()))
+source.col: compression, selection=None: Ok(Ok(()))
+source.col: compression, selection=Some([0]): Ok(Ok(()))
+source.col: compression, selection=Some([]): Ok(Ok(()))
+source.col: truncated, selection=Some([]): Ok(Ok(()))
+source.col: trailing, selection=None: Ok(Ok(()))
+source.col: trailing, selection=Some([0]): Ok(Ok(()))
+source.col: trailing, selection=Some([]): Ok(Ok(()))
+topic0.col: count-overflow, selection=None: Err(Any { .. })
+topic0.col: count-overflow, selection=Some([0]): Ok(Ok(()))
+topic0.col: count-overflow, selection=Some([]): Ok(Ok(()))
+topic0.col: version, selection=None: Ok(Ok(()))
+topic0.col: version, selection=Some([0]): Ok(Ok(()))
+topic0.col: version, selection=Some([]): Ok(Ok(()))
+topic0.col: compression, selection=None: Ok(Ok(()))
+topic0.col: compression, selection=Some([0]): Ok(Ok(()))
+topic0.col: compression, selection=Some([]): Ok(Ok(()))
+topic0.col: truncated, selection=None: Ok(Ok(()))
+topic0.col: truncated, selection=Some([0]): Ok(Ok(()))
+topic0.col: truncated, selection=Some([]): Ok(Ok(()))
+topic0.col: trailing, selection=None: Ok(Ok(()))
+topic0.col: trailing, selection=Some([0]): Ok(Ok(()))
+topic0.col: trailing, selection=Some([]): Ok(Ok(()))
+test reader::tests::fixed_columns_validate_layout_before_materializing_rows ... FAILED
+
+failures:
+
+failures:
+    reader::tests::fixed_columns_validate_layout_before_materializing_rows
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

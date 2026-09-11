@@ -1,0 +1,61 @@
+{
+  "production_commit": "196664e4d16e93280869523f8c845e7cec2d3808",
+  "changes": "benchmark-only mixed payload fixture and lifecycle diagnostics",
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.7831577499746345
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 1.9584486670210026
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.7631040830165148
+    },
+    {
+      "name": "fixture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--test",
+        "ingestion_publication",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 2.935995667008683
+    }
+  ],
+  "release_smoke_tests": "original and candidate exact-row/empty-block/rotation/reopen fixture pass; full paired comparisons also pass every oracle",
+  "cleanup": "Searched changed harness for superseded fixture paths and helpers; retained existing transfer-v3 and header-codec fixtures for reproducibility. No production code removed."
+}

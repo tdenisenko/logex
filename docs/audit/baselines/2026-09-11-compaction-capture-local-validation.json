@@ -1,0 +1,99 @@
+{
+  "source": {
+    "base": "1e27d838d6b6232f6c5195664f5c98efd0b88a21",
+    "archive_sha256": "b4adae58c01cc2b792e8ecf750d7f67fd207b52b84c4d5e46b2a5c6c761e57bd",
+    "changed_sources": {
+      "crates/logex-storage/src/column_artifact.rs": "6203e0a8f97474ca8932b99a6e7ac6e5c558bf6610a9898fc9f00c97dba53511",
+      "crates/logex-storage/src/reader.rs": "70c62ef7e0fd46001f439a2b10e386e72934853b7d7c1b9af72b42b435bc84e3",
+      "crates/logex-storage/src/segment_reader.rs": "2310c59e2bc870c6b9592d5e338886f4feecc4f799760618bc1641dfafc4fa82",
+      "crates/logex-storage/src/native/segment.rs": "1296458293a7850f7a85dfce81bbc457d41f3311a7773168d7386a4aa19adff8",
+      "crates/logex-storage/src/native/storage.rs": "ef275a72922f823721d3fd9b1790f8449d7f3de1089d1eedbd985122206ed8ec",
+      "crates/logex-storage/src/index_checkpoint.rs": "c72b9d1809ab02e460c30b68951cb4262f65c97cb7f448b7879f586a3c820a5b",
+      "crates/logex-query/src/native.rs": "a00f4c223aa32d35f4290b5dd6b2e26445a560dddee593cd0e24af7986b777f0",
+      "crates/logex-query/src/sql.rs": "dccb3c53672577d1b91fe5fc0ae94530e995df515334a09249311374d28dd92e"
+    }
+  },
+  "gates": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.8130365000106394
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 6.016187499975786
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 5.08192008396145
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 131.10708033305127
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 11.786946165957488
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 49.628031334024854
+    }
+  ],
+  "workspace_tests": {
+    "passed": 905,
+    "ignored": 9
+  },
+  "status": "All six local gates pass. Platform validation and final performance confirmation are still pending."
+}

@@ -1,0 +1,932 @@
+# Combined sync ingestion checkpoints
+
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
+The sections below record the durable-checkpoint implementation through
+`683bcdf8`. A [bounded progress-publication successor](published-ingestion-checkpoints.md)
+is now implemented locally and in validation. It shares one bounded recovery
+window across pending and published sync work and adds `checkpoint_durable()`
+for the stronger boundary. Its recovery and performance acceptance remain open.
+
+This is an **unmerged prototype** continuing PR #130. It addresses B2-10 in the
+sync callers and tests the user's proposed bounded rewind/re-fetch approach.
+Performance acceptance, platform validation and the wider audit remain open.
+The user permits incompatible changes if they materially help performance and
+is willing to perform a fresh sync. The current candidate changes the catalog
+format to version 6 and segment manifests to version 4; compressed page codecs
+remain unchanged. Historical segments now use the [shared artifact candidate](shared-segment-artifact.md). No existing
+production dataset has been reset or modified.
+
+## Behavior and invariants
+
+Live blocks, forward-gap chunks and historical chunks now associate their rows
+and progress in one storage operation. Each operation takes complete validated
+blocks, including blocks with no logs. Subscribers are notified after that
+operation succeeds. Forward-gap publication uses its final header window once;
+the superseded list of per-block 8,192-header snapshots is removed.
+
+Successful sync operations become queryable in the running process. They are
+not individually promised durable across restart: a restart may discard the
+unfinished epoch and resume the existing verified fetch pipeline from the last
+durable head/floor. `checkpoint()` makes the current rows and progress durable.
+This is an intentional acknowledgment change for the combined sync APIs,
+authorized by the user's preference for bounded re-ingestion over duplicated
+recovery row data. Generic `write_batch`/`write_historical_batch` retain their
+WAL-backed durable behavior; their separately published progress is not a
+transaction, and sync no longer uses that sequence.
+
+An epoch contains at most 32 MiB of equivalent encoded row payload or 64 caller
+batches. Validation computes the size without serializing a second row copy.
+A valid oversized caller batch checkpoints before returning. Five seconds makes
+an epoch eligible for checkpoint at the next write or existing background tick;
+it is not a hard wall-clock deadline. Route changes, generic durable writes,
+standalone metadata updates and relevant maintenance boundaries checkpoint first.
+Detached compaction plans exclude the epoch's affected segments.
+
+## Catalog version 6 recovery protocol
+
+The checksummed catalog is the single durable authority for segment row counts,
+allocation IDs, bundled column table references, canonical head/header window,
+chain anchors and historical progress.
+The legacy filename `catalog.json` is deliberately retained: older binaries must
+fail to parse the new bytes at their known path rather than create another catalog.
+Its contents are now a binary frame: eight-byte `LXCAT006` magic, two little-endian
+32-bit lengths (metadata and header list), a CRC32, JSON metadata and a canonical
+RLP list of the complete recent headers. The checksum covers the first 16 prefix
+bytes and both payloads. It detects accidental corruption, not malicious tampering.
+
+Reads/encodings are bounded to 64 MiB, the header list to 8,192 entries, and each
+header frame to 16 KiB before decoding its body. Truncation, trailing bytes, bad
+checksums, unknown metadata fields and unsupported versions fail explicitly.
+Segment IDs, relative paths and active ownership are checked. Cached headers must
+have representable RLP optional-field sequences and at most 32 bytes of extra data;
+callers reject these encoding errors before publishing rows or changing progress.
+Chain authentication and fork/ancestry validation remain separate invariants.
+The disk-size cache reads only small metadata as an untrusted hint; it never uses
+that shortcut for recovery, coverage or query state.
+
+1. Keep the durable catalog unchanged during an ingestion epoch. Update rows and
+   progress in memory. Raw/per-column files containing a previously committed
+   prefix still order complete replacements before rename. Bundles append
+   immutable column and canonical-bitmap versions, preserving the entire
+   catalog-pinned prefix without ordering each append separately.
+2. Newly allocated segments, and an initial active segment with zero committed
+   rows, can defer artifact/manifest synchronization. They contain no data the
+   catalog promises. Exclusive first creation avoids an unnecessary temporary
+   rename; replacements of existing files stay atomic for current readers.
+3. At checkpoint, submit all deferred segment trees, including affected bundles
+   with previously committed rows, and their parent directory entries,
+   order them before the catalog, and fully synchronize any other devices first.
+   Publish one atomic checksummed catalog and complete its device synchronization.
+   The catalog can then reference only complete, already-ordered segment contents.
+4. On startup, validate catalog and WAL evidence before modifying rows. Restore
+   active segment prefixes and canonical bits to the catalog's counts; discard
+   only canonical segment IDs at or above its allocation boundary. Never infer
+   committed rows/progress by adopting newer manifests. Missing committed
+   artifacts fail explicitly. Damage confined to wholly uncommitted segments can
+   be discarded, including malformed initial-hot manifests and partial columns.
+5. Bundled historical prefixes, including canonical flags, are restored from their
+   catalog-pinned immutable table and fully verified before trimming an uncommitted
+   suffix. Their manifest is derived metadata and can rebuild from the catalog
+   even if absent or malformed. Raw recovery
+   publishes each restored prefix durably before removing obsolete compressed
+   pages. The catalog remains unchanged, so an interrupted rollback repeats
+   safely. The existing verified sync path re-fetches from its restored head/floor.
+
+Recovery runs under exclusive data-directory ownership before queries. Complete
+caller batches define checkpoints, including empty blocks and blocks split across
+segments. Chain finality is not a substitute for local persistence ordering.
+Generic WAL-backed writes retain their recovery journal and use the same catalog;
+WAL validation precedes rollback so damaged recovery evidence remains inspectable.
+
+The separate sync `storage_state.json`, `wal/ingestion.json`, publishing decision,
+and pair of staged metadata files from `aefbc0db` are superseded. This removes
+several full flushes per checkpoint and avoids duplicating the header window in
+JSON serialization. It intentionally drops automatic manifest adoption on startup.
+
+## Fresh-sync compatibility decision
+
+Catalog versions 1–5 are rejected with an actionable
+diagnostic; they are not migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
+a dangling catalog alias, also fails instead of initializing an empty database.
+Older binaries fail to parse the binary frame at the original catalog path.
+A deployment must use a **new empty data directory** and verified fresh sync. Rolling back the binary
+requires its original directory or another fresh sync, not reuse of version 6.
+Retain original directories until their owner explicitly chooses otherwise.
+The user's protected external-volume contents are outside this test scope.
+
+This breaking change is a performance candidate, not an accepted release. It will
+be retained only with measured evidence meeting the user's 10% limit. Starting
+fresh alone does not improve performance; removing redundant durability work is
+the intended benefit.
+
+## Validation and remaining work
+
+The preceding `aefbc0db` prototype passed all six local gates (833 tests, six
+ignored; [results](baselines/2026-09-11-sync-checkpoint-gates.jsonl)). Those results
+do **not** validate the new catalog/deferred-publication protocol. Its storage
+suite at that stage passed 129 tests with two explicitly ignored cases, including
+recovery-evidence and malformed-uncommitted-artifact checks. All six [local gates](baselines/2026-09-11-catalog-v2-gates.jsonl)
+pass for `adff367c`: 836 tests passed, six intentionally ignored, and the release
+build succeeds. Performance and platform validation remain pending.
+
+The current regressions exercise live/historical retry, empty progress, rotation,
+compaction, prior non-canonical rows, each main-thread write/commit failure point,
+interrupted rollback, origin damage, route/API/configuration changes and actual
+child-process exit. Catalog tests cover every truncation/single-byte mutation,
+valid-checksum invalid identities, old versions, oversized input and missing
+aliases. Worker failures and physical power-loss interleavings are not exhaustively
+covered by the main-thread injection matrix.
+
+Pending: new release comparisons including large historical calls and per-block
+live checkpoints; Linux/macOS CI; isolated ExFAT/distinct-device
+recovery; concurrent-query failure behavior; recovery memory/startup cost; and the
+broader storage audit. Previous ExFAT results apply to `ff728ea3` only.
+
+## First release comparison
+
+[Raw results](baselines/2026-09-11-sync-checkpoint-publication.jsonl) compare the
+original `09a63f55` baseline with prototype `aefbc0db` on internal APFS, using the
+same pinned compiler, Mac14,15, 16 GiB RAM and warm-cache conditions as the prior
+publication fixture. Three alternating process pairs, three iterations per
+process, 128 measured blocks, 128 rows per nonempty block and the 8,192-header
+window. No build or test ran during timing. Both revisions pass the exact row,
+head, anchor, floor and reopen oracles; final checkpoint/finalization is included.
+
+| Workload | Baseline median ms | Prototype median ms | Change |
+| --- | ---: | ---: | ---: |
+| Live storage publication | 2,799.517 | 789.061 | -71.81% |
+| Short historical storage publication | 14.960 | 51.719 | +245.72% |
+
+This establishes a live improvement for this fixture, not end-to-end P2P sync or
+paced live performance. The short historical fixture fits in one sparse staging
+chunk; it still fails the 10% ceiling badly. Removing its WAL copy did not resolve
+that cost. The next investigation separates raw-column, compaction and checkpoint
+costs and measures larger production-shaped history chunks before selecting a
+format change or a further durability optimization.
+
+A [temporary release attribution run](baselines/2026-09-11-sync-checkpoint-profile.json)
+separated the short historical append (24.17 ms) and finalization/checkpoint
+(32.64 ms). Full directory syncs account for approximately 21.86 ms across those
+phases, while raw-file flush helpers account for another 13.45 ms during append.
+Helper totals include worker overlap; this is instrumentation evidence, not an
+acceptance benchmark. A 491,520-row historical call took 156.96 ms in the same
+instrumented diagnostic, including its automatic oversized-batch checkpoint;
+its corresponding baseline comparison is still needed. All temporary profiling
+code was removed after capture.
+
+These measured costs motivated catalog version 2 and deferred publication as
+described above. The historical comparison records the rejected earlier design;
+it must not be presented as performance of the new candidate.
+
+## Catalog v2 release comparison
+
+[Raw samples](baselines/2026-09-11-catalog-v2-comparison.jsonl) compare original
+`09a63f55` with `adff367c` on internal APFS (Mac14,15, 16 GiB, pinned nightly
+2026-08-24). Three alternating pairs per profile, three iterations per process;
+all exact row/head/anchor/floor/reopen oracles pass. Final checkpoint/finalization
+is included; no build or test ran during timing. Fresh directories, OS caches
+not evicted, 8,192 warm headers and a million-row segment target. Fixture v2 adds
+route selection and per-block checkpoint controls, applied consistently to the
+baseline harness; baseline calls already publish separately. The per-block case
+forces the candidate's durability boundary without sleeping or network traffic.
+Binary hashes and fixture digests are in the raw records. `/usr/bin/time -l`
+required access to system counters; the initial sandboxed process passed its
+oracle but failed resource collection and was rerun, not combined with results.
+
+| Workload | Baseline median ms | Catalog v2 median ms | Change |
+| --- | ---: | ---: | ---: |
+| Live, 128 blocks / 15,360 rows | 2,854.581 | 515.835 | -81.93% |
+| Historical, same short input | 14.781 | 22.782 | +54.13% |
+| Historical, 2,048 blocks / 491,520 rows | 67.838 | 85.921 | +26.66% |
+| Live, checkpoint after every block | 2,759.964 | 3,322.951 | +20.40% |
+
+**This candidate still fails performance acceptance.** Grouped live improvement
+cannot be generalized to sparse live traffic or historical sync. Full local
+gates pass, but this PR must remain unmerged.
+
+[Temporary phase profiling](baselines/2026-09-11-catalog-v2-profile.json) shows
+checkpoint ordering/full synchronization at roughly 8-10 ms and short raw writes
+at roughly 8-9 ms after warmup. Individual file submission is below 0.2 ms in
+these samples, so parallelizing file fsync is not supported by this profile.
+Potential next reductions are redundant ordering before the catalog's own barrier,
+first writes to unpublished files, and per-call publication that can safely defer
+to the same catalog checkpoint. Committed prefixes and current readers still
+require protection; any optimization needs its own recovery and timing evidence.
+
+The next isolated change prepares the catalog temporary file before the barrier
+for deferred trees. The same barrier orders both payloads before publishing the
+catalog's name; other devices are fully persisted first, and the final catalog
+parent sync still supplies durability. Nine focused ingestion/recovery tests
+pass, including both interruption matrices. New timing evidence is pending.
+
+[The barrier-only comparison](baselines/2026-09-11-catalog-barrier-comparison.jsonl)
+at `b2b8b7b9` repeats the same 18 processes/54 iterations with exact oracles passing.
+Short historical publication falls to 21.042 ms versus a paired 14.928 ms baseline
+(+40.96%); large history is 80.922 versus 66.414 ms (+21.85%). Grouped live is
+495.086 versus 2,870.973 ms (-82.76%); per-block live remains 3,340.908 versus
+2,773.894 ms (+20.44%). The isolated change reduces historical cost but does not
+meet acceptance. Per-block live mostly writes existing prefixes, for which there
+was no deferred-tree barrier to remove.
+
+All six Linux/macOS CI jobs for catalog candidate `adff367c` pass in run
+`34533144525`. That CI does not cover later performance changes. The next
+experiment removes temporary creation/rename only when exclusive creation proves
+a wholly uncommitted destination does not exist; existing files retain atomic
+replacement. Its full storage suite passes 130 tests with two ignored, and
+strict storage Clippy passes. Its timing is pending.
+
+[Exclusive-creation measurements](baselines/2026-09-11-direct-create-comparison.jsonl)
+at `57c1e67e` use three alternating short-fixture pairs with three iterations.
+Short history is 20.299 versus 14.659 ms (+38.48%); grouped live is 491.057 versus
+2,914.074 ms (-83.15%). The small APFS change needs further confirmation against
+noise and on ExFAT before treating it as a retained optimization. Per-block live
+and large history were not remeasured for this isolated first-creation change.
+
+[Per-block live profiling](baselines/2026-09-11-live-checkpoint-profile.json)
+shows approximately 8 ms/block encoding the entire 8,192-header window and another
+7.5-8 ms/block in final synchronization. This identifies repeated large metadata
+serialization/publication as a larger target than first-file renames. The next
+format experiment will consider a compact encoding for cached headers while
+retaining one authoritative catalog and the full recent-header window; it must
+be measured before acceptance. No profiling hooks remain in production code.
+
+## Compact cached-header experiment
+
+[Encoding diagnostics](baselines/2026-09-11-cached-header-encoding.json) identify
+an existing codec that avoids repeatedly serializing multi-megabyte JSON header
+windows. With 8,192 populated synthetic headers, median RLP encoding is 1.443 ms
+and 5,365,633 bytes versus JSON 8.254 ms and 13,465,461 bytes. The minimal fixture
+is 1.017 ms / 4,153,348 bytes versus 6.067 ms / 10,067,969 bytes. All 18 samples
+pass exact RLP round-trip equality. Fixed codec ordering makes this a diagnostic,
+not a performance acceptance result. LZ4 added about 13 ms for populated headers,
+so compressing the JSON is not justified by these samples.
+
+Version 3 uses Alloy's already locked RLP implementation, retaining all headers,
+checksums and checkpoint ordering. No package versions or column encodings change.
+Removed the obsolete JSON envelope/raw-value feature and the server's duplicate
+catalog parser. New tests cover optional fields, oversized/trailing RLP, invalid
+encoding inputs before publication, and segment-ID exhaustion. The last two
+regressions failed before their fixes. Full version 3 gates and actual ingestion
+comparisons are in progress; earlier version 2 results do not validate version 3.
+
+## Catalog v3 release comparison
+
+All six [local gates](baselines/2026-09-11-catalog-v3-gates.jsonl) pass for committed
+`3f457987`: 841 tests passed, seven explicitly ignored cases, strict workspace
+Clippy, doc tests and release linking. [Paired release samples](baselines/2026-09-11-catalog-v3-comparison.jsonl)
+use four profiles, three alternating process pairs each, three fresh iterations
+per process. Final checkpoint/finalization remains timed; every exact row and
+progress/reopen oracle passes. The fixture digest and tip hash match across each
+pair. Builds/tests were stopped during timing. Hardware, cache conditions,
+compiler, binary and fixture hashes are captured in the raw output. The v3
+[baseline adapter](baselines/2026-09-11-publication-v3-baseline.patch) preserves
+original production code while giving it identical fixture inputs and oracles.
+
+| Workload | Baseline median ms | Catalog v3 median ms | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live, minimal headers | 2,777.323 | 469.196 | -83.11% |
+| Historical, 15,360 rows | 14.780 | 19.751 | +33.63% |
+| Historical, 491,520 rows | 74.197 | 81.285 | +9.55% |
+| Per-block checkpoint live, minimal headers | 2,801.352 | 1,985.857 | -29.11% |
+| Per-block checkpoint live, populated headers | 3,509.579 | 2,115.962 | -39.71% |
+
+The compact header format removes the measured live regression, including the
+per-block boundary and populated fields. It does **not** finish performance
+acceptance: short history remains above 10%; large history narrowly fits in this
+run and needs confirmation because its earlier baseline median was lower.
+These are storage-call timings, not end-to-end sync throughput. Process peak RSS
+medians were ~53-55 MiB candidate versus ~662-867 MiB baseline for per-block live;
+large-history RSS was ~1,270 MiB on both, including fixture/oracle allocations.
+All six Linux/macOS CI jobs pass for `3f457987` in run `34538163643`. Historical
+raw writes/compaction, current cross-device and ExFAT recovery checks, and remaining
+storage review still gate merge.
+
+[Historical phase attribution](baselines/2026-09-11-catalog-v3-history-profile.json)
+shows short raw writes around 8 ms, compaction 5.5 ms and checkpoint 7-8.5 ms.
+In warm large calls, preparing/encoding the payload column takes 60-65 ms, while
+its page writer takes 31-38 ms. These overlapping worker durations include
+scheduling; they are not exclusive CPU totals. Code inspection confirms an entire
+column of cloned `Bytes` before paging and an unused raw buffer built even for
+adaptive encoding. The next experiment borrows payloads per page and removes
+that unused adaptive-path serialization. Temporary profiling scopes were removed.
+
+[Payload-borrowing comparison](baselines/2026-09-11-borrowed-data-comparison.jsonl)
+at `45372779` versus `3f457987` isolates page-sized borrowed payload references and
+removal of unused adaptive-path raw serialization. Three alternating pairs with
+three iterations each pass exact row/progress/reopen oracles. Large-history median
+falls 80.056 → 71.005 ms (-11.31%); short history is 20.021 → 20.737 ms (+3.58%).
+The latter path does not use the full-column borrowing change; repeat it with the
+next short-write investigation to distinguish noise from an encoder regression.
+All 134 storage tests and strict storage Clippy pass. The original-baseline 10%
+ceiling still applies, and neither this isolated result nor earlier CI permits merge.
+
+[Four-worker initial-write comparison](baselines/2026-09-11-raw-four-comparison.jsonl)
+at `2355d6f4` versus `45372779` reduces short-history median 19.897 → 17.237 ms
+(-13.37%), with three alternating pairs and exact oracles passing. It uses the
+same four column groups as appends; publication ordering and worker error
+propagation stay intact. All 134 storage tests and strict storage Clippy pass.
+This is still above the original short-history baseline's 10% allowance. The
+remaining raw-to-compressed payload path allocates one `Bytes` per row; a bounded
+borrowed reader can remove that overhead while validating its offsets before
+allocation. That reader's corrupt-length behavior needs a regression first.
+
+The borrowed raw-payload experiment also fixes B2-12: `read_var_bytes` previously
+computed/allocated offsets from the untrusted row count before checking the table
+fits in the file. The pre-fix 44-byte/`u64::MAX` fixture panics; it now returns
+`InvalidData`. A shared owned file buffer validates the raw version, compression,
+count arithmetic, offset table and full monotonic/sentinel layout before either
+public query materialization or page-level compaction borrowing. Empty and repeated
+selected rows retain their order. Query results still own individual payloads, so
+a small retained result does not pin an entire raw column. The complete raw file
+is still read into memory for compaction; this is not a streaming-file or globally
+bounded-recovery claim. Superseded offset vectors and the unused encoder wrapper
+are removed. Focused tests pass; full storage validation/timing is in progress.
+
+[Validated raw-payload borrowing](baselines/2026-09-11-raw-borrow-comparison.jsonl)
+at `2872595b` versus `2355d6f4` gives 18.079 → 17.205 ms short-history median
+(-4.83%) across three alternating pairs; all exact oracles pass. The small timing
+change needs confirmation against noise; the reproduced malformed-layout fix
+is independently required. Full storage tests pass (136, two ignored), as do the
+final layout tests and strict storage Clippy. The next isolated experiment avoids
+spawning fourteen compaction workers when each column occupies only one page;
+multipage raw segments retain parallel compaction. Nine focused compaction tests
+and strict Clippy pass; timing is pending.
+
+**Rejected experiment:** [single-page serial compaction](baselines/2026-09-11-single-page-rejected.jsonl)
+at `2635b41c` increases the short median 16.985 → 20.208 ms (+18.97%) versus
+`2872595b`. All oracles pass, but the performance result rejects the scheduling
+assumption even at one page per column. Restored the previous parallel compaction
+implementation; no serial-size threshold remains. Recompare the combined retained
+changes against original `09a63f55` before further tuning or acceptance.
+
+## Combined confirmation at 224a9d30
+
+All six [local gates](baselines/2026-09-11-catalog-v3-final-gates.jsonl) pass with
+843 tests and seven ignored cases. All six Linux/macOS CI jobs pass in run
+`34540157764`. [Expanded original-baseline comparison](baselines/2026-09-11-catalog-v3-final-comparison.jsonl)
+uses five alternating pairs for grouped live/short history and large history,
+three pairs for each per-block live profile, and three iterations per process.
+All exact oracles and fixture identifiers agree. No builds/tests ran during timing;
+final checkpoint/finalization is included. Raw output records median and observed
+nearest-rank p95 (9/15 samples are not a production latency distribution).
+
+| Workload | Original baseline median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live | 2,889.054 | 518.361 | -82.06% |
+| Short historical | 15.202 | 18.388 | +20.96% |
+| Large historical | 66.830 | 71.237 | +6.59% |
+| Per-block live, minimal headers | 2,850.929 | 2,067.854 | -27.47% |
+| Per-block live, populated headers | 3,532.592 | 2,232.949 | -36.79% |
+
+Short history still fails the 10% ceiling, so the candidate remains unmerged.
+The large profile fits the limit in this confirmation, and live remains faster;
+these are storage-call results, not measured P2P throughput. Next isolate whether
+initial raw-file creation benefits from two workers instead of four; the existing
+append scheduling and compaction remain unchanged in that experiment.
+
+**Rejected experiment:** [two initial workers](baselines/2026-09-11-raw-two-rejected.jsonl)
+at `6a659209` gives 17.216 → 17.776 ms (+3.25%) versus `224a9d30` in the isolated
+short-history comparison. It does not demonstrate improvement; restored four
+workers. Thirteen focused column/recovery tests and strict Clippy had passed.
+The remaining prototype therefore matches the previously validated production
+code while further performance work continues.
+
+[All-null file extension](baselines/2026-09-11-null-extension-comparison.jsonl)
+at `080c9eec` gives 19.058 → 17.134 ms (-10.10%) versus the validated `224a9d30`
+in three alternating isolated short-history pairs. It extends new replacement
+files to their required zero-filled logical length instead of writing each null
+slot, with unchanged headers, bitmap bytes and publication ordering. Fourteen
+focused column/recovery tests and strict Clippy pass, including exact file-byte
+checks for new files, replacements, empty/partial-byte counts and repopulation.
+This is promising but needs combined original-baseline confirmation and ExFAT
+validation; it does not establish acceptance for all sync workloads.
+
+The [mixed original-baseline confirmation](baselines/2026-09-11-null-original-comparison.jsonl)
+at `080c9eec` (docs-only HEAD `5cb4518d`) still fails: five alternating pairs,
+three iterations per route give short history 14.800 → 18.152 ms (+22.65%),
+and grouped live 2,881.240 → 490.167 ms (-82.99%). All exact oracles pass.
+The isolated all-null gain did not establish a convincing improvement over the
+previous mixed confirmation; it remains provisional, and PR #130 stays unmerged.
+The original historical path omitted fsync, unlike its live WAL path. Its faster
+short finalization therefore includes no equivalent durability guarantee. This
+explains a fixed cost but does not waive the user's 10% performance ceiling.
+A bounded larger replacement-write buffer is the next isolated experiment: raw
+fixed-width writes currently pass through an 8 KiB buffer, generating repeated
+small writes before compression. No checkpoint ordering is relaxed.
+
+[Larger replacement write buffers](baselines/2026-09-11-replacement-buffer-comparison.jsonl)
+at `260f5c64` versus `080c9eec` reduce isolated short-history median
+18.009 → 16.182 ms (-10.14%), with three alternating pairs and all exact
+oracles passing. The 64 KiB buffers retain at most 2 MiB for the bounded
+replacement set. Fourteen focused column/recovery tests and strict storage
+Clippy pass. Combined original-baseline confirmation is still required.
+
+Current combined-sync cross-device recovery now has an explicit ignored test
+using `LOGEX_TEST_VOLUME_A/B`: both filesystem directions, live/history,
+empty/three/twelve incoming rows, checkpoint versus restart rewind, repeated
+reopen and exact retry. All 24 combinations pass on the disposable local
+APFS/ExFAT image. The eight existing generic-WAL cross-device cases also pass
+after initializing a catalog before installing the dangling WAL alias: catalog
+v3 correctly rejects such an artifact in an otherwise uninitialized directory.
+These are process-reopen/order checks, not physical power-cut certification.
+The complete storage suite on ExFAT is running before performance confirmation.
+
+
+At `83b5720e` (production identical to `260f5c64`), all six local workspace
+gates pass: 844 tests and eight ignored cases. The complete local ExFAT run
+reports 133 passed, four failed and three ignored: four cleanup tests assumed
+that only application files could exist. A focused diagnostic found `column`
+and `._column`, whose companion has the observed AppleDouble v2 header. The
+assertions now allow valid companions of expected files while still rejecting
+leftover temporary artifacts and their companions. No production cleanup or
+integrity rule was relaxed. All 32 focused ExFAT checks now pass (10 durability, 21 reader and one
+compaction oracle), including the new fixed-column/prefix behavior.
+The local long run used a Cargo output binary while later reader work rebuilt
+that path, so its process-spawn cases are preliminary; future full runs use an
+immutable copied executable. The Intel run uses such a copy and is still running.
+
+Fixed-width raw reader regressions reproduce B2-13 (count-allocation panics,
+invalid format/layout acceptance and out-of-bounds null results). The new byte
+view also removes typed-to-raw copies during compaction. Twenty-one reader cases,
+a page-boundary byte-equivalence oracle and strict storage Clippy pass on APFS.
+Original-baseline timing for the buffer change and isolated timing for this
+next representation change remain pending; none authorizes merge.
+
+
+The [original-baseline buffer confirmation](baselines/2026-09-11-buffer-original-comparison.jsonl)
+still fails short history at `83b5720e`: 14.737 → 18.044 ms (+22.44%),
+with grouped live 2,959.867 → 544.773 ms (-81.59%). Five alternating pairs
+with three iterations pass all exact oracles. The buffer's isolated gain did
+not reproduce convincingly in this mixed workload; it remains provisional.
+[Fixed-view compaction](baselines/2026-09-11-fixed-view-comparison.jsonl) at
+`89718b71` versus `83b5720e` gives 18.228 → 17.950 ms (-1.53%) in three
+isolated pairs. This is within likely noise and is not a claimed speedup;
+the reproduced reader correctness fixes independently justify the validation.
+The original-baseline cap is still unmet. Further investigation must address
+raw historical staging followed by a second compressed write, without creating
+extra small segments or hiding finalization work in an unmeasured background job.
+
+[Intel validation](baselines/2026-09-11-intel-buffer-validation.jsonl) at
+`83b5720e` passes all 137 storage tests (three ignored) and both cross-mount
+tests on the disposable ExFAT image; its copied executable also makes child
+process tests use that exact build. All six Linux/macOS CI jobs pass at that
+commit in run `34543665334`. Both disposable images are detached. Current
+fixed-view full gates/platform checks are still required before acceptance.
+
+
+All six [local gates](baselines/2026-09-11-fixed-view-gates.jsonl) pass at
+`89718b71`: 849 tests and eight ignored cases. The fixed-reader change has
+passed focused ExFAT tests; full current platform validation and the historical
+performance ceiling remain open. A diagnostic direct-compression probe will
+estimate the removable raw-staging cost. A lower dense threshold by itself is
+not a production fix: it creates extra small segments. Any retained design must
+continue coalescing historical chunks, preserve existing committed pages through
+interruption, bound index/page growth, and include final publication costs.
+
+
+The [direct-compression diagnostic](baselines/2026-09-11-direct-staging-probe.jsonl)
+reduces isolated short-history median 17.137 → 12.190 ms (-28.87%) across three
+alternating pairs, with exact row/progress/reopen oracles passing. It temporarily
+caps the dense threshold at 8,192 rows; the captured source diff records that
+one-line probe. The [coalescing regression](baselines/2026-09-11-direct-staging-coalescing-failure.log)
+fails as expected: sixteen medium chunks produce sixteen segments instead of
+one. **The threshold change was restored and is not a candidate for merge.**
+
+This supports investigating compressed page appends inside the existing active
+historical segment. Preserve row/segment/block-span limits and the catalog
+checkpoint boundary; keep committed page payloads/index entries unchanged,
+append new pages, atomically replace page indexes/bitmaps, and publish the
+manifest only after required ordering. Readers must respect their manifest's
+row boundary while later pages are appended. Test interruption at append/index/
+manifest/catalog phases, repeated rewind/retry, exact page/row results and sparse
+multi-batch workloads. Existing readers support explicit per-page row counts;
+no page-boundary assumption or reduction in integrity checks may be introduced.
+Full format/checksum and snapshot-lifetime review remain required audit work.
+
+
+## Compressed historical staging candidate
+
+Historical staging now uses the existing compressed encoders directly, appending
+pages to the active historical segment. The dense threshold, target row count
+and block-span limit are unchanged. Previously committed payload bytes and page
+index entries are immutable; indexes, nullable bitmaps and canonical bits are
+published through the existing replacement batch before the manifest. The catalog
+remains the durable row/progress boundary. Startup validates that complete prefix,
+rewinds unpublished tails, and preserves healthy compressed segments. WAL replay
+uses the catalog's active segment, replacing the old inference that compression
+implies finalization. Background query indexing already excludes this segment.
+
+The [publication regression](baselines/2026-09-11-page-append-publication-before.log)
+initially exposed five rows through a reader holding a two-row manifest. Readers
+now validate and clip page indexes to their captured row boundary; selected reads
+also enforce that boundary. Page payload reads check actual file bounds before
+allocation and checked arithmetic prevents offset wrap. Tests preserve prior
+noncanonical bits and exact payload/index prefixes, keep sixteen medium batches
+in one segment, reject twelve malformed metadata/prefix cases without mutation,
+and simulate seven append/publication crash states with repeated reopen and retry.
+Main-thread failure matrices now include both small appends and rotation. Raw
+layout assumptions in old fixtures were updated without dropping row/recovery
+assertions. Full current workspace/platform validation is still required.
+
+The [original comparison](baselines/2026-09-11-page-append-original-comparison.jsonl)
+uses fixture v3, five alternating pairs with three iterations for short/large
+workloads, and three pairs for sustained history. Finalization and checkpoint
+costs are included, and all exact row/progress/reopen oracles pass:
+
+| Workload | Original median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| Grouped live, 128 blocks × 128 rows | 2,849.237 ms | 548.022 ms | -80.77% |
+| Short history, one 128-block chunk | 14.237 ms | 12.989 ms | -8.77% |
+| Sustained history, sixteen 128-block chunks | 273.934 ms | 123.813 ms | -54.80% |
+| Large history, 512 blocks × 1,024 rows | 60.787 ms | 67.158 ms | +10.48% |
+
+The [sparse comparison](baselines/2026-09-11-page-append-sparse-comparison.jsonl)
+uses three alternating pairs with three iterations and one row per nonempty block:
+
+| Workload | Original median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| 128 blocks, one chunk | 6.247 ms | 11.097 ms | +77.63% |
+| 2,048 blocks, sixteen 128-block chunks | 46.703 ms | 69.125 ms | +48.01% |
+| 8,192 blocks, four 2,048-block chunks | 19.388 ms | 26.909 ms | +38.79% |
+
+Every sixteenth block is empty. These are local APFS storage-call measurements,
+not network sync throughput. Binary hashes, captured source diff, hardware,
+toolchain, cache conditions, samples, p95 and process peak RSS are in the artifacts.
+The original historical path omitted fsync; that does not waive the user's 10%
+limit. **The candidate still fails acceptance and PR #130 must not merge.**
+Profile the fixed small-file publication cost before selecting another change;
+large encoding allocations and page/index growth also need measurement. Broader
+format checksums, query snapshot lifetime and repair remain unfinished audit work.
+
+
+### Fixed-cost follow-up
+
+[Instrumented phase timings](baselines/2026-09-11-page-append-phase-profile.jsonl)
+show the final device/directory synchronization dominates tiny chunks (roughly
+5–6 ms in the diagnostic runs); the 39 individual flush calls total only about
+0.1 ms. Nested and parallel phase durations overlap, so they are not additive or
+acceptance timings. Merely parallelizing file flushes is not supported by this
+profile. Creating the canonical bitmap separately also ordered it once before
+the containing publication ordered it again.
+
+The new bitmap is now written with the other new page artifacts and remains
+covered by their manifest/catalog publication. Existing committed canonical
+prefix replacements retain their ordering. The standalone bitmap helper is now
+test-only. [Isolated timing](baselines/2026-09-11-new-bitmap-comparison.jsonl)
+versus `e60718fc` is short history -15.12%, few logs -2.34%, tiny chunks +0.87%,
+and large history +0.41%. Only the short-history result supports a speedup; the
+others are within likely noise. Four segment regressions, crash-phase recovery
+and strict storage Clippy pass. This remains provisional until combined checks.
+
+Two further diagnostics were restored, not retained:
+
+- [Omitting the empty initial manifest](baselines/2026-09-11-first-history-manifest-comparison.jsonl)
+  gave few logs +13.78%, tiny chunks +0.01%, short history -4.55% and sparse history
+  -3.69%. Results do not establish a retained improvement; the original allocation
+  and publication sequence is restored.
+- [Four compressed-column workers below 4,096 rows](baselines/2026-09-11-small-page-workers-comparison.jsonl)
+  gave few logs -6.68%, tiny chunks -3.29%, short history +3.34% and sparse history
+  +0.63%. It does not resolve sparse overhead and most results are within noise.
+  The established fourteen column workers are restored to isolate further work.
+
+The sparse acceptance gap remains. A compact shared page artifact is a candidate
+for the user's authorized fresh-format approach: reduce file/index/bitmap creation
+and publication overhead while keeping immutable committed prefixes and bounded
+checkpoint rewind. This requires a concrete format and failure tests before any
+claim that it solves performance. No protected dataset or deployment is affected.
+
+
+All six [local workspace gates](baselines/2026-09-11-page-append-gates.jsonl)
+pass for page appends plus the new-bitmap publication simplification: 853 tests,
+eight ignored, doc tests, strict Clippy, formatting, all-target check and release
+linking. The rejected empty-manifest/worker changes are absent. The performance
+ceiling and current platform checks remain open; green gates do not permit merge.
+A separate equal-bytes artifact-layout probe will test the shared-file hypothesis
+before implementing any new container format.
+
+
+The [equal-bytes artifact probe](baselines/2026-09-11-artifact-layout-probe.jsonl)
+compares 32 encoded column/index/null files with one shared artifact, retaining
+canonical/manifest files and identical durable publication. Fifteen alternating
+pairs per size pass byte-for-byte readback and checksum checks. Creation plus
+publication median changes 12.212 → 8.142 ms for 120 rows (-33.33%),
+10.941 → 8.495 ms for 15,360 rows (-22.36%), and 21.380 → 20.486 ms for
+491,520 rows (-4.18%). Compression is outside this diagnostic timer, so these
+are not ingestion speedups. The first two results support a shared-artifact
+prototype; the large change is within likely noise. Actual append/recovery/query
+and original-baseline acceptance remain required.
+
+
+## Integrated bundle comparison (2026-09-11, `75570eb2`)
+
+Catalog v4 / segment v2 connects the shared artifact to ingestion, readers and
+recovery. All six local gates pass: 865 tests, eight explicitly ignored, strict
+Clippy/check, doctests, formatting and release node build. CI run `34552619060`
+exposed a Linux-only test assumption (`fail_after > 20`) after the reduced file
+count shortened the failure matrix. The exact data/recovery oracles passed up to
+that assertion. Replace it with an explicit durable-catalog publication event,
+then rerun Linux CI; do not infer platform acceptance from local macOS success.
+
+Repeated original-versus-bundle release runs use the unchanged v3 fixture, fresh
+APFS directories, pinned executables, finalization/checkpoints and exact
+row/progress/reopen oracles. Short/large use five alternating pairs of three runs;
+the other profiles use three pairs of three. No local builds/tests ran during
+these timings. These measure storage calls, not peer-to-peer sync throughput.
+
+| Workload | Original median ms | Bundle median ms | Change |
+| --- | ---: | ---: | ---: |
+| Few logs: one 120-row chunk | 8.252292 | 9.635834 | +16.77% — fails |
+| Tiny chunks: sixteen 120-row chunks | 57.605667 | 23.925042 | -58.47% |
+| Sparse history: four 1,920-row chunks | 22.474500 | 13.962334 | -37.87% |
+| Short history: one 15,360-row chunk | 15.023792 | 10.873833 | -27.62% |
+| Grouped live | 3239.781458 | 580.346834 | -82.09% |
+| Sustained history: sixteen 15,360-row chunks | 278.226292 | 68.142208 | -75.51% |
+| Large history: one 491,520-row chunk | 62.903750 | 74.061125 | +17.74% — fails |
+
+The single-tiny and large cases still prevent acceptance under the user's 10%
+ceiling. Full records include p95, throughput, process peak RSS, environment,
+fixture digests, commit and binary hashes. Median process RSS in the combined
+short/live fixture was 659.4 MiB original versus 68.3 MiB candidate; large history
+was 1234.8 versus 1254.5 MiB. These are process high-water marks including fixture
+construction/oracles, not isolated ingestion memory. Physical disk/write
+amplification, query/startup effects and current ExFAT validation remain required.
+
+[Raw comparison](baselines/2026-09-11-bundle-original-comparison.jsonl),
+[local gates](baselines/2026-09-11-bundle-integration-gates.jsonl),
+[Linux failing-before assertion](baselines/2026-09-11-bundle-linux-matrix-before.log).
+
+Instrumented phases identify about 7 ms in large-batch capacity preflight, which
+called zstd's bound once per row. Computing it once per complete page, and only
+checking individual rows for the final capacity-constrained page, retains the
+same conservative bound. Five alternating pairs of three release runs against
+`75570eb2` improved large history from 73.779917 to 67.850542 ms (-8.04%). This is
+an isolated improvement; original-baseline confirmation remains required. Tiny
+batch time is still dominated by final checkpoint publication. The next isolated
+probe removes its empty first manifest, retaining first complete row/manifest
+publication and all commit/recovery checks.
+
+[Instrumented phases](baselines/2026-09-11-bundle-phase-profile.jsonl),
+[page-bound comparison](baselines/2026-09-11-bundle-page-bound-comparison.jsonl).
+Worker and nested durations overlap and must not be added together. Instrumented
+runs are diagnostic, separate from acceptance timing; instrumentation is removed.
+
+
+The bundled-format first-manifest probe now shows a consistent isolated saving:
+three alternating pairs of three runs for few logs/tiny chunks, five pairs for
+short history. Publishing the first complete historical manifest directly
+improves few logs 8.798708 → 7.863959 ms (-10.62%), tiny chunks 23.019625 →
+21.145625 ms (-8.14%), and short history 10.005208 → 9.030875 ms (-9.74%). The
+allocation remains part of the pending transaction; no empty catalog entry is
+published separately. Failure-matrix validation and a new original-baseline
+comparison are required before combined acceptance. This supersedes the earlier
+rejected empty-manifest probe only for the new bundled implementation.
+
+[First-manifest comparison](baselines/2026-09-11-bundle-first-manifest-comparison.jsonl).
+
+All six local gates also pass after both optimizations and the platform assertion
+correction: 865 tests/eight ignored, strict Clippy/check, formatting, doctests and
+release node build. [Gate results](baselines/2026-09-11-bundle-streamlined-gates.jsonl).
+
+
+## Original confirmation after bundle simplification (`7c25958a`)
+
+Five alternating pairs of three release runs per profile preserve exact
+row/progress/reopen oracles. Local workspace gates pass (865 tests/eight ignored).
+Both remaining failures persist despite the isolated gains:
+
+| Workload | Original median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| Few logs | 6.854958 | 8.181792 | +19.36% — fails |
+| Tiny chunks | 57.146709 | 24.925459 | -56.38% |
+| Sparse history | 21.884875 | 13.159584 | -39.87% |
+| Short history | 15.361667 | 10.196375 | -33.62% |
+| Grouped live | 3173.144125 | 555.956084 | -82.48% |
+| Sustained history | 215.534917 | 65.018750 | -69.83% |
+| Large history | 62.812084 | 69.500041 | +10.65% — fails |
+
+[Raw results](baselines/2026-09-11-bundle-streamlined-original-comparison.jsonl).
+No acceptance waiver is applied. Baseline timings also vary between run sets;
+isolated percentage improvements must not be multiplied and called acceptance.
+Next inspect avoidable large-column allocation/copy work and tiny-batch overhead
+without weakening final checkpoint durability.
+
+
+All six Linux/macOS CI jobs pass for `7c25958a` in run `34553735175`. The Linux
+matrix now checks that the catalog was actually published rather than asserting
+an incidental minimum number of I/O calls.
+
+An isolated follow-up removes intermediate typed address/hash/topic vectors:
+values are written directly into the existing encoded-input buffer, with checked
+capacity arithmetic and fallible reservation. Existing raw/typed page-byte,
+malformed-metadata and append snapshot tests pass. Five alternating pairs of
+three release runs against `7c25958a` improve large history 71.078208 → 67.022416 ms
+(-5.71%); short history 9.047750 → 9.054792 ms (+0.08%, within noise). Median process
+peak RSS for large history is 1244.3 → 1230.3 MiB; fixture/oracle allocations also
+contribute to that high-water mark. This remains provisional pending the combined
+original comparison and gates.
+
+[Single-buffer comparison](baselines/2026-09-11-bundle-single-buffer-comparison.jsonl).
+
+
+A serial path for chunks of at most 128 rows / 64 KiB payload was measured and
+removed. Five alternating pairs of three release runs against the single-buffer
+parallel control showed few logs +11.76%, tiny chunks -0.64%, short history +0.44%
+and large history +2.22%. The hoped-for tiny-chunk improvement did not appear;
+the shared function-pointer dispatcher and threshold are not retained.
+
+[Rejected serial comparison](baselines/2026-09-11-bundle-small-serial-comparison.jsonl).
+
+The next isolated layout probe places `segment.bundle` directly in its segment
+instead of creating a `columns` subdirectory. Logical column names stay fixed;
+raw rollback also removes the now-root-level uncommitted artifact after publishing
+the restored raw manifest. All 158 storage tests pass (three explicitly ignored).
+This physical-location probe is not accepted or versioned yet; if retained, its
+format diagnostics/versions and complete gates must be updated before publication.
+
+
+The flat-file layout was also removed: five alternating pairs of three runs
+showed few logs +0.89%, tiny chunks -0.16%, short history +0.71% and large history
++1.43%, all within likely noise. No path or format-version change is retained.
+The only retained follow-up is the measured fixed-column buffer reduction, and
+all six workspace gates pass again (865 tests/eight ignored).
+
+[Rejected flat-file comparison](baselines/2026-09-11-bundle-flat-artifact-comparison.jsonl),
+[retained buffer-change gates](baselines/2026-09-11-bundle-single-buffer-gates.jsonl).
+
+Metadata growth remains an explicit acceptance concern: repeating full tables
+and page indexes on every append can accumulate stale bytes quadratically.
+Measure representative and very small batches before choosing a bounded encoding
+or reclamation change. Format acceptance, original ingestion confirmation, disk
+and query/startup accounting, and current isolated ExFAT validation remain open.
+
+
+## Bounded metadata follow-up
+
+All six CI jobs pass for `0223055d` in run `34555483224`, in addition to its saved
+local gates. The subsequent growth diagnostic nevertheless rejects its full-table
+and full-index publication pattern: 1,024 tiny appends retain a 295 MB artifact.
+
+The local successor uses catalog v5 / segment v3 and bounded table deltas, inline
+incremental page-index entries, and nullable bitmaps with bounded compression.
+An intermediate separate-index-fragment implementation reduced disk size but
+increased small-read overhead and was revised. The current inline version passes
+164 storage tests (three ignored) and reduces that artifact to 10.4 MB while
+preserving exact rows and one segment. Details, malformed-input coverage and all
+raw evidence are in [the format ledger](shared-segment-artifact.md). This is still
+unaccepted; original ingestion, query/startup, full gates and platforms remain.
+
+
+## Original confirmation with inline metadata (2026-09-11)
+
+Five alternating pairs × three release iterations preserve all exact row,
+head/floor/anchor and reopen oracles. These are storage-call timings, including
+finalization/checkpoint, not end-to-end peer throughput.
+
+| Profile | Original median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| few-logs | 6.569917 | 7.925625 | +20.64% — fails |
+| tiny-chunks | 45.301792 | 21.958500 | -51.53% |
+| sparse-history | 19.270958 | 12.010666 | -37.67% |
+| short | 14.584833 | 9.010583 | -38.22% |
+| short (live) | 2921.185708 | 548.505917 | -81.22% |
+| sustained-history | 217.713041 | 65.160292 | -70.07% |
+| large-history | 61.249000 | 67.097041 | +9.55% |
+
+[Raw samples, p95 and peak memory](baselines/2026-09-11-inline-index-original-comparison.jsonl).
+Tiny finalized history still fails the user's ceiling. Large history is close to
+that ceiling and exceeds the 5% investigation threshold. Short-history p95 also
+varied above baseline despite its faster median; tail stability needs confirmation.
+This is not format acceptance. Repeated many-appends/query/startup comparisons,
+current platform tests and physical write accounting remain open.
+
+All six local workspace gates pass for the inline-index milestone: 871 tests /
+eight explicitly ignored cases, formatting, locked all-target check/strict Clippy,
+doctests and release build. The final format-diagnostic correction also passes
+focused catalog tests and refreshed formatting/check/Clippy.
+[Gate records](baselines/2026-09-11-inline-index-gates.jsonl). No merge or performance
+acceptance is implied.
+
+All six Linux/macOS CI jobs also pass for `5df13474` in run `34557667817`. The
+current phase profile puts tiny finalized history at 7.26 ms median: roughly
+1.01 ms writing rows and 6.22 ms checkpointing, including 4.77 ms in the final
+directory/device sync and 0.74 ms in ordering. The 0.22 ms column-encoding scope
+is not the dominant tiny-batch cost. These three instrumented samples identify
+work to inspect, not acceptance or additive component timings.
+[Phase records](baselines/2026-09-11-inline-index-phase-profile.jsonl).
+
+
+The stateless bulk-Zstd experiment passed all 165 storage tests but was removed.
+Against `5df13474`, five alternating pairs × three release runs showed few logs
++11.87%, tiny chunks +3.00%, short history -0.79% and large history -2.75%. The
+small large-history change does not justify the tiny-batch regression. Compression
+levels, streaming encoders and dependencies remain unchanged.
+[Rejected compression comparison](baselines/2026-09-11-bulk-zstd-comparison.jsonl).
+
+
+The three-versus-one-file publication diagnostic did not establish a stable gain.
+Three independent release processes each ran 15 alternating pairs per size. Tiny
+publication varied from -9.71% to +0.44% to -3.42%; pooled tiny/short/large changes
+were -4.20% / +1.00% / -0.83%. Exact artifact-byte and checksum oracles passed, but
+these are not ingestion measurements and do not justify another format change.
+[File-count probe](baselines/2026-09-11-segment-file-count-probe.jsonl). The current
+bundle, canonical bitmap and manifest layout is retained.
+
+Expanded original confirmation found a separate many-appends regression. With
+1,024 one-block historical calls (960 rows; every sixteenth block is empty),
+original median is 2,151.38 ms and the inline-metadata candidate is 4,519.01 ms
+(+110.05%). The 128-call/15,360-row profile improves 350.95 → 243.99 ms (-30.48%).
+Five alternating pairs × three release runs preserve all exact oracles.
+[Many-appends comparison](baselines/2026-09-11-many-appends-original-comparison.jsonl).
+This is an additional acceptance failure; the smaller set of profiles did not
+cover it. Current append preflight loads the growing table chain separately for
+capacity, metadata inspection and writer construction. A local follow-up reuses
+one validated snapshot across those stages, verifies its manifest reference and
+writable-file identity before mutation, and moves uniquely owned metadata rather
+than cloning it. No cross-call cache or format change is introduced. The 166-test storage suite and both new identity/reference regressions pass.
+
+
+## Reused inspection and combined publication follow-up
+
+[Original comparisons](baselines/2026-09-11-reused-bundle-inspection-comparison.jsonl)
+with five alternating pairs × three release samples show that reader reuse reduces
+but does not resolve the many-appends failure: one-row history is 2,178.79 →
+3,588.11 ms (+64.68%); the 128-call profile is 344.70 → 198.04 ms (-42.55%).
+All exact row/head/floor/anchor/reopen oracles pass. These are storage-call timings,
+not peer-network throughput, and do not waive the 10% ceiling.
+
+[Three instrumented runs](baselines/2026-09-11-many-appends-phase-profile.jsonl)
+identify 1,817 ordering calls for the 1,024-call workload, with roughly 1.07–1.29 s
+inside those calls. The bitmap replacement orders separately before the manifest
+publication orders the same tree again. Nested/concurrent profile times are not
+additive or acceptance measurements. All temporary instrumentation is removed.
+
+The next candidate stages a bundled append's canonical bitmap until manifest
+publication, orders both complete replacement payloads with the immutable bundle,
+then renames the bitmap before the manifest. One barrier per device replaces the
+two separate barriers. Other devices still complete a full sync before the catalog
+can reference them; the catalog's final sync makes the publication durable.
+Before that commit, filesystem writeback may persist either rename first. Recovery
+therefore uses the catalog-pinned bundle and original row count, never a newer
+manifest's claimed progress. The previous canonical prefix remains complete in
+both bitmap versions. Per-column appends retain their existing publication path.
+
+All 167 storage tests pass, including every grouped-publication failure point and
+an expanded ten-phase recovery matrix. The added phases cover a newer manifest
+with the old bitmap and a complete or torn uncommitted bundle tail, repeated
+reopen, preserved non-canonical bits, retry and exact final rows. Original release
+comparison, workspace gates and platform validation for this candidate remain
+pending. No merge, deployment or production directory change is authorized by
+these results.
+
+
+The grouped candidate's five-pair original comparison still fails one-row history:
+2,148.96 → 3,215.89 ms (+49.65%); the 128-call profile is 347.43 → 224.84 ms
+(-35.29%). All exact oracles pass. This remains incomplete, and the 128-call result
+also warrants an isolated comparison with reader reuse before retaining the extra
+publication machinery. [Raw evidence](baselines/2026-09-11-grouped-manifest-original-comparison.jsonl).
+This grouped-publication milestone was superseded by the immutable canonical
+implementation below, which avoids replacing committed bitmap data during an
+unfinished sync epoch.
+
+
+All six local workspace gates pass for the reader-reuse/grouped-publication
+checkpoint: 874 tests, eight explicitly ignored, strict Clippy, locked all-target
+check, doctests and release build. [Gate records](baselines/2026-09-11-grouped-inspection-gates.jsonl).
+The added failure loop enumerates the observed checkpoints rather than assuming
+a platform-specific fixed event count. These correctness checks do not resolve
+the remaining performance failures or replace current Linux/macOS/ExFAT checks.
+
+
+## Immutable canonical implementation (in validation)
+
+The catalog-v6 / segment-v4 / bundle-v3 candidate stores canonical flags as stream
+32 in the immutable bundle. It uses the same bounded bitmap codec and checksum
+validation as nullable columns. Reorgs append a replacement bitmap/table, publish
+the manifest, then durably commit the new catalog reference. A failure marks the
+storage object as requiring recovery; repeated reopen restores the committed
+reference. Captured bundled readers retain their old canonical snapshot.
+
+This removes the grouped bitmap/manifest helper and its test-only column-application
+adapter. Raw/per-column append publication is unchanged. Current validation passes all six local workspace gates (878 tests/eight ignored).
+The regressions cover reorg interruption and exact reopen, stale valid manifests,
+malformed/old versions and bitmap padding. Original comparisons improve sustained
+ingestion substantially but still fail tiny finalized history (+17.01%); large
+history (+6.32%) also needs investigation. Current CI and final ExFAT confirmation
+remain pending. See the [implementation evidence](shared-segment-artifact.md#current-candidate-immutable-canonical-metadata).
+
+
+The tiny-checkpoint sync-target experiment was rejected. Nine alternating pairs
+× seven release samples compare the current directory full-sync with the existing
+file-and-directory helper targeting the catalog file: 7.750875 → 8.124625 ms
+(+4.82%). Both retain complete synchronization and pass exact oracles; no gain
+justifies changing the helper. [Evidence](baselines/2026-09-11-catalog-sync-target-comparison.jsonl).
+The original full directory sync is retained.
+
+The stale-manifest reorg guard has a demonstrated regression:
+[without the check](baselines/2026-09-11-canonical-reference-before.log) the second
+canonical update succeeds from stale flags; [with the check](baselines/2026-09-11-canonical-reference-after.log)
+it fails before changing artifacts, and restart/retry preserves both updates.
+The trusted catalog reference is compared before reading or writing reorg state.

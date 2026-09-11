@@ -1,0 +1,3 @@
+{"kind": "environment", "head": "83b5720e", "image": "/private/tmp/logex-audit-130-02gwayfm/exfat-raw.dmg", "filesystem": "exfat", "apfs_device": 16777225, "exfat_device": 16777234, "binary_sha256": "6130f789b6ba7243ed5a95c1195ff541b61776211c1c5481ac836ea2b0a7e5c5", "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2\n", "hardware": "Macmini8,1\n17179869184\n6\n"}
+{"kind": "result", "name": "distinct-mounts", "exit_code": 0, "elapsed_seconds": 24.007200372}
+{"kind": "result", "name": "exfat-storage", "exit_code": 0, "elapsed_seconds": 953.808826489}

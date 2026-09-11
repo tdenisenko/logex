@@ -231,6 +231,11 @@ async fn query_cases(
     let start = Instant::now();
     let actual = execute_log_filter(storage, &filter()).unwrap();
     let elapsed = start.elapsed();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "native filter omitted or duplicated matching rows"
+    );
     assert_eq!(actual, expected);
     samples.record("native_filter", iteration, elapsed, expected.len());
 
@@ -286,6 +291,9 @@ async fn run(config: Config) {
         for batch in rows.chunks(config.batch_rows) {
             storage.write_batch(batch).unwrap();
         }
+        // Include the final checkpoint: deferring column persistence must not
+        // make ingestion appear faster by charging it to indexing or reopen.
+        storage.checkpoint().unwrap();
         samples.record(
             "live_storage_ingest",
             iteration,
@@ -301,12 +309,11 @@ async fn run(config: Config) {
             .iter()
             .chain(std::iter::once(storage.hot_partition()))
             .filter(|partition| partition.meta.row_count > 0)
-            .map(|partition| (partition.meta.id, partition.meta.path.clone()))
+            .map(|partition| partition.meta.path.clone())
             .collect();
         let start = Instant::now();
-        for (id, path) in &targets {
+        for path in &targets {
             IndexBuilder::build_all_indexes(path).unwrap();
-            storage.refresh_segment_manifest(*id).unwrap();
         }
         samples.record("index_build", iteration, start.elapsed(), rows.len());
         assert_native(&storage, &expected);
@@ -425,5 +432,115 @@ async fn ordered_sql_crosses_compacted_page_boundaries() {
     storage.write_historical_batch(&rows).unwrap();
     storage.finalize_historical_segment().unwrap();
     // LIMIT 1000 spans the tail page and the previous 16,384-row page.
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+}
+
+#[tokio::test]
+async fn live_bundles_preserve_queries_through_append_rotation_indexes_and_reorg() {
+    assert_live_queries_through_indexed_append(true).await;
+}
+
+#[tokio::test]
+async fn live_raw_segments_preserve_queries_through_append_rotation_indexes_and_reorg() {
+    assert_live_queries_through_indexed_append(false).await;
+}
+
+async fn assert_live_queries_through_indexed_append(bundled: bool) {
+    let mut rows = fixture(17_000, Profile::Dense);
+    let mut headers = Vec::new();
+    let mut parent_hash = B256::ZERO;
+    for block in rows.chunks_mut(128) {
+        let header = alloy_consensus::Header {
+            number: block[0].block_number,
+            timestamp: block[0].timestamp,
+            parent_hash,
+            ..Default::default()
+        };
+        parent_hash = header.hash_slow();
+        for row in block {
+            row.block_hash = parent_hash;
+        }
+        headers.push(header);
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 10_000,
+        compaction_safety_margin_blocks: 0,
+    };
+    let mut storage = PartitionManager::open(config.clone()).unwrap();
+    let mut start = 0;
+    for end in [8_192, 16_512, rows.len()] {
+        let through = end.div_ceil(128);
+        if bundled {
+            storage
+                .ingest_canonical_batch(
+                    &rows[start..end],
+                    &headers[through - 1],
+                    &headers[..through],
+                    None,
+                )
+                .unwrap();
+        } else {
+            storage.write_batch(&rows[start..end]).unwrap();
+        }
+        storage.checkpoint().unwrap();
+        let expected = expected_matches(&rows[..end]);
+        // This also checks the previous hot indexes after its next append.
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+        for partition in storage
+            .sealed_partitions()
+            .iter()
+            .chain(std::iter::once(storage.hot_partition()))
+        {
+            if partition.meta.row_count > 0 {
+                assert_eq!(partition.meta.path.join("address.col").exists(), !bundled);
+                IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+            }
+        }
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+        start = end;
+    }
+    let removed = rows[0].block_hash;
+    assert_eq!(storage.mark_non_canonical(removed).unwrap(), 128);
+    let remaining: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.block_hash != removed)
+        .collect();
+    let expected = expected_matches(&remaining);
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    drop(storage);
+    for _ in 0..2 {
+        let storage = PartitionManager::open(config.clone()).unwrap();
+        query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    }
+}
+
+#[tokio::test]
+async fn historical_queries_preserve_canonical_flags_after_reorg_and_restart() {
+    let rows = fixture(17_000, Profile::Dense);
+    let removed_hash = rows[0].block_hash;
+    let remaining: Vec<_> = rows
+        .iter()
+        .filter(|row| row.block_hash != removed_hash)
+        .cloned()
+        .collect();
+    let expected = expected_matches(&remaining);
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 50_000,
+        compaction_safety_margin_blocks: 0,
+    };
+    let mut storage = PartitionManager::open(config.clone()).unwrap();
+    storage.write_historical_batch(&rows).unwrap();
+    storage.finalize_historical_segment().unwrap();
+    assert_eq!(
+        storage.mark_non_canonical(removed_hash).unwrap(),
+        (rows.len() - remaining.len()) as u64
+    );
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    drop(storage);
+    let storage = PartitionManager::open(config).unwrap();
     query_cases(&storage, &expected, 0, &mut Samples::default()).await;
 }
