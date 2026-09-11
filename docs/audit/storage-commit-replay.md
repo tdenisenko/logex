@@ -30,6 +30,8 @@ implementation; they do not authorize opening catalog v2 with an older binary.
 | B2-11 | P2, segment-ID exhaustion panics or wraps | A catalog with `next_segment_id = u64::MAX` reaches unchecked allocation. The debug regression panics on overflow; release arithmetic can wrap the allocation boundary. Allocation and registration now return a checked error without changing catalog state. The focused regression failed before the fix and passes after it. No data-loss simulation is claimed for this boundary. |
 | B2-12 | P2, raw variable-column lengths panic before validation | A 44-byte column declaring `u64::MAX` rows panics while computing its offset table, before rejecting the file. A regression failed before the fix. Raw payload layout now checks version/compression, count arithmetic, table size, monotonic offsets, zero origin and exact final sentinel before allocating row results, including selected/empty selections. Compaction borrows one page from the validated file buffer; query payloads retain independent ownership. The malformed-layout and selection-order regressions pass. |
 
+| B2-13 | P2, fixed raw-reader allocation and nullable bounds | Tiny headers reproduce address/hash/topic capacity panics, and an out-of-range nullable read returned `None`. A shared checked view validates full layouts or requested append prefixes before materialization. See the detailed finding and before-fix evidence below. The unmerged fix preserves selected-prefix append behavior and enables borrowed compaction; no measured speedup is claimed yet. |
+
 ## Commit and recovery protocol
 
 `wal/recovery.json` has a checksum over its canonical serialized payload and a

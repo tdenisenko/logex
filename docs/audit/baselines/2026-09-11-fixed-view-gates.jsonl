@@ -1,0 +1,6 @@
+{"gate": "fmt", "returncode": 0, "elapsed_seconds": 0.7567824160214514}
+{"gate": "check", "returncode": 0, "elapsed_seconds": 7.851935416983906}
+{"gate": "clippy", "returncode": 0, "elapsed_seconds": 7.042204125027638}
+{"gate": "test", "returncode": 0, "elapsed_seconds": 146.19638179201866}
+{"gate": "doc", "returncode": 0, "elapsed_seconds": 13.119654915994033}
+{"gate": "release", "returncode": 0, "elapsed_seconds": 43.56130204099463}

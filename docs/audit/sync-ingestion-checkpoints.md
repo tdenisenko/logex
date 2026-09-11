@@ -435,3 +435,34 @@ view also removes typed-to-raw copies during compaction. Twenty-one reader cases
 a page-boundary byte-equivalence oracle and strict storage Clippy pass on APFS.
 Original-baseline timing for the buffer change and isolated timing for this
 next representation change remain pending; none authorizes merge.
+
+
+The [original-baseline buffer confirmation](baselines/2026-09-11-buffer-original-comparison.jsonl)
+still fails short history at `83b5720e`: 14.737 → 18.044 ms (+22.44%),
+with grouped live 2,959.867 → 544.773 ms (-81.59%). Five alternating pairs
+with three iterations pass all exact oracles. The buffer's isolated gain did
+not reproduce convincingly in this mixed workload; it remains provisional.
+[Fixed-view compaction](baselines/2026-09-11-fixed-view-comparison.jsonl) at
+`89718b71` versus `83b5720e` gives 18.228 → 17.950 ms (-1.53%) in three
+isolated pairs. This is within likely noise and is not a claimed speedup;
+the reproduced reader correctness fixes independently justify the validation.
+The original-baseline cap is still unmet. Further investigation must address
+raw historical staging followed by a second compressed write, without creating
+extra small segments or hiding finalization work in an unmeasured background job.
+
+[Intel validation](baselines/2026-09-11-intel-buffer-validation.jsonl) at
+`83b5720e` passes all 137 storage tests (three ignored) and both cross-mount
+tests on the disposable ExFAT image; its copied executable also makes child
+process tests use that exact build. All six Linux/macOS CI jobs pass at that
+commit in run `34543665334`. Both disposable images are detached. Current
+fixed-view full gates/platform checks are still required before acceptance.
+
+
+All six [local gates](baselines/2026-09-11-fixed-view-gates.jsonl) pass at
+`89718b71`: 849 tests and eight ignored cases. The fixed-reader change has
+passed focused ExFAT tests; full current platform validation and the historical
+performance ceiling remain open. A diagnostic direct-compression probe will
+estimate the removable raw-staging cost. A lower dense threshold by itself is
+not a production fix: it creates extra small segments. Any retained design must
+continue coalescing historical chunks, preserve existing committed pages through
+interruption, bound index/page growth, and include final publication costs.
