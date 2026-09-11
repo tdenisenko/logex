@@ -5,6 +5,10 @@ metadata snapshots, which account for most of the sparse bundle growth described
 in [the read-cost investigation](bundle-read-costs.md). It does not finish the
 storage audit or waive remaining read, index, startup or space costs.
 
+The subsequent [bounded table-record candidate](bundle-table-codecs.md) changes
+stored table encoding and uses catalog v9 / segment v7 / bundle v5. The measurements
+below identify the preceding v8/v6/v4 source; its grouping rules remain.
+
 ## Format and recovery
 
 Catalog v8 (`LXCAT008`), segment manifest v6 and bundle v4 (`LXBND004`,

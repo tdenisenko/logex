@@ -1,0 +1,141 @@
+{
+  "stage": "isolated LZ4, before catalog/segment version bumps; same production record codec",
+  "source_sha256": "de38b4460391c310622ec8846be1612a66a35316d68f953f09893ad2451a49a3",
+  "checks": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all"
+      ],
+      "seconds": 0.8013034160248935,
+      "exit_code": 0
+    },
+    {
+      "label": "bundle",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "seconds": 11.756028875010088,
+      "exit_code": 0
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "logex-storage",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "seconds": 2.3852196250809357,
+      "exit_code": 0
+    }
+  ],
+  "test_log": "   Compiling logex-storage v0.1.0 (/private/tmp/logex-table-codec-probe-c_bmxr7s/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.50s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (/Users/tdenisenko/code/logex/target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 21 tests\ntest bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement ... ok\ntest bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum ... ok\ntest bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary ... ok\ntest bundle::tests::an_open_snapshot_keeps_its_file_after_path_replacement ... ok\ntest bundle::tests::group_carries_survive_failed_writes_and_suffix_rollback ... ok\ntest bundle::tests::inline_indexes_enforce_encoding_and_cumulative_bounds ... ok\ntest bundle::tests::inspected_append_rejects_file_replacement_even_with_identical_bytes ... ok\ntest bundle::tests::interrupted_extent_and_table_writes_leave_the_checkpoint_readable ... ok\ntest bundle::tests::invalid_appends_keep_the_writer_usable_and_prefix_intact ... ok\ntest bundle::tests::parent_tables_and_valid_checksum_delta_bounds_are_verified ... ok\ntest bundle::tests::selected_ranges_keep_each_stream_and_snapshot_independent ... ok\ntest bundle::tests::selections_cross_bounded_extents_and_concurrent_columns ... ok\ntest bundle::tests::snapshots_match_an_independent_model_under_mixed_updates ... ok\ntest bundle::tests::snapshots_preserve_data_and_metadata_across_appends ... ok\ntest bundle::tests::sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity ... ok\ntest bundle::tests::table_groups_carry_without_losing_old_snapshots ... ok\ntest bundle::tests::table_records_bound_decoding_and_round_trip_both_codecs ... ok\ntest bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata ... ok\ntest bundle::tests::truncations_and_mutations_fail_without_changing_the_artifact ... ok\ntest bundle::tests::valid_checksums_cannot_bypass_table_record_bounds ... ok\ntest bundle::tests::valid_checksums_do_not_bypass_table_bounds ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 180 filtered out; finished in 5.33s\n\n",
+  "integrated_storage_log": "   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.60s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 201 tests\ntest bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement ... ok\ntest bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum ... ok\ntest bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary ... ok\ntest bundle::tests::an_open_snapshot_keeps_its_file_after_path_replacement ... ok\ntest bundle::tests::group_carries_survive_failed_writes_and_suffix_rollback ... ok\ntest bundle::tests::inline_indexes_enforce_encoding_and_cumulative_bounds ... ok\ntest bundle::tests::inspected_append_rejects_file_replacement_even_with_identical_bytes ... ok\ntest bundle::tests::interrupted_extent_and_table_writes_leave_the_checkpoint_readable ... ok\ntest bundle::tests::invalid_appends_keep_the_writer_usable_and_prefix_intact ... ok\ntest bundle::tests::parent_tables_and_valid_checksum_delta_bounds_are_verified ... ok\ntest bundle::tests::selected_ranges_keep_each_stream_and_snapshot_independent ... ok\ntest bundle::tests::selections_cross_bounded_extents_and_concurrent_columns ... ok\ntest bundle::tests::snapshots_match_an_independent_model_under_mixed_updates ... ok\ntest bundle::tests::snapshots_preserve_data_and_metadata_across_appends ... ok\ntest bundle::tests::sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity ... ok\ntest bundle::tests::table_groups_carry_without_losing_old_snapshots ... ok\ntest bundle::tests::table_records_bound_decoding_and_round_trip_both_codecs ... ok\ntest bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata ... ok\ntest bundle::tests::truncations_and_mutations_fail_without_changing_the_artifact ... ok\ntest bundle::tests::valid_checksums_cannot_bypass_table_record_bounds ... ok\ntest bundle::tests::valid_checksums_do_not_bypass_table_bounds ... ok\ntest column::tests::bitmap_out_of_range_set_cannot_change_future_rows ... ok\ntest column::tests::bitmap_padding_cannot_become_present_rows_after_append ... ok\ntest column::tests::test_column_header_roundtrip ... ok\ntest column::tests::test_null_bitmap_roundtrip ... ok\ntest column_artifact::tests::bundled_bitmaps_reject_malformed_encoding_and_unbounded_sizes ... ok\ntest column_artifact::tests::bundled_bitmaps_roundtrip_sparse_dense_and_random_nulls ... ok\ntest compression::tests::test_bitpack_u32_roundtrip ... ok\ntest compression::tests::test_bitpack_u64_roundtrip ... ok\ntest compression::tests::test_delta_constant ... ok\ntest compression::tests::test_delta_of_delta_constant_interval ... ok\ntest compression::tests::test_delta_of_delta_varying_interval ... ok\ntest compression::tests::test_delta_roundtrip ... ok\ntest compression::tests::test_dict_roundtrip_20b ... ok\ntest compression::tests::test_dict_roundtrip_32b ... ok\ntest compression::tests::test_dict_single_value ... ok\ntest compression::tests::test_lz4_roundtrip ... ok\ntest compression::tests::test_signed_delta_roundtrip_descending ... ok\ntest compression::tests::test_zigzag ... ok\ntest compression::tests::test_zstd_roundtrip ... ok\ntest durability::tests::atomic_replacement_failures_leave_a_complete_old_or_new_file ... ok\ntest durability::tests::column_replacements_are_staged_and_failure_keeps_complete_files ... ok\ntest durability::tests::cross_device_dependencies_require_full_sync_before_publication ... ok\ntest durability::tests::deferred_creation_preserves_existing_files_when_writes_fail ... ok\ntest durability::tests::grouped_publication_orders_artifacts_before_manifest_and_persists_names ... ok\ntest durability::tests::new_file_through_symlink_syncs_its_actual_parent ... ok\ntest durability::tests::ordering_fallback_preserves_io_errors_and_retries_interruptions ... ok\ntest durability::tests::partial_write_error_preserves_original_and_removes_temporary ... ok\ntest durability::tests::publication_follows_directory_symlinks_and_rejects_cycles ... ok\ntest durability::tests::stale_temporary_symlink_is_never_followed ... ok\ntest index_checkpoint::tests::bundle_index_checkpoint_matches_canonical_state_without_changing_row_count ... ok\ntest index_checkpoint::tests::indexes_require_a_current_checkpoint_and_exclude_concurrent_builders ... ok\ntest index_checkpoint::tests::interrupted_index_rebuild_never_publishes_partial_files ... ok\ntest index_checkpoint::tests::malformed_index_checkpoints_are_bounded_and_rebuildable ... ok\ntest native::catalog::tests::cached_header_frames_bound_counts_lengths_and_trailing_data ... ok\ntest native::catalog::tests::cached_header_rlp_preserves_supported_optional_field_sequences ... ok\ntest native::catalog::tests::catalog_bootstraps_and_reloads ... ok\ntest native::catalog::tests::catalog_read_is_bounded_and_preserves_oversized_input ... ok\ntest native::catalog::tests::catalog_rejects_old_versions_and_invalid_identity_without_rewriting ... ok\ntest native::catalog::tests::catalog_updates_hot_target_rows_from_config_on_reload ... ok\ntest native::catalog::tests::checked_catalog_rejects_truncation_and_single_byte_damage ... ok\ntest native::catalog::tests::missing_catalog_alias_is_never_replaced_by_a_fresh_database ... ok\ntest native::catalog::tests::segment_allocation_overflow_returns_an_error ... ok\ntest native::catalog::tests::storage_paths_are_stable ... ok\ntest native::filter::tests::builder_helpers_set_expected_constraints ... ok\ntest native::filter::tests::defaults_match_canonical_eth_get_logs_style_queries ... ok\ntest native::recovery::tests::checkpoint_shape_is_validated_even_with_a_matching_checksum ... ok\ntest native::recovery::tests::valid_checksum_does_not_bypass_journal_version_or_position_checks ... ok\ntest native::segment::tests::appended_pages_wait_for_manifest_publication ... ok\ntest native::segment::tests::borrowed_fixed_compaction_matches_typed_pages_across_page_boundary ... ok\ntest native::segment::tests::compacted_append_rejects_bad_metadata_without_mutating_files ... ok\ntest native::segment::tests::inspected_append_rejects_changed_manifest_reference_without_writes ... ok\ntest native::segment::tests::interrupted_block_profile_rewrite_preserves_the_published_generation ... ok\ntest native::segment::tests::interrupted_full_profile_rewrite_preserves_the_published_generation ... ok\ntest native::segment::tests::manifest_refresh_cannot_restore_retired_column_paths ... ok\ntest native::segment::tests::raw_compaction_preserves_a_captured_reader ... ok\ntest native::segment::tests::raw_projection_keeps_its_prefix_across_append_and_retirement ... ok\ntest native::segment::tests::recompact_segment_rewrites_only_legacy_block_number_profile ... ok\ntest native::segment::tests::rewrite_cleanup_preserves_unreferenced_artifacts_and_canonicality ... ok\ntest native::storage::tests::bundled_append_recovery_preserves_the_checkpoint_at_each_phase ... ok\ntest native::storage::tests::bundled_readers_keep_their_snapshot_across_historical_appends ... ok\ntest native::storage::tests::bundled_reorg_recovers_each_publication_failure_and_preserves_snapshots ... ok\ntest native::storage::tests::bundles_rotate_before_their_extent_capacity_is_exhausted ... ok\ntest native::storage::tests::catalog_reopens_symlinked_segment_directories ... ok\ntest native::storage::tests::checkpoint_age_is_controlled_without_sleeping ... ok\ntest native::storage::tests::checkpoint_bounds_accumulated_wal_bytes ... ok\ntest native::storage::tests::checkpoint_recovery_across_distinct_mounts ... ignored, requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts\ntest native::storage::tests::checkpoint_replays_multiple_batches_and_continues_both_ingestion_routes ... ok\ntest native::storage::tests::committed_bundle_corruption_is_preserved_before_rollback ... ok\ntest native::storage::tests::committed_canonical_bitmap_damage_does_not_recanonicalize_rows ... ok\ntest native::storage::tests::compacted_checkpoint_ignores_partially_removed_raw_columns ... ok\ntest native::storage::tests::compaction_error_identifies_truncated_raw_column ... ok\ntest native::storage::tests::compaction_waits_until_segment_is_safely_behind_head ... ok\ntest native::storage::tests::completed_checkpoint_with_missing_rows_preserves_its_journal ... ok\ntest native::storage::tests::data_directory_lock_is_exclusive_and_retained_by_compaction ... ok\ntest native::storage::tests::historical_batch_replaces_abandoned_segment_directory ... ok\ntest native::storage::tests::historical_checkpoint_recovers_after_each_io_failure_with_prior_wal_batches ... ok\ntest native::storage::tests::historical_floor_only_moves_toward_older_blocks ... ok\ntest native::storage::tests::historical_ingestion_coalesces_medium_chunks ... ok\ntest native::storage::tests::ingestion_actual_process_exit_discards_unfinished_first_batch ... ok\ntest native::storage::tests::ingestion_checkpoint_recovers_each_main_thread_failure_atomically ... ok\ntest native::storage::tests::ingestion_discards_damaged_segments_that_have_no_committed_rows ... ok\ntest native::storage::tests::ingestion_empty_epochs_have_bounded_replay_and_config_change_recovers ... ok\ntest native::storage::tests::ingestion_origin_damage_is_rejected_without_discarding_rows ... ok\ntest native::storage::tests::ingestion_rejects_unencodable_headers_before_publishing_rows ... ok\ntest native::storage::tests::ingestion_restart_rewinds_rows_and_progress_before_retry ... ok\ntest native::storage::tests::ingestion_rollback_itself_is_resumable ... ok\ntest native::storage::tests::ingestion_route_and_durable_api_switches_checkpoint_before_writes ... ok\ntest native::storage::tests::journal_recovers_after_process_exit_and_releases_directory_lock ... ok\ntest native::storage::tests::journal_recovery_preserves_prior_noncanonical_rows_during_partial_column_rebuild ... ok\ntest native::storage::tests::journal_recovery_rejects_damage_and_missing_wal_before_commit_completion ... ok\ntest native::storage::tests::journal_replay_excludes_preexisting_historical_segments ... ok\ntest native::storage::tests::journal_replay_rejects_mismatched_payload_and_committed_prefix ... ok\ntest native::storage::tests::journal_replays_when_first_batch_left_only_some_column_files ... ok\ntest native::storage::tests::journaled_commit_recovers_after_every_main_thread_io_checkpoint ... ok\ntest native::storage::tests::journaled_replay_allows_identical_new_batches ... ok\ntest native::storage::tests::last_directory_owner_unlocks_even_with_a_duplicated_descriptor ... ok\ntest native::storage::tests::legacy_committed_overlap_requires_explicit_recovery ... ok\ntest native::storage::tests::legacy_wal_bytes_cannot_distinguish_new_rows_from_committed_replay ... ok\ntest native::storage::tests::live_first_bundle_recovers_each_publication_and_empty_raw_cleanup_failure ... ok\ntest native::storage::tests::live_ingestion_bundles_fresh_segments_and_preserves_reader_snapshots ... ok\ntest native::storage::tests::missing_catalog_never_adopts_segment_manifests ... ok\ntest native::storage::tests::native_storage_bootstraps_and_rotates_segments ... ok\ntest native::storage::tests::native_storage_clears_empty_wal_recovery_tail_before_next_append ... ok\ntest native::storage::tests::native_storage_coalesces_sparse_historical_writes_across_batches ... ok\ntest native::storage::tests::native_storage_persists_sync_state ... ok\ntest native::storage::tests::native_storage_rebuilds_partial_active_historical_segment_on_open ... ok\ntest native::storage::tests::native_storage_rebuilds_partial_hot_segment_before_wal_replay ... ok\ntest native::storage::tests::native_storage_rejects_missing_canonical_bits_after_committed_rows ... ok\ntest native::storage::tests::native_storage_reopen_preserves_wal_on_complete_entry_corruption ... ok\ntest native::storage::tests::native_storage_reopens_after_reverse_historical_append ... ok\ntest native::storage::tests::native_storage_replay_wal_is_idempotent_after_partial_hot_commit ... ok\ntest native::storage::tests::native_storage_splits_oversized_batches_at_hot_target ... ok\ntest native::storage::tests::native_storage_wal_replay_skips_committed_rows_across_rotation ... ok\ntest native::storage::tests::native_storage_writes_dense_subtarget_historical_batches_compacted ... ok\ntest native::storage::tests::native_storage_writes_historical_batches_as_compacted_sealed_segments ... ok\ntest native::storage::tests::oversized_caller_batch_is_checkpointed_before_success ... ok\ntest native::storage::tests::published_checkpoint_recovery_across_distinct_mounts ... ignored, requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts\ntest native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened ... ok\ntest native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints ... ok\ntest native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries ... ok\ntest native::storage::tests::published_ingestion_hardens_before_wal_reorg_and_metadata_mutation ... ok\ntest native::storage::tests::published_ingestion_idle_hardening_and_failure_are_explicit ... ok\ntest native::storage::tests::published_ingestion_orders_data_and_catalog_before_subsequent_writes ... ok\ntest native::storage::tests::published_ingestion_rewinds_any_complete_checkpoint_in_the_window ... ok\ntest native::storage::tests::rewind_canonical_state_rewinds_sync_head_and_indexed_anchor ... ok\ntest native::storage::tests::route_switch_and_reorg_retire_previous_checkpoint ... ok\ntest native::storage::tests::stale_bundle_manifest_cannot_recanonicalize_previously_removed_rows ... ok\ntest native::storage::tests::startup_integrity_rejects_broken_recent_header_window ... ok\ntest native::storage::tests::startup_integrity_rejects_truncated_raw_column_body ... ok\ntest native::storage::tests::sync_checkpoint_recovery_across_distinct_mounts ... ignored, requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts\ntest native::storage::tests::wal_append_to_live_bundle_recovers_each_publication_failure ... ok\ntest page::tests::adaptive_bytes_page_roundtrip ... ok\ntest page::tests::adaptive_fixed_width_roundtrips_zero_prefixed_b256_values ... ok\ntest page::tests::adaptive_fixed_width_uses_dictionary_fast_path_for_repeated_values ... ok\ntest page::tests::page_index_roundtrip ... ok\ntest page::tests::variable_bytes_page_roundtrip ... ok\ntest partition::tests::manager_coalesces_sparse_historical_partitions_across_writes ... ok\ntest partition::tests::manager_persists_chain_anchors ... ok\ntest partition::tests::manager_persists_rows_and_rotates_segments ... ok\ntest partition::tests::manager_recovers_sync_head_and_recent_headers ... ok\ntest reader::tests::all_null_column_extensions_preserve_new_and_replaced_file_bytes ... ok\ntest reader::tests::fixed_columns_preserve_empty_and_repeated_selection_order ... ok\ntest reader::tests::fixed_columns_validate_layout_before_materializing_rows ... ok\ntest reader::tests::nullable_columns_reject_mismatched_bitmaps_and_out_of_bounds_nulls ... ok\ntest reader::tests::selected_fixed_prefix_survives_an_unfinished_append ... ok\ntest reader::tests::test_read_after_append ... ok\ntest reader::tests::test_read_all_rows_roundtrip ... ok\ntest reader::tests::test_read_canonical_bitmap ... ok\ntest reader::tests::test_read_individual_columns ... ok\ntest reader::tests::test_read_row_count ... ok\ntest reader::tests::test_read_specific_rows ... ok\ntest reader::tests::test_read_variable_length_data ... ok\ntest reader::tests::truncated_fixed_column_returns_error ... ok\ntest reader::tests::truncated_variable_column_returns_error ... ok\ntest reader::tests::variable_column_preserves_empty_payloads_and_selected_order ... ok\ntest reader::tests::variable_column_rejects_malformed_layout_before_allocation ... ok\ntest segment_reader::tests::canonical_len_rejects_truncated_bitmap ... ok\ntest segment_reader::tests::compacted_log_rows_support_descending_page_crossings ... ok\ntest segment_reader::tests::corrupted_page_index_is_rejected ... ok\ntest segment_reader::tests::reads_compacted_segment_rows ... ok\ntest segment_reader::tests::selected_pages_preserve_arbitrary_order_and_duplicates ... ok\ntest wal::tests::append_invalid_row_preserves_existing_wal ... ok\ntest wal::tests::complete_corrupt_wal_entry_is_an_error_not_a_successful_prefix ... ok\ntest wal::tests::test_wal_empty_read ... ok\ntest wal::tests::test_wal_garbage_tail_requires_inspection ... ok\ntest wal::tests::test_wal_multiple_appends ... ok\ntest wal::tests::test_wal_reads_legacy_json_payload ... ok\ntest wal::tests::test_wal_truncate ... ok\ntest wal::tests::test_wal_write_and_read ... ok\ntest wal::tests::wal_bare_relative_filename_roundtrips ... ok\ntest wal::tests::wal_binary_row_shape_must_not_be_silently_normalized ... ok\ntest wal::tests::wal_complete_frame_bit_mutations_never_return_a_prefix ... ok\ntest wal::tests::wal_invalid_append_does_not_create_a_file ... ok\ntest wal::tests::wal_legacy_row_count_must_match_the_payload ... ok\ntest wal::tests::wal_lengths_are_bounded_before_allocation ... ok\ntest wal::tests::wal_partial_checksum_requires_valid_payload_and_matching_prefix ... ok\ntest wal::tests::wal_payload_validation_covers_legacy_and_binary_shapes ... ok\ntest wal::tests::wal_read_errors_and_length_changes_are_not_treated_as_incomplete_tails ... ok\ntest wal::tests::wal_release_baseline ... ignored, explicit release WAL benchmark; see docs/audit/wal-recovery.md\ntest wal::tests::wal_truncation_policy_at_every_byte ... ok\n\ntest result: ok. 197 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 97.95s\n\n",
+  "archive": {
+    "archive_sha256": "ef77ff1082ce40d3e02b753bfe902ec9973655053ca0f3b73a90a3040c92a385",
+    "base": "a0c3aa64a9c881d6bc3693961ff4433071cb98ee",
+    "source_files": {
+      "crates/logex-storage/src/bundle.rs": "d101622a6cc7e933f5955b97c6a9813c5752381ab97be37f1d0ce8b065005a04",
+      "crates/logex-storage/src/native/catalog.rs": "f92229b694ac66169db72c6e071f463b6347089be8d5e10f2640e45b0f49b8ca"
+    }
+  },
+  "workspace_gates": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.8029984169406816
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 5.803211500053294
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 5.060965375043452
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 120.60780979099218
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 9.657166291028261
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit": 0,
+      "seconds": 49.828594458987936
+    }
+  ],
+  "workspace_test_count": {
+    "passed": 908,
+    "ignored": 9
+  },
+  "source_archive_verified_files": 88
+}

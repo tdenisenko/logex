@@ -6,9 +6,10 @@ Existing production directories and the protected external volume remain outside
 this work. The equal-bytes probe in `sync-ingestion-checkpoints.md` supports
 investigation, not acceptance of the new format.
 
-The current [grouped-table follow-up](bundle-table-groups.md) replaces the periodic
+The [grouped-table follow-up](bundle-table-groups.md) replaces the periodic
 full-table scheme described in the historical milestones below. Its stored
-versions are catalog v8 / segment v6 / bundle v4; publication invariants remain.
+versions are catalog v8 / segment v6 / bundle v4. The current [table-record candidate](bundle-table-codecs.md)
+uses v9 / v7 / v5 and retains these publication invariants.
 
 ## Scope
 

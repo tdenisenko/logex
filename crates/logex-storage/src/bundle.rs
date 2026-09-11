@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-const FILE_MAGIC: &[u8; 8] = b"LXBND004";
-const TABLE_MAGIC: &[u8; 8] = b"LXBT0004";
+const FILE_MAGIC: &[u8; 8] = b"LXBND005";
+const TABLE_MAGIC: &[u8; 8] = b"LXBT0005";
 // Column payloads and page-index entries are append-only; nullable bitmaps replace.
 pub(crate) const DATA_STREAMS: u8 = 28;
 const STREAMS: u8 = 33;
@@ -33,9 +33,11 @@ pub struct BundleReference {
     pub sequence: u64,
     pub row_count: u64,
     pub table_offset: u64,
+    /// Stored record bytes, including the codec and decoded-length header.
     pub table_len: u32,
     pub checksum: u32,
     pub depth: u32,
+    /// Sum of decoded table bytes; compression never expands the parse budget.
     pub chain_bytes: u32,
 }
 
@@ -44,12 +46,12 @@ impl BundleReference {
         if self.sequence == 0
             || self.row_count > MAX_ROWS
             || self.table_offset < FILE_MAGIC.len() as u64
-            || self.table_len < 32
-            || self.table_len > MAX_TABLE_BYTES
+            || self.table_len < 5
+            || self.table_len > MAX_TABLE_BYTES + 5
             || self.depth == 0
             || self.depth > MAX_TABLE_DEPTH
             || self.depth != table_depth(self.sequence)
-            || self.chain_bytes < self.table_len
+            || self.chain_bytes < 32
             || self.chain_bytes > MAX_TABLE_BYTES
         {
             return Err(invalid("invalid bundle reference"));
@@ -247,7 +249,8 @@ impl BundleReader {
             if crc32fast::hash(&bytes) != current.checksum {
                 return Err(invalid("bundle table checksum mismatch"));
             }
-            let (streams, parent) = decode_table(&bytes, &current)?;
+            let decoded = decode_record(&bytes, current.chain_bytes)?;
+            let (streams, parent) = decode_table(&decoded, &current)?;
             tables.push((current.clone(), streams));
             match parent {
                 Some(parent) => current = parent,
@@ -638,6 +641,7 @@ impl BundleWriter {
                 (bytes, 1, len)
             }
         };
+        let bytes = encode_record(&bytes);
         let reference = BundleReference {
             sequence,
             row_count,
@@ -734,6 +738,44 @@ fn encode_table(
     Ok(bytes)
 }
 
+// The checksummed record bounds decompression before allocating. Chain budgets
+// count decoded bytes, so compression cannot expand the accepted metadata limit.
+fn encode_record(bytes: &[u8]) -> Vec<u8> {
+    let compressed = lz4_flex::block::compress(bytes);
+    let (codec, payload) = if compressed.len() < bytes.len() {
+        (1, compressed.as_slice())
+    } else {
+        (0, bytes)
+    };
+    let mut record = Vec::with_capacity(5 + payload.len());
+    record.push(codec);
+    record.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    record.extend_from_slice(payload);
+    record
+}
+
+fn decode_record(record: &[u8], budget: u32) -> io::Result<Vec<u8>> {
+    let mut cursor = Cursor(record);
+    let [codec] = cursor.take::<1>()?;
+    let len = cursor.u32()?;
+    if !(32..=MAX_TABLE_BYTES).contains(&len) || len > budget {
+        return Err(invalid("bundle decoded table exceeds its bound"));
+    }
+    match codec {
+        0 if cursor.0.len() == len as usize => Ok(cursor.0.to_vec()),
+        1 if cursor.0.len() < len as usize => {
+            let mut bytes = buffer(len as usize)?;
+            let actual = lz4_flex::block::decompress_into(cursor.0, &mut bytes)
+                .map_err(|_| invalid("invalid compressed bundle table"))?;
+            if actual != bytes.len() {
+                return Err(invalid("bundle decoded table length mismatch"));
+            }
+            Ok(bytes)
+        }
+        _ => Err(invalid("invalid bundle table record")),
+    }
+}
+
 fn decode_table(
     bytes: &[u8],
     reference: &BundleReference,
@@ -765,14 +807,14 @@ fn decode_table(
             || parent.sequence.checked_add(table_span(reference.sequence))
                 != Some(reference.sequence)
             || parent.depth + 1 != reference.depth
-            || parent.chain_bytes.checked_add(reference.table_len) != Some(reference.chain_bytes)
+            || parent.chain_bytes.checked_add(bytes.len() as u32) != Some(reference.chain_bytes)
         {
             return Err(invalid("invalid bundle parent reference"));
         }
         Some(parent)
     } else {
         if reference.depth != 1
-            || reference.chain_bytes != reference.table_len
+            || reference.chain_bytes != bytes.len() as u32
             || table_span(reference.sequence) != reference.sequence
         {
             return Err(invalid("invalid full bundle table reference"));
@@ -1199,6 +1241,8 @@ mod tests {
         let first = create(&path);
         let sequence = 2 << GROUP_BITS;
         let bytes = encode_table(3, sequence, &BTreeMap::new(), Some(&first)).unwrap();
+        let decoded_len = bytes.len() as u32;
+        let bytes = encode_record(&bytes);
         let forged = BundleReference {
             sequence,
             row_count: 3,
@@ -1206,7 +1250,7 @@ mod tests {
             table_len: bytes.len() as u32,
             checksum: crc32fast::hash(&bytes),
             depth: 2,
-            chain_bytes: first.chain_bytes + bytes.len() as u32,
+            chain_bytes: first.chain_bytes + decoded_len,
         };
         forged.end().unwrap();
         OpenOptions::new()
@@ -1238,7 +1282,8 @@ mod tests {
         assert_eq!(reader.read_stream(14).unwrap(), vec![7; INDEX_BYTES]);
         for case in 0..3 {
             let mut damaged = original.clone();
-            let table = &mut damaged[first.table_offset as usize..];
+            let mut table =
+                decode_record(&damaged[first.table_offset as usize..], first.chain_bytes).unwrap();
             match case {
                 0 => table[33] = 0,
                 1 => table[36..44].copy_from_slice(&(INDEX_BYTES as u64 + 1).to_le_bytes()),
@@ -1246,7 +1291,11 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut forged = first.clone();
-            forged.checksum = crc32fast::hash(table);
+            let record = encode_record(&table);
+            forged.table_len = record.len() as u32;
+            forged.checksum = crc32fast::hash(&record);
+            damaged.truncate(forged.table_offset as usize);
+            damaged.extend_from_slice(&record);
             fs::write(&path, &damaged).unwrap();
             assert!(BundleReader::open(&path, &forged).is_err(), "case {case}");
         }
@@ -1263,6 +1312,8 @@ mod tests {
             },
         )]);
         let bytes = encode_table(2, 2, &updates, Some(&first)).unwrap();
+        let decoded_len = bytes.len() as u32;
+        let bytes = encode_record(&bytes);
         let second = BundleReference {
             sequence: 2,
             row_count: 2,
@@ -1270,7 +1321,7 @@ mod tests {
             table_len: bytes.len() as u32,
             checksum: crc32fast::hash(&bytes),
             depth: 2,
-            chain_bytes: first.chain_bytes + bytes.len() as u32,
+            chain_bytes: first.chain_bytes + decoded_len,
         };
         OpenOptions::new()
             .append(true)
@@ -1304,7 +1355,9 @@ mod tests {
         }
         for case in 0..10 {
             let mut damaged = original.clone();
-            let table = &mut damaged[second.table_offset as usize..];
+            let mut table =
+                decode_record(&damaged[second.table_offset as usize..], second.chain_bytes)
+                    .unwrap();
             match case {
                 0 => table[32..40].copy_from_slice(&second.table_offset.to_le_bytes()),
                 1 => table[40..44].copy_from_slice(&u32::MAX.to_le_bytes()),
@@ -1319,7 +1372,11 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut forged = second.clone();
-            forged.checksum = crc32fast::hash(table);
+            let record = encode_record(&table);
+            forged.table_len = record.len() as u32;
+            forged.checksum = crc32fast::hash(&record);
+            damaged.truncate(forged.table_offset as usize);
+            damaged.extend_from_slice(&record);
             fs::write(&path, &damaged).unwrap();
             assert!(BundleReader::open(&path, &forged).is_err(), "case {case}");
             assert_eq!(fs::read(&path).unwrap(), damaged);
@@ -1330,7 +1387,7 @@ mod tests {
                 0 => forged.depth = 0,
                 1 => forged.depth = MAX_TABLE_DEPTH + 1,
                 2 => forged.chain_bytes = MAX_TABLE_BYTES + 1,
-                3 => forged.chain_bytes = forged.table_len - 1,
+                3 => forged.chain_bytes = 31,
                 4 => forged.row_count = MAX_ROWS + 1,
                 5 => forged.sequence = 0,
                 6 => forged.sequence = 32,
@@ -1402,7 +1459,11 @@ mod tests {
         let original = fs::read(&path).unwrap();
         for case in 0..10 {
             let mut bytes = original.clone();
-            let table = &mut bytes[reference.table_offset as usize..];
+            let mut table = decode_record(
+                &bytes[reference.table_offset as usize..],
+                reference.chain_bytes,
+            )
+            .unwrap();
             match case {
                 0 => table[24..28].copy_from_slice(&u32::MAX.to_le_bytes()),
                 1 => table[32] = STREAMS,
@@ -1417,7 +1478,11 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut forged = reference.clone();
-            forged.checksum = crc32fast::hash(table);
+            let record = encode_record(&table);
+            forged.table_len = record.len() as u32;
+            forged.checksum = crc32fast::hash(&record);
+            bytes.truncate(forged.table_offset as usize);
+            bytes.extend_from_slice(&record);
             fs::write(&path, &bytes).unwrap();
             assert!(BundleReader::open(&path, &forged).is_err(), "case {case}");
             assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -1528,11 +1593,19 @@ mod tests {
         writer.append_data(0, b"second").unwrap();
         let mut reference = writer.finish(2).unwrap();
         let mut bytes = fs::read(&path).unwrap();
-        let table = &mut bytes[reference.table_offset as usize..];
+        let mut table = decode_record(
+            &bytes[reference.table_offset as usize..],
+            reference.chain_bytes,
+        )
+        .unwrap();
         let first = table[48..64].to_vec();
         table.copy_within(64..80, 48);
         table[64..80].copy_from_slice(&first);
-        reference.checksum = crc32fast::hash(table);
+        let record = encode_record(&table);
+        reference.table_len = record.len() as u32;
+        reference.checksum = crc32fast::hash(&record);
+        bytes.truncate(reference.table_offset as usize);
+        bytes.extend_from_slice(&record);
         fs::write(&path, &bytes).unwrap();
         assert!(BundleReader::open(&path, &reference).is_err());
         assert_eq!(fs::read(path).unwrap(), bytes);
@@ -1639,5 +1712,72 @@ mod tests {
         let reader = BundleReader::open(&path, &last).unwrap();
         assert_eq!(reader.read_stream(0).unwrap().len(), 5 + MAX_EXTENTS - 1);
         reader.verify_all().unwrap();
+    }
+
+    #[test]
+    fn table_records_bound_decoding_and_round_trip_both_codecs() {
+        let mut rng = 919u64;
+        let mut codecs = [false; 2];
+        for len in [32, 127, 4096, MAX_TABLE_BYTES as usize] {
+            for random in [false, true] {
+                let bytes: Vec<_> = (0..len)
+                    .map(|_| {
+                        rng ^= rng << 13;
+                        rng ^= rng >> 7;
+                        rng ^= rng << 17;
+                        if random { rng as u8 } else { 0 }
+                    })
+                    .collect();
+                let record = encode_record(&bytes);
+                codecs[record[0] as usize] = true;
+                assert!(record.len() <= len + 5);
+                assert_eq!(decode_record(&record, MAX_TABLE_BYTES).unwrap(), bytes);
+                assert!(decode_record(&record, len as u32 - 1).is_err());
+                for declared in [0, 31, MAX_TABLE_BYTES + 1, u32::MAX] {
+                    let mut forged = record.clone();
+                    forged[1..5].copy_from_slice(&declared.to_le_bytes());
+                    assert!(decode_record(&forged, MAX_TABLE_BYTES).is_err());
+                }
+            }
+        }
+        assert_eq!(codecs, [true, true]);
+        let record = encode_record(&vec![7; 2048]);
+        assert_eq!(record[0], 1);
+        for len in 0..record.len() {
+            assert!(decode_record(&record[..len], MAX_TABLE_BYTES).is_err());
+        }
+        let mut forged = record.clone();
+        forged[0] = 2;
+        assert!(decode_record(&forged, MAX_TABLE_BYTES).is_err());
+        forged = record;
+        forged[1..5].copy_from_slice(&2049u32.to_le_bytes());
+        assert!(decode_record(&forged, MAX_TABLE_BYTES).is_err());
+    }
+
+    #[test]
+    fn valid_checksums_cannot_bypass_table_record_bounds() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let reference = create(&path);
+        let original = fs::read(&path).unwrap();
+        for case in 0..7 {
+            let mut bytes = original.clone();
+            let record = &mut bytes[reference.table_offset as usize..];
+            match case {
+                0 => record[0] = 2,
+                1 => record[1..5].copy_from_slice(&u32::MAX.to_le_bytes()),
+                2 => record[1..5].copy_from_slice(&(MAX_TABLE_BYTES + 1).to_le_bytes()),
+                3 => record[1..5].copy_from_slice(&31u32.to_le_bytes()),
+                4 => record[1..5].copy_from_slice(&(reference.chain_bytes + 1).to_le_bytes()),
+                5 => record[5..].fill(0),
+                6 => record[1..5].copy_from_slice(&(reference.chain_bytes - 1).to_le_bytes()),
+                _ => unreachable!(),
+            }
+            let mut forged = reference.clone();
+            forged.checksum = crc32fast::hash(record);
+            fs::write(&path, &bytes).unwrap();
+            assert!(BundleReader::open(&path, &forged).is_err(), "case {case}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 }

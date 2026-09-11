@@ -6,8 +6,9 @@ and fresh incompatible directories, while retaining the 10% ingestion ceiling.
 No production directory or service uses this implementation.
 
 The [live-bundle successor](live-segment-bundles.md) added catalog v7 / segment v5
-support for hot bundles. The current [grouped-table follow-up](bundle-table-groups.md)
-uses catalog v8 / segment v6 / bundle v4. Both retain the publication contract below.
+support for hot bundles. The [grouped-table follow-up](bundle-table-groups.md)
+uses catalog v8 / segment v6 / bundle v4; the current [table-record candidate](bundle-table-codecs.md)
+uses v9 / v7 / v5. These retain the publication contract below.
 The measurements here describe the preceding implementation unless explicitly
 identified otherwise; its Intel ExFAT live failure remains recorded.
 
