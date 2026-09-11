@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod bundle;
 mod column;
 pub mod compression;
 mod durability;

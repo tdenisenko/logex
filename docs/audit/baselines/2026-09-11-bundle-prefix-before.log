@@ -1,0 +1,24 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.69s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum ... FAILED
+
+failures:
+
+---- bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum stdout ----
+
+thread 'bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum' (19637046) panicked at crates/logex-storage/src/bundle.rs:653:9:
+assertion failed: BundleReader::open(&path, &reference).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 156 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

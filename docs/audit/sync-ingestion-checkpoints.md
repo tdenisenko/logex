@@ -587,3 +587,15 @@ linking. The rejected empty-manifest/worker changes are absent. The performance
 ceiling and current platform checks remain open; green gates do not permit merge.
 A separate equal-bytes artifact-layout probe will test the shared-file hypothesis
 before implementing any new container format.
+
+
+The [equal-bytes artifact probe](baselines/2026-09-11-artifact-layout-probe.jsonl)
+compares 32 encoded column/index/null files with one shared artifact, retaining
+canonical/manifest files and identical durable publication. Fifteen alternating
+pairs per size pass byte-for-byte readback and checksum checks. Creation plus
+publication median changes 12.212 → 8.142 ms for 120 rows (-33.33%),
+10.941 → 8.495 ms for 15,360 rows (-22.36%), and 21.380 → 20.486 ms for
+491,520 rows (-4.18%). Compression is outside this diagnostic timer, so these
+are not ingestion speedups. The first two results support a shared-artifact
+prototype; the large change is within likely noise. Actual append/recovery/query
+and original-baseline acceptance remain required.
