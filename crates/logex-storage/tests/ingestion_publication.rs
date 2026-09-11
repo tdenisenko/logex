@@ -17,7 +17,18 @@ struct Config {
     repeats: usize,
     route: Option<bool>,
     checkpoint_each_block: bool,
+    durable_checkpoint: bool,
     rich_headers: bool,
+}
+
+impl Config {
+    fn checkpoint(&self, storage: &mut PartitionManager) {
+        if self.durable_checkpoint {
+            storage.checkpoint_durable().unwrap();
+        } else {
+            storage.checkpoint().unwrap();
+        }
+    }
 }
 
 // SyncEngine's retained canonical-header window.
@@ -174,6 +185,7 @@ fn run(config: Config) {
             "warm_headers":config.warm_headers,
             "route":config.route.map(|historical| if historical {"historical"} else {"live"}),
             "checkpoint_each_block":config.checkpoint_each_block,
+            "durable_checkpoint":config.durable_checkpoint,
             "header_fields":if config.rich_headers {"rich"} else {"minimal"},
             "cache":"fresh directories; OS cache not evicted"})
     );
@@ -228,11 +240,11 @@ fn run(config: Config) {
                     // sleeps. Report the revision's checkpoint durability contract;
                     // this is not a paced-network or power-failure test.
                     if config.checkpoint_each_block {
-                        storage.checkpoint().unwrap();
+                        config.checkpoint(&mut storage);
                     }
                 }
             }
-            storage.checkpoint().unwrap();
+            config.checkpoint(&mut storage);
             let elapsed = start.elapsed();
             println!(
                 "{}",
@@ -275,6 +287,7 @@ fn storage_publication_preserves_rows_and_empty_block_progress() {
         repeats: 1,
         route: None,
         checkpoint_each_block: false,
+        durable_checkpoint: false,
         rich_headers: false,
     });
 }
@@ -299,6 +312,11 @@ fn benchmark_sync_storage_publication() {
             Ok("rich") => true,
             Ok("minimal") | Err(std::env::VarError::NotPresent) => false,
             value => panic!("invalid LOGEX_PUBLICATION_HEADER_FIELDS: {value:?}"),
+        },
+        durable_checkpoint: match std::env::var("LOGEX_PUBLICATION_DURABLE_CHECKPOINT").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(_) => false,
+            Ok(_) => panic!("LOGEX_PUBLICATION_DURABLE_CHECKPOINT must be 0 or 1"),
         },
         checkpoint_each_block: match std::env::var("LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK")
             .as_deref()
@@ -325,6 +343,7 @@ fn benchmark_cached_header_encoding() {
             repeats: 1,
             route: None,
             checkpoint_each_block: false,
+            durable_checkpoint: false,
             rich_headers: rich,
         });
         for iteration in 0..9 {

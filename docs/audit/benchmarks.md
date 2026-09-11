@@ -122,6 +122,7 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
 | `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
 | `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
+| `LOGEX_PUBLICATION_DURABLE_CHECKPOINT` | 0 | `1` uses `checkpoint_durable()` for the final checkpoint and any per-block checkpoint. Report this separately from bounded ordered publication; both include exact clean-reopen oracles. |
 
 Numeric sizes and repetition counts must be positive. Every sixteenth block is empty. This fixture holds the
 production 8,192-header window but does not warm an existing million-row hot

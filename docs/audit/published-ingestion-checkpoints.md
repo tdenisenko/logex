@@ -96,7 +96,7 @@ initial data, rotation, canonical flags, repeated reopen/retry, all preceding
 catalog choices, compaction protection across multiple publications, frequent
 checkpoint accounting, byte/age/route boundaries, idle handling and poisoned
 hardening failures. The new cross-mount matrix adds 96 predecessor cases to the
-existing 32 cases; it has not yet run for this implementation.
+existing 32 cases; it passes on the local isolated APFS/ExFAT image in both mount directions.
 
 Broader release comparisons, Linux/macOS CI gates, isolated
 ExFAT recovery/performance, explicit durable-checkpoint costs, mixed idle and
@@ -124,3 +124,58 @@ All six current [local workspace gates](baselines/2026-09-11-ordered-ingestion-g
 pass: 885 tests/nine ignored, formatting, locked all-target check, strict Clippy,
 doctests and release build. Later changes only clarify benchmark comments and
 audit documentation; formatting was rechecked.
+
+Current [isolated ExFAT validation](baselines/2026-09-11-ordered-ingestion-exfat.jsonl)
+passes 177 storage tests/four ignored and all 128 cross-mount cases. The runner
+verified and detached its exact disposable image. All six Linux/macOS CI jobs
+also pass at c63fb9ed in run 34570017540.
+
+
+## Broader local comparisons and explicit durability cost
+
+The [five-pair/three-sample broad run](baselines/2026-09-11-ordered-ingestion-broad-comparison.jsonl)
+uses the same default ordered publication and exact v3 fixtures with the added
+benchmark-only durable-checkpoint switch disabled. Current changes versus original
+are tiny history -39.11%, tiny chunks -68.98%, sparse history -67.92%, short history
+-58.41%, grouped live -81.87%, sustained history -80.69%, large history +8.12% and
+per-block live publication -46.87%. All measured medians are within 10%; the large
+profile's difference from the earlier +3.52% result was investigated with a
+controlled original/current/harness-switch comparison below. No result is discarded.
+
+`LOGEX_PUBLICATION_DURABLE_CHECKPOINT=1` requests the strong API for the final and
+any per-block checkpoints. A separate [same-binary comparison](baselines/2026-09-11-checkpoint-modes.jsonl)
+uses five alternating process pairs × three samples, with identical data/oracles:
+
+| Workload | Ordered median | Durable median | Extra elapsed time |
+| --- | ---: | ---: | ---: |
+| Tiny historical batch | 4.623667 ms | 6.382750 ms | 1.759083 ms |
+| 17 grouped live blocks | 38.028000 ms | 42.134375 ms | 4.106375 ms |
+| 32 live blocks, checkpoint after each | 349.912000 ms | 515.867958 ms | 165.955958 ms |
+
+These measure the additional promise of latest-progress durability, not a different
+compression format or acceptance exemption. Default bounded sync does not request
+a hard checkpoint after every block. The new benchmark switch is explicit in JSON
+output; inputs, expected rows, progress and clean-reopen checks are unchanged.
+Its default correctness test, both measured modes, formatting and strict workspace
+all-target Clippy pass. Production code remains c63fb9ed.
+
+
+A [nine-triplet/seven-sample large-history control](baselines/2026-09-11-ordered-large-control.jsonl)
+gives original 63.105042 ms, saved ordered binary 65.962792 ms (+4.53%) and the
+optional-switch harness with that switch disabled 64.148750 ms (+1.65%). Both
+candidate p95 values improve; the optional-switch binary differs by -2.75% from
+the saved binary. The broad +8.12% regression did not repeat at that magnitude.
+Retain all measurements and keep examining large-history variability in later
+integrated runs; the fixture switch is not a claimed production optimization.
+[CI and focused fixture validation](baselines/2026-09-11-checkpoint-modes-validation.jsonl).
+
+Current Intel comparisons confirm APFS tiny history -73.43%, short history -72.08%
+and per-block live publication -74.72%. On isolated ExFAT, tiny history is -38.91%
+and short history -76.88%, but per-block live still **fails at +26.31%**
+(13,259.555959 → 16,748.521002 ms). The ordering change does not solve that profile.
+Raw [Intel APFS](baselines/2026-09-11-ordered-ingestion-intel-apfs-performance.jsonl)
+and [Intel ExFAT](baselines/2026-09-11-ordered-ingestion-intel-exfat-performance.jsonl)
+records include five alternating pairs × three samples, binary identities, host
+metadata, exact oracles and runner source. The disposable image detached after
+timing. Full current Intel ExFAT correctness is running separately afterward.
+Acceptance remains blocked by performance, without changing the user's ceiling.
