@@ -72,7 +72,7 @@ impl<'a> PageOutput<'a> {
             dir,
             existing_rows: 0,
             previous: Default::default(),
-            canonical: None,
+            canonical: Some(NullBitmap::new()),
             replacements: None,
         }
     }
@@ -306,9 +306,11 @@ pub(crate) fn write_compacted_rows(
 ) -> std::io::Result<Vec<ColumnDescriptor>> {
     fs::create_dir_all(segment_dir)?;
     fs::create_dir_all(segment_dir.join("columns"))?;
-    ColumnFile::write_canonical_bitmap(segment_dir, rows.len() as u64)?;
-
     let output = PageOutput::new(segment_dir);
+    // This is a new representation with no committed rows. Publish its bitmap
+    // together with its columns; the containing manifest/catalog supplies the
+    // ordering and durable flush, just as it does for the new page payloads.
+    output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
     output.finish()?;
     Ok(columns)

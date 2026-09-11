@@ -695,6 +695,7 @@ impl ColumnFile {
     }
 
     /// Write a canonical bitmap where all rows are marked canonical (all 1s).
+    #[cfg(test)]
     pub(crate) fn write_canonical_bitmap(dir: &Path, row_count: u64) -> io::Result<()> {
         let mut bitmap = NullBitmap::new();
         for _ in 0..row_count {

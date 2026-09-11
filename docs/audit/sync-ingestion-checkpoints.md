@@ -541,3 +541,49 @@ limit. **The candidate still fails acceptance and PR #130 must not merge.**
 Profile the fixed small-file publication cost before selecting another change;
 large encoding allocations and page/index growth also need measurement. Broader
 format checksums, query snapshot lifetime and repair remain unfinished audit work.
+
+
+### Fixed-cost follow-up
+
+[Instrumented phase timings](baselines/2026-09-11-page-append-phase-profile.jsonl)
+show the final device/directory synchronization dominates tiny chunks (roughly
+5–6 ms in the diagnostic runs); the 39 individual flush calls total only about
+0.1 ms. Nested and parallel phase durations overlap, so they are not additive or
+acceptance timings. Merely parallelizing file flushes is not supported by this
+profile. Creating the canonical bitmap separately also ordered it once before
+the containing publication ordered it again.
+
+The new bitmap is now written with the other new page artifacts and remains
+covered by their manifest/catalog publication. Existing committed canonical
+prefix replacements retain their ordering. The standalone bitmap helper is now
+test-only. [Isolated timing](baselines/2026-09-11-new-bitmap-comparison.jsonl)
+versus `e60718fc` is short history -15.12%, few logs -2.34%, tiny chunks +0.87%,
+and large history +0.41%. Only the short-history result supports a speedup; the
+others are within likely noise. Four segment regressions, crash-phase recovery
+and strict storage Clippy pass. This remains provisional until combined checks.
+
+Two further diagnostics were restored, not retained:
+
+- [Omitting the empty initial manifest](baselines/2026-09-11-first-history-manifest-comparison.jsonl)
+  gave few logs +13.78%, tiny chunks +0.01%, short history -4.55% and sparse history
+  -3.69%. Results do not establish a retained improvement; the original allocation
+  and publication sequence is restored.
+- [Four compressed-column workers below 4,096 rows](baselines/2026-09-11-small-page-workers-comparison.jsonl)
+  gave few logs -6.68%, tiny chunks -3.29%, short history +3.34% and sparse history
+  +0.63%. It does not resolve sparse overhead and most results are within noise.
+  The established fourteen column workers are restored to isolate further work.
+
+The sparse acceptance gap remains. A compact shared page artifact is a candidate
+for the user's authorized fresh-format approach: reduce file/index/bitmap creation
+and publication overhead while keeping immutable committed prefixes and bounded
+checkpoint rewind. This requires a concrete format and failure tests before any
+claim that it solves performance. No protected dataset or deployment is affected.
+
+
+All six [local workspace gates](baselines/2026-09-11-page-append-gates.jsonl)
+pass for page appends plus the new-bitmap publication simplification: 853 tests,
+eight ignored, doc tests, strict Clippy, formatting, all-target check and release
+linking. The rejected empty-manifest/worker changes are absent. The performance
+ceiling and current platform checks remain open; green gates do not permit merge.
+A separate equal-bytes artifact-layout probe will test the shared-file hypothesis
+before implementing any new container format.
