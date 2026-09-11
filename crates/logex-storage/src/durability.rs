@@ -154,9 +154,10 @@ pub(crate) struct ReplacementBatch {
     publication: Publication,
 }
 
-/// Deferred files contain no committed data and must be flushed as a complete
-/// tree before the catalog can reference them. Ordered replacements preserve a
-/// committed prefix; durable publication also completes the device flush.
+/// Deferred writes must not overwrite catalog-pinned data: they create new files,
+/// append immutable bundle extents, or replace derived metadata. Flush the complete
+/// affected trees before the catalog can reference them. Ordered replacements
+/// preserve a committed prefix; durable publication completes the device flush.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Publication {
     #[default]
@@ -212,41 +213,6 @@ impl ReplacementBatch {
             replacement.publish()?;
         }
         Ok(())
-    }
-
-    /// Publish an append's complete replacements and manifest together. The
-    /// catalog remains the durable authority: it must not be advanced until the
-    /// returned ordered publication has been included in its final sync.
-    pub(crate) fn publish_with_tree(
-        self,
-        tree: &Path,
-        manifest: &Path,
-        bytes: &[u8],
-        catalog: &Path,
-        publication: Publication,
-    ) -> io::Result<()> {
-        if publication != self.publication {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "replacement publication mode changed",
-            ));
-        }
-        let pending = self
-            .pending
-            .into_inner()
-            .map_err(|_| io::Error::other("column replacement lock poisoned"))?;
-        if publication == Publication::Deferred {
-            for replacement in pending {
-                replacement.publish()?;
-            }
-            return write_bytes_deferred(manifest, bytes);
-        }
-        let group = prepare_tree_with_replacements(tree, manifest, bytes, pending)?;
-        if publication == Publication::Durable {
-            group.finish()
-        } else {
-            group.persist_external_devices(catalog)
-        }
     }
 }
 
@@ -382,36 +348,11 @@ pub(crate) fn publish_tree_ordered(
 }
 
 fn prepare_tree_publication(tree: &Path, manifest: &Path, bytes: &[u8]) -> io::Result<SyncGroup> {
-    prepare_tree_with_replacements(tree, manifest, bytes, Vec::new())
-}
-
-fn prepare_tree_with_replacements(
-    tree: &Path,
-    manifest: &Path,
-    bytes: &[u8],
-    pending: Vec<Replacement>,
-) -> io::Result<SyncGroup> {
     let mut group = SyncGroup::default();
     flush_tree(tree, &mut group)?;
     let replacement = Replacement::prepare(manifest, |writer| writer.write_all(bytes))?;
     group.include_flushed(replacement.writer.get_ref().try_clone()?, manifest)?;
-    for replacement in &pending {
-        group.include_flushed(
-            replacement.writer.get_ref().try_clone()?,
-            &replacement.destination,
-        )?;
-    }
     group.order_before_manifest(manifest)?;
-    for replacement in pending {
-        let directory = parent(&replacement.destination).to_owned();
-        replacement.publish()?;
-        if directory != tree {
-            group.flush_directory(&directory)?;
-        }
-    }
-    // Readers see replacement names before the new manifest. On disk their
-    // renames may persist in either order until the catalog's commit barrier;
-    // startup must restore the catalog prefix rather than adopt this manifest.
     replacement.publish()?;
     group.flush_directory(tree)?;
     group.flush_directory(parent(tree))?;
@@ -790,69 +731,6 @@ mod tests {
         // Recovery must discard this unpublished first-write artifact; no
         // previously published bytes were overwritten by either failure.
         assert_only_test_files(dir.path(), &["existing", "new"]);
-    }
-
-    #[test]
-    fn grouped_replacement_publication_preserves_prefixes_at_each_failure() {
-        for publication in [Publication::Ordered, Publication::Durable] {
-            let mut checkpoints = 0;
-            for failure in std::iter::once(usize::MAX).chain(0..) {
-                if failure != usize::MAX && failure >= checkpoints {
-                    break;
-                }
-                let dir = tempfile::tempdir().unwrap();
-                let bitmap = dir.path().join("canonical.bitmap");
-                let manifest = dir.path().join("segment.json");
-                fs::write(&bitmap, b"old bits").unwrap();
-                fs::write(&manifest, b"old manifest").unwrap();
-                let pending = ReplacementBatch::new(publication);
-                pending
-                    .write(&bitmap, |writer| writer.write_all(b"old bits plus new"))
-                    .unwrap();
-                inject_failure(failure);
-                let result = pending.publish_with_tree(
-                    dir.path(),
-                    &manifest,
-                    b"new manifest",
-                    &dir.path().join("catalog.json"),
-                    publication,
-                );
-                let events = take_events();
-                if failure == usize::MAX {
-                    result.unwrap();
-                    checkpoints = events.len();
-                    let bitmap_rename = events
-                        .iter()
-                        .position(|(op, path)| *op == "rename_temporary" && path == &bitmap)
-                        .unwrap();
-                    let manifest_rename = events
-                        .iter()
-                        .position(|(op, path)| *op == "rename_temporary" && path == &manifest)
-                        .unwrap();
-                    assert!(bitmap_rename < manifest_rename);
-                    #[cfg(target_vendor = "apple")]
-                    {
-                        let orders: Vec<_> = events
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, (op, _))| *op == "order_device")
-                            .collect();
-                        assert_eq!(orders.len(), 1);
-                        assert!(orders[0].0 < bitmap_rename);
-                    }
-                } else {
-                    assert!(result.is_err(), "{publication:?}, {failure}: {events:?}");
-                }
-                let bits = fs::read(&bitmap).unwrap();
-                assert!(bits == b"old bits" || bits == b"old bits plus new");
-                let metadata = fs::read(&manifest).unwrap();
-                assert!(metadata == b"old manifest" || metadata == b"new manifest");
-                if metadata == b"new manifest" {
-                    assert_eq!(bits, b"old bits plus new");
-                }
-                assert_only_test_files(dir.path(), &["canonical.bitmap", "segment.json"]);
-            }
-        }
     }
 
     #[cfg(target_vendor = "apple")]

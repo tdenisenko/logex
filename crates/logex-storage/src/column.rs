@@ -52,7 +52,8 @@ impl ColumnFileHeader {
 /// A bitmap tracking which rows have null values (used for optional topic columns).
 #[derive(Debug, Clone, Default)]
 pub struct NullBitmap {
-    /// One bit per row. `true` = value present, `false` = null.
+    /// One bit per row. `true` = value present, `false` = null. Unused bits
+    /// in the last byte stay zero so appending a null can leave them untouched.
     bits: Vec<u8>,
     len: u64,
 }
@@ -80,6 +81,9 @@ impl NullBitmap {
 
     /// Set the value at position `row`.
     pub fn set(&mut self, row: u64, present: bool) {
+        if row >= self.len {
+            return;
+        }
         let byte_idx = (row / 8) as usize;
         let bit_idx = (row % 8) as u32;
         if byte_idx < self.bits.len() {
@@ -92,7 +96,9 @@ impl NullBitmap {
     }
 
     pub fn is_present(&self, row: u64) -> bool {
-        let byte_idx = (row / 8) as usize;
+        let Ok(byte_idx) = usize::try_from(row / 8) else {
+            return false;
+        };
         let bit_idx = (row % 8) as u32;
         if byte_idx >= self.bits.len() {
             return false;
@@ -115,11 +121,14 @@ impl NullBitmap {
             return None;
         }
         let len = u64::from_le_bytes(data[0..8].try_into().ok()?);
-        let byte_count = len.div_ceil(8) as usize;
-        if data.len() < 8 + byte_count {
-            return None;
+        let byte_count = usize::try_from(len.div_ceil(8)).ok()?;
+        let end = 8usize.checked_add(byte_count)?;
+        let mut bits = data.get(8..end)?.to_vec();
+        if !len.is_multiple_of(8) {
+            // Padding is outside the declared row set. Normalize it before a
+            // later append reuses those bit positions, preserving all real rows.
+            *bits.last_mut()? &= (1u8 << (len % 8)) - 1;
         }
-        let bits = data[8..8 + byte_count].to_vec();
         Some(Self { bits, len })
     }
 }
@@ -833,5 +842,41 @@ mod tests {
         assert!(parsed.is_present(2));
         assert!(parsed.is_present(3));
         assert!(!parsed.is_present(4));
+    }
+
+    #[test]
+    fn bitmap_padding_cannot_become_present_rows_after_append() {
+        for len in 1u64..16 {
+            let mut encoded = len.to_le_bytes().to_vec();
+            encoded.resize(8 + len.div_ceil(8) as usize, 0xff);
+            let mut bitmap = NullBitmap::read_from(&encoded).unwrap();
+            for row in 0..len {
+                assert!(bitmap.is_present(row));
+            }
+            for row in len..len + 16 {
+                bitmap.push(false);
+                assert!(!bitmap.is_present(row), "len {len}, appended row {row}");
+            }
+            assert!(!bitmap.is_present(u64::MAX));
+        }
+    }
+
+    #[test]
+    fn bitmap_out_of_range_set_cannot_change_future_rows() {
+        let mut bitmap = NullBitmap::new();
+        bitmap.push(true);
+        for row in [1, 7, 8, u64::MAX] {
+            bitmap.set(row, true);
+            assert!(!bitmap.is_present(row));
+        }
+        for row in 1..16 {
+            bitmap.push(false);
+            assert!(!bitmap.is_present(row));
+        }
+        bitmap.set(0, false);
+        bitmap.set(15, true);
+        assert!(!bitmap.is_present(0));
+        assert!(bitmap.is_present(15));
+        assert!(NullBitmap::read_from(&u64::MAX.to_le_bytes()).is_none());
     }
 }

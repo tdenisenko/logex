@@ -10,8 +10,9 @@ investigation, not acceptance of the new format.
 
 Reuse the current page encoders, logical column schema, catalog checkpoint model
 and segment coalescing. Store compressed column payloads, page indexes and null
-bitmaps in one appendable artifact. Keep the canonical bitmap separate because
-reorgs change its existing bits. Raw live columns remain supported. This removes
+bitmaps and canonical flags in one appendable artifact. Reorgs append a new
+canonical view and commit its reference through the catalog. Raw live columns
+remain supported. This removes
 many file creations/replacements without weakening the durable checkpoint.
 
 ## Publication and recovery invariants
@@ -28,7 +29,7 @@ many file creations/replacements without weakening the durable checkpoint.
   Each durable table and every extent it references must precede catalog
   publication under the existing per-device ordering rules.
 - Startup validates the catalog-pinned table and committed extents before any
-  mutation. Restore the committed manifest/canonical prefix before trimming only
+  mutation. Reconstruct the derived manifest from the committed reference before trimming only
   the uncommitted file suffix. Interrupted rollback must repeat safely. Missing
   or corrupt committed bytes remain an explicit repair error.
 - Bound table size, extent counts, allocations and checked arithmetic. Rotate
@@ -58,7 +59,7 @@ The prototype file used by the isolated layout probe is not this storage format
 and must not be treated as an implementation or migration artifact.
 
 
-## Current low-level implementation
+## Inline-index milestone (`5df13474`)
 
 `bundle.rs` is now connected to historical ingestion, SegmentReader and catalog
 recovery. Catalog v5 (`LXCAT005`) and segment v3 intentionally reject older
@@ -213,3 +214,78 @@ A stale format-number diagnostic was corrected during validation; formatting,
 check, strict Clippy and catalog tests pass again after that correction.
 [Validation records](baselines/2026-09-11-inline-index-gates.jsonl). Current platform
 and final performance acceptance remain pending.
+
+
+## Current candidate: immutable canonical metadata
+
+A [benchmark-only diagnostic](baselines/2026-09-11-immutable-canonical-diagnostic.jsonl)
+estimated the cost removable by eliminating per-append mutable metadata ordering.
+It temporarily deferred bitmap/manifest publication and flushed all affected
+bundle trees at checkpoint. **That temporary rule is not crash safe in the present
+format**; it was compiled only into the isolated fixture and restored before use.
+No node executable or production data used the rule. Five alternating pairs ×
+three release samples passed exact clean-reopen oracles: one-row history was
+2,179.70 → 989.07 ms (-54.62%), and 128-call history 348.01 → 121.04 ms (-65.22%).
+These are feasibility measurements, not acceptance or claims about a real format.
+
+The chosen follow-up, using the user's fresh-sync/breaking-format authorization,
+is to store canonical bits as another checksummed immutable bundle stream. The
+catalog then pins both rows and canonical state; an unfinished epoch can append
+without overwriting either committed prefix. Bundled manifests become derived
+metadata reconstructible from the trusted catalog and fixed format schema.
+Checkpoint must flush every affected bundle tree before catalog publication,
+including a previously committed active historical segment. Reorg changes must
+append a new bitmap/table and publish its catalog reference durably; older bundle
+snapshots retain their original canonical view. Raw/per-column representations
+retain their separate bitmap and existing publication protocol.
+
+The format change is implemented locally and remains in validation. Version
+rejection, canonical CRC/length bounds, interruption, reordered/torn metadata,
+non-canonical preservation, reorg publication, captured readers, generic WAL
+replay and cross-device ordering are covered by regression tests. It uses catalog v6
+(`LXCAT006`), segment manifest v4, bundle magic `LXBND003` and table magic
+`LXBT0003`. Stream 32 holds canonical bits; streams 0–31 retain their prior roles.
+The obsolete grouped canonical-file publication machinery is removed. Current full workspace validation passes; performance acceptance and current
+Linux/macOS CI remain required before merge.
+
+
+The actual implementation's [many-appends comparison](baselines/2026-09-11-immutable-canonical-original-comparison.jsonl)
+uses five alternating pairs × three release samples with all exact oracles passing.
+One-row history improves 2,156.22 → 803.80 ms (-62.72%); 128-call history improves
+349.36 → 94.92 ms (-72.83%). These replace the diagnostic with recovery-capable
+implementation evidence for these two workloads only. The broader profiles below include the remaining acceptance failure.
+
+
+[Broader original comparison](baselines/2026-09-11-immutable-canonical-broad-original-comparison.jsonl):
+five alternating pairs × three release samples, exact oracles passing, final
+checkpoint/finalization included. Few logs remain 6.039792 → 7.067042 ms
+(+17.01%, fails); tiny chunks -60.41%, sparse history -44.80%, short history
+-35.62%, grouped live -81.98%, sustained history -77.58%, large history +6.32%,
+and per-block live checkpoints -21.38%. These storage timings do not establish
+peer throughput. The tiny finalized case still blocks acceptance; the repeatable
+large-history cost also exceeds the 5% investigation threshold. No merge.
+
+
+The initial format's isolated ExFAT suite passed 167 tests/three ignored and all
+32 cross-mount combinations; the image was detached afterward. Final ExFAT
+validation for the later guard and bitmap fixes is running. The guard prevents
+a valid stale manifest from seeding a second canonical update and restoring flags
+that an earlier reorg had cleared. The new regression fails with that guard removed
+and passes with it restored; reopen reconstructs the manifest from the current
+catalog before retry. Temporary benchmark/growth instrumentation is removed.
+
+
+Unused bitmap padding could become a present row after `push(false)`, either from
+decoded padding or a preceding out-of-range `set`. Both regression tests fail
+[before the fix](baselines/2026-09-11-bitmap-padding-before.log) and pass
+[after it](baselines/2026-09-11-bitmap-padding-after.log). Decoding now clears only
+bits outside the declared row count and checks address/length conversions before
+allocation. Out-of-range updates are ignored; declared values and the fast append
+path remain unchanged.
+
+All six [local gates](baselines/2026-09-11-immutable-canonical-gates.jsonl) pass
+for the final guard and padding changes: 878 tests/eight ignored, formatting,
+locked all-target check, strict Clippy, doctests and release build.
+The [growth probe](baselines/2026-09-11-immutable-canonical-growth.jsonl) retains
+exact row/reopen oracles and records reachable/stale artifact bytes. Its single-run
+timings are diagnostic, and allocated bytes do not measure physical writes.

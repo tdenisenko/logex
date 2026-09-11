@@ -430,3 +430,32 @@ async fn ordered_sql_crosses_compacted_page_boundaries() {
     // LIMIT 1000 spans the tail page and the previous 16,384-row page.
     query_cases(&storage, &expected, 0, &mut Samples::default()).await;
 }
+
+#[tokio::test]
+async fn historical_queries_preserve_canonical_flags_after_reorg_and_restart() {
+    let rows = fixture(17_000, Profile::Dense);
+    let removed_hash = rows[0].block_hash;
+    let remaining: Vec<_> = rows
+        .iter()
+        .filter(|row| row.block_hash != removed_hash)
+        .cloned()
+        .collect();
+    let expected = expected_matches(&remaining);
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 50_000,
+        compaction_safety_margin_blocks: 0,
+    };
+    let mut storage = PartitionManager::open(config.clone()).unwrap();
+    storage.write_historical_batch(&rows).unwrap();
+    storage.finalize_historical_segment().unwrap();
+    assert_eq!(
+        storage.mark_non_canonical(removed_hash).unwrap(),
+        (rows.len() - remaining.len()) as u64
+    );
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+    drop(storage);
+    let storage = PartitionManager::open(config).unwrap();
+    query_cases(&storage, &expected, 0, &mut Samples::default()).await;
+}

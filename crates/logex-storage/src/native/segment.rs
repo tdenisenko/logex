@@ -66,20 +66,12 @@ struct PageOutput<'a> {
 pub(crate) struct EncodedColumns {
     columns: Vec<ColumnDescriptor>,
     bundle: Option<BundleReference>,
-    replacements: Option<durability::ReplacementBatch>,
 }
 
-#[cfg(test)]
 impl EncodedColumns {
-    pub(crate) fn apply_to(
-        self,
-        descriptor: &mut SegmentDescriptor,
-    ) -> std::io::Result<Vec<ColumnDescriptor>> {
-        if let Some(replacements) = self.replacements {
-            replacements.publish()?;
-        }
+    pub(crate) fn apply_to(self, descriptor: &mut SegmentDescriptor) -> Vec<ColumnDescriptor> {
         descriptor.column_bundle = self.bundle;
-        Ok(self.columns)
+        self.columns
     }
 }
 
@@ -124,7 +116,9 @@ impl<'a> PageOutput<'a> {
                 "compacted segment has an unpublished tail; reopen before appending",
             ));
         }
-        output.replacements = Some(durability::ReplacementBatch::new(publication));
+        if bundle.is_none() {
+            output.replacements = Some(durability::ReplacementBatch::new(publication));
+        }
         if let Some(reader) = bundle {
             output.bundle = Some((
                 BundleWriter::append_inspected(&dir.join(BUNDLE_PATH), reader)?,
@@ -247,7 +241,8 @@ impl<'a> PageOutput<'a> {
                 },
             );
         }
-        let canonical = read_bitmap_prefix(&dir.join("canonical.bitmap"), manifest.row_count)?;
+        let canonical =
+            parse_bitmap_prefix(&artifacts.read("canonical.bitmap")?, manifest.row_count)?;
         tail |= canonical.len() != manifest.row_count;
         Ok((
             Self {
@@ -267,9 +262,7 @@ impl<'a> PageOutput<'a> {
         path: &Path,
         write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
-        if let Some((bundle, rows)) = &self.bundle
-            && path != self.dir.join("canonical.bitmap")
-        {
+        if let Some((bundle, rows)) = &self.bundle {
             let relative = path
                 .strip_prefix(self.dir)
                 .ok()
@@ -326,28 +319,6 @@ impl<'a> PageOutput<'a> {
             .unwrap_or(Ok(()))?;
         Ok(reference)
     }
-
-    fn finish_for_manifest(
-        mut self,
-    ) -> std::io::Result<(
-        Option<BundleReference>,
-        Option<durability::ReplacementBatch>,
-    )> {
-        // Bundled append has only the canonical bitmap outside its immutable
-        // payload. Keep that replacement staged for the manifest's ordering
-        // barrier; per-column append retains its existing publication sequence.
-        let replacements = if self.bundle.is_some() {
-            self.replacements.take()
-        } else {
-            None
-        };
-        Ok((self.finish()?, replacements))
-    }
-}
-
-fn read_bitmap_prefix(path: &Path, rows: u64) -> std::io::Result<NullBitmap> {
-    let bytes = fs::read(path)?;
-    parse_bitmap_prefix(&bytes, rows)
 }
 
 fn parse_bitmap_prefix(bytes: &[u8], rows: u64) -> std::io::Result<NullBitmap> {
@@ -411,25 +382,26 @@ pub(crate) fn restore_bundled_checkpoint(
     let artifacts = ColumnArtifacts::open(&dir, Some(&prefix))?;
     artifacts.verify_bundle()?;
     let (inspected, tail) = PageOutput::inspect(&dir, &prefix, &artifacts)?;
+    // A bundle's manifest is derived metadata. The catalog pins the complete
+    // schema, row boundary and immutable canonical bitmap; an unpublished or
+    // damaged manifest is never used to decide which data to retain.
     let previous: Option<SegmentManifest> =
         match fs::read(paths.segment_manifest_path(descriptor.id)) {
-            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?),
+            Ok(bytes) => serde_json::from_slice(&bytes).ok(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
     if !tail && previous.as_ref() == Some(&prefix) {
         return Ok(());
     }
-    // Validate all committed bytes before modifying either the manifest or bitmap.
     let canonical = inspected
         .canonical
         .ok_or_else(|| std::io::Error::other("missing canonical prefix"))?;
     if canonical.len() != descriptor.row_count {
-        let mut trimmed = NullBitmap::new();
-        for row in 0..descriptor.row_count {
-            trimmed.push(canonical.is_present(row));
-        }
-        ColumnFile::replace_canonical_bitmap(&dir, &trimmed)?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "immutable canonical bitmap does not match the catalog",
+        ));
     }
     persist_segment_manifest_with_columns(paths, descriptor, prefix.columns)?;
     let path = dir.join(BUNDLE_PATH);
@@ -495,7 +467,6 @@ pub(crate) fn write_bundled_rows(
     Ok(EncodedColumns {
         columns,
         bundle: output.finish()?,
-        replacements: None,
     })
 }
 
@@ -594,12 +565,27 @@ pub(crate) fn append_compacted_rows(
     let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication, inspected)?;
     output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
-    let (bundle, replacements) = output.finish_for_manifest()?;
     Ok(EncodedColumns {
         columns,
-        bundle,
-        replacements,
+        bundle: output.finish()?,
     })
+}
+
+/// Append a new canonical view without changing the catalog-pinned bitmap.
+/// The caller must publish the returned reference and flush this tree before
+/// acknowledging the catalog commit; an interrupted update remains a tail.
+pub(crate) fn append_bundled_canonical(
+    dir: &Path,
+    reference: &BundleReference,
+    canonical: &NullBitmap,
+) -> std::io::Result<BundleReference> {
+    let mut bytes = Vec::new();
+    canonical.write_to(&mut bytes)?;
+    let encoded = crate::column_artifact::encode_bitmap(&bytes, reference.row_count)?;
+    let reader = BundleReader::open(&dir.join(BUNDLE_PATH), reference)?;
+    let writer = BundleWriter::append_inspected(&dir.join(BUNDLE_PATH), reader)?;
+    writer.replace_metadata(crate::column_artifact::CANONICAL_STREAM, &encoded)?;
+    writer.finish(reference.row_count)
 }
 
 fn write_compacted_values(
@@ -845,37 +831,11 @@ pub(crate) fn persist_ingest_manifest_with_columns(
     persist_manifest(paths, descriptor, columns, publication)
 }
 
-pub(crate) fn persist_encoded_ingest_manifest(
-    paths: &StorageCatalogPaths,
-    descriptor: &mut SegmentDescriptor,
-    encoded: EncodedColumns,
-    publication: Publication,
-) -> std::io::Result<()> {
-    descriptor.column_bundle = encoded.bundle;
-    persist_manifest_with_replacements(
-        paths,
-        descriptor,
-        encoded.columns,
-        publication,
-        encoded.replacements,
-    )
-}
-
 fn persist_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
     columns: Vec<ColumnDescriptor>,
     publication: Publication,
-) -> std::io::Result<()> {
-    persist_manifest_with_replacements(paths, descriptor, columns, publication, None)
-}
-
-fn persist_manifest_with_replacements(
-    paths: &StorageCatalogPaths,
-    descriptor: &SegmentDescriptor,
-    columns: Vec<ColumnDescriptor>,
-    publication: Publication,
-    replacements: Option<durability::ReplacementBatch>,
 ) -> std::io::Result<()> {
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(&segment_dir)?;
@@ -898,15 +858,6 @@ fn persist_manifest_with_replacements(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    if let Some(replacements) = replacements {
-        return replacements.publish_with_tree(
-            &segment_dir,
-            &path,
-            &json,
-            &paths.catalog_path(),
-            publication,
-        );
-    }
     match publication {
         Publication::Deferred => durability::write_bytes_deferred(&path, &json),
         Publication::Ordered => {
@@ -2062,7 +2013,7 @@ mod tests {
         assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
         assert!(snapshot.read_log_rows(Some(&[2])).is_err());
         apply_rows_to_descriptor(&mut descriptor, &rows[2..]);
-        let appended = appended.apply_to(&mut descriptor).unwrap();
+        let appended = appended.apply_to(&mut descriptor);
         persist_segment_manifest_with_columns(&paths, &descriptor, appended).unwrap();
         assert_eq!(snapshot.read_log_rows(None).unwrap(), rows[..2]);
         let current = SegmentReader::open(&dir).unwrap();
@@ -2094,7 +2045,6 @@ mod tests {
                 write_bundled_rows(&dir, &rows[..2])
                     .unwrap()
                     .apply_to(&mut descriptor)
-                    .unwrap()
             } else {
                 write_compacted_rows(&dir, &rows[..2]).unwrap()
             };
@@ -2102,7 +2052,7 @@ mod tests {
             let original: SegmentManifest =
                 serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
             let paths: Vec<String> = if bundled {
-                vec![BUNDLE_PATH.to_owned(), "canonical.bitmap".to_owned()]
+                vec![BUNDLE_PATH.to_owned()]
             } else {
                 original
                     .columns
@@ -2174,6 +2124,17 @@ mod tests {
                             fs::write(dir.join(index), write_page_index(&entries)).unwrap();
                         }
                     }
+                    11 if bundled => {
+                        let writer = BundleWriter::append(
+                            &dir.join(BUNDLE_PATH),
+                            original.column_bundle.as_ref().unwrap(),
+                        )
+                        .unwrap();
+                        writer
+                            .replace_metadata(crate::column_artifact::CANONICAL_STREAM, &[0; 8])
+                            .unwrap();
+                        manifest.column_bundle = Some(writer.finish(2).unwrap());
+                    }
                     11 => fs::write(dir.join("canonical.bitmap"), [0u8; 8]).unwrap(),
                     _ => unreachable!(),
                 }
@@ -2216,8 +2177,7 @@ mod tests {
         apply_rows_to_descriptor(&mut descriptor, &rows[..2]);
         let columns = write_bundled_rows(&dir, &rows[..2])
             .unwrap()
-            .apply_to(&mut descriptor)
-            .unwrap();
+            .apply_to(&mut descriptor);
         persist_segment_manifest_with_columns(&paths, &descriptor, columns.clone()).unwrap();
         let inspected = BundleReader::open(
             &dir.join(BUNDLE_PATH),
@@ -2231,7 +2191,7 @@ mod tests {
         .unwrap();
         descriptor.column_bundle = Some(writer.finish(2).unwrap());
         persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
-        let paths = [BUNDLE_PATH, "segment.json", "canonical.bitmap"];
+        let paths = [BUNDLE_PATH, "segment.json"];
         let before: Vec<_> = paths
             .iter()
             .map(|path| fs::read(dir.join(path)).unwrap())

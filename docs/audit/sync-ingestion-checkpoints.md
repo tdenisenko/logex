@@ -5,7 +5,7 @@ sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.
 The user permits incompatible changes if they materially help performance and
 is willing to perform a fresh sync. The current candidate changes the catalog
-format to version 5 and segment manifests to version 3; compressed page codecs
+format to version 6 and segment manifests to version 4; compressed page codecs
 remain unchanged. Historical segments now use the [shared artifact candidate](shared-segment-artifact.md). No existing
 production dataset has been reset or modified.
 
@@ -35,14 +35,14 @@ it is not a hard wall-clock deadline. Route changes, generic durable writes,
 standalone metadata updates and relevant maintenance boundaries checkpoint first.
 Detached compaction plans exclude the epoch's affected segments.
 
-## Catalog version 5 recovery protocol
+## Catalog version 6 recovery protocol
 
 The checksummed catalog is the single durable authority for segment row counts,
 allocation IDs, bundled column table references, canonical head/header window,
 chain anchors and historical progress.
 The legacy filename `catalog.json` is deliberately retained: older binaries must
 fail to parse the new bytes at their known path rather than create another catalog.
-Its contents are now a binary frame: eight-byte `LXCAT005` magic, two little-endian
+Its contents are now a binary frame: eight-byte `LXCAT006` magic, two little-endian
 32-bit lengths (metadata and header list), a CRC32, JSON metadata and a canonical
 RLP list of the complete recent headers. The checksum covers the first 16 prefix
 bytes and both payloads. It detects accidental corruption, not malicious tampering.
@@ -58,13 +58,16 @@ The disk-size cache reads only small metadata as an untrusted hint; it never use
 that shortcut for recovery, coverage or query state.
 
 1. Keep the durable catalog unchanged during an ingestion epoch. Update rows and
-   progress in memory. Files containing a previously committed prefix still order
-   complete replacements before rename; older rows cannot be sacrificed.
+   progress in memory. Raw/per-column files containing a previously committed
+   prefix still order complete replacements before rename. Bundles append
+   immutable column and canonical-bitmap versions, preserving the entire
+   catalog-pinned prefix without ordering each append separately.
 2. Newly allocated segments, and an initial active segment with zero committed
    rows, can defer artifact/manifest synchronization. They contain no data the
    catalog promises. Exclusive first creation avoids an unnecessary temporary
    rename; replacements of existing files stay atomic for current readers.
-3. At checkpoint, submit all deferred segment trees and parent directory entries,
+3. At checkpoint, submit all deferred segment trees, including affected bundles
+   with previously committed rows, and their parent directory entries,
    order them before the catalog, and fully synchronize any other devices first.
    Publish one atomic checksummed catalog and complete its device synchronization.
    The catalog can then reference only complete, already-ordered segment contents.
@@ -74,8 +77,10 @@ that shortcut for recovery, coverage or query state.
    committed rows/progress by adopting newer manifests. Missing committed
    artifacts fail explicitly. Damage confined to wholly uncommitted segments can
    be discarded, including malformed initial-hot manifests and partial columns.
-5. Bundled historical prefixes are restored from their catalog-pinned immutable
-   table and fully verified before trimming an uncommitted suffix. Raw recovery
+5. Bundled historical prefixes, including canonical flags, are restored from their
+   catalog-pinned immutable table and fully verified before trimming an uncommitted
+   suffix. Their manifest is derived metadata and can rebuild from the catalog
+   even if absent or malformed. Raw recovery
    publishes each restored prefix durably before removing obsolete compressed
    pages. The catalog remains unchanged, so an interrupted rollback repeats
    safely. The existing verified sync path re-fetches from its restored head/floor.
@@ -93,12 +98,12 @@ JSON serialization. It intentionally drops automatic manifest adoption on startu
 
 ## Fresh-sync compatibility decision
 
-Catalog versions 1–4 are rejected with an actionable
+Catalog versions 1–5 are rejected with an actionable
 diagnostic; they are not migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
 a dangling catalog alias, also fails instead of initializing an empty database.
 Older binaries fail to parse the binary frame at the original catalog path.
 A deployment must use a **new empty data directory** and verified fresh sync. Rolling back the binary
-requires its original directory or another fresh sync, not reuse of version 5.
+requires its original directory or another fresh sync, not reuse of version 6.
 Retain original directories until their owner explicitly chooses otherwise.
 The user's protected external-volume contents are outside this test scope.
 
@@ -872,9 +877,9 @@ The grouped candidate's five-pair original comparison still fails one-row histor
 (-35.29%). All exact oracles pass. This remains incomplete, and the 128-call result
 also warrants an isolated comparison with reader reuse before retaining the extra
 publication machinery. [Raw evidence](baselines/2026-09-11-grouped-manifest-original-comparison.jsonl).
-Moving canonical metadata into the immutable bundle is being evaluated as a way
-to avoid replacing committed bitmap data during an unfinished sync epoch; it is
-not implemented or measured yet.
+This grouped-publication milestone was superseded by the immutable canonical
+implementation below, which avoids replacing committed bitmap data during an
+unfinished sync epoch.
 
 
 All six local workspace gates pass for the reader-reuse/grouped-publication
@@ -883,3 +888,35 @@ check, doctests and release build. [Gate records](baselines/2026-09-11-grouped-i
 The added failure loop enumerates the observed checkpoints rather than assuming
 a platform-specific fixed event count. These correctness checks do not resolve
 the remaining performance failures or replace current Linux/macOS/ExFAT checks.
+
+
+## Immutable canonical implementation (in validation)
+
+The catalog-v6 / segment-v4 / bundle-v3 candidate stores canonical flags as stream
+32 in the immutable bundle. It uses the same bounded bitmap codec and checksum
+validation as nullable columns. Reorgs append a replacement bitmap/table, publish
+the manifest, then durably commit the new catalog reference. A failure marks the
+storage object as requiring recovery; repeated reopen restores the committed
+reference. Captured bundled readers retain their old canonical snapshot.
+
+This removes the grouped bitmap/manifest helper and its test-only column-application
+adapter. Raw/per-column append publication is unchanged. Current validation passes all six local workspace gates (878 tests/eight ignored).
+The regressions cover reorg interruption and exact reopen, stale valid manifests,
+malformed/old versions and bitmap padding. Original comparisons improve sustained
+ingestion substantially but still fail tiny finalized history (+17.01%); large
+history (+6.32%) also needs investigation. Current CI and final ExFAT confirmation
+remain pending. See the [implementation evidence](shared-segment-artifact.md#current-candidate-immutable-canonical-metadata).
+
+
+The tiny-checkpoint sync-target experiment was rejected. Nine alternating pairs
+× seven release samples compare the current directory full-sync with the existing
+file-and-directory helper targeting the catalog file: 7.750875 → 8.124625 ms
+(+4.82%). Both retain complete synchronization and pass exact oracles; no gain
+justifies changing the helper. [Evidence](baselines/2026-09-11-catalog-sync-target-comparison.jsonl).
+The original full directory sync is retained.
+
+The stale-manifest reorg guard has a demonstrated regression:
+[without the check](baselines/2026-09-11-canonical-reference-before.log) the second
+canonical update succeeds from stale flags; [with the check](baselines/2026-09-11-canonical-reference-after.log)
+it fails before changing artifacts, and restart/retry preserves both updates.
+The trusted catalog reference is compared before reading or writing reorg state.

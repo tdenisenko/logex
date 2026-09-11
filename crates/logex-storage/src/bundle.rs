@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-const FILE_MAGIC: &[u8; 8] = b"LXBND002";
-const TABLE_MAGIC: &[u8; 8] = b"LXBT0002";
+const FILE_MAGIC: &[u8; 8] = b"LXBND003";
+const TABLE_MAGIC: &[u8; 8] = b"LXBT0003";
 // Column payloads and page-index entries are append-only; nullable bitmaps replace.
 pub(crate) const DATA_STREAMS: u8 = 28;
-const STREAMS: u8 = 32;
+const STREAMS: u8 = 33;
 pub(crate) const MAX_EXTENT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_EXTENTS: usize = 4096;
 const MAX_TABLE_BYTES: u32 = 4 * 1024 * 1024;
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(new.read_stream(0).unwrap(), b"first second");
         assert_eq!(new.read_range(0, 3..8).unwrap(), b"st se");
         assert_eq!(new.read_stream(28).unwrap(), b"new index");
-        assert!(new.read_stream(32).is_err());
+        assert!(new.read_stream(STREAMS).is_err());
         assert!(new.read_range(0, 0..u64::MAX).is_err());
         old.verify_all().unwrap();
         new.verify_all().unwrap();

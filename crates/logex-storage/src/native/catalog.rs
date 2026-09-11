@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 3;
-pub const CATALOG_FORMAT_VERSION: u32 = 5;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT005";
+pub const STORAGE_FORMAT_VERSION: u32 = 4;
+pub const CATALOG_FORMAT_VERSION: u32 = 6;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT006";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -654,17 +654,23 @@ mod tests {
         assert!(NativeStorageCatalog::open_or_create(&config).is_err());
         assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
 
-        // The previous checksummed format also remains untouched. Its magic
-        // and metadata version are both old, with an otherwise valid checksum.
-        let mut previous = catalog.clone();
-        previous.format_version = 4;
-        let mut bytes = encode_frame(&serde_json::to_vec(&previous).unwrap(), &[]).unwrap();
-        bytes[..8].copy_from_slice(b"LXCAT004");
-        let checksum = frame_checksum(&bytes);
-        bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
-        fs::write(paths.catalog_path(), &bytes).unwrap();
-        assert!(NativeStorageCatalog::open_or_create(&config).is_err());
-        assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
+        // Reject each earlier framed version with either its old magic or
+        // today's magic and an old metadata version, even with a valid CRC.
+        for version in 2..CATALOG_FORMAT_VERSION {
+            for old_magic in [false, true] {
+                let mut previous = catalog.clone();
+                previous.format_version = version;
+                let mut bytes = encode_frame(&serde_json::to_vec(&previous).unwrap(), &[]).unwrap();
+                if old_magic {
+                    bytes[..8].copy_from_slice(format!("LXCAT{version:03}").as_bytes());
+                }
+                let checksum = frame_checksum(&bytes);
+                bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
+                fs::write(paths.catalog_path(), &bytes).unwrap();
+                assert!(NativeStorageCatalog::open_or_create(&config).is_err());
+                assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
+            }
+        }
 
         for damage in 0..5 {
             let mut damaged = catalog.clone();

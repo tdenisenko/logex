@@ -8,6 +8,7 @@ use crate::bundle::{BundleReader, MAX_EXTENTS, MAX_ROWS};
 use crate::native::{STORAGE_FORMAT_VERSION, SegmentKind, SegmentManifest};
 use crate::page::{PAGE_INDEX_ENTRY_BYTES, frame_page_index};
 
+pub(crate) const CANONICAL_STREAM: u8 = 32;
 pub(crate) const BUNDLE_PATH: &str = "columns/segment.bundle";
 pub(crate) const COLUMN_NAMES: [&str; 14] = [
     "address",
@@ -27,6 +28,9 @@ pub(crate) const COLUMN_NAMES: [&str; 14] = [
 ];
 
 pub(crate) fn stream_id(path: &str) -> io::Result<u8> {
+    if path == "canonical.bitmap" {
+        return Ok(CANONICAL_STREAM);
+    }
     let path = path
         .strip_prefix("columns/")
         .ok_or_else(|| invalid("invalid bundle directory"))?;
@@ -142,7 +146,7 @@ impl ColumnArtifacts {
                         }
                         frame_page_index(&bundle.read_stream(id)?)
                     }
-                    28..32 => {
+                    28..=CANONICAL_STREAM => {
                         let expected = bitmap_bytes(bundle.row_count())?;
                         if len > expected as u64 + 1 {
                             return Err(invalid("bundled bitmap exceeds its bound"));

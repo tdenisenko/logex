@@ -28,6 +28,10 @@ struct PageSelection {
 }
 
 impl SegmentReader {
+    pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
+        self.artifacts.bundle().map(|bundle| bundle.reference())
+    }
+
     pub fn open(dir: &Path) -> io::Result<Self> {
         let manifest = load_manifest(dir)?;
         if manifest.as_ref().is_some_and(|manifest| {
@@ -134,12 +138,19 @@ impl SegmentReader {
     }
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
-        let data = fs::read(self.canonical_path())?;
+        let data = if self.artifacts.bundle().is_some() {
+            self.artifacts.read("canonical.bitmap")?
+        } else {
+            fs::read(self.canonical_path())?
+        };
         NullBitmap::read_from(&data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
     }
 
     pub fn read_canonical_len(&self) -> io::Result<u64> {
+        if self.artifacts.bundle().is_some() {
+            return self.read_canonical().map(|bitmap| bitmap.len());
+        }
         let mut file = File::open(self.canonical_path())?;
         let mut len_bytes = [0u8; 8];
         file.read_exact(&mut len_bytes)?;

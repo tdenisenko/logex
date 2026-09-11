@@ -23,8 +23,8 @@ use super::catalog::{
 };
 use super::segment::{
     append_compacted_rows, append_ingest_rows, apply_ordered_rows_to_descriptor,
-    apply_rows_to_descriptor, compact_ingest_segment, compact_segment,
-    persist_encoded_ingest_manifest, persist_ingest_manifest, persist_segment_manifest,
+    apply_rows_to_descriptor, compact_ingest_segment, compact_segment, persist_ingest_manifest,
+    persist_ingest_manifest_with_columns, persist_segment_manifest,
     segment_uses_current_compaction_profile, verify_raw_segment_files_complete, write_bundled_rows,
 };
 
@@ -528,11 +528,15 @@ impl NativeStorage {
     }
 
     fn segment_publication(&self, id: u64) -> Publication {
-        if self
-            .pending_ingestion
-            .as_ref()
-            .is_some_and(|pending| pending.origin.can_defer(id))
-        {
+        if self.pending_ingestion.as_ref().is_some_and(|pending| {
+            pending.origin.can_defer(id)
+                || (pending.origin.includes(id)
+                    && self
+                        .catalog
+                        .segments
+                        .iter()
+                        .any(|segment| segment.id == id && segment.column_bundle.is_some()))
+        }) {
             Publication::Deferred
         } else if self.pending_checkpoint.is_some() || self.pending_ingestion.is_some() {
             Publication::Ordered
@@ -557,7 +561,10 @@ impl NativeStorage {
             .catalog
             .segments
             .iter()
-            .filter(|segment| pending.origin.can_defer(segment.id))
+            .filter(|segment| {
+                pending.origin.can_defer(segment.id)
+                    || (pending.origin.includes(segment.id) && segment.column_bundle.is_some())
+            })
             .map(|segment| self.paths.segment_dir(segment.id))
             .collect::<Vec<_>>();
         durability::publish_catalog_after_trees(
@@ -664,6 +671,10 @@ impl NativeStorage {
                     format!("committed segment {} is unavailable", segment.id),
                 ));
             }
+            if segment.column_bundle.is_some() {
+                super::segment::restore_bundled_checkpoint(&self.paths, segment)?;
+                continue;
+            }
             let active = Some(segment.id) == self.catalog.active_hot_segment
                 || Some(segment.id) == self.catalog.active_historical_segment;
             let manifest = match fs::read(self.paths.segment_manifest_path(segment.id)) {
@@ -683,10 +694,6 @@ impl NativeStorage {
                     io::ErrorKind::InvalidData,
                     "catalog and manifest segment identities disagree",
                 ));
-            }
-            if segment.column_bundle.is_some() {
-                super::segment::restore_bundled_checkpoint(&self.paths, segment)?;
-                continue;
             }
             if active && segment.row_count == 0 && manifest.is_none() {
                 self.restore_committed_prefix(segment)?;
@@ -877,8 +884,13 @@ impl NativeStorage {
             }
             let columns = write_bundled_rows(&segment_dir, chunk)?;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
-            let publication = self.segment_publication(descriptor.id);
-            persist_encoded_ingest_manifest(&self.paths, &mut descriptor, columns, publication)?;
+            let columns = columns.apply_to(&mut descriptor);
+            persist_ingest_manifest_with_columns(
+                &self.paths,
+                &descriptor,
+                columns,
+                self.segment_publication(descriptor.id),
+            )?;
             appended.push(self.partition_meta(&descriptor));
             self.catalog.segments.push(descriptor);
             remaining = &remaining[take..];
@@ -961,7 +973,13 @@ impl NativeStorage {
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
                 apply_ordered_rows_to_descriptor(descriptor, chunk);
-                persist_encoded_ingest_manifest(&self.paths, descriptor, columns, publication)?;
+                let columns = columns.apply_to(descriptor);
+                persist_ingest_manifest_with_columns(
+                    &self.paths,
+                    descriptor,
+                    columns,
+                    publication,
+                )?;
                 touched.insert(descriptor.id);
             }
             self.persist_catalog()?;
@@ -1279,15 +1297,23 @@ impl NativeStorage {
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.ensure_writable()?;
         self.checkpoint()?;
+        self.recovery_required = true;
         let mut total_marked = 0u64;
+        let mut changed_bundles = Vec::new();
 
-        for descriptor in &self.catalog.segments {
+        for descriptor in &mut self.catalog.segments {
             if descriptor.row_count == 0 {
                 continue;
             }
 
             let dir = self.paths.segment_dir(descriptor.id);
             let reader = SegmentReader::open(&dir)?;
+            if reader.bundle_reference() != descriptor.column_bundle.as_ref() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical update manifest differs from catalog; reopen to restore metadata",
+                ));
+            }
             let hashes = reader.read_b256("block_hash", None)?;
             let mut canonical = reader.read_canonical()?;
             let mut modified = false;
@@ -1301,10 +1327,26 @@ impl NativeStorage {
             }
 
             if modified {
-                ColumnFile::replace_canonical_bitmap(&dir, &canonical)?;
+                if let Some(reference) = &descriptor.column_bundle {
+                    descriptor.column_bundle = Some(super::segment::append_bundled_canonical(
+                        &dir, reference, &canonical,
+                    )?);
+                    persist_ingest_manifest(&self.paths, descriptor, Publication::Deferred)?;
+                    changed_bundles.push(dir);
+                } else {
+                    ColumnFile::replace_canonical_bitmap(&dir, &canonical)?;
+                }
             }
         }
 
+        if !changed_bundles.is_empty() {
+            durability::publish_catalog_after_trees(
+                changed_bundles.iter().map(PathBuf::as_path),
+                &self.paths.catalog_path(),
+                &self.catalog.encode()?,
+            )?;
+        }
+        self.recovery_required = false;
         Ok(total_marked)
     }
 
@@ -3317,6 +3359,8 @@ mod tests {
             let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
             let mut bytes = fs::read(&bundle_path).unwrap();
             match damage {
+                // The canonical bitmap is the first payload written to a new
+                // bundle, before the column workers. Its CRC must fail closed.
                 0 => bytes[8] ^= 1,
                 1 => bytes[reference.table_offset as usize] ^= 1,
                 2 => bytes.truncate(reference.end().unwrap() as usize - 1),
@@ -3326,7 +3370,6 @@ mod tests {
             let paths = [
                 bundle_path,
                 dir.join("segment.json"),
-                dir.join("canonical.bitmap"),
                 storage.paths.catalog_path(),
             ];
             let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
@@ -3373,6 +3416,19 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(snapshot.read_log_rows(Some(&[16_385])).is_err());
+        assert_eq!(snapshot.read_canonical_len().unwrap(), 16_385);
+        let prior = SegmentReader::open(&storage.segment_path(id)).unwrap();
+        let hash = rows[0].block_hash;
+        let marked = rows.iter().filter(|row| row.block_hash == hash).count() as u64;
+        assert_eq!(storage.mark_non_canonical(hash).unwrap(), marked);
+        let current = SegmentReader::open(&storage.segment_path(id)).unwrap();
+        let flags = current.read_canonical().unwrap();
+        let old_flags = prior.read_canonical().unwrap();
+        for (id, row) in rows.iter().enumerate() {
+            assert!(old_flags.is_present(id as u64));
+            assert_eq!(flags.is_present(id as u64), row.block_hash != hash);
+        }
+        assert!(!storage.segment_path(id).join("canonical.bitmap").exists());
         assert_eq!(
             SegmentReader::open(&storage.segment_path(id))
                 .unwrap()
@@ -3446,6 +3502,16 @@ mod tests {
                     .unwrap();
             }
         }
+        writer
+            .replace_metadata(
+                crate::column_artifact::CANONICAL_STREAM,
+                &crate::column_artifact::encode_bitmap(
+                    &artifacts.read("canonical.bitmap").unwrap(),
+                    manifest.row_count,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let reference = writer.finish(1).unwrap();
         drop(artifacts);
         fs::rename(staged, dir.join(BUNDLE_PATH)).unwrap();
@@ -3504,7 +3570,7 @@ mod tests {
             let manifest_bytes = fs::read(dir.join("segment.json")).unwrap();
             let bundle_path = dir.join(crate::column_artifact::BUNDLE_PATH);
             let old_bundle = fs::read(&bundle_path).unwrap();
-            let old_canonical = fs::read(dir.join("canonical.bitmap")).unwrap();
+            assert!(!dir.join("canonical.bitmap").exists());
             storage.ingest_historical_batch(&incoming, &next).unwrap();
             let current: SegmentManifest =
                 serde_json::from_slice(&fs::read(dir.join("segment.json")).unwrap()).unwrap();
@@ -3514,45 +3580,38 @@ mod tests {
                 storage.checkpoint().unwrap();
             }
             drop(storage);
-            // A torn first extent, all payload without a table, a torn table,
-            // complete table with old metadata, new canonical bits, new manifest,
-            // newer manifest with old bitmap and complete/torn bundle tails, and
-            // a durable catalog. Only the last phase commits the new rows.
-            if phase < 5 {
+            // The catalog alone commits rows and canonical state. The
+            // derived manifest may be absent, malformed or newer than a torn
+            // bundle suffix without changing the retained checkpoint.
+            if phase < 4 {
                 fs::write(dir.join("segment.json"), &manifest_bytes).unwrap();
-                if phase < 4 {
-                    fs::write(dir.join("canonical.bitmap"), &old_canonical).unwrap();
-                }
-                let tail_end = match phase {
-                    0 => old_bundle.len() as u64 + 1,
-                    1 => new_reference.table_offset,
-                    2 => new_reference.table_offset + u64::from(new_reference.table_len) / 2,
-                    _ => new_reference.end().unwrap(),
-                };
+            } else if phase == 4 {
+                fs::remove_file(dir.join("segment.json")).unwrap();
+            } else if phase == 5 {
+                fs::write(dir.join("segment.json"), b"{torn metadata").unwrap();
+            } else if phase == 6 {
+                let mut forged = current.clone();
+                forged.segment_id += 1;
+                forged.canonical_rows_path = "../unrelated".into();
+                fs::write(
+                    dir.join("segment.json"),
+                    serde_json::to_vec(&forged).unwrap(),
+                )
+                .unwrap();
+            }
+            let tail_end = match phase {
+                0 => Some(old_bundle.len() as u64 + 1),
+                1 => Some(new_reference.table_offset),
+                2 | 7 => Some(new_reference.table_offset + u64::from(new_reference.table_len) / 2),
+                _ => None,
+            };
+            if let Some(end) = tail_end {
                 fs::OpenOptions::new()
                     .write(true)
                     .open(&bundle_path)
                     .unwrap()
-                    .set_len(tail_end)
+                    .set_len(end)
                     .unwrap();
-            }
-            if (6..9).contains(&phase) {
-                // Before the catalog commit, filesystem writeback may persist
-                // the manifest rename ahead of the canonical bitmap rename.
-                fs::write(dir.join("canonical.bitmap"), &old_canonical).unwrap();
-                if phase > 6 {
-                    let end = if phase == 7 {
-                        old_bundle.len() as u64 + 1
-                    } else {
-                        new_reference.table_offset + u64::from(new_reference.table_len) / 2
-                    };
-                    fs::OpenOptions::new()
-                        .write(true)
-                        .open(&bundle_path)
-                        .unwrap()
-                        .set_len(end)
-                        .unwrap();
-                }
             }
             for restart in 0..2 {
                 let recovered = NativeStorage::open(config.clone())
@@ -3602,6 +3661,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bundled_reorg_recovers_each_publication_failure_and_preserves_snapshots() {
+        let mut steps = 0;
+        for failure in std::iter::once(usize::MAX).chain(0..) {
+            if failure != usize::MAX && failure >= steps {
+                break;
+            }
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 1_000,
+                ..Default::default()
+            };
+            let header = ingestion_header(100, B256::ZERO);
+            let rows = ingestion_rows(3, &header);
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            storage.ingest_historical_batch(&rows, &header).unwrap();
+            storage.checkpoint().unwrap();
+            let id = storage.active_historical_segment_id().unwrap();
+            let snapshot = SegmentReader::open(&storage.segment_path(id)).unwrap();
+            let catalog = storage.paths.catalog_path();
+            let before = fs::read(&catalog).unwrap();
+            durability::inject_failure(failure);
+            let result = storage.mark_non_canonical(header.hash_slow());
+            let events = durability::take_events();
+            if failure == usize::MAX {
+                assert_eq!(result.unwrap(), 3);
+                steps = events.len();
+                assert!(steps > 0);
+            } else {
+                assert!(result.is_err(), "failure {failure}: {events:?}");
+                assert!(storage.ensure_writable().is_err());
+            }
+            let committed = fs::read(&catalog).unwrap() != before;
+            drop(storage);
+            for restart in 0..2 {
+                let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("failure {failure}, restart {restart}: {events:?}: {error}")
+                });
+                let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
+                assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+                let bits = reader.read_canonical().unwrap();
+                assert_eq!(bits.len(), 3);
+                for row in 0..3 {
+                    assert_eq!(bits.is_present(row), !committed);
+                    assert!(snapshot.read_canonical().unwrap().is_present(row));
+                }
+            }
+            let mut recovered = NativeStorage::open(config.clone()).unwrap();
+            assert_eq!(
+                recovered.mark_non_canonical(header.hash_slow()).unwrap(),
+                if committed { 0 } else { 3 }
+            );
+            drop(recovered);
+            let recovered = NativeStorage::open(config).unwrap();
+            let reader = SegmentReader::open(&recovered.segment_path(id)).unwrap();
+            let bits = reader.read_canonical().unwrap();
+            assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+            assert!((0..3).all(|row| !bits.is_present(row)));
+        }
+    }
+
+    #[test]
+    fn stale_bundle_manifest_cannot_recanonicalize_previously_removed_rows() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1_000,
+            ..Default::default()
+        };
+        let first = ingestion_header(100, B256::ZERO);
+        let second = ingestion_header(99, B256::ZERO);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        for header in [&first, &second] {
+            storage
+                .ingest_historical_batch(&ingestion_rows(3, header), header)
+                .unwrap();
+        }
+        storage.checkpoint().unwrap();
+        let id = storage.active_historical_segment_id().unwrap();
+        let dir = storage.segment_path(id);
+        let manifest = dir.join("segment.json");
+        let older = fs::read(&manifest).unwrap();
+        assert_eq!(storage.mark_non_canonical(first.hash_slow()).unwrap(), 3);
+        // The old manifest is syntactically valid and references the same rows,
+        // but predates the first canonical update. It must not seed another one.
+        fs::write(&manifest, &older).unwrap();
+        let paths = [
+            manifest,
+            dir.join(crate::column_artifact::BUNDLE_PATH),
+            storage.paths.catalog_path(),
+        ];
+        let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+        assert!(storage.mark_non_canonical(second.hash_slow()).is_err());
+        assert!(storage.ensure_writable().is_err());
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        drop(storage);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let flags = SegmentReader::open(&dir).unwrap().read_canonical().unwrap();
+        for row in 0..6 {
+            assert_eq!(flags.is_present(row), row >= 3);
+        }
+        assert_eq!(storage.mark_non_canonical(second.hash_slow()).unwrap(), 3);
+        drop(storage);
+        let storage = NativeStorage::open(config).unwrap();
+        let flags = SegmentReader::open(&dir).unwrap().read_canonical().unwrap();
+        assert_eq!(storage.total_rows(), 6);
+        assert!((0..6).all(|row| !flags.is_present(row)));
     }
 
     #[test]
