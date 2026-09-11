@@ -89,8 +89,74 @@ grouped live is -95.35%, per-block live -68.89%, one-row live -67.37%, and rich
 header live -70.05%. The benchmark binary predates the index-checkpoint follow-up.
 [Integrated storage record](baselines/2026-09-11-live-bundle-integrated-broad.jsonl).
 The combined index-checkpoint implementation passes all six local workspace
-gates (895 tests/nine ignored). CI/platform validation, query/startup/index cost,
-disk growth and write amplification remain acceptance work.
+gates (895 tests/nine ignored). The platform checks below pass; query/startup/index costs and sparse bundle
+growth still prevent complete acceptance.
 PR #130 stays draft and unmerged. Broader query snapshot lifetime and index
 publication review are still required; the new reader tests do not complete those
 audit batches.
+
+
+## Integrated platform and lifecycle checks
+
+Saved `196664e4` passes all six Linux/macOS CI jobs. Exact integrated `6ce06c13`
+binaries pass the full storage suite (184 passed/four ignored), all 128
+cross-mount recovery cases, and the query harness (five passed/one ignored) on
+both Apple architectures' disposable ExFAT images. Both images detached after
+validation; subsequent timing uses a separate attachment. The later clock-only
+test correction does not change production behavior.
+[Platform record](baselines/2026-09-11-live-bundle-platform-validation.jsonl).
+
+The [index follow-up](index-checkpoints.md) records the first combined lifecycle
+comparison, including remaining index-build, generic row-only API and warm-start
+costs. These are not hidden by the combined sync improvements. Exact integrated
+Intel ExFAT timings now pass the ingestion ceiling, with 15 samples per revision:
+
+| Intel disposable ExFAT workload | Original median | Integrated median | Change |
+| --- | ---: | ---: | ---: |
+| Tiny historical calls | 624.348 ms | 128.003 ms | -79.50% |
+| Short history | 256.049 ms | 63.902 ms | -75.04% |
+| Per-block live | 13,122.895 ms | 8,122.487 ms | -38.10% |
+| One-row live | 12,147.744 ms | 8,088.388 ms | -33.42% |
+
+Exact oracles pass, no build/test workload overlapped timing on that host, and
+the disposable image detached. [Raw integrated Intel comparison](baselines/2026-09-11-live-bundle-integrated-intel-exfat.jsonl).
+
+## Mixed payloads and sparse growth
+
+The extended benchmark retains v3 transfer fixtures and adds v4 mixed payloads
+with independently hashed 0–1024-byte data. Source adapters, immutable binary
+hashes, environment, runner and raw records are retained in the
+[lifecycle comparison](baselines/2026-09-11-live-bundle-lifecycle.jsonl).
+Original/candidate production revisions are `09a63f55`/`196664e4`; only the harness
+changes for these measurements. A macOS dev-dependency on already locked `libc`
+adds IO accounting to the original fixture without changing production versions.
+
+| ARM APFS workload | Samples each | Ingestion change | File bytes, original → current | Full-row validation, original → current |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed history, 2,048 blocks, 128 logs/nonempty block, 64-block calls | 15 | -87.18% | 46,876,970 → 46,423,812 | 134.047 → 137.119 ms |
+| Mixed live, 128 blocks, publication each block | 15 | -70.81% | 16,415,724 → 7,373,192 | 4.441 → 9.735 ms |
+| Sparse history, 1,024 one-block calls | 15 | -63.45% | 136,843 → 9,352,715 | 0.947 → 14.611 ms |
+| Sparse live, 1,024 blocks, publication each block | 3 | -67.70% | 10,344,096 → 13,504,216 | 0.592 → 14.913 ms |
+
+Every sixteenth block is empty, so each sparse dataset contains 960 logs. All
+four profiles retain one nonempty segment. The sparse live run has only three
+samples and is a growth diagnostic, not a tail-latency acceptance result. Full-row
+validation includes reading, sorting and exact comparison; it is not SQL latency.
+
+OS-attributed write medians decrease 94.24% / 64.25% / 88.18% / 59.24% in table
+order. These counters do not measure physical NAND write amplification. Warm
+reopen changes from 0.782 → 14.451 ms for mixed history, 19.990 → 18.882 ms for
+mixed live, 0.455 → 14.651 ms for sparse history, and 18.101 → 26.945 ms for sparse
+live. Caches are not evicted. No local builds/tests overlapped timing.
+
+**Remaining finding:** tiny appends retain excessive table/page metadata and
+require many small extent reads. Sparse history uses 68 times the original file
+bytes and roughly 15 times full-row validation time despite faster ingestion.
+This is substantially better than the rejected 295 MB format, but is not accepted
+as the final layout. Reduce metadata and read overhead without relaxing bounds,
+checksums, catalog authority or the user's ingestion ceiling. Index publication
+and generic API costs from the other comparison also remain visible.
+
+The extended harness passes formatting, workspace check, strict Clippy, its
+ordinary fixture, and both release fixtures' exact oracles.
+[Validation](baselines/2026-09-11-publication-lifecycle-validation.json).

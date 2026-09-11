@@ -120,6 +120,7 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_SEGMENT_ROWS` | 1000000 | Segment row target |
 | `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
 | `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
+| `LOGEX_PUBLICATION_PAYLOAD` | transfer | `transfer` preserves fixture v3's 32-byte data; `mixed` selects fixture v4, varying 0–1024 bytes with independently hashed words |
 | `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
 | `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
 | `LOGEX_PUBLICATION_DURABLE_CHECKPOINT` | 0 | `1` uses `checkpoint_durable()` for the final checkpoint and any per-block checkpoint. Report this separately from bounded ordered publication; both include exact clean-reopen oracles. |
@@ -129,6 +130,23 @@ production 8,192-header window but does not warm an existing million-row hot
 segment; that additional write-amplification scenario remains to be measured.
 It prints individual timings and exact fixture identifiers, with no in-process
 summary or claim of end-to-end P2P throughput.
+
+The `lifecycle` records supplement ingestion timing with logical/allocated file
+bytes, file and segment counts, warm reopen time, full-row validation time, and
+OS-attributed process writes. Collection is outside the ingestion timer. Full-row
+validation includes materialization, sorting and comparison with the independent
+oracle; it is not query latency. Unix allocated bytes use `stat` blocks and exclude
+directory/filesystem metadata. The process write counters are
+[Apple's `proc_pid_rusage` v2](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
+([matching structure](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h))
+and [Linux `/proc/self/io` `write_bytes`](https://www.kernel.org/doc/html/latest/filesystems/proc.html#proc-pid-io-display-the-io-accounting-fields).
+They do not measure device/NAND write amplification: delayed writeback can be
+charged after sampling, and Linux counts page dirtying before writeout or later
+truncation. Compare on the same OS/filesystem with identical checkpoint policy.
+Other platforms report an unavailable counter rather than zero.
+
+The small CI fixture includes mixed payloads, rotation, empty blocks and exact
+reopen checks. Transfer fixture v3 inputs remain unchanged for earlier comparisons.
 
 For the separate CPU-only cached-header codec diagnostic, use:
 
@@ -149,3 +167,15 @@ isolated checkout of `09a63f55`, then apply the
 It restores the old separate-call sequence, removes the new codec-only diagnostic,
 and leaves baseline production code/dependencies unchanged. Build both revisions
 with the same pinned release profile and match fixture digests and tip hashes.
+
+
+For the later lifecycle/mixed-payload harness, the
+[baseline-only adapter](baselines/2026-09-11-publication-lifecycle-baseline.patch)
+is against the harness at the corresponding audit commit. Copy that harness into
+an isolated `09a63f55` checkout, apply this adapter, and add `libc = "0.2"` under
+`[target.'cfg(target_os = "macos")'.dev-dependencies]`. The existing lockfile gains
+only `libc` in `logex-storage`'s dependency list; no dependency version changes.
+The adapter preserves every fixture/oracle and restores the original separate
+calls, rejects the unsupported strong-checkpoint option, and omits the unrelated
+new header-codec diagnostic. Record both source and binary hashes. The original
+production APIs publish on each call; current final checkpoint cost remains timed.

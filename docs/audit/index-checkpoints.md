@@ -54,8 +54,21 @@ after canonical changes with an unchanged row count or maximum segment id.
 All six combined local workspace gates pass: 895 tests passed, nine ignored.
 Final wrapper/background cleanup also passes formatting, workspace check, strict
 Clippy, the query harness and background tests. [Validation record](baselines/2026-09-11-index-checkpoint-validation.jsonl).
-CI/platform gates and performance accounting remain in progress. Query/index construction costs must be measured separately from the
-already-recorded live storage gain. This is not completion of batch 6: malformed
+All six Linux/macOS CI jobs pass at `196664e4`. Both Apple architectures pass
+184 storage tests/four ignored, 128 cross-mount recovery cases, and five query
+tests/one ignored on disposable ExFAT images at integrated `6ce06c13`.
+[Platform record](baselines/2026-09-11-live-bundle-platform-validation.jsonl).
+
+The first integrated APFS lifecycle comparison uses five alternating process
+pairs × three fresh datasets per dense/sparse profile (200,000 rows). Native,
+count and ordered query medians increase 1.0–3.7%; concurrent native queries are
++2.1% dense / +6.6% sparse. Index construction is +26.2% dense / +13.1% sparse.
+Warm reopen is 12.7–13.1 ms versus 1.2–1.3 ms. Generic row-only live writes are
++19.2–19.9%; generic historical writes are +30.4–36.5%. Those generic APIs are no
+longer production sync callers; combined sync has separate measurements. The
+results remain visible and are not waived as successful performance acceptance.
+[Raw comparison](baselines/2026-09-11-live-bundle-query-performance.jsonl).
+Index flushing, startup validation and concurrent cost need further attribution. This is not completion of batch 6: malformed
 index payloads, standalone low-level writer APIs, complete query snapshot/file
 lifetimes, derived artifact enumeration and broader randomized index equivalence
 remain audit work. The PR remains draft and unmerged.

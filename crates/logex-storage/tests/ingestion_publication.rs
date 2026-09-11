@@ -1,5 +1,6 @@
 //! Storage calls made by live/historical sync, including progress publication.
 //! Synthetic headers are already-validated inputs here, not consensus fixtures.
+use std::path::Path;
 use std::time::Instant;
 
 use alloy_consensus::Header;
@@ -19,6 +20,86 @@ struct Config {
     checkpoint_each_block: bool,
     durable_checkpoint: bool,
     rich_headers: bool,
+    mixed_payloads: bool,
+}
+
+#[derive(Default, serde::Serialize)]
+struct Footprint {
+    logical_bytes: u64,
+    allocated_bytes: Option<u64>,
+    files: u64,
+}
+
+fn footprint(path: &Path) -> std::io::Result<Footprint> {
+    let mut result = Footprint {
+        allocated_bytes: cfg!(unix).then_some(0),
+        ..Default::default()
+    };
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            let child = footprint(&entry.path())?;
+            result.logical_bytes += child.logical_bytes;
+            result.files += child.files;
+            result.allocated_bytes = result
+                .allocated_bytes
+                .zip(child.allocated_bytes)
+                .map(|(left, right)| left + right);
+        } else {
+            result.logical_bytes += metadata.len();
+            result.files += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                *result.allocated_bytes.as_mut().unwrap() += metadata.blocks() * 512;
+            }
+        }
+    }
+    Ok(result)
+}
+
+// OS-attributed process disk writes, not NAND/device-wide write amplification.
+// Read these counters outside timing; delayed writeback may be charged later.
+#[cfg(target_os = "macos")]
+fn process_written_bytes() -> std::io::Result<Option<u64>> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
+    // SAFETY: RUSAGE_INFO_V2 writes exactly the matching C-layout structure.
+    // Its correctly aligned buffer remains valid for this synchronous call;
+    // proc_pid_rusage's pointer-to-pointer signature denotes the output buffer,
+    // not a pointer value to dereference. Only a successful call initializes it.
+    // See Apple's libproc.h and bsd/sys/resource.h, linked in benchmarks.md.
+    let result = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            usage.as_mut_ptr().cast(),
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful call above initialized the complete v2 structure.
+    Ok(Some(unsafe { usage.assume_init() }.ri_diskio_byteswritten))
+}
+
+#[cfg(target_os = "linux")]
+fn process_written_bytes() -> std::io::Result<Option<u64>> {
+    let counters = std::fs::read_to_string("/proc/self/io")?;
+    let value = counters
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:"))
+        .ok_or_else(|| std::io::Error::other("missing process write_bytes counter"))?;
+    value
+        .trim()
+        .parse()
+        .map(Some)
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_written_bytes() -> std::io::Result<Option<u64>> {
+    Ok(None)
 }
 
 impl Config {
@@ -102,7 +183,19 @@ fn fixture(config: &Config) -> (Vec<Header>, Vec<Vec<LogRow>>) {
             .map(|log| {
                 let mut key = hash.to_vec();
                 key.extend_from_slice(&(log as u64 / 2).to_le_bytes());
-                let data = Bytes::copy_from_slice(keccak256(&key).as_slice());
+                let data = if config.mixed_payloads {
+                    let length = [0, 32, 32, 32, 32, 64, 128, 256, 1024, 32][(index + log) % 10];
+                    let mut payload = Vec::with_capacity(length);
+                    for word in 0..length / 32 {
+                        let mut seed = key.clone();
+                        seed.extend_from_slice(&(log as u64).to_le_bytes());
+                        seed.extend_from_slice(&(word as u64).to_le_bytes());
+                        payload.extend_from_slice(keccak256(seed).as_slice());
+                    }
+                    Bytes::from(payload)
+                } else {
+                    Bytes::copy_from_slice(keccak256(&key).as_slice())
+                };
                 LogRow {
                     block_number: header.number,
                     block_hash: hash,
@@ -176,7 +269,7 @@ fn run(config: Config) {
     let tip = headers.last().unwrap();
     println!(
         "{}",
-        json!({"kind":"config", "fixture_version":3, "workload":"sync_storage_publication",
+        json!({"kind":"config", "fixture_version":if config.mixed_payloads {4} else {3}, "workload":"sync_storage_publication",
             "blocks":config.blocks,"rows_per_nonempty_block":config.rows_per_block,
             "empty_every_nth_block":16,"history_batch_blocks":config.history_batch_blocks,
             "segment_rows":config.segment_rows,"repeats":config.repeats,
@@ -187,6 +280,7 @@ fn run(config: Config) {
             "checkpoint_each_block":config.checkpoint_each_block,
             "durable_checkpoint":config.durable_checkpoint,
             "header_fields":if config.rich_headers {"rich"} else {"minimal"},
+            "payload":if config.mixed_payloads {"mixed"} else {"transfer"},
             "cache":"fresh directories; OS cache not evicted"})
     );
     for iteration in 0..config.repeats {
@@ -216,6 +310,7 @@ fn run(config: Config) {
                     .unwrap();
                 storage.record_historical_floor(previous).unwrap();
             }
+            let writes_before = process_written_bytes().unwrap();
             let start = Instant::now();
             if historical {
                 for (first, rows) in &history {
@@ -246,6 +341,7 @@ fn run(config: Config) {
             }
             config.checkpoint(&mut storage);
             let elapsed = start.elapsed();
+            let writes_after = process_written_bytes().unwrap();
             println!(
                 "{}",
                 json!({"kind":"sample", "iteration":iteration,
@@ -254,9 +350,16 @@ fn run(config: Config) {
                     "blocks_per_second":measured_headers.len() as f64/elapsed.as_secs_f64(),
                     "rows_per_second":expected.len() as f64/elapsed.as_secs_f64()})
             );
+            let start = Instant::now();
             assert_rows(&storage, &expected);
+            let validation_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let files = footprint(dir.path()).unwrap();
+            let segments = storage.sealed_partitions().len()
+                + usize::from(storage.hot_partition().meta.row_count > 0);
             drop(storage);
+            let start = Instant::now();
             let reopened = PartitionManager::open(storage_config).unwrap();
+            let reopen_ms = start.elapsed().as_secs_f64() * 1000.0;
             assert_rows(&reopened, &expected);
             if historical {
                 assert_eq!(reopened.historical_floor_header(), measured_headers.first());
@@ -272,6 +375,16 @@ fn run(config: Config) {
                 );
                 assert_eq!(reopened.recent_headers().last(), Some(tip));
             }
+            println!(
+                "{}",
+                json!({"kind":"lifecycle", "iteration":iteration,
+                    "route":if historical {"historical"} else {"live"},
+                    "files":files, "segments":segments,
+                    "full_row_validation_ms":validation_ms, "warm_reopen_ms":reopen_ms,
+                    "process_written_bytes":writes_before.zip(writes_after)
+                        .map(|(before, after)| after.checked_sub(before).unwrap()),
+                })
+            );
         }
     }
 }
@@ -289,6 +402,7 @@ fn storage_publication_preserves_rows_and_empty_block_progress() {
         checkpoint_each_block: false,
         durable_checkpoint: false,
         rich_headers: false,
+        mixed_payloads: true,
     });
 }
 
@@ -312,6 +426,11 @@ fn benchmark_sync_storage_publication() {
             Ok("rich") => true,
             Ok("minimal") | Err(std::env::VarError::NotPresent) => false,
             value => panic!("invalid LOGEX_PUBLICATION_HEADER_FIELDS: {value:?}"),
+        },
+        mixed_payloads: match std::env::var("LOGEX_PUBLICATION_PAYLOAD").as_deref() {
+            Ok("mixed") => true,
+            Ok("transfer") | Err(std::env::VarError::NotPresent) => false,
+            value => panic!("invalid LOGEX_PUBLICATION_PAYLOAD: {value:?}"),
         },
         durable_checkpoint: match std::env::var("LOGEX_PUBLICATION_DURABLE_CHECKPOINT").as_deref() {
             Ok("1") => true,
@@ -345,6 +464,7 @@ fn benchmark_cached_header_encoding() {
             checkpoint_each_block: false,
             durable_checkpoint: false,
             rich_headers: rich,
+            mixed_payloads: false,
         });
         for iteration in 0..9 {
             let start = Instant::now();
