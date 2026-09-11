@@ -3,16 +3,18 @@
 This batch 2 milestone follows PR #129. It fixes replay of a WAL batch after some
 or all of that batch has already reached committed segments. It also establishes
 file and directory synchronization before clearing that batch's recovery data.
-It preserves the WAL and segment encodings; the user approved a separate journal
-instead of a versioned WAL. Other storage formats and compaction replacement
-protocols still require review.
+The generic WAL encoding is preserved. The user approved a separate recovery
+journal and subsequently authorized a fresh sync with breaking storage changes.
+The current catalog/segment/bundle/index versions are 11/9/5/2; the protocol history
+below is explicitly revision-specific. Compaction replacement and generation
+coalescing are covered in their linked findings, with final acceptance still open.
 
 PR #130 remains unmerged: the initial ingestion slowdown was rejected. The user
 requires no more than 10% degradation and authorized bounded WAL checkpoints.
 The [grouped-flush investigation](baselines/2026-09-11-grouped-flush.md) records
 the tested intermediate changes; the [checkpoint investigation](baselines/2026-09-11-checkpoints.md)
 records that rejected intermediate prototype. The current
-[catalog v2 candidate](sync-ingestion-checkpoints.md) combines sync rows/progress,
+[combined-checkpoint design](sync-ingestion-checkpoints.md) combines sync rows/progress,
 uses bounded restart re-fetch, and requires a new data directory. The protocol
 and old-format downgrade notes below describe the preceding WAL-checkpoint
 implementation; they do not authorize opening catalog v2 with an older binary.
@@ -249,3 +251,33 @@ multi-page byte oracle compares both encoders' data, page indexes, descriptors
 and null bitmaps. Query results still own their values; the complete raw file
 is read into memory. This does not resolve cross-column snapshot/file-lifetime
 races; those remain part of the query audit.
+
+
+## Already-empty WAL startup
+
+Phase profiling at a0ed88c1 found generic populated reopen spending roughly
+4–9 ms truncating and fully synchronizing an already-empty WAL, in addition to
+4–6 ms of required catalog hardening. With no journal and a physically empty WAL,
+startup now skips that mutation. A partial frame can decode to zero rows while
+still occupying bytes; that case continues to durably truncate before appending.
+The catalog is still hardened, recovery evidence is still validated, and active
+or completed journals keep their previous paths.
+
+The new regression fails before the fix at its unwanted-mutation assertion and
+passes afterward. It covers repeated empty reopen, a recoverable partial header,
+exact original rows and subsequent append/checkpoint/reopen. All 207 storage
+unit tests pass; five platform/benchmark tests are intentionally ignored here.
+[Failure, exact patch and validation](baselines/2026-09-11-empty-wal-validation.json).
+[Diagnostic phase evidence](baselines/2026-09-11-storage-phase-attribution.json).
+This removes redundant work without claiming that required startup integrity or
+full synchronization can be omitted.
+
+
+An isolated Apple synchronization experiment removed the initial ordinary fsync
+of the exact file retained for the final full sync, keeping directory fsyncs and
+every device's final synchronization. Apple's [F_FULLFSYNC contract](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/fcntl.2)
+supports the file-plus-device flush, but the measured change was inconsistent:
+dense generic live/history medians -3.62%/-2.03%, sparse +0.41%/+2.91%, with larger
+tail variation. Its 206 release storage tests passed. The experiment is rejected;
+production retains the preceding synchronization implementation and guarantees.
+[Source, tests and paired measurements](baselines/2026-09-11-single-file-sync-rejected.jsonl).

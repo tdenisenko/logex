@@ -1794,7 +1794,17 @@ impl NativeStorage {
         let rows = self.wal.read_all()?;
         let mut journal = match journal {
             Some(journal) => journal,
-            None if rows.is_empty() => return self.wal.truncate(),
+            None if rows.is_empty() => {
+                // With no journal, an already-empty WAL has no recovery work.
+                // The observed catalog was hardened before reaching this point.
+                // A partial frame can decode to zero rows while retaining bytes;
+                // those bytes still require durable truncation before appending.
+                return if self.wal.is_empty()? {
+                    Ok(())
+                } else {
+                    self.wal.truncate()
+                };
+            }
             None => {
                 // Old WALs carry no starting position. Overlap is ambiguous:
                 // these could be committed rows or a new intentionally repeated
@@ -5373,6 +5383,63 @@ mod tests {
         );
         drop(plan);
         NativeStorage::open(config).expect("directory lock released after compaction plan drops");
+    }
+
+    #[test]
+    fn empty_wal_reopen_avoids_mutation_but_trims_recoverable_tail() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let rows = make_rows(3, 100);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint().unwrap();
+        let segment = storage.hot_partition_meta().path;
+        let wal = tmp.path().join("wal/pending.wal");
+        drop(storage);
+
+        // A physically empty WAL needs no mutation. A recoverable partial frame
+        // still has bytes and must be retired before the next append.
+        for tail in [&[][..], &[1, 2, 3][..], &[][..]] {
+            fs::write(&wal, tail).unwrap();
+            durability::inject_failure(usize::MAX);
+            let reopened = NativeStorage::open(config.clone());
+            let events = durability::take_events();
+            let reopened = reopened.unwrap();
+            assert_eq!(reopened.total_rows(), rows.len() as u64);
+            assert_eq!(
+                SegmentReader::open(&segment)
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap(),
+                rows
+            );
+            assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|(operation, _)| *operation == "truncate_wal"),
+                !tail.is_empty()
+            );
+            drop(reopened);
+        }
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let more = make_rows(2, 200);
+        storage.write_batch(&more).unwrap();
+        storage.checkpoint().unwrap();
+        drop(storage);
+        let reopened = NativeStorage::open(config).unwrap();
+        let expected = [rows, more].concat();
+        assert_eq!(reopened.total_rows(), expected.len() as u64);
+        assert_eq!(
+            SegmentReader::open(&segment)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            expected
+        );
     }
 
     #[test]

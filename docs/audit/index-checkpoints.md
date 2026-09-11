@@ -117,3 +117,24 @@ for causal acceptance and is retained as inconclusive. It also measures reopen
 after compaction, with no populated raw hot segment, so it does not isolate the
 changed raw-header inspection. The header change bounds inspection memory and
 bytes read; no speed claim is made from that fixture.
+
+
+The isolated independent-publication comparison now has 15 samples per revision
+and dense/sparse profile. It compares the preceding projected-reader/bounded-header
+source against a0ed88c1, following each revision's production index sequence.
+Exact fixture/native/SQL/reopen oracles all pass. Index medians improve
+303.132→281.579 ms dense (-7.11%) and 558.122→520.856 ms sparse (-6.68%).
+Sparse concurrent-query median rises 6.29% in the unchanged query path, requiring
+confirmation; no outlier is discarded. This establishes the removed publication
+cost, not final original-baseline acceptance.
+[All samples and source identities](baselines/2026-09-11-independent-index-comparison.jsonl).
+
+The subsequent original-09a63f55 comparison uses 15 fresh-dataset samples per
+revision/profile at a0ed88c1. Index construction is +11.18% dense / +11.91% sparse,
+improved from preceding candidates but still under investigation. Generic WAL
+live is +10.08% / +14.00%, history +29.48% / +19.03%; these remain separate from
+combined sync. Warm reopen is 17.070 / 15.870 ms versus 1.239 / 1.256 ms. Native
+filter medians are -2.60% / +1.41%, ordered SQL -1.43% / +2.37%, count SQL -0.74% /
++5.74%. Sparse concurrent queries +15.17% and compaction +22.12% dense / +12.50%
+are retained for attribution and confirmation. No result is a waived acceptance.
+[Original-baseline samples](baselines/2026-09-11-independent-index-original.jsonl).

@@ -1,6 +1,11 @@
 # Sparse bundle page coalescing
 
-Follow-up to the LZ4 table candidate `6156ef33` within draft PR #130. LZ4 reduces
+This document retains the diagnostic history and the subsequently integrated
+coordinator. Current source is a0ed88c1 (catalog 11 / segment manifest 9 / bundle 5 /
+index checkpoint 2); final performance/platform acceptance remains in progress.
+
+The initial follow-up to LZ4 candidate `6156ef33` measured whether page coalescing
+could help. LZ4 reduces
 metadata, but a sparse segment still contains hundreds of tiny compressed pages.
 This isolated experiment measures whether rebuilding the same rows into full
 pages can address the remaining space/read gap. It is **not** a replacement
@@ -128,8 +133,8 @@ These are controlled storage fixtures, not physical-device power-loss proof.
 Fixed-width compressed pages now bound decompression by their checked expected
 size. Maintenance variable pages use a per-page budget derived from validated
 length columns within the aggregate 8 MiB budget. The streaming prototype used
-bounded output plus a bounded Zstd window; direct bounded decompression is now the candidate being
-compared to address its read overhead. General query variable-page resource
+bounded output plus a bounded Zstd window; the retained implementation uses direct bounded decompression; the later
+materialization-order comparison below records the measured read-cost correction. General query variable-page resource
 limits remain a separate parser/query audit item; this coordinator does not call
 that unbounded path. No new unsafe block or dependency is introduced.
 
@@ -235,3 +240,26 @@ follow-up harness mistyped an expected test name; that attempt was rejected,
 all 88 source hashes were reverified and the corrected harness rebuilt before
 running tests. [Builds, logs, CI and platform scope](baselines/2026-09-11-bundle-repack-intel-validation.json).
 No production volume contents were used. ARM final-source validation remains.
+
+
+### Growth beyond the repack bound
+
+At a0ed88c1, five alternating process pairs per profile retain exact full-row,
+head/floor and restart oracles. Sparse history uses 18,432 blocks with one row in
+each nonempty block (17,280 rows), crossing the 16,384-row repack bound within one
+segment. Dense history uses 2,304 blocks × 1,024 rows in nonempty blocks (2,211,840
+rows), crossing two million rows and ending in three segments. Empty blocks are
+included in progress. Finalization is timed, and caches are not evicted.
+
+| Profile | Ingestion, original → a0ed88c1 | Change | Full-row oracle | Warm reopen |
+| --- | ---: | ---: | ---: | ---: |
+| Sparse boundary | 44,943.359 → 12,192.104 ms | -72.87% | 8.858 → 11.931 ms | 0.897 → 8.122 ms |
+| Dense rotation | 4,558.812 → 821.790 ms | -81.97% | 2,206.623 → 2,507.718 ms | 1.469 → 93.540 ms |
+
+Process-attributed writes fall 97.07% sparse and 90.12% dense. Sparse retained
+bytes are 3,450,298 versus 2,310,887 (+49.31%); coalescing stops at its explicit
+row bound and subsequent appends retain small pages. Dense retained bytes fall
+0.53%. Read/startup costs remain recorded for attribution, with no claim that
+this proves end-to-end sync or uniformly faster reads. The larger fixture also
+retains every observed tail and process RSS; no outlier is discarded.
+[Growth measurements and runner](baselines/2026-09-11-independent-index-growth.jsonl).
