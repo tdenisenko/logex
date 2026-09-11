@@ -177,5 +177,41 @@ Raw [Intel APFS](baselines/2026-09-11-ordered-ingestion-intel-apfs-performance.j
 and [Intel ExFAT](baselines/2026-09-11-ordered-ingestion-intel-exfat-performance.jsonl)
 records include five alternating pairs × three samples, binary identities, host
 metadata, exact oracles and runner source. The disposable image detached after
-timing. Full current Intel ExFAT correctness is running separately afterward.
+timing. Full current Intel ExFAT correctness subsequently passed 177 tests/four ignored
+and all 128 cross-mount cases; the exact disposable image detached again.
+[Current Intel build and validation record](baselines/2026-09-11-ordered-ingestion-intel-exfat.jsonl).
 Acceptance remains blocked by performance, without changing the user's ceiling.
+
+
+## ExFAT live I/O investigation
+
+An [instrumented release profile](baselines/2026-09-11-live-file-flush-profile.jsonl)
+retains the complete v3 row/progress/reopen oracles. For 128 live blocks and a
+publication after each, APFS has 3,720 file flushes and ExFAT has 6,120; both have
+492 ordering calls. Scope times overlap and include instrumentation, so they are
+not an acceptance comparison. Column append, manifest publication and checkpoint
+I/O dominate; cached-header encoding is about 190–220 ms for the whole workload.
+No unsupported-barrier fallback was observed in these local image runs.
+
+A separate [two-block inventory](baselines/2026-09-11-live-file-inventory.jsonl)
+confirms 20 primary segment files on APFS and the same files plus 20 regular
+`._` companions on ExFAT. Apple documents this companion convention in its
+[extended-attribute implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_xattr.c);
+the [AppleDouble MIME specification](https://www.rfc-editor.org/rfc/rfc1740.html)
+separates the file data from resource/attribute information.
+
+A [three-triplet/three-sample diagnostic](baselines/2026-09-11-rejected-sidecar-flush.jsonl)
+skipping regular `._` leaves in the tree flush does not improve enough to retain:
+original/current/diagnostic medians are 7,423.141791 / 6,295.023791 / 6,251.017208 ms.
+The diagnostic is only -0.70% versus current, and its p95 worsens. All temporary
+source is restored and both profiling/timing images detached. ARM ExFAT current
+is faster than original in this run; the repeated Intel +26.31% remains a failure.
+This diagnostic did not establish a safe general companion-name exclusion policy.
+In particular, current `collect_indexes` lists arbitrary files as Custom indexes,
+including companions; that classification needs review in the index audit.
+
+The next isolated feasibility probe is live reuse of the existing immutable bundle
+representation, reducing the number of column files and replacements. No such
+production change is implemented or accepted by this record. It would require
+catalog compatibility, zero-row rollback, generic WAL transitions, reorg/snapshot,
+index/compaction and query-cost validation in addition to ingestion performance.
