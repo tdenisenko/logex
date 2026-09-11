@@ -3,8 +3,8 @@
 Unmerged successor to `c63fb9ed` in draft PR #130. Fresh live sync segments now
 use the immutable bundle representation. The grouped-table follow-up summarizes bounded
 groups of updates; see [its measurements](bundle-table-groups.md). The current
-[generation coalescing candidate](bundle-repacking.md) uses catalog v10 (`LXCAT010`),
-segment manifest v8 and the [bounded table-record bundle v5](bundle-table-codecs.md),
+[generation coalescing candidate](bundle-repacking.md) uses catalog v11 (`LXCAT011`),
+segment manifest v9 and the [bounded table-record bundle v5](bundle-table-codecs.md),
 with full validation still in progress.
 The live-bundle measurements below describe the preceding v7/v5/v3 milestone. Prior catalogs are rejected without rewriting or deleting their data.
 The user authorized fresh incompatible directories, but no production data reset

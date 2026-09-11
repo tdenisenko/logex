@@ -10,7 +10,7 @@ instead of 11,322. The missing rows were present in storage.
 
 Managed `IndexBuilder` operations now publish an `indexes/index-checkpoint` file
 after their output is complete. The bounded, checksummed record identifies the
-source row count and, for bundles, the exact immutable table/canonical reference.
+source row count, generation and, for bundles, the exact immutable table/canonical reference.
 Raw prefixes rely on their append-only row boundary; storage rollback deletes
 their derived indexes before replacing rows. A future repair that replaces rows
 must rebuild indexes as part of its offline publication protocol.
@@ -72,3 +72,48 @@ Index flushing, startup validation and concurrent cost need further attribution.
 index payloads, standalone low-level writer APIs, complete query snapshot/file
 lifetimes, derived artifact enumeration and broader randomized index equivalence
 remain audit work. The PR remains draft and unmerged.
+
+
+## Removing duplicate index publication (validation in progress)
+
+Every query and missing-index check now uses the source-bound index checkpoint
+and named index files. A workspace-wide search found no reader of the manifest's
+`indexes` list. Nevertheless, the CLI and background indexer still refreshed the
+segment manifest after publishing the checkpoint, flushing the entire segment
+again and briefly taking the ingestion write lock. Startup also reconstructed the
+unused list, so merely omitting the refresh would leave unnecessary manifest
+repairs on reopen.
+
+The current follow-up removes that list, its `IndexKind`/`IndexDescriptor` types
+and `collect_indexes`, and removes the post-build refresh calls and wrappers.
+Catalog 11 / segment manifest 9 identify the resulting format; bundle 5 and index
+checkpoint 2 are unchanged. Existing directories remain rejected unchanged under
+the authorized fresh-sync decision. `IndexBuilder` retains the same exclusive
+index ownership, durable withdrawal, source check, complete tree flush and durable
+checkpoint publication. No index integrity or durability check is weakened.
+The existing background compaction scheduler continues to own compaction work;
+index completion no longer initiates a second storage mutation. Query fixtures
+that relied on refresh's implicit WAL checkpoint now state that checkpoint
+explicitly.
+
+The new CLI regression covers first build, missing-only execution and forced
+rebuild, with two sealed segments, a hot segment, a noncanonical row and a
+persisted head. It verifies the exact source files/catalog, rows, canonical bits
+and current index checkpoints across reopen. On unmodified e2635a2f plus this
+test, it fails because `segment.json` changes. The current-source regression
+passes. All six local gates pass: 918 workspace tests, 10 intentionally ignored,
+documentation tests and the release node build. Performance/platform confirmation
+is in progress. [Exact source and validation](baselines/2026-09-11-independent-index-validation.json). This is a performance and
+maintenance finding, not evidence that this specific rewrite changed query rows.
+
+Two smaller resource improvements accompany the review. Index builders capture
+only their required columns, and row-count inspection reuses the existing fixed
+17-byte header reader instead of reading whole raw column payloads. Complete raw
+file size/final-offset checks and bitmap validation remain separate and unchanged.
+The isolated projection comparison showed median index construction -2.65% dense
+and -1.74% sparse; this supports fewer open files, not a claim that the entire
+index regression was fixed. The subsequent header timing run was too variable
+for causal acceptance and is retained as inconclusive. It also measures reopen
+after compaction, with no populated raw hot segment, so it does not isolate the
+changed raw-header inspection. The header change bounds inspection memory and
+bytes read; no speed claim is made from that fixture.

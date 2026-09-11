@@ -255,8 +255,7 @@ mod tests {
         let mut mgr = PartitionManager::open(config).unwrap();
         mgr.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
-        mgr.refresh_segment_indexes(mgr.hot_partition().meta.id)
-            .unwrap();
+        mgr.checkpoint().unwrap();
         (tmp, mgr)
     }
 

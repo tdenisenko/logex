@@ -249,34 +249,21 @@ pub async fn run_background_indexer(
                 sealed_index_scan_complete_for_max_id = sealed_max_id;
             } else {
                 let target_count = sealed_targets.len();
-                let result = tokio::task::spawn_blocking(move || -> io::Result<Vec<u64>> {
-                    let mut indexed = Vec::with_capacity(sealed_targets.len());
-                    for target in sealed_targets {
+                let result = tokio::task::spawn_blocking(move || -> io::Result<usize> {
+                    let mut indexed = 0;
+                    for path in sealed_targets {
                         IndexBuilder::build_missing_indexes(
-                            &target.path,
+                            &path,
                             IndexBuildProfile::Erc20Transfer,
                         )?;
-                        indexed.push(target.segment_id);
+                        indexed += 1;
                     }
                     Ok(indexed)
                 })
                 .await;
 
                 match result {
-                    Ok(Ok(indexed_segment_ids)) => {
-                        let indexed = indexed_segment_ids.len();
-                        {
-                            let mut storage = state.storage.write().await;
-                            for segment_id in indexed_segment_ids {
-                                if let Err(e) = storage.refresh_segment_manifest(segment_id) {
-                                    tracing::warn!(
-                                        error = %e,
-                                        segment_id,
-                                        "failed to refresh segment manifest after sealed index build"
-                                    );
-                                }
-                            }
-                        }
+                    Ok(Ok(indexed)) => {
                         tracing::info!(
                             indexed,
                             target_count,
@@ -313,16 +300,6 @@ pub async fn run_background_indexer(
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
             {
                 Ok(Ok(())) => {
-                    {
-                        let mut storage = state.storage.write().await;
-                        if let Err(e) = storage.refresh_segment_indexes(current.partition_id) {
-                            tracing::warn!(
-                                error = %e,
-                                partition_id = current.partition_id,
-                                "failed to refresh segment manifest after hot index rebuild"
-                            );
-                        }
-                    }
                     tracing::debug!(
                         partition_id = current.partition_id,
                         rows = current.row_count,
@@ -514,16 +491,10 @@ fn should_rebuild_hot_indexes(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SealedIndexTarget {
-    segment_id: u64,
-    path: PathBuf,
-}
-
 fn sealed_query_index_targets(
     storage: &PartitionManager,
     limit: usize,
-) -> (Option<u64>, Vec<SealedIndexTarget>) {
+) -> (Option<u64>, Vec<PathBuf>) {
     let max_segment_id = storage
         .sealed_partitions()
         .iter()
@@ -541,10 +512,7 @@ fn sealed_query_index_targets(
         .filter(|partition| Some(partition.meta.id) != active_historical_segment)
         .filter(|partition| query_indexes_missing(&partition.meta.path))
         .take(limit)
-        .map(|partition| SealedIndexTarget {
-            segment_id: partition.meta.id,
-            path: partition.meta.path.clone(),
-        })
+        .map(|partition| partition.meta.path.clone())
         .collect();
 
     (max_segment_id, targets)

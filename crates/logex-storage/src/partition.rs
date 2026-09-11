@@ -151,17 +151,6 @@ impl PartitionManager {
         self.inner.active_historical_segment_id()
     }
 
-    /// Refresh manifest metadata after indexes are rebuilt externally.
-    pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
-        self.inner.refresh_segment_indexes(segment_id)
-    }
-
-    /// Refresh manifest metadata after external index writes without compacting
-    /// or rewriting segment columns.
-    pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
-        self.inner.refresh_segment_manifest(segment_id)
-    }
-
     /// Compact sealed segments that are safely behind the current head.
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
         self.inner.compact_eligible_segments()

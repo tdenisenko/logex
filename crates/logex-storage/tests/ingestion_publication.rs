@@ -21,6 +21,7 @@ struct Config {
     durable_checkpoint: bool,
     rich_headers: bool,
     mixed_payloads: bool,
+    history_cached_head: bool,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -276,7 +277,7 @@ fn run(config: Config) {
     let tip = headers.last().unwrap();
     println!(
         "{}",
-        json!({"kind":"config", "fixture_version":if config.mixed_payloads {4} else {3}, "workload":"sync_storage_publication",
+        json!({"kind":"config", "fixture_version":if config.history_cached_head {5} else if config.mixed_payloads {4} else {3},"history_cached_head":config.history_cached_head, "workload":"sync_storage_publication",
             "blocks":config.blocks,"rows_per_nonempty_block":config.rows_per_block,
             "empty_every_nth_block":16,"history_batch_blocks":config.history_batch_blocks,
             "segment_rows":config.segment_rows,"repeats":config.repeats,
@@ -306,6 +307,15 @@ fn run(config: Config) {
             if historical {
                 // Establish the initial backward-sync anchor outside ingestion.
                 storage.record_historical_floor(tip).unwrap();
+                if config.history_cached_head {
+                    storage
+                        .record_verified_canonical_state(
+                            &anchor(tip),
+                            tip,
+                            &headers[headers.len().saturating_sub(RECENT_HEADER_WINDOW)..],
+                        )
+                        .unwrap();
+                }
             } else if config.warm_headers > 0 {
                 let previous = &headers[config.warm_headers - 1];
                 storage
@@ -372,7 +382,17 @@ fn run(config: Config) {
             if historical {
                 assert_eq!(reopened.historical_floor_header(), measured_headers.first());
                 assert_eq!(reopened.historical_anchor_header(), Some(tip));
-                assert!(reopened.sync_head().is_none());
+                if config.history_cached_head {
+                    assert_eq!(reopened.sync_head().unwrap().block_number, tip.number);
+                    assert_eq!(reopened.sync_head().unwrap().block_hash, tip.hash_slow());
+                    assert_eq!(reopened.chain_anchors().indexed_head, Some(anchor(tip)));
+                    assert_eq!(
+                        reopened.recent_headers(),
+                        &headers[headers.len().saturating_sub(RECENT_HEADER_WINDOW)..]
+                    );
+                } else {
+                    assert!(reopened.sync_head().is_none());
+                }
             } else {
                 assert_eq!(reopened.sync_head().unwrap().block_number, tip.number);
                 assert_eq!(reopened.sync_head().unwrap().block_hash, tip.hash_slow());
@@ -399,25 +419,34 @@ fn run(config: Config) {
 
 #[test]
 fn storage_publication_preserves_rows_and_empty_block_progress() {
-    run(Config {
-        blocks: 16,
-        warm_headers: 4,
-        rows_per_block: 3,
-        history_batch_blocks: 6,
-        segment_rows: 11,
-        repeats: 1,
-        route: None,
-        checkpoint_each_block: false,
-        durable_checkpoint: false,
-        rich_headers: false,
-        mixed_payloads: true,
-    });
+    for history_cached_head in [false, true] {
+        run(Config {
+            blocks: 16,
+            warm_headers: 4,
+            rows_per_block: 3,
+            history_batch_blocks: 6,
+            segment_rows: 11,
+            repeats: 1,
+            route: None,
+            checkpoint_each_block: false,
+            durable_checkpoint: false,
+            rich_headers: false,
+            mixed_payloads: true,
+            history_cached_head,
+        });
+    }
 }
 
 #[test]
 #[ignore = "release sync-storage publication baseline; see docs/audit/benchmarks.md"]
 fn benchmark_sync_storage_publication() {
     run(Config {
+        history_cached_head: match std::env::var("LOGEX_PUBLICATION_HISTORY_CACHED_HEAD").as_deref()
+        {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            value => panic!("invalid LOGEX_PUBLICATION_HISTORY_CACHED_HEAD: {value:?}"),
+        },
         blocks: positive_env("LOGEX_PUBLICATION_BLOCKS", 128),
         warm_headers: positive_env("LOGEX_PUBLICATION_WARM_HEADERS", 8_192),
         rows_per_block: positive_env("LOGEX_PUBLICATION_ROWS_PER_BLOCK", 128),
@@ -473,6 +502,7 @@ fn benchmark_cached_header_encoding() {
             durable_checkpoint: false,
             rich_headers: rich,
             mixed_payloads: false,
+            history_cached_head: false,
         });
         for iteration in 0..9 {
             let start = Instant::now();

@@ -6,7 +6,7 @@ mod storage;
 pub(crate) use segment::current_column_profile;
 
 pub use catalog::{
-    CATALOG_FORMAT_VERSION, ColumnDescriptor, CompressionCodec, IndexKind, NativeStorageCatalog,
+    CATALOG_FORMAT_VERSION, ColumnDescriptor, CompressionCodec, NativeStorageCatalog,
     NativeStorageConfig, STORAGE_FORMAT_VERSION, SegmentDescriptor, SegmentKind, SegmentManifest,
     StorageCatalogPaths, StorageState,
 };

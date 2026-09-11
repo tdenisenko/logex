@@ -912,9 +912,7 @@ mod tests {
         .unwrap();
         storage.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 

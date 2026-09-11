@@ -22,7 +22,7 @@ impl IndexBuilder {
         partition_dir: &Path,
         profile: IndexBuildProfile,
     ) -> std::io::Result<bool> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &[])?;
         let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?;
         if checkpoint.is_none() {
             return Ok(true);
@@ -236,7 +236,7 @@ impl IndexBuilder {
 
     /// Build address index: Address (20 bytes) -> RoaringBitmap of row IDs.
     fn build_address_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["address"])?;
         let addresses = reader.read_address(None)?;
         let mut index = BTreeIndex::new(20);
 
@@ -252,7 +252,7 @@ impl IndexBuilder {
     /// Build topic0 index: B256 (32 bytes) -> RoaringBitmap of row IDs.
     /// Only indexes rows where topic0 is present (non-null).
     fn build_topic0_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["topic0"])?;
         let topics = reader.read_nullable_b256("topic0", None)?;
         let mut index = BTreeIndex::new(32);
 
@@ -270,7 +270,7 @@ impl IndexBuilder {
     /// Build block_number index: u64 as big-endian 8 bytes -> RoaringBitmap of row IDs.
     /// Uses big-endian so lexicographic ordering matches numeric ordering (for range scans).
     fn build_block_number_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["block_number"])?;
         let blocks = reader.read_u64("block_number", None)?;
         let mut index = BTreeIndex::new(8);
 
@@ -286,7 +286,7 @@ impl IndexBuilder {
     /// Build timestamp index: u64 as big-endian 8 bytes -> RoaringBitmap of row IDs.
     /// Uses big-endian so lexicographic ordering matches numeric ordering (for range scans).
     fn build_timestamp_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["timestamp"])?;
         let timestamps = reader.read_u64("timestamp", None)?;
         let mut index = BTreeIndex::new(8);
 
@@ -301,7 +301,7 @@ impl IndexBuilder {
 
     /// Build block_hash index: B256 (32 bytes) -> RoaringBitmap of row IDs.
     fn build_block_hash_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["block_hash"])?;
         let hashes = reader.read_b256("block_hash", None)?;
         let mut index = BTreeIndex::new(32);
 

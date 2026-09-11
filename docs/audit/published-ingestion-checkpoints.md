@@ -214,8 +214,10 @@ The diagnostic is only -0.70% versus current, and its p95 worsens. All temporary
 source is restored and both profiling/timing images detached. ARM ExFAT current
 is faster than original in this run; the repeated Intel +26.31% remains a failure.
 This diagnostic did not establish a safe general companion-name exclusion policy.
-In particular, current `collect_indexes` lists arbitrary files as Custom indexes,
-including companions; that classification needs review in the index audit.
+At that stage, `collect_indexes` listed arbitrary files as Custom indexes,
+including companions. The later [index publication cleanup](index-checkpoints.md)
+removes this unused manifest list entirely; index readers use the source-bound
+checkpoint and known file names.
 
 The [live bundle probe](live-segment-bundles.md) improves the formerly failing
 Intel profile by 37.50% against the original baseline. Integration and expanded

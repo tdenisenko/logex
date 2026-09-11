@@ -15,7 +15,7 @@ use super::segment::append_rows;
 use crate::durability::{self, Publication};
 use crate::state::SyncHead;
 use crate::wal::{EncodedWalBatch, WriteAheadLog};
-use crate::{ColumnFile, ColumnFileHeader, NullBitmap, SegmentReader};
+use crate::{ColumnFile, NullBitmap, SegmentReader};
 
 use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
@@ -690,7 +690,7 @@ impl NativeStorage {
                 // does not imply that the removed raw columns still exist.
                 if !super::segment::segment_is_compacted(&self.paths, segment.id)?
                     && has_raw_segment_artifacts(&dir)?
-                    && hot_segment_physical_row_counts(&dir)?
+                    && hot_segment_physical_row_counts(segment, &dir)?
                         .iter()
                         .any(|(_, count)| *count != segment.row_count)
                 {
@@ -801,7 +801,7 @@ impl NativeStorage {
                 restore |= super::segment::compacted_segment_has_uncommitted_tail(&dir, &prefix)?;
             }
             if active && !compacted && has_raw_segment_artifacts(&dir)? {
-                match hot_segment_physical_row_counts(&dir) {
+                match hot_segment_physical_row_counts(segment, &dir) {
                     Ok(counts) => {
                         if counts.iter().any(|(_, count)| *count < segment.row_count) {
                             return Err(io::Error::new(
@@ -1216,36 +1216,6 @@ impl NativeStorage {
             }
         }
         Ok(())
-    }
-
-    pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
-        self.ensure_writable()?;
-        self.checkpoint_durable()?;
-        let descriptor = self
-            .catalog
-            .segments
-            .iter()
-            .find(|segment| segment.id == segment_id)
-            .cloned()
-            .ok_or_else(|| std::io::Error::other("segment not found"))?;
-        if self.should_compact_segment(&descriptor) {
-            compact_segment(&self.paths, &descriptor)
-        } else {
-            persist_segment_manifest(&self.paths, &descriptor)
-        }
-    }
-
-    pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
-        self.ensure_writable()?;
-        self.checkpoint_durable()?;
-        let descriptor = self
-            .catalog
-            .segments
-            .iter()
-            .find(|segment| segment.id == segment_id)
-            .cloned()
-            .ok_or_else(|| std::io::Error::other("segment not found"))?;
-        persist_segment_manifest(&self.paths, &descriptor)
     }
 
     pub fn compact_eligible_segments(&mut self) -> std::io::Result<usize> {
@@ -2106,7 +2076,7 @@ impl NativeStorage {
                 return Ok(false);
             }
 
-            let column_counts = hot_segment_physical_row_counts(&segment_dir)?;
+            let column_counts = hot_segment_physical_row_counts(&descriptor, &segment_dir)?;
             if column_counts
                 .iter()
                 .all(|(_, row_count)| *row_count == descriptor.row_count)
@@ -2357,7 +2327,7 @@ fn verify_segment_integrity(
     // unreadable. Raw manifests still require the complete raw file set.
     if !super::segment::segment_is_compacted(paths, descriptor.id)? {
         verify_raw_segment_files_complete(descriptor, &dir)?;
-        for (name, physical_rows) in hot_segment_physical_row_counts(&dir)? {
+        for (name, physical_rows) in hot_segment_physical_row_counts(descriptor, &dir)? {
             if physical_rows != row_count {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2503,7 +2473,10 @@ fn has_raw_segment_artifacts(dir: &Path) -> io::Result<bool> {
     })
 }
 
-fn hot_segment_physical_row_counts(segment_dir: &Path) -> io::Result<Vec<(&'static str, u64)>> {
+fn hot_segment_physical_row_counts(
+    descriptor: &SegmentDescriptor,
+    segment_dir: &Path,
+) -> io::Result<Vec<(&'static str, u64)>> {
     const COLUMN_FILES: &[&str] = &[
         "address.col",
         "block_number.col",
@@ -2531,13 +2504,9 @@ fn hot_segment_physical_row_counts(segment_dir: &Path) -> io::Result<Vec<(&'stat
     let mut counts = Vec::with_capacity(COLUMN_FILES.len() + BITMAP_FILES.len());
     for name in COLUMN_FILES {
         let path = segment_dir.join(name);
-        let data = fs::read(&path)?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("corrupt hot segment column {}", path.display()),
-            )
-        })?;
+        // Only the fixed header contributes a count. Payload sizes and the final
+        // data offset are checked separately by raw integrity validation.
+        let header = super::segment::read_raw_column_header(descriptor, &path, name)?;
         counts.push((*name, header.row_count));
     }
 
@@ -2616,6 +2585,7 @@ fn verify_recent_headers(state: &StorageState) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ColumnFileHeader;
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -3428,7 +3398,7 @@ mod tests {
 
     #[test]
     fn published_ingestion_hardens_before_wal_reorg_and_metadata_mutation() {
-        for action in 0..8 {
+        for action in 0..7 {
             let dir = TempDir::new().unwrap();
             let mut storage = NativeStorage::open(NativeStorageConfig {
                 data_dir: dir.path().to_owned(),
@@ -3462,10 +3432,7 @@ mod tests {
                 4 => storage
                     .record_chain_anchors(storage.chain_anchors())
                     .unwrap(),
-                5 => storage
-                    .refresh_segment_manifest(storage.catalog.active_hot_segment.unwrap())
-                    .unwrap(),
-                6 => {
+                5 => {
                     storage.compact_eligible_segments_limit(1).unwrap();
                 }
                 _ => storage
@@ -6742,7 +6709,7 @@ mod tests {
             .unwrap();
         let sealed_path = storage.segment_path(sealed.id);
 
-        storage.refresh_segment_indexes(sealed.id).unwrap();
+        assert_eq!(storage.compact_eligible_segments().unwrap(), 0);
         assert!(sealed_path.join("address.col").exists());
         assert!(!sealed_path.join("columns/address.pages").exists());
         assert_eq!(storage.compaction_backlog_count().unwrap(), 0);

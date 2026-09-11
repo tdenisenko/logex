@@ -61,7 +61,7 @@ impl CompositeIndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["address", "topic0"])?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_KEY_SIZE);
@@ -89,7 +89,8 @@ impl CompositeIndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader =
+            SegmentReader::open_projected(partition_dir, &["address", "topic0", "block_number"])?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let blocks = reader.read_u64("block_number", None)?;
@@ -124,7 +125,8 @@ impl CompositeIndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader =
+            SegmentReader::open_projected(partition_dir, &["address", "topic0", "topic1"])?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
@@ -159,7 +161,8 @@ impl CompositeIndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader =
+            SegmentReader::open_projected(partition_dir, &["address", "topic0", "topic2"])?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic2s = reader.read_nullable_b256("topic2", None)?;
@@ -194,7 +197,7 @@ impl CompositeIndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(partition_dir, &["topic0", "topic1"])?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
         let mut index = BTreeIndex::new(TOPIC0_TOPIC1_KEY_SIZE);

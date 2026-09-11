@@ -117,6 +117,7 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_ROWS_PER_BLOCK` | 128 | Rows in each nonempty block |
 | `LOGEX_PUBLICATION_WARM_HEADERS` | 8192 | Untimed prior header-window setup |
 | `LOGEX_PUBLICATION_HISTORY_BLOCKS` | 2048 | Maximum complete blocks per historical call |
+| `LOGEX_PUBLICATION_HISTORY_CACHED_HEAD` | 0 | `1` seeds the retained canonical head/header window before historical timing (fixture v5) and verifies it remains unchanged after backfill/reopen; useful for backfill while live state exists |
 | `LOGEX_PUBLICATION_SEGMENT_ROWS` | 1000000 | Segment row target |
 | `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
 | `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
@@ -126,8 +127,11 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
 | `LOGEX_PUBLICATION_DURABLE_CHECKPOINT` | 0 | `1` uses `checkpoint_durable()` for the final checkpoint and any per-block checkpoint. Report this separately from bounded ordered publication; both include exact clean-reopen oracles. |
 
-Numeric sizes and repetition counts must be positive. Every sixteenth block is empty. This fixture holds the
-production 8,192-header window but does not warm an existing million-row hot
+Numeric sizes and repetition counts must be positive. Every sixteenth block is empty.
+Live profiles hold the production 8,192-header window. Historical profiles seed
+only their floor/anchor unless `LOGEX_PUBLICATION_HISTORY_CACHED_HEAD=1`; earlier
+historical measurements therefore exclude publication of a retained live cache.
+Neither mode warms an existing million-row hot
 segment; that additional write-amplification scenario remains to be measured.
 It prints individual timings and exact fixture identifiers, with no in-process
 summary or claim of end-to-end P2P throughput.
@@ -154,7 +158,9 @@ truncation. Compare on the same OS/filesystem with identical checkpoint policy.
 Other platforms report an unavailable counter rather than zero.
 
 The small CI fixture includes mixed payloads, rotation, empty blocks and exact
-reopen checks. Transfer fixture v3 inputs remain unchanged for earlier comparisons.
+reopen checks, both with and without the cached historical head. Cached history
+also checks the exact retained headers, head hash and indexed anchor. Transfer
+fixture v3 inputs remain unchanged for earlier comparisons.
 
 For the separate CPU-only cached-header codec diagnostic, use:
 

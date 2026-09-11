@@ -190,3 +190,48 @@ the six SegmentReader regressions. [Exact validation and builds](baselines/2026-
 Original-baseline/platform confirmation remains pending. Historical benchmark
 coverage is also being extended to include a retained live-head cache during backfill;
 previous historical profiles seeded only a floor/anchor, not that cached state.
+
+### Original baseline with cached historical head
+
+The extended fixture now checks historical backfill with and without an existing
+canonical head and retained header window. Both release binaries use identical
+fixture inputs/oracles; the original 09a63f55 source has only the recorded
+benchmark API adapter and an existing-version libc dev-dependency edge. Five
+alternating process pairs, three fresh datasets per process give 15 samples per
+revision/profile on internal ARM APFS, without concurrent local builds or tests.
+The final checkpoint/finalization is included; all rows, empty-block progress,
+head hashes, anchors and retained headers are checked after reopen.
+
+| Profile | Ingestion median, original → e2635a2f | Change | Full-row validation change | Warm reopen, original → current |
+| --- | ---: | ---: | ---: | ---: |
+| Cached large history | 72.322 → 69.982 ms | -3.24% | +2.34% | 19.015 → 22.908 ms |
+| Cached mixed history | 917.528 → 87.923 ms | -90.42% | +0.09% | 18.829 → 26.977 ms |
+| Cached sparse history | 11,316.077 → 770.691 ms | -93.19% | -2.48% | 19.034 → 17.408 ms |
+| Cached rich mixed history | 1,037.014 → 91.883 ms | -91.14% | -0.29% | 24.118 → 29.922 ms |
+| Uncached large history | 61.988 → 66.724 ms | +7.64% | +1.17% | 0.936 → 10.267 ms |
+| Mixed live | 3,286.072 → 936.189 ms | -71.51% | +139.94% | 20.219 → 19.272 ms |
+| Uncached sparse history | 2,446.148 → 704.172 ms | -71.21% | -8.58% | 0.462 → 4.790 ms |
+
+All ingestion medians meet the user's 10% ceiling; this is not acceptance of all
+lifecycle costs or end-to-end sync performance. The uncached large-history +7.64%
+requires attribution under the audit's 5% investigation rule. Small live full-row
+validation is 4.331→10.393 ms and remains an open read-cost finding; it is not a
+SQL-query measurement. The original small-live fixture retains raw columns while
+the current source writes pages. Startup performs stronger recovery/integrity
+work, but redundant work must still be removed before accepting a tradeoff.
+
+[Every sample and environment](baselines/2026-09-11-publication-cached-head.jsonl),
+[build/source identities](baselines/2026-09-11-publication-cached-head-build.jsonl)
+and [baseline-only adapter](baselines/2026-09-11-publication-cached-head-baseline.patch).
+The original lockfile change was verified to contain only the libc dependency
+edge, with no version change. This supersedes the earlier claim that every
+historical profile included a retained canonical-header cache.
+
+Intel ExFAT validation is complete for b457ca60 (206 storage tests, five query
+tests and 136 cross-mount recovery cases). The exact e2635a2f follow-up passes six
+reader tests, three repacking tests, five query tests and eight cross-mount
+repacking cases. Both runs detach the exact disposable image. An initial
+follow-up harness mistyped an expected test name; that attempt was rejected,
+all 88 source hashes were reverified and the corrected harness rebuilt before
+running tests. [Builds, logs, CI and platform scope](baselines/2026-09-11-bundle-repack-intel-validation.json).
+No production volume contents were used. ARM final-source validation remains.

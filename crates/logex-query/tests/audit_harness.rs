@@ -309,12 +309,11 @@ async fn run(config: Config) {
             .iter()
             .chain(std::iter::once(storage.hot_partition()))
             .filter(|partition| partition.meta.row_count > 0)
-            .map(|partition| (partition.meta.id, partition.meta.path.clone()))
+            .map(|partition| partition.meta.path.clone())
             .collect();
         let start = Instant::now();
-        for (id, path) in &targets {
+        for path in &targets {
             IndexBuilder::build_all_indexes(path).unwrap();
-            storage.refresh_segment_manifest(*id).unwrap();
         }
         samples.record("index_build", iteration, start.elapsed(), rows.len());
         assert_native(&storage, &expected);

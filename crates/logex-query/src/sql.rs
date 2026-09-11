@@ -4341,9 +4341,7 @@ mod tests {
         .unwrap();
         storage.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4371,9 +4369,7 @@ mod tests {
         rows[1].source = Source::Trace;
         storage.write_batch(&rows).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4426,9 +4422,7 @@ mod tests {
             ])
             .unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
         (tmp, storage)
     }
 
@@ -4461,9 +4455,7 @@ mod tests {
             ])
             .unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
-        storage
-            .refresh_segment_indexes(storage.hot_partition().meta.id)
-            .unwrap();
+        storage.checkpoint().unwrap();
 
         let rows = storage
             .hot_partition()

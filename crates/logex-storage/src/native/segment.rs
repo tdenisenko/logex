@@ -21,8 +21,8 @@ use crate::reader::{ColumnReader, RawBytesColumn, RawFixedColumn};
 use crate::segment_reader::SegmentReader;
 
 use super::catalog::{
-    ColumnDescriptor, CompressionCodec, IndexDescriptor, IndexKind, SegmentDescriptor, SegmentKind,
-    SegmentManifest, StorageCatalogPaths,
+    ColumnDescriptor, CompressionCodec, SegmentDescriptor, SegmentKind, SegmentManifest,
+    StorageCatalogPaths,
 };
 
 const DEFAULT_PAGE_ROWS: u32 = 16_384;
@@ -380,7 +380,6 @@ pub(crate) fn restore_bundled_checkpoint(
         row_count: descriptor.row_count,
         canonical_rows_path: "canonical.bitmap".to_owned(),
         columns,
-        indexes: collect_indexes(&dir)?,
     };
     let artifacts = ColumnArtifacts::open(&dir, Some(&prefix))?;
     artifacts.verify_bundle()?;
@@ -1127,7 +1126,6 @@ fn persist_manifest(
         row_count: descriptor.row_count,
         canonical_rows_path: "canonical.bitmap".to_owned(),
         columns,
-        indexes: collect_indexes(&segment_dir)?,
     };
 
     let path = paths.segment_manifest_path(descriptor.id);
@@ -2047,7 +2045,7 @@ fn verify_raw_data_column_file(
     Ok(())
 }
 
-fn read_raw_column_header(
+pub(super) fn read_raw_column_header(
     descriptor: &SegmentDescriptor,
     path: &Path,
     name: &str,
@@ -2187,45 +2185,6 @@ fn remove_file_if_exists(path: PathBuf) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-fn collect_indexes(segment_dir: &Path) -> std::io::Result<Vec<IndexDescriptor>> {
-    let index_dir = segment_dir.join("indexes");
-    if !index_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut entries: Vec<PathBuf> = fs::read_dir(&index_dir)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
-        .collect();
-    entries.sort();
-
-    Ok(entries
-        .into_iter()
-        .filter_map(|path| {
-            let file_name = path.file_name()?.to_str()?.to_owned();
-            if file_name == crate::index_checkpoint::INDEX_CHECKPOINT_FILE {
-                return None;
-            }
-            let kind = match file_name.as_str() {
-                "address.bptree" => IndexKind::Address,
-                "topic0.bptree" => IndexKind::Topic0,
-                "block_number.bptree" => IndexKind::BlockNumber,
-                "block_hash.bptree" => IndexKind::BlockHash,
-                "timestamp.bptree" => IndexKind::Timestamp,
-                "address_topic0.bptree" => IndexKind::AddressTopic0,
-                "address_topic0_topic1.bptree" => IndexKind::AddressTopic0Topic1,
-                "address_topic0_topic2.bptree" => IndexKind::AddressTopic0Topic2,
-                _ => IndexKind::Custom,
-            };
-            Some(IndexDescriptor {
-                kind,
-                name: file_name.clone(),
-                data_path: format!("indexes/{file_name}"),
-            })
-        })
-        .collect())
 }
 
 #[cfg(test)]

@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 8;
-pub const CATALOG_FORMAT_VERSION: u32 = 10;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT010";
+pub const STORAGE_FORMAT_VERSION: u32 = 9;
+pub const CATALOG_FORMAT_VERSION: u32 = 11;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT011";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -97,20 +97,6 @@ pub enum CompressionCodec {
     AdaptiveBytes,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndexKind {
-    BlockNumber,
-    BlockHash,
-    Address,
-    Topic0,
-    Timestamp,
-    AddressTopic0,
-    AddressTopic0Topic1,
-    AddressTopic0Topic2,
-    Custom,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,7 +136,6 @@ pub struct SegmentManifest {
     pub row_count: u64,
     pub canonical_rows_path: String,
     pub columns: Vec<ColumnDescriptor>,
-    pub indexes: Vec<IndexDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,13 +148,6 @@ pub struct ColumnDescriptor {
     pub null_bitmap_path: Option<String>,
     #[serde(default)]
     pub page_index_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexDescriptor {
-    pub kind: IndexKind,
-    pub name: String,
-    pub data_path: String,
 }
 
 /// Canonical progress committed atomically with its segment positions.

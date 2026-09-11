@@ -43,7 +43,10 @@ pub struct Erc20EventBloomReader {
 
 impl Erc20EventBloom {
     pub fn build(partition_dir: &Path, index_dir: &Path) -> io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(
+            partition_dir,
+            &["address", "topic0", "topic1", "topic2"],
+        )?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
@@ -185,7 +188,10 @@ pub struct TransferBloomReader {
 
 impl TransferBloom {
     pub fn build(partition_dir: &Path, index_dir: &Path) -> io::Result<()> {
-        let reader = SegmentReader::open(partition_dir)?;
+        let reader = SegmentReader::open_projected(
+            partition_dir,
+            &["address", "topic0", "topic1", "topic2"],
+        )?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
