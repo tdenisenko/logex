@@ -140,3 +140,7 @@ Large-history warm reopen is 9.899 versus 0.875 ms. Smaller tables help but do n
 remove many small payload pages or provide safe artifact reclamation. Those costs,
 generic WAL/index costs and the repeated mixed-history tail remain audit work.
 PR #130 stays draft and unmerged.
+
+The subsequent [page-coalescing feasibility](bundle-repacking.md) measures the
+remaining small-page cost. It shows substantial read/space potential, with a
+replacement publication/retirement coordinator still required before integration.
