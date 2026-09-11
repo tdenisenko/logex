@@ -11,6 +11,8 @@ use crate::native::CompressionCodec;
 
 const PAGE_INDEX_MAGIC: &[u8; 4] = b"LXPI";
 const PAGE_INDEX_VERSION: u32 = 1;
+pub(crate) const PAGE_INDEX_HEADER_BYTES: usize = 12;
+pub(crate) const PAGE_INDEX_ENTRY_BYTES: usize = 24;
 const ADAPTIVE_FIXED_NONE: u8 = 0;
 const ADAPTIVE_FIXED_DICTIONARY: u8 = 1;
 const ADAPTIVE_FIXED_ZSTD: u8 = 2;
@@ -41,6 +43,24 @@ pub fn write_page_index(entries: &[PageIndexEntry]) -> Vec<u8> {
         out.extend_from_slice(&entry.encoded_len.to_le_bytes());
     }
     out
+}
+
+/// Restore the standard header around a captured append-only entry stream.
+pub(crate) fn frame_page_index(entries: &[u8]) -> io::Result<Vec<u8>> {
+    if !entries.len().is_multiple_of(PAGE_INDEX_ENTRY_BYTES) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unaligned page index entries",
+        ));
+    }
+    let count = u32::try_from(entries.len() / PAGE_INDEX_ENTRY_BYTES)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "page index count overflow"))?;
+    let mut out = Vec::with_capacity(PAGE_INDEX_HEADER_BYTES + entries.len());
+    out.extend_from_slice(PAGE_INDEX_MAGIC);
+    out.extend_from_slice(&PAGE_INDEX_VERSION.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(entries);
+    Ok(out)
 }
 
 pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {

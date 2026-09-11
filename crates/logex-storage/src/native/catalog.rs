@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 2;
-pub const CATALOG_FORMAT_VERSION: u32 = 4;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT004";
+pub const STORAGE_FORMAT_VERSION: u32 = 3;
+pub const CATALOG_FORMAT_VERSION: u32 = 5;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT005";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -486,9 +486,9 @@ fn invalid_catalog(message: impl Into<String>) -> io::Error {
 
 fn frame_lengths(prefix: &[u8]) -> io::Result<(usize, usize)> {
     if prefix.len() < CATALOG_PREFIX_BYTES || &prefix[..8] != CATALOG_MAGIC {
-        return Err(invalid_catalog(
-            "invalid or unsupported catalog; format 4 requires a new data directory",
-        ));
+        return Err(invalid_catalog(format!(
+            "invalid or unsupported catalog; format {CATALOG_FORMAT_VERSION} requires a new data directory"
+        )));
     }
     // The fixed prefix was checked before these exact-width conversions.
     let metadata = u32::from_le_bytes(prefix[8..12].try_into().unwrap()) as usize;
@@ -657,9 +657,9 @@ mod tests {
         // The previous checksummed format also remains untouched. Its magic
         // and metadata version are both old, with an otherwise valid checksum.
         let mut previous = catalog.clone();
-        previous.format_version = 3;
+        previous.format_version = 4;
         let mut bytes = encode_frame(&serde_json::to_vec(&previous).unwrap(), &[]).unwrap();
-        bytes[..8].copy_from_slice(b"LXCAT003");
+        bytes[..8].copy_from_slice(b"LXCAT004");
         let checksum = frame_checksum(&bytes);
         bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
         fs::write(paths.catalog_path(), &bytes).unwrap();

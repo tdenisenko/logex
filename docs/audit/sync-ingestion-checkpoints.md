@@ -746,3 +746,50 @@ and page indexes on every append can accumulate stale bytes quadratically.
 Measure representative and very small batches before choosing a bounded encoding
 or reclamation change. Format acceptance, original ingestion confirmation, disk
 and query/startup accounting, and current isolated ExFAT validation remain open.
+
+
+## Bounded metadata follow-up
+
+All six CI jobs pass for `0223055d` in run `34555483224`, in addition to its saved
+local gates. The subsequent growth diagnostic nevertheless rejects its full-table
+and full-index publication pattern: 1,024 tiny appends retain a 295 MB artifact.
+
+The local successor uses catalog v5 / segment v3 and bounded table deltas, inline
+incremental page-index entries, and nullable bitmaps with bounded compression.
+An intermediate separate-index-fragment implementation reduced disk size but
+increased small-read overhead and was revised. The current inline version passes
+164 storage tests (three ignored) and reduces that artifact to 10.4 MB while
+preserving exact rows and one segment. Details, malformed-input coverage and all
+raw evidence are in [the format ledger](shared-segment-artifact.md). This is still
+unaccepted; original ingestion, query/startup, full gates and platforms remain.
+
+
+## Original confirmation with inline metadata (2026-09-11)
+
+Five alternating pairs × three release iterations preserve all exact row,
+head/floor/anchor and reopen oracles. These are storage-call timings, including
+finalization/checkpoint, not end-to-end peer throughput.
+
+| Profile | Original median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| few-logs | 6.569917 | 7.925625 | +20.64% — fails |
+| tiny-chunks | 45.301792 | 21.958500 | -51.53% |
+| sparse-history | 19.270958 | 12.010666 | -37.67% |
+| short | 14.584833 | 9.010583 | -38.22% |
+| short (live) | 2921.185708 | 548.505917 | -81.22% |
+| sustained-history | 217.713041 | 65.160292 | -70.07% |
+| large-history | 61.249000 | 67.097041 | +9.55% |
+
+[Raw samples, p95 and peak memory](baselines/2026-09-11-inline-index-original-comparison.jsonl).
+Tiny finalized history still fails the user's ceiling. Large history is close to
+that ceiling and exceeds the 5% investigation threshold. Short-history p95 also
+varied above baseline despite its faster median; tail stability needs confirmation.
+This is not format acceptance. Repeated many-appends/query/startup comparisons,
+current platform tests and physical write accounting remain open.
+
+All six local workspace gates pass for the inline-index milestone: 871 tests /
+eight explicitly ignored cases, formatting, locked all-target check/strict Clippy,
+doctests and release build. The final format-diagnostic correction also passes
+focused catalog tests and refreshed formatting/check/Clippy.
+[Gate records](baselines/2026-09-11-inline-index-gates.jsonl). No merge or performance
+acceptance is implied.

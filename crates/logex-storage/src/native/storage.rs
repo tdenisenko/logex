@@ -3436,18 +3436,22 @@ mod tests {
                 writer.append_data(id as u8, &data).unwrap();
             }
             writer
-                .replace_metadata(
+                .append_data(
                     id as u8 + 14,
                     &artifacts
                         .read(&format!("columns/{name}.pages.idx"))
-                        .unwrap(),
+                        .unwrap()[crate::page::PAGE_INDEX_HEADER_BYTES..],
                 )
                 .unwrap();
             if (9..13).contains(&id) {
                 writer
                     .replace_metadata(
                         id as u8 + 19,
-                        &artifacts.read(&format!("columns/{name}.null")).unwrap(),
+                        &crate::column_artifact::encode_bitmap(
+                            &artifacts.read(&format!("columns/{name}.null")).unwrap(),
+                            manifest.row_count,
+                        )
+                        .unwrap(),
                     )
                     .unwrap();
             }

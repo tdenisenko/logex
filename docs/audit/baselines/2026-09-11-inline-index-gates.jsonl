@@ -1,0 +1,10 @@
+{"gate": "fmt", "returncode": 0, "elapsed_seconds": 0.7332369579817168}
+{"gate": "check", "returncode": 0, "elapsed_seconds": 7.604086000006646}
+{"gate": "clippy", "returncode": 0, "elapsed_seconds": 6.718466291029472}
+{"gate": "test", "returncode": 0, "elapsed_seconds": 112.78336729097646}
+{"gate": "doc", "returncode": 0, "elapsed_seconds": 12.05023304198403}
+{"gate": "release", "returncode": 0, "elapsed_seconds": 44.48884770798031}
+{"gate": "fmt_after_diagnostic", "returncode": 0, "elapsed_seconds": 0.7694196250522509}
+{"gate": "check_after_diagnostic", "returncode": 0, "elapsed_seconds": 5.002907082962338}
+{"gate": "clippy_after_diagnostic", "returncode": 0, "elapsed_seconds": 4.6540962920407765}
+{"gate": "catalog_after_diagnostic", "returncode": 0, "elapsed_seconds": 2.3479568749899045}

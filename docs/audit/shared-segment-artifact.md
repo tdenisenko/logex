@@ -61,19 +61,33 @@ and must not be treated as an implementation or migration artifact.
 ## Current low-level implementation
 
 `bundle.rs` is now connected to historical ingestion, SegmentReader and catalog
-recovery. Catalog v4 (`LXCAT004`) and segment v2 intentionally reject older
+recovery. Catalog v5 (`LXCAT005`) and segment v3 intentionally reject older
 formats without rewriting them. New historical segments use
 `columns/segment.bundle`; raw live columns and their existing compaction path
 remain supported. This candidate is not accepted for deployment.
 
-The prototype uses `LXBND001` file magic and immutable `LXBT0001` tables. A
-reference stores row count, table offset, table length and CRC32. Tables encode
-numeric stream IDs, logical lengths and physical offset/length/CRC32 extents.
-IDs 0–13 are append-only data streams; IDs 14–31 are replaceable index/nullable
-metadata streams. No table field supplies a filesystem path. Individual extents
-are at most 1 MiB, each stream at most 4,096 extents, and table reads at most
-4 MiB. Counts, reserved fields, logical lengths, offsets, physical ordering,
-overlap and trailing bytes are checked before use. CRC32 detects accidental
+The candidate uses `LXBND002` file magic and immutable `LXBT0002` tables. A
+reference stores row count, table offset, table length, CRC32, ancestor depth and
+total table-chain bytes. Tables encode numeric stream IDs, logical lengths and
+physical offset/length/CRC32 extents. IDs 0–13 hold append-only column payloads;
+IDs 14–27 hold append-only page-index entries inline in the checksummed tables,
+without a repeated header or separate fragments. The reader reconstructs the
+existing logical index header from the captured count.
+IDs 28–31 hold replaceable null bitmaps, tagged as plain or LZ4-compressed bytes.
+Compression is used only when smaller, and decoding allocates from the captured
+row count, never a size supplied by compressed input. Bundled row count is bounded
+by 4,096 fixed-column pages × 16,384 rows (about 8 MiB per decoded bitmap).
+
+Most appends write only changed stream extents. A delta records its parent
+reference; after at most 32 tables, or before 4 MiB of cumulative table reads, the
+writer emits a complete table. This bounds startup/query traversal while reducing
+repeated metadata writes. It does not reclaim older full tables. No table field
+supplies a filesystem path. Individual extents are at most 1 MiB and each stream
+at most 4,096 extents. Counts, reserved fields, logical lengths, offsets, physical
+ordering, overlap and trailing bytes are checked before use. Parent snapshots must precede
+their children physically, with nondecreasing rows and strictly increasing depth
+and cumulative read budget. Delta
+extents must follow their parent's complete snapshot. CRC32 detects accidental
 corruption; it is not authentication.
 
 Readers retain a file handle and the table they opened. Selected ranges verify
@@ -83,7 +97,7 @@ then the immutable table, and return a reference after userspace buffers flush.
 An I/O failure poisons that writer; old references remain readable. The append
 constructor rejects an unpublished tail until storage recovery trims it.
 
-Nine focused tests and strict storage Clippy pass: exact snapshots across append
+Regression coverage includes: exact snapshots across append
 and metadata replacement, bounded-fragment selections and concurrent writers,
 every truncation/one-bit mutation of a small artifact, valid-checksum malformed
 tables, interrupted fragment/table writes and retry, four deterministic seeds of
@@ -120,3 +134,82 @@ Still required for acceptance: complete workspace/platform gates, original-basel
 ingestion comparisons, query/startup effects, physical disk/write-amplification
 measurements and isolated ExFAT/cross-device validation. The 10% performance ceiling
 is unchanged, and PR #130 remains draft.
+
+
+## Metadata growth finding (2026-09-11, `0223055d`)
+
+The diagnostic confirms excessive stale metadata, not just a theoretical bound.
+Every case remains one bundle and passes exact rows after finalization/reopen:
+
+| Chunk rows × calls | Rows | Artifact bytes | Current reachable bytes | Stale bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 1 × 1,024 | 1,024 | 295,440,392 | 814,600 | 294,625,792 |
+| 120 × 128 | 15,360 | 5,386,120 | 216,712 | 5,169,408 |
+| 15,360 × 64 | 983,040 | 24,534,152 | 7,857,800 | 16,676,352 |
+
+[Probe source and records](baselines/2026-09-11-bundle-metadata-growth.jsonl).
+Allocated file blocks were also recorded; these are not physical-device write
+counters. The one-row case grows from 1.25 MB at 64 calls to 4.79 MB at 128,
+18.76 MB at 256, 74.25 MB at 512, and 295.44 MB at 1,024. The current immutable
+full-table/full-index snapshot format therefore cannot be accepted as-is.
+
+The next prototype now keeps immutable committed references but appends only
+new page-index entries, publishes bounded table deltas with periodic full tables,
+and compresses nullable bitmaps with an explicit decoded-size bound. Retain one
+artifact and the current coalescing behavior. Bound ancestor depth and total
+metadata bytes before allocation, validate parent ordering and stream prefixes,
+and flatten before the bound. A successor incompatible format must reject older
+directories unchanged. These changes are implemented locally; performance and platform acceptance remain open.
+
+Validate this against the existing malformed-input and mixed-snapshot model tests,
+add ancestor/flattening/checksum/crash regressions, repeat growth/query/startup and
+original-ingestion comparisons, then platform checks. Avoid solving metadata
+growth by proliferating tiny segments without measuring query/index consequences.
+
+A new regression reproduces the growth failure before the change using 1,024
+small appends and exact stream reads. Added tests exercise table flattening,
+reopening old snapshots, corrupt ancestors, valid-checksum invalid parent/delta
+bounds, and malformed/oversized compressed bitmaps. The mixed-operation model
+now crosses two flattening boundaries. Final validation results follow below.
+
+
+## Incremental metadata and inline indexes (2026-09-11)
+
+The first incremental prototype reduced the 1,024-row artifact from 295.44 MB to
+8.86 MB, but one separate fragment per index append caused excessive small reads:
+ingestion took 9,005.58 ms and reopen 31.46 ms in the diagnostic, versus 4,124.96 ms
+and 12.51 ms in the previous diagnostic. It is not retained in that form.
+[Intermediate growth evidence](baselines/2026-09-11-incremental-metadata-growth.jsonl)
+records its exact source. A separate original-baseline comparison still failed
+one tiny historical batch (+31.68%); other tested profiles were faster or within
+10%. [Original comparison](baselines/2026-09-11-incremental-original-comparison.jsonl).
+
+The current refinement keeps index bytes inside the bounded, checksummed table
+chain. They are available after table validation and require no per-append fragment
+reads. Raw index data is bounded to 4,096 × 24 bytes per column before allocation
+or concatenation. Malformed flags/counts and cumulative chain overflow have
+explicit tests. Existing payload extents and nullable bitmap checksums remain.
+
+| Chunk rows × calls | Current artifact bytes | Reachable bytes | Stale bytes |
+| --- | ---: | ---: | ---: |
+| 1 × 1,024 | 10,411,036 | 833,320 | 9,577,716 |
+| 120 × 128 | 406,128 | 228,292 | 177,836 |
+| 15,360 × 64 | 7,490,422 | 7,387,441 | 102,981 |
+
+All three retain one segment and exact post-reopen rows. These are 96.48%, 92.46%
+and 69.47% smaller than the initial full-metadata prototype. Periodic full tables
+still retain stale metadata; this is bounded by segment capacity, not a claim of
+linear file growth or complete space reclamation. The diagnostic takes 4,444.86 /
+260.22 / 275.53 ms for ingestion and 12.03 / 2.44 / 3.51 ms for reopen. Single-run
+timings are diagnostic only; repeated original-baseline acceptance remains open.
+Reachable bytes include the complete table chain and do not double-count inline
+index bytes. File allocation is not a physical-device write counter.
+
+[Inline-index probe and records](baselines/2026-09-11-inline-index-growth.jsonl),
+[growth regression before the fix](baselines/2026-09-11-incremental-metadata-before.log).
+All six local workspace gates pass: formatting, locked workspace/all-target
+check and strict Clippy, 871 tests/eight ignored, doctests and release node build.
+A stale format-number diagnostic was corrected during validation; formatting,
+check, strict Clippy and catalog tests pass again after that correction.
+[Validation records](baselines/2026-09-11-inline-index-gates.jsonl). Current platform
+and final performance acceptance remain pending.

@@ -4,8 +4,9 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::bundle::BundleReader;
+use crate::bundle::{BundleReader, MAX_EXTENTS, MAX_ROWS};
 use crate::native::{STORAGE_FORMAT_VERSION, SegmentKind, SegmentManifest};
+use crate::page::{PAGE_INDEX_ENTRY_BYTES, frame_page_index};
 
 pub(crate) const BUNDLE_PATH: &str = "columns/segment.bundle";
 pub(crate) const COLUMN_NAMES: [&str; 14] = [
@@ -103,7 +104,28 @@ impl ColumnArtifacts {
 
     pub(crate) fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         match &self.bundle {
-            Some(bundle) => bundle.read_stream(stream_id(path)?),
+            Some(bundle) => {
+                let id = stream_id(path)?;
+                let len = bundle.stream_len(id)?;
+                match id {
+                    14..28 => {
+                        if len > (MAX_EXTENTS * PAGE_INDEX_ENTRY_BYTES) as u64
+                            || !len.is_multiple_of(PAGE_INDEX_ENTRY_BYTES as u64)
+                        {
+                            return Err(invalid("bundled page index exceeds its bound"));
+                        }
+                        frame_page_index(&bundle.read_stream(id)?)
+                    }
+                    28..32 => {
+                        let expected = bitmap_bytes(bundle.row_count())?;
+                        if len > expected as u64 + 1 {
+                            return Err(invalid("bundled bitmap exceeds its bound"));
+                        }
+                        decode_bitmap(&bundle.read_stream(id)?, bundle.row_count())
+                    }
+                    _ => bundle.read_stream(id),
+                }
+            }
             None => fs::read(self.dir.join(path)),
         }
     }
@@ -132,6 +154,118 @@ impl ColumnArtifacts {
     }
 }
 
+fn bitmap_bytes(rows: u64) -> io::Result<usize> {
+    if rows > MAX_ROWS {
+        return Err(invalid("bundled bitmap row count exceeds its bound"));
+    }
+    usize::try_from(8 + rows.div_ceil(8))
+        .map_err(|_| invalid("bundled bitmap exceeds address space"))
+}
+
+pub(crate) fn encode_bitmap(bytes: &[u8], rows: u64) -> io::Result<Vec<u8>> {
+    if bytes.len() != bitmap_bytes(rows)? || bytes[..8] != rows.to_le_bytes() {
+        return Err(invalid("bundled bitmap row count mismatch"));
+    }
+    // The row count in the captured reference bounds decompression; no size
+    // from the compressed payload is ever trusted for allocation.
+    let compressed = lz4_flex::block::compress(bytes);
+    let (tag, payload) = if compressed.len() < bytes.len() {
+        (1, compressed.as_slice())
+    } else {
+        (0, bytes)
+    };
+    let mut encoded = Vec::with_capacity(1 + payload.len());
+    encoded.push(tag);
+    encoded.extend_from_slice(payload);
+    Ok(encoded)
+}
+
+fn decode_bitmap(encoded: &[u8], rows: u64) -> io::Result<Vec<u8>> {
+    let expected = bitmap_bytes(rows)?;
+    if encoded.len() > expected + 1 {
+        return Err(invalid("bundled bitmap exceeds its bound"));
+    }
+    let bytes = match encoded.split_first() {
+        Some((0, bytes)) if bytes.len() == expected => bytes.to_vec(),
+        Some((1, bytes)) => {
+            let mut output = vec![0; expected];
+            let len = lz4_flex::block::decompress_into(bytes, &mut output)
+                .map_err(|_| invalid("invalid compressed bundled bitmap"))?;
+            if len != expected {
+                return Err(invalid("bundled bitmap length mismatch"));
+            }
+            output
+        }
+        _ => return Err(invalid("invalid bundled bitmap encoding")),
+    };
+    if bytes[..8] != rows.to_le_bytes() {
+        return Err(invalid("bundled bitmap row count mismatch"));
+    }
+    Ok(bytes)
+}
+
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::column::NullBitmap;
+
+    #[test]
+    fn bundled_bitmaps_roundtrip_sparse_dense_and_random_nulls() {
+        let mut seed = 919u64;
+        for rows in [0, 1, 7, 8, 9, 16_385, 100_000] {
+            for mode in 0..3 {
+                let mut bitmap = NullBitmap::new();
+                for _ in 0..rows {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    bitmap.push(mode == 1 || (mode == 2 && seed >> 63 != 0));
+                }
+                let mut bytes = Vec::new();
+                bitmap.write_to(&mut bytes).unwrap();
+                let encoded = encode_bitmap(&bytes, rows).unwrap();
+                assert!(encoded.len() <= bytes.len() + 1);
+                assert_eq!(decode_bitmap(&encoded, rows).unwrap(), bytes);
+                if rows >= 16_385 && mode != 2 {
+                    assert!(encoded.len() < bytes.len() / 10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_bitmaps_reject_malformed_encoding_and_unbounded_sizes() {
+        let rows = 8192u64;
+        let mut raw = vec![0; bitmap_bytes(rows).unwrap()];
+        raw[..8].copy_from_slice(&rows.to_le_bytes());
+        let compressed = encode_bitmap(&raw, rows).unwrap();
+        assert_eq!(compressed[0], 1);
+        for len in 0..compressed.len() {
+            assert!(
+                decode_bitmap(&compressed[..len], rows).is_err(),
+                "length {len}"
+            );
+        }
+        assert!(decode_bitmap(&compressed, rows + 1).is_err());
+        assert!(decode_bitmap(&compressed, u64::MAX).is_err());
+        assert!(decode_bitmap(&[0; 1034], rows).is_err());
+        assert!(decode_bitmap(&[2], rows).is_err());
+        // A syntactically valid compressed block must not overflow the output
+        // allocation derived from the captured row count.
+        let mut oversized = vec![1];
+        oversized.extend(lz4_flex::block::compress(&vec![0; raw.len() * 2]));
+        assert!(decode_bitmap(&oversized, rows).is_err());
+        let mut undersized = vec![1];
+        undersized.extend(lz4_flex::block::compress(&raw[..raw.len() - 1]));
+        assert!(decode_bitmap(&undersized, rows).is_err());
+        assert!(encode_bitmap(&raw, rows + 1).is_err());
+        assert!(encode_bitmap(&[], 0).is_err());
+        let mut plain = vec![0];
+        plain.extend_from_slice(&raw);
+        assert_eq!(decode_bitmap(&plain, rows).unwrap(), raw);
+        plain[1] ^= 1;
+        assert!(decode_bitmap(&plain, rows).is_err());
+    }
 }

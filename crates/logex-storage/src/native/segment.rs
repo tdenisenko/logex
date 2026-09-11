@@ -52,7 +52,8 @@ const RAW_BITMAP_COLUMNS: &[&str] = &[
 ];
 
 /// Existing page payloads and index entries form an immutable append prefix.
-/// Only the small indexes and bitmaps are replaced before manifest publication.
+/// Per-column indexes and bitmaps are replaced before manifest publication;
+/// bundled indexes append inside immutable tables.
 struct PageOutput<'a> {
     dir: &'a Path,
     existing_rows: u64,
@@ -251,7 +252,7 @@ impl<'a> PageOutput<'a> {
         path: &Path,
         write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
-        if let Some((bundle, _)) = &self.bundle
+        if let Some((bundle, rows)) = &self.bundle
             && path != self.dir.join("canonical.bitmap")
         {
             let relative = path
@@ -261,7 +262,8 @@ impl<'a> PageOutput<'a> {
                 .ok_or_else(|| std::io::Error::other("invalid column artifact path"))?;
             let mut bytes = Vec::new();
             write(&mut bytes)?;
-            return bundle.replace_metadata(stream_id(relative)?, &bytes);
+            let encoded = crate::column_artifact::encode_bitmap(&bytes, *rows)?;
+            return bundle.replace_metadata(stream_id(relative)?, &encoded);
         }
         if let Some(replacements) = &self.replacements {
             replacements.write(path, |writer| write(writer))
@@ -471,14 +473,19 @@ pub(crate) fn bundled_row_capacity(
     reference: Option<&BundleReference>,
     rows: &[LogRow],
 ) -> std::io::Result<usize> {
-    use crate::bundle::{BundleReader, MAX_EXTENT_BYTES, MAX_EXTENTS};
+    use crate::bundle::{BundleReader, DATA_STREAMS, MAX_EXTENT_BYTES, MAX_EXTENTS};
     let capacity = reference
         .map(|reference| {
             BundleReader::open(&dir.join(BUNDLE_PATH), reference)?.remaining_data_extents()
         })
         .transpose()?
-        .unwrap_or([MAX_EXTENTS; 14]);
-    let mut pages = capacity[..13].iter().copied().min().unwrap_or(0);
+        .unwrap_or([MAX_EXTENTS; DATA_STREAMS as usize]);
+    let mut pages = capacity[..13]
+        .iter()
+        .chain(&capacity[14..])
+        .copied()
+        .min()
+        .unwrap_or(0);
     let mut data_extents = capacity[13];
     let mut accepted = 0;
     while accepted < rows.len() && pages > 0 && data_extents > 0 {
@@ -1497,7 +1504,11 @@ where
         };
         Some(BufWriter::new(file))
     };
-    let mut entries = previous.map(|p| p.entries.clone()).unwrap_or_default();
+    let mut entries = if output.bundle.is_some() {
+        Vec::new()
+    } else {
+        previous.map(|p| p.entries.clone()).unwrap_or_default()
+    };
     let mut offset = previous.map_or(0, |p| p.encoded_bytes);
 
     let mut start = 0usize;
@@ -1540,7 +1551,14 @@ where
         writer.flush()?;
     }
     let index = write_page_index(&entries);
-    output.metadata(&index_path, |writer| writer.write_all(&index))?;
+    if let Some((bundle, _)) = &output.bundle {
+        bundle.append_data(
+            stream_id(&index_rel)?,
+            &index[crate::page::PAGE_INDEX_HEADER_BYTES..],
+        )?;
+    } else {
+        output.metadata(&index_path, |writer| writer.write_all(&index))?;
+    }
     Ok((data_rel, index_rel, page_rows))
 }
 
@@ -2068,9 +2086,10 @@ mod tests {
                             )
                             .unwrap();
                             writer
-                                .replace_metadata(
+                                .append_data(
                                     stream_id(index).unwrap(),
-                                    &write_page_index(&entries),
+                                    &write_page_index(&entries)
+                                        [crate::page::PAGE_INDEX_HEADER_BYTES..],
                                 )
                                 .unwrap();
                             manifest.column_bundle = Some(writer.finish(2).unwrap());
