@@ -3208,6 +3208,46 @@ mod tests {
     }
 
     #[test]
+    fn historical_ingestion_coalesces_medium_chunks() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1_000_000,
+            ..Default::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        for number in (100..116).rev() {
+            let header = ingestion_header(number, B256::ZERO);
+            let hash = header.hash_slow();
+            let rows: Vec<_> = make_rows(15_360, number)
+                .into_iter()
+                .map(|mut row| {
+                    row.block_number = number;
+                    row.block_hash = hash;
+                    row.timestamp = header.timestamp;
+                    row
+                })
+                .collect();
+            storage.ingest_historical_batch(&rows, &header).unwrap();
+        }
+        storage.finalize_active_historical_segment().unwrap();
+        drop(storage);
+        let storage = NativeStorage::open(config).unwrap();
+        assert_eq!(storage.total_rows(), 16 * 15_360);
+        assert_eq!(storage.historical_floor().unwrap().block_number, 100);
+        // Medium caller batches must fill the existing segment, rather than
+        // multiplying segment files and downstream index/query work.
+        assert_eq!(
+            storage
+                .segments()
+                .iter()
+                .filter(|s| s.row_count > 0)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn native_storage_coalesces_sparse_historical_writes_across_batches() {
         let tmp = TempDir::new().unwrap();
         let mut storage = NativeStorage::open(NativeStorageConfig {
