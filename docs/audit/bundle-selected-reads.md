@@ -1,5 +1,9 @@
 # Bundle page-selection investigation
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 The grouped bundle at `a0559acd` meets the original-baseline ingestion ceiling
 in the recorded sync profiles, but sparse reads and retained storage remain
 above the original implementation. This investigation isolates read costs;

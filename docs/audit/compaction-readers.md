@@ -1,5 +1,9 @@
 # Compaction publication and reader lifetime
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Two deterministic fixtures expose a correctness bug at `1e27d838`: a reader
 captured before successful compaction fails with `NotFound` afterward. A newly
 opened reader returns the correct rows. Raw-to-page compaction unlinks the raw

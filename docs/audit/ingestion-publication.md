@@ -1,5 +1,9 @@
 # Ingestion progress publication and restart boundaries
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 **PR #130 remains a draft.** The measurements and reproducer below describe
 `09a63f55` and `ff728ea3`. A new [combined sync checkpoint prototype](sync-ingestion-checkpoints.md)
 implements bounded row/progress rewind and passes its initial regression tests.

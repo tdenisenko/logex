@@ -1,5 +1,9 @@
 # Bounded sync progress publication
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 This is an **unmerged implementation in validation**, following `683bcdf8` in
 PR #130. The user authorizes bounded verified re-ingestion, engineering judgment
 and fresh incompatible directories, while retaining the 10% ingestion ceiling.

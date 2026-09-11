@@ -1,5 +1,9 @@
 # Sparse bundle page coalescing
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 This document retains the diagnostic history and the subsequently integrated
 coordinator. Current source is a0ed88c1 (catalog 11 / segment manifest 9 / bundle 5 /
 index checkpoint 2); final performance/platform acceptance remains in progress.

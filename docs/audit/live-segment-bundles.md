@@ -1,5 +1,9 @@
 # Live segment bundles
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Unmerged successor to `c63fb9ed` in draft PR #130. Fresh live sync segments now
 use the immutable bundle representation. The grouped-table follow-up summarizes bounded
 groups of updates; see [its measurements](bundle-table-groups.md). The current

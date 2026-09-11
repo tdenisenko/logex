@@ -1,5 +1,9 @@
 # Journaled commit recovery and publication durability
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 This batch 2 milestone follows PR #129. It fixes replay of a WAL batch after some
 or all of that batch has already reached committed segments. It also establishes
 file and directory synchronization before clearing that batch's recovery data.

@@ -1,5 +1,9 @@
 # Index freshness during ingestion
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Unmerged follow-up within storage PR #130. The live-bundle query regression found
 that an index built at 8,192 rows was still used after that segment grew to 10,000
 rows and rotated. Native filtering returned 10,082 matches across the dataset

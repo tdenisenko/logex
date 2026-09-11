@@ -1,5 +1,9 @@
 # Grouped bundle tables
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Unmerged follow-up to `9215da2c` in draft PR #130. This addresses repeated full
 metadata snapshots, which account for most of the sparse bundle growth described
 in [the read-cost investigation](bundle-read-costs.md). It does not finish the

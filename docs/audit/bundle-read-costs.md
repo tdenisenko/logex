@@ -1,5 +1,9 @@
 # Sparse bundle read costs
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Follow-up within draft PR #130. The integrated ingestion comparisons pass the
 original-baseline ceiling, but 1,024 tiny historical calls leave 9.35 MB for 960
 logs and full-row validation takes about 15 ms versus about 1 ms originally.

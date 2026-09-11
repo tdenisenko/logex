@@ -1,9 +1,11 @@
 # PR #130 acceptance record
 
 This is a storage recovery and performance milestone, not completion of the
-whole audit or approval to deploy/live-sync production data. PR #130 remains
-draft while the final startup-only revision is validated. The completed source
-and final platform/CI evidence will be identified here before merge.
+whole audit or approval to deploy/live-sync production data. Implementation and
+acceptance are complete at production source
+`4408e0704af38afd6e95cd7e5aa7144da14edc80`; subsequent documentation-only changes
+carry the final evidence. [PR #130](https://github.com/tdenisenko/logex/pull/130)
+records the final-tip CI and merge state.
 
 ## Implemented scope and compatibility
 
@@ -77,6 +79,36 @@ respectively. Exact rows and progress pass. The latter's excessive full-payload
 startup scan is addressed by the final startup-only change and measured separately.
 [Growth samples](baselines/2026-09-11-independent-index-growth.jsonl).
 
+## Final startup-only comparison
+
+Production source 4408e070 versus the preceding 13588219, with the same release
+fixture and publication settings. Five alternating pairs; one fresh dataset per
+pair/revision for growth and three for mixed workloads (5 or 15 samples). All
+whole-row, canonicality, progress, head/anchor and reopen oracles pass. This change
+only moves clean-startup validation and updates its success log; ingestion codecs,
+persistence boundaries and query algorithms are unchanged.
+
+| Workload | Warm reopen before → after, ms | Change | Ingestion median change |
+|---|---:|---:|---:|
+| 2,211,840 rows / three segments | 87.042 → 7.528 | -91.35% | -6.91% |
+| 17,280 sparse rows, past repack cap | 7.666 → 5.694 | -25.72% | +0.07% |
+| Cached mixed history | 26.077 → 17.106 | -34.40% | +0.18% |
+| Mixed live | 18.521 → 16.527 | -10.77% | +0.09% |
+
+Full-row validation changes -0.68%, -0.06%, +1.84% and -2.57%, respectively.
+Allocated-byte and file/segment-count medians are identical; median process-
+attributed writes are identical or differ by 4 KiB. Subkilobyte logical-size
+differences are retained in the raw samples without attributing their cause. The
+startup reduction exceeds the observed noise; unrelated ingestion/read differences
+are not attributed to a new ingestion optimization. These are warm-cache startup
+measurements; removing the unconditional payload scan also removes its mandatory
+full-file I/O on a cold start, without claiming measured cold-start latency.
+
+[Complete paired results](baselines/2026-09-12-startup-performance.jsonl) include
+both release build records and executable hashes, hardware/toolchain/cache controls
+and every sample. Local builds/tests do not overlap these timings. Final source
+matches all 88 tracked Rust/Cargo/toolchain hashes in the archived build inputs.
+
 ## Retained costs and limits
 
 These tradeoffs are explicit; the sync ceiling is not silently applied only to
@@ -86,7 +118,9 @@ a favorable generic benchmark or waived for production callers.
   +10.27%, history +20.61% / +16.47% versus the original implementation. These
   APIs retain the extra strong journal/WAL durability required to fix ambiguous
   replay. Phase profiling identifies synchronization as a material cost. Actual
-  sync callers use joint block/progress ingestion, measured above. The generic
+  sync callers in `engine/ingest.rs` and `engine/anchored.rs` use joint block/
+  progress ingestion, measured above; the node crate's generic write calls are
+  inside test modules. The generic
   API regressions are accepted for this stronger contract; they are not presented
   as satisfying the production-sync performance ceiling. A redundant empty-WAL
   truncation and obsolete index-to-segment publication have been removed.
@@ -110,6 +144,16 @@ a favorable generic benchmark or waived for production callers.
 - **Startup:** empty-WAL cleanup falls from approximately 16–17 ms to 6 ms on the
   generic fixture. Required catalog/root hardening remains. A clean reopen no
   longer needs a full payload scan; pending recovery and retirement still do.
+- **Process peak memory:** median peak RSS across complete benchmark processes
+  is 662 → 68 MiB for mixed live, 1456 → 785 MiB for cached mixed history and
+  4222 → 4013 MiB for dense growth. Costs remain for uncached sparse history
+  (14 → 21 MiB), sparse growth (69 → 189 MiB), and the full generic/query fixture
+  (889 → 979 MiB dense; 622 → 951 MiB sparse). These high-water marks include
+  fixture generation, expected rows, repeated runs, result buffers and allocator
+  retention; they do not isolate node steady-state memory or establish the cause
+  of a difference. Repack/table/read-window bounds remain enforced. The mixed
+  workload/staging audit must measure steady-state memory before live deployment;
+  this PR does not claim that every memory workload improved.
 - **Space and writes:** sparse history can use 43–49% more logical bytes for
   immutable metadata/canonical evidence while process-attributed writes fall
   92–97%. Dense growth uses 0.53% fewer logical bytes and 90.12% fewer process
@@ -120,8 +164,8 @@ a favorable generic benchmark or waived for production callers.
 [phase attribution](baselines/2026-09-11-storage-phase-attribution.json).
 Whole-file caching, wider extent layouts, Zstd tables, speculative worker/reader
 changes and the isolated single-file fsync experiment were rejected when costs
-or noise did not justify them. No integrity checks are removed to improve a
-benchmark. The deliberate clean-startup check scope is documented above.
+or noise did not justify them. Payload checks remain on reads and before destructive recovery. The deliberate
+clean-startup check scope is documented above.
 
 ## Validation and disposition
 
@@ -133,10 +177,24 @@ passes 136 controlled cross-mount recovery cases: WAL 8, sync 24, published 96,
 repack 8. Both images were verified detached. These are system-disk-backed test
 images; no contents of the protected external volume were accessed.
 
-The final startup change adds two tests and extends corruption fixtures. Final
-workspace, exact-source ARM/Intel and startup-performance results are pending.
-Build/source hashes prevent acceptance of a stale binary. Initial failures and
-rejected measurements are retained with their explanations.
+The final startup change adds two tests and extends corruption fixtures. All six
+local gates pass (921 tests, 10 intentionally ignored), as do all six Linux/macOS
+CI jobs at 4408e070. Both ARM and Intel ExFAT pass 209 storage tests (five ignored),
+five query tests (one ignored), 27 index tests, CLI/publication smoke and all 136
+cross-mount recovery cases per platform. Both images are verified detached. The
+new clean-read and predecessor-preservation regressions are confirmed in both
+platform logs. Startup performance results are recorded above.
+
+- [Final local gates and logs](baselines/2026-09-11-startup-local-validation.json)
+- [Archived inputs, 88 source hashes, ARM binaries and source CI](baselines/2026-09-12-startup-source-build.json)
+- [Final ARM ExFAT/cross-mount logs](baselines/2026-09-12-startup-arm-exfat.json)
+- [Final Intel build/ExFAT/cross-mount logs](baselines/2026-09-12-startup-intel-exfat.json)
+- [Failing-before and passing-after startup regressions](baselines/2026-09-11-startup-regressions.json)
+
+No measured-host build/test ran during performance comparisons. Subsequent edits
+change documentation only; the complete set of tracked Rust/Cargo/toolchain files
+still matches the tested archive. Before-fix failures, the corrected fixture
+helper, unfavorable samples and rejected experiments remain explicit evidence.
 
 Remaining audit work includes trust/fork conformance, networking/liveness, sync
 reorg/cancellation, broad index/query/protocol/dashboard review, external-volume

@@ -1,5 +1,9 @@
 # Shared segment artifact prototype
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Status: integrated, unaccepted candidate within unmerged PR #130. The user permits a fresh
 sync and breaking storage changes to meet the ingestion performance constraint.
 Existing production directories and the protected external volume remain outside

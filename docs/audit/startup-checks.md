@@ -43,6 +43,10 @@ preserve the relevant files for later verified offline repair.
   The helper was corrected to select only the authoritative reference's prefix.
   The initial failure is retained; it was not an implementation checksum failure.
 
+The final paired growth measurement improves warm startup 87.042 → 7.528 ms
+(-91.35%), with exact rows/progress and no ingestion regression. Sparse growth
+and mixed history/live startup also improve.
+
 Final-source platform checks, workspace gates and measurements are recorded in
 [the PR acceptance record](pr130-acceptance.md). This check scope must be preserved
 when the later offline repair coordinator and health/status behavior are added.

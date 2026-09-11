@@ -1,5 +1,9 @@
 # Combined sync ingestion checkpoints
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 The sections below record the durable-checkpoint implementation through
 `683bcdf8`. A [bounded progress-publication successor](published-ingestion-checkpoints.md)
 is now implemented locally and in validation. It shares one bounded recovery

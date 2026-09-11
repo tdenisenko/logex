@@ -1,5 +1,9 @@
 # Bounded bundle table records
 
+This document retains the investigation chronology and revision-specific results.
+Use [the PR #130 acceptance record](pr130-acceptance.md) for the final source,
+validation status, compatibility decision and performance tradeoffs.
+
 Unmerged follow-up to `a0c3aa64` in draft PR #130. Small sync calls leave repeated
 stream descriptors and inline page indexes in immutable grouped tables. The
 current experiment reduces their stored bytes without changing payload pages,
