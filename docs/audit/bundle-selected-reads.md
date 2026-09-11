@@ -66,7 +66,7 @@ remains valid for that caller; the new benchmark closes the coverage gap.
 
 ## Lazy candidate and remaining validation
 
-A lazy per-stream cumulative-offset table is integrated locally for validation. It is built only
+A lazy per-stream cumulative-offset table is saved as `1e27d838`. It is built only
 for nonzero-offset reads of streams with at least 32 extents, lives beside the
 existing physical read window, and is bound to the same immutable reader.
 Full scans and startup keep the compact extent layout and allocate no lookup.
@@ -79,7 +79,8 @@ Mixed-live selection falls 2.56% (15 samples). Sparse ingestion median is -0.01%
 reopen +2.06%, and process peak RSS +0.73%. Selected-run ingestion p95 rises
 23.58% because three candidate samples exceed 1,050 ms; those samples also have
 larger allocated-file footprints despite identical logical bytes. That is an
-observed association, not a proven filesystem cause, and requires confirmation.
+observed association, not a proven filesystem cause; the confirmation below
+retains and investigates these samples.
 [Selected comparison](baselines/2026-09-11-bundle-lazy-offset-selected.jsonl).
 
 Full-mode ingestion changes +0.81% mixed history, -0.62% mixed live and +1.37%
@@ -88,7 +89,7 @@ reopen rises 5.61% in this 15-sample run; it is +2.06% in the selected run, wher
 reopen invokes the same code. Full-mode sparse peak RSS rises 6.01%, although
 those full reads do not allocate the new lookup. RSS includes the entire
 fixture, storage and oracle process; it does not attribute allocations to the
-lookup. These differences and the ingestion tails remain under investigation.
+lookup. The confirmation below investigates these differences and ingestion tails.
 Logical bytes and median OS-attributed writes are unchanged.
 [Full-mode comparison](baselines/2026-09-11-bundle-lazy-offset-full.jsonl).
 
@@ -98,8 +99,25 @@ also cover partial/checksummed reads, failed refill/retry, malformed tables and
 immutable bounds. All 19 bundle tests and all six workspace gates pass: 900
 passed/nine ignored. The integrated release fixture is byte-identical to the
 measured prototype. [Validation record](baselines/2026-09-11-bundle-lazy-offset-validation.json).
-A focused 45-sample confirmation in each mode is running; new CI/platform
-acceptance is still pending.
+The exact `1e27d838` confirmation uses another 45 samples per mode. Sparse
+selected validation improves 31.20% (15.091 → 10.383 ms), p95 16.663 → 11.545 ms;
+full-row validation rises 4.93% (8.373 → 8.786 ms), p95 8.953 → 9.385 ms. That
+small full-read cost is repeatable and retained explicitly alongside the selected
+read gain; it does not resolve the larger original-baseline full-read gap.
+Reopen medians are +2.35%/+3.13% and process RSS -0.07%/+0.30% in full/selected
+mode. The earlier >5% reopen/RSS increase does not repeat at that magnitude.
+Ingestion medians are -0.85%/-0.73%, p95 -5.69%/+8.59%. The initial +23.58%
+ingestion p95 is not repeated at that magnitude; tail variation remains visible
+and is not attributed to a proven cause. Logical bytes and median process writes
+are unchanged in both modes. All exact oracles pass.
+[Full confirmation](baselines/2026-09-11-bundle-lazy-confirm-full.jsonl),
+[selected confirmation](baselines/2026-09-11-bundle-lazy-confirm-selected.jsonl).
+All six Linux/macOS CI jobs pass in run `34591575477`. Exact current release
+binaries pass the targeted ExFAT checks on both Apple Silicon and Intel: 19 bundle
+tests and five query audit tests/one ignored. This reader change adds no format
+or filesystem primitive; the preceding `a0559acd` full storage/128-case cross-mount
+suites are recorded separately. Both exact disposable images were detached.
+[Current platform evidence](baselines/2026-09-11-bundle-lazy-platform-validation.jsonl).
 
 Sparse page fragmentation, retained obsolete payloads and safe compaction/file
 lifetime remain separate unresolved costs. PR #130 remains draft and unmerged.
