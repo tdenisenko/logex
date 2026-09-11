@@ -674,3 +674,75 @@ rejected empty-manifest probe only for the new bundled implementation.
 All six local gates also pass after both optimizations and the platform assertion
 correction: 865 tests/eight ignored, strict Clippy/check, formatting, doctests and
 release node build. [Gate results](baselines/2026-09-11-bundle-streamlined-gates.jsonl).
+
+
+## Original confirmation after bundle simplification (`7c25958a`)
+
+Five alternating pairs of three release runs per profile preserve exact
+row/progress/reopen oracles. Local workspace gates pass (865 tests/eight ignored).
+Both remaining failures persist despite the isolated gains:
+
+| Workload | Original median ms | Candidate median ms | Change |
+| --- | ---: | ---: | ---: |
+| Few logs | 6.854958 | 8.181792 | +19.36% — fails |
+| Tiny chunks | 57.146709 | 24.925459 | -56.38% |
+| Sparse history | 21.884875 | 13.159584 | -39.87% |
+| Short history | 15.361667 | 10.196375 | -33.62% |
+| Grouped live | 3173.144125 | 555.956084 | -82.48% |
+| Sustained history | 215.534917 | 65.018750 | -69.83% |
+| Large history | 62.812084 | 69.500041 | +10.65% — fails |
+
+[Raw results](baselines/2026-09-11-bundle-streamlined-original-comparison.jsonl).
+No acceptance waiver is applied. Baseline timings also vary between run sets;
+isolated percentage improvements must not be multiplied and called acceptance.
+Next inspect avoidable large-column allocation/copy work and tiny-batch overhead
+without weakening final checkpoint durability.
+
+
+All six Linux/macOS CI jobs pass for `7c25958a` in run `34553735175`. The Linux
+matrix now checks that the catalog was actually published rather than asserting
+an incidental minimum number of I/O calls.
+
+An isolated follow-up removes intermediate typed address/hash/topic vectors:
+values are written directly into the existing encoded-input buffer, with checked
+capacity arithmetic and fallible reservation. Existing raw/typed page-byte,
+malformed-metadata and append snapshot tests pass. Five alternating pairs of
+three release runs against `7c25958a` improve large history 71.078208 → 67.022416 ms
+(-5.71%); short history 9.047750 → 9.054792 ms (+0.08%, within noise). Median process
+peak RSS for large history is 1244.3 → 1230.3 MiB; fixture/oracle allocations also
+contribute to that high-water mark. This remains provisional pending the combined
+original comparison and gates.
+
+[Single-buffer comparison](baselines/2026-09-11-bundle-single-buffer-comparison.jsonl).
+
+
+A serial path for chunks of at most 128 rows / 64 KiB payload was measured and
+removed. Five alternating pairs of three release runs against the single-buffer
+parallel control showed few logs +11.76%, tiny chunks -0.64%, short history +0.44%
+and large history +2.22%. The hoped-for tiny-chunk improvement did not appear;
+the shared function-pointer dispatcher and threshold are not retained.
+
+[Rejected serial comparison](baselines/2026-09-11-bundle-small-serial-comparison.jsonl).
+
+The next isolated layout probe places `segment.bundle` directly in its segment
+instead of creating a `columns` subdirectory. Logical column names stay fixed;
+raw rollback also removes the now-root-level uncommitted artifact after publishing
+the restored raw manifest. All 158 storage tests pass (three explicitly ignored).
+This physical-location probe is not accepted or versioned yet; if retained, its
+format diagnostics/versions and complete gates must be updated before publication.
+
+
+The flat-file layout was also removed: five alternating pairs of three runs
+showed few logs +0.89%, tiny chunks -0.16%, short history +0.71% and large history
++1.43%, all within likely noise. No path or format-version change is retained.
+The only retained follow-up is the measured fixed-column buffer reduction, and
+all six workspace gates pass again (865 tests/eight ignored).
+
+[Rejected flat-file comparison](baselines/2026-09-11-bundle-flat-artifact-comparison.jsonl),
+[retained buffer-change gates](baselines/2026-09-11-bundle-single-buffer-gates.jsonl).
+
+Metadata growth remains an explicit acceptance concern: repeating full tables
+and page indexes on every append can accumulate stale bytes quadratically.
+Measure representative and very small batches before choosing a bounded encoding
+or reclamation change. Format acceptance, original ingestion confirmation, disk
+and query/startup accounting, and current isolated ExFAT validation remain open.

@@ -1172,8 +1172,15 @@ fn compact_address_values(
     output: &PageOutput<'_>,
     values: impl IntoIterator<Item = Address>,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values: Vec<_> = values.into_iter().collect();
-    let mut raw = Vec::with_capacity(values.len() * 20);
+    let values = values.into_iter();
+    let capacity = values
+        .size_hint()
+        .0
+        .checked_mul(20)
+        .ok_or_else(|| std::io::Error::other("fixed column capacity overflow"))?;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(capacity)
+        .map_err(std::io::Error::other)?;
     for value in values {
         raw.extend_from_slice(value.as_slice());
     }
@@ -1198,8 +1205,15 @@ fn compact_b256_values(
     codec: CompressionCodec,
     values: impl IntoIterator<Item = B256>,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values: Vec<_> = values.into_iter().collect();
-    let mut raw = Vec::with_capacity(values.len() * 32);
+    let values = values.into_iter();
+    let capacity = values
+        .size_hint()
+        .0
+        .checked_mul(32)
+        .ok_or_else(|| std::io::Error::other("fixed column capacity overflow"))?;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(capacity)
+        .map_err(std::io::Error::other)?;
     for value in values {
         raw.extend_from_slice(value.as_slice());
     }
@@ -1243,8 +1257,15 @@ fn compact_nullable_b256_values(
     codec: CompressionCodec,
     values: impl IntoIterator<Item = Option<B256>>,
 ) -> std::io::Result<ColumnDescriptor> {
-    let values: Vec<_> = values.into_iter().collect();
-    let mut raw = Vec::with_capacity(values.len() * 32);
+    let values = values.into_iter();
+    let capacity = values
+        .size_hint()
+        .0
+        .checked_mul(32)
+        .ok_or_else(|| std::io::Error::other("fixed column capacity overflow"))?;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(capacity)
+        .map_err(std::io::Error::other)?;
     let mut nulls = output.previous_nulls(name)?;
     for value in values {
         match value {
