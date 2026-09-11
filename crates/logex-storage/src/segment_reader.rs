@@ -29,6 +29,11 @@ struct PageSelection {
 }
 
 impl SegmentReader {
+    pub(crate) fn generation(&self) -> u64 {
+        self.manifest
+            .as_ref()
+            .map_or(0, |manifest| manifest.generation)
+    }
     pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
         self.artifacts.bundle().map(|bundle| bundle.reference())
     }
@@ -272,6 +277,64 @@ impl SegmentReader {
     }
 
     pub fn read_log_rows(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<LogRow>> {
+        self.materialize_log_rows(row_ids, self.read_var_bytes("data", row_ids)?)
+    }
+
+    /// Materialize a small maintenance candidate without trusting compressed
+    /// frame sizes or allocating its complete data stream up front.
+    pub(crate) fn read_log_rows_bounded(&self, budget: usize) -> io::Result<Vec<LogRow>> {
+        let descriptor = self.compacted_column("data").ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bounded read requires paged data",
+            )
+        })?;
+        let lengths = self.read_u32("data_len", None)?;
+        let mut data = Vec::new();
+        let mut remaining = budget;
+        for entry in self.read_compacted_page_index(descriptor, None)? {
+            let start = usize::try_from(entry.first_row).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "data row offset overflow")
+            })?;
+            let lengths = lengths
+                .get(start..start + entry.row_count as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
+                })?;
+            let bytes = lengths
+                .iter()
+                .try_fold(0usize, |sum, &len| sum.checked_add(len as usize))
+                .filter(|&sum| sum <= remaining)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "data page exceeds maintenance budget",
+                    )
+                })?;
+            let page = crate::page::decode_var_bytes_page_bounded(
+                &self.read_page_payload(descriptor, &entry)?,
+                descriptor.codec,
+                entry.row_count as usize,
+                bytes,
+            )?;
+            for value in &page {
+                remaining = remaining.checked_sub(value.len()).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "maintenance payload budget exceeded",
+                    )
+                })?;
+            }
+            data.extend(page);
+        }
+        self.materialize_log_rows(None, data)
+    }
+
+    fn materialize_log_rows(
+        &self,
+        row_ids: Option<&[u32]>,
+        data: Vec<Bytes>,
+    ) -> io::Result<Vec<LogRow>> {
         let addresses = self.read_address(row_ids)?;
         let block_numbers = self.read_u64("block_number", row_ids)?;
         let block_hashes = self.read_b256("block_hash", row_ids)?;
@@ -283,9 +346,36 @@ impl SegmentReader {
         let topic1s = self.read_nullable_b256("topic1", row_ids)?;
         let topic2s = self.read_nullable_b256("topic2", row_ids)?;
         let topic3s = self.read_nullable_b256("topic3", row_ids)?;
-        let data = self.read_var_bytes("data", row_ids)?;
         let data_lens = self.read_u32("data_len", row_ids)?;
         let sources = self.read_u8("source", row_ids)?;
+
+        if [
+            block_numbers.len(),
+            block_hashes.len(),
+            timestamps.len(),
+            tx_hashes.len(),
+            tx_indices.len(),
+            log_indices.len(),
+            topic0s.len(),
+            topic1s.len(),
+            topic2s.len(),
+            topic3s.len(),
+            data.len(),
+            data_lens.len(),
+            sources.len(),
+        ]
+        .into_iter()
+        .any(|len| len != addresses.len())
+            || data
+                .iter()
+                .zip(&data_lens)
+                .any(|(bytes, &len)| bytes.len() as u64 != u64::from(len))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "log columns have inconsistent row or data lengths",
+            ));
+        }
 
         let mut rows = Vec::with_capacity(addresses.len());
         for index in 0..addresses.len() {
@@ -772,6 +862,26 @@ mod tests {
                 source: Source::Receipt,
             })
             .collect()
+    }
+
+    #[test]
+    fn log_rows_reject_inconsistent_data_lengths() {
+        let tmp = TempDir::new().unwrap();
+        ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+        let path = tmp.path().join("data_len.col");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[ColumnFileHeader::SIZE..ColumnFileHeader::SIZE + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+        let reader = SegmentReader::open(tmp.path()).unwrap();
+        assert_eq!(
+            reader.read_log_rows(None).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            reader.read_log_rows(Some(&[0])).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

@@ -12,6 +12,17 @@ use crate::page::{PAGE_INDEX_ENTRY_BYTES, frame_page_index};
 
 pub(crate) const CANONICAL_STREAM: u8 = 32;
 pub(crate) const BUNDLE_PATH: &str = "columns/segment.bundle";
+
+/// Generation zero keeps the initial path. Replacements never overwrite a
+/// physical artifact selected by an older catalog or captured reader.
+pub(crate) fn bundle_path(dir: &Path, generation: u64) -> PathBuf {
+    if generation == 0 {
+        dir.join(BUNDLE_PATH)
+    } else {
+        dir.join(format!("bundle_{generation:016x}"))
+            .join("segment.bundle")
+    }
+}
 pub(crate) const COLUMN_NAMES: [&str; 14] = [
     "address",
     "block_number",
@@ -203,7 +214,7 @@ impl ColumnArtifacts {
                     }
                     reader
                 } else {
-                    BundleReader::open(&dir.join(BUNDLE_PATH), reference)?
+                    BundleReader::open(&bundle_path(dir, manifest.generation), reference)?
                 };
                 if !reader.has_complete_schema() {
                     return Err(invalid("incomplete bundled column streams"));

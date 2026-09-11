@@ -1,4 +1,4 @@
-# Sparse bundle page coalescing feasibility
+# Sparse bundle page coalescing
 
 Follow-up to the LZ4 table candidate `6156ef33` within draft PR #130. LZ4 reduces
 metadata, but a sparse segment still contains hundreds of tiny compressed pages.
@@ -58,3 +58,106 @@ views, index source identity and bounded memory/disk work. Measure finalization 
 ingestion cost on the real combined-sync fixture; do not add a full rewrite after
 every batch based only on this read-time gain. No production coordinator or file
 path change was introduced by this diagnostic, and no existing data was replaced.
+
+## Integrated coordinator (validation in progress)
+
+The current branch adds bounded automatic coalescing at a combined-ingestion
+checkpoint. It considers only touched bundled segments with at least 128 table
+publications and 128 address pages, at most 16,384 rows, at most 16 MiB of encoded
+column streams, and at most 8 MiB of variable payload. It processes candidates
+serially under the storage owner; sealed segment maintenance also holds its
+existing inode lock. A busy maintenance owner postpones coalescing. Dense and
+larger segments continue through the existing append/rotation path. This policy
+is deliberately bounded; it is not a general streaming compactor.
+
+Catalog v10 (`LXCAT010`) and manifest v8 give the existing generation field
+physical path semantics. Generation zero uses `columns/segment.bundle`; later
+generations use `bundle_{generation:016x}/segment.bundle`. Bundle v5 payload/table
+encoding is unchanged. Creation is exclusive. Existing reserved names are skipped
+with a 64-attempt bound so an orphan directory containing unrelated files does
+not prevent future maintenance. Index checkpoint v2 (`LXICP002`) also binds the
+generation. Existing data directories require the explicitly authorized fresh
+sync decision; no migration or production data change is performed.
+
+The coordinator captures the current rows and canonical bitmap, writes the new
+file and derived manifest, then forces the existing strong data-before-catalog
+publication. Only a successful durable catalog publication permits retirement of
+the previous file. The descriptor keeps its segment ID, row order, ranges and
+coverage, including empty blocks. Existing readers keep their file descriptors;
+new readers capture the new manifest. No reader waits for the maintenance lock.
+A stale compaction/manifest-refresh plan is rejected before writing its old
+reference back. Repacking invalidates derived index identity; ordinary scan
+fallback remains correct until the existing index builder publishes a new set.
+
+Recovery first hardens the observed catalog and verifies/restores its referenced
+bundle. It then removes only the known unreferenced bundle files and empty
+parents, preserving unrelated files. Cleanup is repeatable if deletions are lost
+on power failure. A failed write/publication/retirement poisons the current writer
+and requires reopening; the coordinator never assumes a failed catalog rename
+means the old catalog remains authoritative. There is no extra durability promise
+for deletion itself, and no in-place overwrite of a predecessor bundle.
+
+The regression suite covers hot/historical replacement, retained readers,
+canonical changes, empty-block progress, later appends, stale maintenance and
+index builders, busy ownership, orphan/name collisions and precise cleanup. A
+fault sweep exercises every owner-thread checkpoint, both observed and preceding
+catalog outcomes, and repeated reopen. A distinct-mount fixture covers both
+routes and publication outcomes with catalog/columns on opposite filesystems.
+These are controlled storage fixtures, not physical-device power-loss proof.
+
+### Decoder findings encountered during implementation
+
+- **B2-14 (P2): variable pages accepted unreferenced prefix/suffix bytes.** The
+  failing `bytes_pages_reject_unreferenced_payload` regression reproduces this.
+  Both offset encodings now require zero origin and an exact final sentinel;
+  duplicate u64 materialization was removed. Row materialization also rejects
+  inconsistent per-column counts and data_len values instead of indexing blindly
+  or returning internally inconsistent rows.
+- **B2-15 (P1): truncated packed values could become different valid values.**
+  `packed_decoders_reject_missing_bits_and_invalid_widths` failed because an empty
+  one-bit input decoded as zero. The decoder now checks bit width, checked total
+  length and zero padding before allocating/reading. Dictionary size arithmetic
+  is checked. All integer codec prefixes and extra suffixes are exercised against
+  independent full-domain values.
+- **B2-16 (P2): extreme timestamp differences panicked in debug builds.** The
+  failing `timestamp_codec_round_trips_extreme_differences` fixture crosses the
+  complete u64 domain. Explicit modular arithmetic matches the signed-delta
+  representation and the prior release behavior, preserving valid encodings
+  while giving debug/release the same round trip.
+
+Fixed-width compressed pages now bound decompression by their checked expected
+size. Maintenance variable pages use a per-page budget derived from validated
+length columns within the aggregate 8 MiB budget. The streaming prototype used
+bounded output plus a bounded Zstd window; direct bounded decompression is now the candidate being
+compared to address its read overhead. General query variable-page resource
+limits remain a separate parser/query audit item; this coordinator does not call
+that unbounded path. No new unsafe block or dependency is introduced.
+
+### First integrated release comparison
+
+Fifteen samples per revision/profile compare the first integrated streaming-
+decoder prototype with exact `6156ef33`. Finalization/checkpoints, exact row and
+progress/reopen oracles are included. Internal ARM APFS, alternating process order,
+no concurrent local builds/tests, no cache eviction. All samples are retained.
+This prototype predates the additional codec regressions and bounded direct-
+decoder change; it is evidence for the coordinator, not final-source acceptance.
+
+| Profile | Ingestion median change | Full-row validation | Warm reopen |
+| --- | ---: | ---: | ---: |
+| Large history | +1.18% | +0.25% | -0.86% |
+| Mixed history | +1.69% | +6.91% | -1.76% |
+| Mixed live | +0.41% | -0.20% | +0.75% |
+| Sparse history | -21.05% | -85.65% | -34.92% |
+
+Sparse ingestion is 803.072→634.065 ms; validation 7.038→1.010 ms; reopen
+7.014→4.565 ms; logical bytes 1,261,501→195,339 (-84.52%). Process-attributed
+writes rise 2.00%; this is not physical NAND write amplification. Mixed-history
+read cost requires investigation. Mixed-live reopen p95 rises 20.134→42.829 ms
+while its median changes less than 1%; this tail is retained for confirmation.
+[All measurements](baselines/2026-09-11-bundle-repack-stream.jsonl) and
+[exact prototype patch/build identity](baselines/2026-09-11-bundle-repack-stream-build.jsonl).
+
+All six local gates now pass on the frozen archive cb40500627ef2700af4e8f19a8d9bb36dfad94100b9f61e46da064c0b699d4e1:
+917 workspace tests/10 ignored, including 206 storage tests/five ignored.
+[Failure reproductions, source identities and validation](baselines/2026-09-11-bundle-repack-validation.json).
+Release confirmation, both ExFAT architectures and PR merge remain outstanding. No live deployment or protected-volume access occurred.

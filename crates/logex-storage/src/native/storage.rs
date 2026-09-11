@@ -598,6 +598,15 @@ impl NativeStorage {
         progress_durable: bool,
     ) -> io::Result<()> {
         self.recovery_required = true;
+        let mut repacked = Vec::new();
+        for segment in &mut self.catalog.segments {
+            if pending.origin.includes(segment.id)
+                && let Some(replacement) =
+                    super::segment::repack_sparse_bundle(&self.paths, segment)?
+            {
+                repacked.push(replacement);
+            }
+        }
         let deferred = self
             .catalog
             .segments
@@ -609,13 +618,18 @@ impl NativeStorage {
             .map(|segment| self.paths.segment_dir(segment.id))
             .collect::<Vec<_>>();
         let bytes = self.catalog.encode()?;
-        if progress_durable {
+        if progress_durable || !repacked.is_empty() {
             durability::publish_catalog_after_trees(
                 deferred.iter().map(PathBuf::as_path),
                 &self.paths.catalog_path(),
                 &bytes,
             )?;
             self.published_ingestion = None;
+            // A preceding catalog can still select the old file until this
+            // strong publication returns successfully. Keep ownership throughout.
+            for replacement in repacked {
+                replacement.retire()?;
+            }
         } else {
             durability::publish_ingestion_catalog_after_trees(
                 deferred.iter().map(PathBuf::as_path),
@@ -738,6 +752,7 @@ impl NativeStorage {
             }
             if segment.column_bundle.is_some() {
                 super::segment::restore_bundled_checkpoint(&self.paths, segment)?;
+                super::segment::retire_unreferenced_bundles(&self.paths, segment)?;
                 continue;
             }
             let active = Some(segment.id) == self.catalog.active_hot_segment
@@ -945,7 +960,7 @@ impl NativeStorage {
             let mut descriptor = self.catalog.allocate_segment(SegmentKind::Sealed)?;
             let segment_dir = self.paths.segment_dir(descriptor.id);
             let candidate = &remaining[..remaining.len().min(target_rows)];
-            let (take, _) = super::segment::bundled_row_capacity(&segment_dir, None, candidate)?;
+            let (take, _) = super::segment::bundled_row_capacity(&segment_dir, None, 0, candidate)?;
             if take == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1007,6 +1022,7 @@ impl NativeStorage {
                 (take, inspected) = super::segment::bundled_row_capacity(
                     &segment_dir,
                     reference,
+                    self.catalog.segments[segment_index].generation,
                     &rows[offset..offset + take],
                 )?;
                 if take == 0 {
@@ -1153,6 +1169,7 @@ impl NativeStorage {
                 (take, inspected) = super::segment::bundled_row_capacity(
                     &hot_dir,
                     descriptor.column_bundle.as_ref(),
+                    descriptor.generation,
                     &rows[offset..offset + take],
                 )?;
                 if take == 0 {
@@ -1431,7 +1448,10 @@ impl NativeStorage {
             if modified {
                 if let Some(reference) = &descriptor.column_bundle {
                     descriptor.column_bundle = Some(super::segment::append_bundled_canonical(
-                        &dir, reference, &canonical,
+                        &dir,
+                        reference,
+                        descriptor.generation,
+                        &canonical,
                     )?);
                     persist_ingest_manifest(&self.paths, descriptor, Publication::Deferred)?;
                     changed_bundles.push(dir);
@@ -2691,6 +2711,346 @@ mod tests {
         }
     }
 
+    fn sparse_repack_fixture(dir: &Path, historical: bool) -> (NativeStorage, Vec<LogRow>, Header) {
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: dir.to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut expected = Vec::new();
+        let mut previous = ingestion_header(256, B256::ZERO);
+        for step in 0..127 {
+            let header = ingestion_header(
+                if historical { 256 - step } else { 256 + step },
+                previous.hash_slow(),
+            );
+            let rows = ingestion_rows(1, &header);
+            ingest_test_batch(&mut storage, historical, &rows, &header, &previous).unwrap();
+            expected.extend(rows);
+            previous = header;
+        }
+        storage.checkpoint_durable().unwrap();
+        storage.mark_non_canonical(expected[12].block_hash).unwrap();
+        (storage, expected, previous)
+    }
+
+    fn trigger_repack(
+        storage: &mut NativeStorage,
+        historical: bool,
+        expected: &mut Vec<LogRow>,
+        previous: &Header,
+    ) {
+        let header = ingestion_header(
+            if historical {
+                previous.number - 1
+            } else {
+                previous.number + 1
+            },
+            previous.hash_slow(),
+        );
+        let rows = ingestion_rows(1, &header);
+        ingest_test_batch(storage, historical, &rows, &header, previous).unwrap();
+        expected.extend(rows);
+        // Coverage of an empty block is part of the same atomic catalog change.
+        let empty = ingestion_header(
+            if historical {
+                header.number - 1
+            } else {
+                header.number + 1
+            },
+            header.hash_slow(),
+        );
+        ingest_test_batch(storage, historical, &[], &empty, &header).unwrap();
+    }
+
+    #[test]
+    fn sparse_repacking_preserves_readers_indexes_coverage_and_future_writes() {
+        for historical in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, mut expected, previous) =
+                sparse_repack_fixture(tmp.path(), historical);
+            trigger_repack(&mut storage, historical, &mut expected, &previous);
+            let index = storage
+                .catalog
+                .segments
+                .iter()
+                .position(|segment| segment.row_count != 0)
+                .unwrap();
+            let old_descriptor = storage.catalog.segments[index].clone();
+            let dir = storage.paths.segment_dir(old_descriptor.id);
+            let old = SegmentReader::open(&dir).unwrap();
+            let canonical = old.read_canonical().unwrap();
+            let state = storage.catalog.state.clone();
+            let sentinel = dir.join("columns/keep-me");
+            fs::write(&sentinel, b"unrelated").unwrap();
+            crate::IndexBuildCheckpoint::begin(&dir)
+                .unwrap()
+                .publish()
+                .unwrap();
+            assert!(
+                crate::IndexReadCheckpoint::open(&dir, &old)
+                    .unwrap()
+                    .is_some()
+            );
+            let stale_builder = crate::IndexBuildCheckpoint::begin(&dir).unwrap();
+            storage.checkpoint().unwrap();
+            let descriptor = &storage.catalog.segments[index];
+            assert_eq!(descriptor.generation, 1);
+            assert_eq!(storage.catalog.state, state);
+            assert!(!dir.join(crate::column_artifact::BUNDLE_PATH).exists());
+            assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated");
+            let new = SegmentReader::open(&dir).unwrap();
+            assert_eq!(new.read_log_rows(None).unwrap(), expected);
+            assert_eq!(old.clone().read_log_rows(None).unwrap(), expected);
+            for row in 0..128 {
+                assert_eq!(
+                    new.read_canonical().unwrap().is_present(row),
+                    canonical.is_present(row)
+                );
+            }
+            assert!(!canonical.is_present(12));
+            assert_eq!(
+                stale_builder.publish().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert!(
+                crate::IndexReadCheckpoint::open(&dir, &new)
+                    .unwrap()
+                    .is_none()
+            );
+            crate::IndexBuildCheckpoint::begin(&dir)
+                .unwrap()
+                .publish()
+                .unwrap();
+            assert!(
+                crate::IndexReadCheckpoint::open(&dir, &new)
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                persist_segment_manifest(&storage.paths, &old_descriptor)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert_eq!(
+                compact_segment(&storage.paths, &old_descriptor)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+            storage.mark_non_canonical(expected[20].block_hash).unwrap();
+            assert!(old.read_canonical().unwrap().is_present(20));
+            assert!(
+                !SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_canonical()
+                    .unwrap()
+                    .is_present(20)
+            );
+            let config = storage.config.clone();
+            drop(storage);
+            let mut reopened = NativeStorage::open(config).unwrap();
+            assert_eq!(reopened.catalog.state, state);
+            let next = ingestion_header(
+                if historical {
+                    previous.number - 3
+                } else {
+                    previous.number + 3
+                },
+                B256::ZERO,
+            );
+            let rows = ingestion_rows(2, &next);
+            ingest_test_initial_batch(&mut reopened, historical, &rows, &next).unwrap();
+            expected.extend(rows);
+            reopened.checkpoint_durable().unwrap();
+            assert_eq!(
+                SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(old.read_log_rows(None).unwrap().len(), 128);
+        }
+    }
+
+    #[test]
+    fn sparse_repacking_interruption_keeps_an_exact_catalog_generation() {
+        // Inject on the owning thread at every replacement/publication/retirement
+        // boundary. Compression workers have separate byte-corruption tests.
+        for historical in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, mut expected, previous) =
+                sparse_repack_fixture(tmp.path(), historical);
+            trigger_repack(&mut storage, historical, &mut expected, &previous);
+            durability::inject_failure(usize::MAX);
+            storage.checkpoint().unwrap();
+            let events = durability::take_events();
+            assert!(
+                events
+                    .iter()
+                    .any(|(op, _)| *op == "repack_retire_generation")
+            );
+            let retirement = events
+                .iter()
+                .position(|(op, _)| *op == "repack_retire_generation")
+                .unwrap();
+            for fail_at in 0..events.len() {
+                for previous_catalog in [false, true] {
+                    if previous_catalog && fail_at >= retirement {
+                        continue;
+                    }
+                    let tmp = TempDir::new().unwrap();
+                    let (mut storage, mut expected, previous) =
+                        sparse_repack_fixture(tmp.path(), historical);
+                    let old_catalog = fs::read(storage.paths.catalog_path()).unwrap();
+                    let old_state = storage.catalog.state.clone();
+                    trigger_repack(&mut storage, historical, &mut expected, &previous);
+                    let new_state = storage.catalog.state.clone();
+                    durability::inject_failure(fail_at);
+                    let result = storage.checkpoint();
+                    let observed = durability::take_events();
+                    assert!(result.is_err(), "{historical}/{fail_at}: {observed:?}");
+                    assert!(storage.checkpoint().is_err());
+                    if previous_catalog {
+                        fs::write(storage.paths.catalog_path(), old_catalog).unwrap();
+                    }
+                    let config = storage.config.clone();
+                    drop(storage);
+                    for _ in 0..2 {
+                        let reopened = NativeStorage::open(config.clone()).unwrap_or_else(|error| panic!("{historical}/{fail_at}/{previous_catalog}: {error}; {observed:?}"));
+                        let rows = read_ingestion_rows(&reopened);
+                        let count = rows.len();
+                        assert!(count == 127 || count == 128);
+                        if previous_catalog {
+                            assert_eq!(count, 127);
+                        }
+                        let mut wanted = expected[..count].to_vec();
+                        wanted.sort_by_key(|row| (row.block_number, row.log_index));
+                        assert_eq!(rows, wanted);
+                        assert_eq!(
+                            reopened.catalog.state,
+                            if count == 127 {
+                                old_state.clone()
+                            } else {
+                                new_state.clone()
+                            }
+                        );
+                        let descriptor = reopened
+                            .catalog
+                            .segments
+                            .iter()
+                            .find(|segment| segment.row_count != 0)
+                            .unwrap();
+                        let dir = reopened.paths.segment_dir(descriptor.id);
+                        let reader = SegmentReader::open(&dir).unwrap();
+                        assert!(!reader.read_canonical().unwrap().is_present(12));
+                        for generation in 0..=1 {
+                            assert_eq!(
+                                crate::column_artifact::bundle_path(&dir, generation).exists(),
+                                generation == descriptor.generation
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_repacking_retries_busy_ownership_and_cleans_only_reserved_orphans() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, mut expected, previous) = sparse_repack_fixture(tmp.path(), true);
+        trigger_repack(&mut storage, true, &mut expected, &previous);
+        let id = storage.catalog.active_historical_segment.unwrap();
+        let dir = storage.paths.segment_dir(id);
+        let owner = File::open(&dir).unwrap();
+        owner.try_lock().unwrap();
+        storage.checkpoint_durable().unwrap();
+        assert_eq!(
+            storage
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == id)
+                .unwrap()
+                .generation,
+            0
+        );
+        owner.unlock().unwrap();
+        let empty = ingestion_header(previous.number - 3, B256::ZERO);
+        storage.ingest_historical_batch(&[], &empty).unwrap();
+        storage.checkpoint_durable().unwrap();
+        assert_eq!(
+            storage
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == id)
+                .unwrap()
+                .generation,
+            1
+        );
+        let orphan = crate::column_artifact::bundle_path(&dir, 2);
+        fs::create_dir(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, b"interrupted generation").unwrap();
+        let sentinel = orphan.parent().unwrap().join("keep-me");
+        fs::write(&sentinel, b"unrelated").unwrap();
+        // Also cover interruption after creating a generation directory but
+        // before creating its file; this must not block reuse after recovery.
+        fs::create_dir(
+            crate::column_artifact::bundle_path(&dir, 3)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        let config = storage.config.clone();
+        drop(storage);
+        let mut reopened = NativeStorage::open(config).unwrap();
+        assert!(!orphan.exists());
+        assert!(
+            !crate::column_artifact::bundle_path(&dir, 3)
+                .parent()
+                .unwrap()
+                .exists()
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated");
+        assert_eq!(
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(reopened.historical_floor_header(), Some(&empty));
+        for number in (1..=128).rev() {
+            let header = ingestion_header(number, B256::ZERO);
+            let rows = ingestion_rows(1, &header);
+            reopened.ingest_historical_batch(&rows, &header).unwrap();
+            expected.extend(rows);
+        }
+        reopened.checkpoint_durable().unwrap();
+        assert_eq!(
+            reopened
+                .catalog
+                .segments
+                .iter()
+                .find(|segment| segment.id == id)
+                .unwrap()
+                .generation,
+            3
+        );
+        assert_eq!(
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"unrelated");
+    }
+
     #[test]
     fn live_ingestion_bundles_fresh_segments_and_preserves_reader_snapshots() {
         let dir = TempDir::new().unwrap();
@@ -3810,6 +4170,73 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[ignore = "requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts"]
+    fn sparse_repacking_recovery_across_distinct_mounts() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let roots = ["LOGEX_TEST_VOLUME_A", "LOGEX_TEST_VOLUME_B"].map(|name| {
+            PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")))
+        });
+        assert_ne!(
+            fs::metadata(&roots[0]).unwrap().dev(),
+            fs::metadata(&roots[1]).unwrap().dev()
+        );
+        for (root, other) in [(&roots[0], &roots[1]), (&roots[1], &roots[0])] {
+            for historical in [false, true] {
+                for committed in [false, true] {
+                    let data = TempDir::new_in(root).unwrap();
+                    let external = TempDir::new_in(other).unwrap();
+                    symlink(external.path(), data.path().join("segments")).unwrap();
+                    let (mut storage, mut expected, previous) =
+                        sparse_repack_fixture(data.path(), historical);
+                    let old_catalog = fs::read(storage.paths.catalog_path()).unwrap();
+                    trigger_repack(&mut storage, historical, &mut expected, &previous);
+                    let descriptor = storage
+                        .catalog
+                        .segments
+                        .iter_mut()
+                        .find(|segment| segment.row_count != 0)
+                        .unwrap();
+                    let replacement =
+                        super::super::segment::repack_sparse_bundle(&storage.paths, descriptor)
+                            .unwrap()
+                            .unwrap();
+                    let dir = storage.paths.segment_dir(descriptor.id);
+                    if committed {
+                        durability::publish_catalog_after_trees(
+                            [dir.as_path()],
+                            &storage.paths.catalog_path(),
+                            &storage.catalog.encode().unwrap(),
+                        )
+                        .unwrap();
+                        replacement.retire().unwrap();
+                    } else {
+                        // Simulate an interruption after complete replacement/manifest
+                        // writes with the previous catalog still authoritative.
+                        assert_eq!(fs::read(storage.paths.catalog_path()).unwrap(), old_catalog);
+                        drop(replacement);
+                        expected.pop();
+                    }
+                    let config = storage.config.clone();
+                    drop(storage);
+                    let reopened = NativeStorage::open(config).unwrap();
+                    let reader = SegmentReader::open(&dir).unwrap();
+                    assert_eq!(reader.read_log_rows(None).unwrap(), expected);
+                    assert!(!reader.read_canonical().unwrap().is_present(12));
+                    assert_eq!(reader.generation(), u64::from(committed));
+                    assert_eq!(reopened.total_rows(), expected.len() as u64);
+                    for generation in 0..=1 {
+                        assert_eq!(
+                            crate::column_artifact::bundle_path(&dir, generation).exists(),
+                            generation == u64::from(committed)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts"]
     fn checkpoint_recovery_across_distinct_mounts() {
         use std::os::unix::fs::{MetadataExt, symlink};
 
@@ -4398,7 +4825,14 @@ mod tests {
                 .find(|segment| segment.id == id)
                 .unwrap();
             descriptor.column_bundle = Some(reference);
-            persist_segment_manifest(&storage.paths, descriptor).unwrap();
+            // This fixture deliberately replaces the transport before publishing
+            // its new identity; standalone refresh correctly rejects a stale one.
+            super::super::segment::persist_segment_manifest_with_columns(
+                &storage.paths,
+                descriptor,
+                manifest.columns,
+            )
+            .unwrap();
             storage.persist_catalog().unwrap();
             drop(storage);
             let mut storage = NativeStorage::open(config.clone()).unwrap();

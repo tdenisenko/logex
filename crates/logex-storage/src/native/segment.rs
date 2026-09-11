@@ -1,5 +1,5 @@
 use crate::bundle::{BundleReader, BundleReference, BundleWriter};
-use crate::column_artifact::{BUNDLE_PATH, ColumnArtifacts, stream_id};
+use crate::column_artifact::{BUNDLE_PATH, ColumnArtifacts, bundle_path, stream_id};
 use crate::durability::{self, Publication};
 use std::fs;
 use std::fs::{File, TryLockError};
@@ -122,7 +122,7 @@ impl<'a> PageOutput<'a> {
         }
         if let Some(reader) = bundle {
             output.bundle = Some((
-                BundleWriter::append_inspected(&dir.join(BUNDLE_PATH), reader)?,
+                BundleWriter::append_inspected(&bundle_path(dir, manifest.generation), reader)?,
                 manifest.row_count + row_count as u64,
             ));
         }
@@ -159,7 +159,8 @@ impl<'a> PageOutput<'a> {
             .as_ref()
             .map(|reference| {
                 Ok::<_, std::io::Error>(
-                    fs::metadata(dir.join(BUNDLE_PATH))?.len() != reference.end()?,
+                    fs::metadata(bundle_path(dir, manifest.generation))?.len()
+                        != reference.end()?,
                 )
             })
             .transpose()?
@@ -406,7 +407,7 @@ pub(crate) fn restore_bundled_checkpoint(
         ));
     }
     persist_segment_manifest_with_columns(paths, descriptor, prefix.columns)?;
-    let path = dir.join(BUNDLE_PATH);
+    let path = bundle_path(&dir, descriptor.generation);
     let file = fs::OpenOptions::new().write(true).open(&path)?;
     if file.metadata()?.len() != reference.end()? {
         durability::checkpoint("bundle_trim_uncommitted_tail", &path)?;
@@ -487,6 +488,197 @@ pub(crate) fn write_bundled_rows(
     Ok(encoded)
 }
 
+/// Keep ownership until the caller durably publishes the authoritative catalog
+/// and retires the previous file. Appends/reorgs are serialized by NativeStorage.
+pub(crate) struct RepackedSegment {
+    previous: PathBuf,
+    _owner: Option<SegmentMaintenanceGuard>,
+}
+
+impl RepackedSegment {
+    pub(crate) fn retire(self) -> std::io::Result<()> {
+        retire_bundle_file(&self.previous)
+    }
+}
+
+/// Coalesce only small, heavily fragmented sources. At most 16K rows and eight
+/// MiB of payload are materialized; each checkpoint processes candidates serially.
+/// The sequence check avoids opening bundles on the ordinary checkpoint path.
+pub(crate) fn repack_sparse_bundle(
+    paths: &StorageCatalogPaths,
+    descriptor: &mut SegmentDescriptor,
+) -> std::io::Result<Option<RepackedSegment>> {
+    const MIN_PAGES: u64 = 128;
+    const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
+    let Some(reference) = descriptor.column_bundle.as_ref() else {
+        return Ok(None);
+    };
+    if reference.sequence < MIN_PAGES || descriptor.row_count > u64::from(DEFAULT_PAGE_ROWS) {
+        return Ok(None);
+    }
+    let owner = match SegmentMaintenanceGuard::acquire(paths, descriptor) {
+        Ok(owner) => owner,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let dir = paths.segment_dir(descriptor.id);
+    let previous = bundle_path(&dir, descriptor.generation);
+    let bundle = BundleReader::open(&previous, reference)?;
+    let encoded_bytes = (0..14).try_fold(0u64, |sum, id| {
+        sum.checked_add(bundle.stream_len(id)?).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "encoded repack size overflow",
+            )
+        })
+    })?;
+    if encoded_bytes > 16 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let pages = bundle.stream_len(14)? / crate::page::PAGE_INDEX_ENTRY_BYTES as u64;
+    if pages < MIN_PAGES {
+        return Ok(None);
+    }
+    let reader = SegmentReader::open(&dir)?;
+    if reader.bundle_reference() != Some(reference) || reader.generation() != descriptor.generation
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "repack source differs from the catalog",
+        ));
+    }
+    let sizes = reader.read_u32("data_len", None)?;
+    if sizes
+        .iter()
+        .try_fold(0usize, |sum, &size| sum.checked_add(size as usize))
+        .is_none_or(|sum| sum > MAX_PAYLOAD)
+    {
+        return Ok(None);
+    }
+    let rows = reader.read_log_rows_bounded(MAX_PAYLOAD)?;
+    let canonical = reader.read_canonical()?;
+    if rows.len() as u64 != descriptor.row_count || canonical.len() != descriptor.row_count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "repack source row boundary differs",
+        ));
+    }
+    let mut generation = descriptor.generation;
+    let mut reserved = None;
+    // A previous orphan directory can contain unrelated files which recovery
+    // intentionally preserves. Skip existing names, without opening their
+    // contents, and bound work even if the reserved namespace is crowded.
+    for _ in 0..64 {
+        generation = generation.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bundle generations exhausted",
+            )
+        })?;
+        let path = bundle_path(&dir, generation);
+        durability::checkpoint("repack_create_generation", &path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("bundle path lacks parent"))?;
+        match fs::create_dir(parent) {
+            Ok(()) => {
+                reserved = Some(path);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let Some(replacement) = reserved else {
+        return Ok(None);
+    };
+    let mut output = PageOutput::new(&dir);
+    output.bundle = Some((BundleWriter::create(&replacement)?, descriptor.row_count));
+    output.canonical = Some(canonical);
+    output.append_canonical(0)?;
+    let columns = write_compacted_values(&output, &rows)?;
+    let mut next = descriptor.clone();
+    next.generation = generation;
+    next.column_bundle = output.finish()?;
+    durability::checkpoint("repack_publish_manifest", &replacement)?;
+    persist_ingest_manifest_with_columns(paths, &next, columns, Publication::Deferred)?;
+    *descriptor = next;
+    Ok(Some(RepackedSegment {
+        previous,
+        _owner: owner,
+    }))
+}
+
+fn retire_bundle_file(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            durability::checkpoint("repack_retire_generation", path)?;
+            fs::remove_file(path)?;
+        }
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "reserved bundle artifact is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Deletion need not survive a power loss: an orphan can be removed again.
+    // Captured readers retain an open file. Never recursively remove a directory
+    // that could contain unrelated artifacts (including filesystem metadata).
+    if let Some(parent) = path.parent() {
+        match fs::remove_dir(parent) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Called only after the observed catalog is hardened and its current bundle
+/// has been verified/restored. Reserved generation names cannot select a path
+/// outside this segment, and unrelated directory contents remain untouched.
+pub(crate) fn retire_unreferenced_bundles(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<()> {
+    let dir = paths.segment_dir(descriptor.id);
+    if descriptor.generation != 0 {
+        retire_bundle_file(&bundle_path(&dir, 0))?;
+    }
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name.strip_prefix("bundle_") else {
+            continue;
+        };
+        let Ok(generation) = u64::from_str_radix(suffix, 16) else {
+            continue;
+        };
+        if name != format!("bundle_{generation:016x}")
+            || generation == 0
+            || generation == descriptor.generation
+        {
+            continue;
+        }
+        if !entry.file_type()?.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "reserved bundle generation is not a directory",
+            ));
+        }
+        retire_bundle_file(&bundle_path(&dir, generation))?;
+    }
+    Ok(())
+}
+
 /// Reserve worst-case compressed extents before writing any part of a batch.
 /// All fixed columns fit in one extent per page under the current profile.
 /// Variable bytes use zstd's bound over the larger u64-offset representation.
@@ -494,11 +686,12 @@ pub(crate) fn write_bundled_rows(
 pub(crate) fn bundled_row_capacity(
     dir: &Path,
     reference: Option<&BundleReference>,
+    generation: u64,
     rows: &[LogRow],
 ) -> std::io::Result<(usize, Option<BundleReader>)> {
     use crate::bundle::{DATA_STREAMS, MAX_EXTENT_BYTES, MAX_EXTENTS};
     let reader = reference
-        .map(|reference| BundleReader::open(&dir.join(BUNDLE_PATH), reference))
+        .map(|reference| BundleReader::open(&bundle_path(dir, generation), reference))
         .transpose()?;
     let capacity = reader
         .as_ref()
@@ -594,13 +787,14 @@ pub(crate) fn append_compacted_rows(
 pub(crate) fn append_bundled_canonical(
     dir: &Path,
     reference: &BundleReference,
+    generation: u64,
     canonical: &NullBitmap,
 ) -> std::io::Result<BundleReference> {
     let mut bytes = Vec::new();
     canonical.write_to(&mut bytes)?;
     let encoded = crate::column_artifact::encode_bitmap(&bytes, reference.row_count)?;
-    let reader = BundleReader::open(&dir.join(BUNDLE_PATH), reference)?;
-    let writer = BundleWriter::append_inspected(&dir.join(BUNDLE_PATH), reader)?;
+    let reader = BundleReader::open(&bundle_path(dir, generation), reference)?;
+    let writer = BundleWriter::append_inspected(&bundle_path(dir, generation), reader)?;
     writer.replace_metadata(crate::column_artifact::CANONICAL_STREAM, &encoded)?;
     writer.finish(reference.row_count)
 }
@@ -848,6 +1042,24 @@ impl Drop for SegmentMaintenanceGuard {
     }
 }
 
+fn verify_maintenance_source(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<()> {
+    if descriptor.column_bundle.is_some() {
+        let reader = SegmentReader::open_projected(&paths.segment_dir(descriptor.id), &[])?;
+        if reader.generation() != descriptor.generation
+            || reader.bundle_reference() != descriptor.column_bundle.as_ref()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "maintenance source changed; capture a new plan",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 thread_local! {
     static AFTER_REFRESH_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -858,6 +1070,7 @@ pub(crate) fn persist_segment_manifest(
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
     let _owner = SegmentMaintenanceGuard::acquire(paths, descriptor)?;
+    verify_maintenance_source(paths, descriptor)?;
     let columns = existing_columns(paths, descriptor.id)?.unwrap_or_else(default_columns);
     #[cfg(test)]
     if let Some(hook) = AFTER_REFRESH_CAPTURE.with_borrow_mut(Option::take) {
@@ -941,9 +1154,11 @@ pub(crate) fn compact_ingest_segment(
     publication: Publication,
 ) -> std::io::Result<()> {
     if descriptor.kind != SegmentKind::Sealed || descriptor.row_count == 0 {
+        verify_maintenance_source(paths, descriptor)?;
         return persist_ingest_manifest(paths, descriptor, publication);
     }
     let _owner = SegmentMaintenanceGuard::acquire(paths, descriptor)?;
+    verify_maintenance_source(paths, descriptor)?;
 
     if segment_uses_current_compaction_profile(paths, descriptor.id)? {
         return persist_ingest_manifest(paths, descriptor, publication);

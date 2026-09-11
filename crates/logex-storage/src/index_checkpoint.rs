@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP001";
+const MAGIC: &[u8; 8] = b"LXICP002";
 const MAX_CHECKPOINT_BYTES: usize = 1_024;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Identity {
     rows: u64,
+    generation: u64,
     bundle: Option<BundleReference>,
 }
 
@@ -23,6 +24,7 @@ impl Identity {
     fn read(reader: &SegmentReader) -> io::Result<Self> {
         Ok(Self {
             rows: reader.read_row_count()?,
+            generation: reader.generation(),
             bundle: reader.bundle_reference().cloned(),
         })
     }
