@@ -30,7 +30,7 @@ fn flush_file(file: &File) -> io::Result<()> {
 
 /// Order the complete replacement before its rename. Apple's barrier orders
 /// earlier fsync'd data without waiting for persistence; the caller must still
-/// perform a full sync before acknowledging the containing commit. Unsupported
+/// perform a full sync before promising power-loss durability. Unsupported
 /// filesystems/devices fall back to the stronger full sync, never plain fsync.
 pub(crate) fn order_file(file: &File) -> io::Result<()> {
     #[cfg(target_vendor = "apple")]
@@ -395,6 +395,33 @@ pub(crate) fn publish_catalog_after_trees<'a>(
     group.order_before_manifest(catalog)?;
     replacement.publish()?;
     sync_directory(parent(catalog))
+}
+
+/// Order complete ingestion data before its restart marker, and the marker
+/// before subsequent writes. Apple barriers preserve a recoverable disk state
+/// without promising which complete checkpoint has reached stable media. The
+/// caller must bound the entire window since its last full sync and harden it
+/// before WAL writes, reorgs or destructive maintenance. External devices are
+/// fully synchronized before publishing a catalog that can persist independently.
+pub(crate) fn publish_ingestion_catalog_after_trees<'a>(
+    trees: impl IntoIterator<Item = &'a Path>,
+    catalog: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let mut group = SyncGroup::default();
+    for tree in trees {
+        flush_tree(tree, &mut group)?;
+        group.flush_directory(parent(tree))?;
+    }
+    let replacement = Replacement::prepare(catalog, |writer| writer.write_all(bytes))?;
+    group.include_flushed(replacement.writer.get_ref().try_clone()?, catalog)?;
+    group.order_before_manifest(catalog)?;
+    checkpoint("ingestion_data_ordered", catalog)?;
+    replacement.publish()?;
+    // Order namespace changes before later writes can reuse the old catalog's
+    // blocks. Plain directory fsync does not supply that ordering on Apple.
+    checkpoint("order_ingestion_catalog_directory", parent(catalog))?;
+    order_file(&File::open(parent(catalog))?)
 }
 
 /// Persist a just-written file and its directory entry with one device flush.

@@ -322,3 +322,41 @@ marker to disappear on power loss. Existing checkpoint guarantees and hard
 WAL/reorg/maintenance boundaries need a separate correctness design, including
 rollback of an additional completed epoch, before this can be considered. All
 temporary source was restored; no node or production directory used this variant.
+
+
+The [bounded progress-publication successor](published-ingestion-checkpoints.md)
+now implements the separate lifecycle guards beyond that isolated diagnostic.
+It remains unmerged and needs its own performance/platform confirmation; earlier
+683bcdf8 measurements do not validate it.
+
+
+## Intel confirmation of saved `683bcdf8`
+
+The isolated current source/build on mac-mini passes 170 ExFAT storage tests
+(three ignored) and 32 cross-mount cases. Both source directories select the pinned
+nightly toolchain; copied binaries and archive identities are recorded in the
+[validation record](baselines/2026-09-11-immutable-canonical-intel-exfat.jsonl).
+The disposable image detached after correctness tests and again after timing.
+The protected external volume's contents were neither read nor written.
+
+Five alternating process pairs × three samples give these original-baseline median
+changes. Negative values mean less elapsed time. These results validate saved
+`683bcdf8`, not the ordered-publication successor:
+
+| Storage workload | Intel APFS | Intel disposable ExFAT |
+| --- | ---: | ---: |
+| Tiny historical batch | +123.05% | -39.57% |
+| Large historical batch | -6.59% | -7.04% |
+| Short historical batch | +24.45% | -75.81% |
+| Grouped live | -88.86% | -51.69% |
+| Per-block live publication | -34.12% | +27.13% |
+| One-row historical calls | -48.27% | -83.48% |
+| Many small historical calls | -66.39% | -84.75% |
+
+The three failures keep acceptance blocked. Raw [APFS](baselines/2026-09-11-immutable-canonical-intel-apfs-performance.jsonl)
+and [ExFAT](baselines/2026-09-11-immutable-canonical-intel-exfat-performance.jsonl)
+records include workload parameters, exact clean-reopen oracles, cache conditions,
+medians, p95, peak RSS, host metadata, binary identities and runner source. The ExFAT
+image lives on internal APFS; this does not measure the protected USB drive or
+physical power-failure behavior. No audit build/test overlapped the timing runs;
+other host load was not controlled.

@@ -224,8 +224,9 @@ fn run(config: Config) {
                             Some(&anchor(header)),
                         )
                         .unwrap();
-                    // Model sparse live traffic's durable boundary without
-                    // sleeping between blocks; this is not a paced-network test.
+                    // Measure a publication boundary after each live block without
+                    // sleeps. Report the revision's checkpoint durability contract;
+                    // this is not a paced-network or power-failure test.
                     if config.checkpoint_each_block {
                         storage.checkpoint().unwrap();
                     }

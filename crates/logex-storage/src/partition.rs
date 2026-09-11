@@ -126,9 +126,18 @@ impl PartitionManager {
         Ok(finalized)
     }
 
-    /// Make current rows and sync progress durable and retire recovery metadata.
+    /// Publish sync progress after persisting its data, or retire WAL metadata.
+    /// Power loss may undo the bounded sync window since the last full flush; use
+    /// `checkpoint_durable` when the latest progress must survive power loss.
     pub fn checkpoint(&mut self) -> std::io::Result<()> {
         self.inner.checkpoint()?;
+        self.refresh_views();
+        Ok(())
+    }
+
+    /// Persist current rows and progress, including the latest catalog name.
+    pub fn checkpoint_durable(&mut self) -> std::io::Result<()> {
+        self.inner.checkpoint_durable()?;
         self.refresh_views();
         Ok(())
     }

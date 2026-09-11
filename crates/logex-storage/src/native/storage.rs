@@ -175,6 +175,7 @@ pub struct NativeStorage {
     recovery_required: bool,
     pending_checkpoint: Option<PendingCheckpoint>,
     pending_ingestion: Option<PendingIngestion>,
+    published_ingestion: Option<PendingIngestion>,
     directory_lock: Arc<DataDirectoryLock>,
 }
 
@@ -213,10 +214,15 @@ impl NativeStorage {
             recovery_required: false,
             pending_checkpoint: None,
             pending_ingestion: None,
+            published_ingestion: None,
             directory_lock,
         };
 
         storage.verify_recovery_evidence()?;
+        // A prior process may have published a sync catalog without completing
+        // its device flush. Make the catalog observed on this open durable
+        // before recovery or maintenance can retire any of its predecessors.
+        durability::sync_directory(storage.paths.root())?;
         storage.restore_catalog_checkpoint()?;
         storage.ensure_active_hot_segment()?;
         storage.replay_wal()?;
@@ -269,8 +275,8 @@ impl NativeStorage {
         timestamp: u64,
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         let next = SyncHead {
             block_number,
@@ -292,8 +298,8 @@ impl NativeStorage {
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
         validate_cached_headers(recent_headers)?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         let next_sync_head = SyncHead {
             block_number: header.number(),
@@ -321,8 +327,8 @@ impl NativeStorage {
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
         validate_cached_headers(recent_headers)?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         self.record_canonical_state(header, recent_headers)?;
 
@@ -334,8 +340,8 @@ impl NativeStorage {
     pub fn record_historical_floor(&mut self, header: &Header) -> std::io::Result<()> {
         validate_cached_headers(std::slice::from_ref(header))?;
         self.ensure_writable()?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         if let Some(current) = self.catalog.state.historical_floor_header.as_ref()
             && current.number() <= header.number()
@@ -356,8 +362,8 @@ impl NativeStorage {
 
     pub fn record_chain_anchors(&mut self, anchors: ChainAnchors) -> std::io::Result<()> {
         self.ensure_writable()?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         if self.catalog.anchors == anchors {
             return Ok(());
@@ -374,7 +380,7 @@ impl NativeStorage {
     ) -> std::io::Result<()> {
         self.ensure_writable()?;
         validate_cached_headers(recent_headers)?;
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         let next_sync_head = recent_headers.last().map(|header| SyncHead {
             block_number: header.number(),
             block_hash: header.hash_slow(),
@@ -403,8 +409,9 @@ impl NativeStorage {
     }
 
     /// Publish validated canonical rows and their restart marker together.
-    /// A restart may discard work since the last checkpoint and re-fetch it.
-    /// Call `checkpoint` before requiring the latest progress to be durable.
+    /// Restart may re-fetch the bounded sync window since the last full flush.
+    /// Call `checkpoint_durable` before requiring
+    /// the latest progress to survive power loss.
     pub fn ingest_canonical_batch(
         &mut self,
         rows: &[LogRow],
@@ -479,14 +486,13 @@ impl NativeStorage {
         self.ensure_writable()?;
         let bytes = crate::wal::validated_payload_len(rows)? as u64;
         if self.pending_checkpoint.is_some()
-            || self.pending_ingestion.as_ref().is_some_and(|pending| {
-                pending.origin.route != route
-                    || pending.bytes.saturating_add(bytes) > CHECKPOINT_INGEST_BYTES
-                    || pending.batches >= 64
-                    || pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
-            })
+            || self.ingestion_checkpoint_due(bytes)
+            || [&self.pending_ingestion, &self.published_ingestion]
+                .into_iter()
+                .flatten()
+                .any(|pending| pending.origin.route != route)
         {
-            self.checkpoint()?;
+            self.checkpoint_durable()?;
         }
         self.recovery_required = true;
         if self.pending_ingestion.is_none() {
@@ -545,17 +551,37 @@ impl NativeStorage {
         }
     }
 
+    /// Include every published epoch since the last full flush. Resetting these
+    /// bounds on each catalog rename would allow an unbounded recovery window.
+    fn ingestion_checkpoint_due(&self, additional_bytes: u64) -> bool {
+        let mut bytes = additional_bytes;
+        let mut batches = 0_u32;
+        for pending in [&self.pending_ingestion, &self.published_ingestion]
+            .into_iter()
+            .flatten()
+        {
+            bytes = bytes.saturating_add(pending.bytes);
+            batches = batches.saturating_add(pending.batches);
+            if pending.started_at.elapsed() >= std::time::Duration::from_secs(5) {
+                return true;
+            }
+        }
+        bytes >= CHECKPOINT_INGEST_BYTES || batches >= 64
+    }
+
     fn complete_ingestion_batch(&mut self) -> io::Result<()> {
         self.recovery_required = false;
-        if self.pending_ingestion.as_ref().is_some_and(|pending| {
-            pending.bytes >= CHECKPOINT_INGEST_BYTES || pending.batches >= 64
-        }) {
-            self.checkpoint()?;
+        if self.ingestion_checkpoint_due(0) {
+            self.checkpoint_durable()?;
         }
         Ok(())
     }
 
-    fn checkpoint_ingestion(&mut self, pending: PendingIngestion) -> io::Result<()> {
+    fn checkpoint_ingestion(
+        &mut self,
+        pending: PendingIngestion,
+        progress_durable: bool,
+    ) -> io::Result<()> {
         self.recovery_required = true;
         let deferred = self
             .catalog
@@ -567,11 +593,35 @@ impl NativeStorage {
             })
             .map(|segment| self.paths.segment_dir(segment.id))
             .collect::<Vec<_>>();
-        durability::publish_catalog_after_trees(
-            deferred.iter().map(PathBuf::as_path),
-            &self.paths.catalog_path(),
-            &self.catalog.encode()?,
-        )?;
+        let bytes = self.catalog.encode()?;
+        if progress_durable {
+            durability::publish_catalog_after_trees(
+                deferred.iter().map(PathBuf::as_path),
+                &self.paths.catalog_path(),
+                &bytes,
+            )?;
+            self.published_ingestion = None;
+        } else {
+            durability::publish_ingestion_catalog_after_trees(
+                deferred.iter().map(PathBuf::as_path),
+                &self.paths.catalog_path(),
+                &bytes,
+            )?;
+            if let Some(published) = self.published_ingestion.as_mut() {
+                // Preserve the earliest origin and deadline: an older catalog
+                // can still be the last complete checkpoint on stable media.
+                published.bytes = published
+                    .bytes
+                    .checked_add(pending.bytes)
+                    .ok_or_else(|| io::Error::other("published ingestion byte count overflow"))?;
+                published.batches = published
+                    .batches
+                    .checked_add(pending.batches)
+                    .ok_or_else(|| io::Error::other("published ingestion batch count overflow"))?;
+            } else {
+                self.published_ingestion = Some(pending);
+            }
+        }
         self.recovery_required = false;
         Ok(())
     }
@@ -1105,7 +1155,7 @@ impl NativeStorage {
 
     pub fn refresh_segment_indexes(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.ensure_writable()?;
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         let descriptor = self
             .catalog
             .segments
@@ -1122,7 +1172,7 @@ impl NativeStorage {
 
     pub fn refresh_segment_manifest(&mut self, segment_id: u64) -> std::io::Result<()> {
         self.ensure_writable()?;
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         let descriptor = self
             .catalog
             .segments
@@ -1143,7 +1193,7 @@ impl NativeStorage {
     }
 
     pub fn compact_eligible_segments_limit(&mut self, limit: usize) -> std::io::Result<usize> {
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         let plan = self.segment_compaction_plan(limit)?;
         plan.compact()
     }
@@ -1240,6 +1290,10 @@ impl NativeStorage {
                 .pending_ingestion
                 .as_ref()
                 .is_some_and(|pending| pending.origin.includes(segment.id))
+            || self
+                .published_ingestion
+                .as_ref()
+                .is_some_and(|published| published.origin.includes(segment.id))
             || self.pending_checkpoint.as_ref().is_some_and(|pending| {
                 segment.id == pending.journal.start.id
                     || segment.id >= pending.journal.next_segment_id
@@ -1296,7 +1350,7 @@ impl NativeStorage {
 
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.ensure_writable()?;
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         self.recovery_required = true;
         let mut total_marked = 0u64;
         let mut changed_bundles = Vec::new();
@@ -1507,7 +1561,7 @@ impl NativeStorage {
 
     #[cfg(test)]
     fn begin_wal_batch(&mut self, rows: &[LogRow]) -> io::Result<()> {
-        self.checkpoint()?;
+        self.checkpoint_durable()?;
         let batch = EncodedWalBatch::new(rows)?;
         if !self.wal.is_empty()? {
             return Err(io::Error::other(
@@ -1525,8 +1579,8 @@ impl NativeStorage {
     fn begin_checkpoint_batch(&mut self, rows: &[LogRow], route: IngestRoute) -> io::Result<()> {
         // Validate the entire caller batch before checkpointing or changing files.
         let batch = EncodedWalBatch::new(rows)?;
-        if self.pending_ingestion.is_some() {
-            self.checkpoint()?;
+        if self.pending_ingestion.is_some() || self.published_ingestion.is_some() {
+            self.checkpoint_durable()?;
         }
         if self.pending_checkpoint.as_ref().is_some_and(|pending| {
             pending.journal.route() != route
@@ -1597,15 +1651,24 @@ impl NativeStorage {
         Ok(())
     }
 
-    /// Make current rows/catalog/progress durable before retiring recovery metadata.
-    /// Generic row batches are already WAL-durable; combined sync ingestion can
-    /// rewind until this boundary. Measurements must include its write costs.
+    /// Publish a complete sync checkpoint, or retire WAL recovery metadata.
+    /// Sync data and catalog publication are ordered. Power loss can undo the
+    /// bounded window of sync work since the last full device flush; use
+    /// `checkpoint_durable` when the latest progress must survive power loss.
+    /// Generic row batches retain their WAL-backed durable contract.
     pub fn checkpoint(&mut self) -> io::Result<()> {
         self.ensure_writable()?;
+        let progress_durable = self.ingestion_checkpoint_due(0);
         if let Some(pending) = self.pending_ingestion.take() {
-            return self.checkpoint_ingestion(pending);
+            return self.checkpoint_ingestion(pending, progress_durable);
         }
         let Some(mut pending) = self.pending_checkpoint.take() else {
+            if progress_durable && self.published_ingestion.is_some() {
+                self.recovery_required = true;
+                durability::sync_directory(self.paths.root())?;
+                self.published_ingestion = None;
+                self.recovery_required = false;
+            }
             return Ok(());
         };
         self.recovery_required = true;
@@ -1617,19 +1680,42 @@ impl NativeStorage {
         self.finish_wal_batch()
     }
 
+    /// Make the latest rows and progress durable, including the published sync
+    /// catalog name. Use before operations that cannot rewind with ingestion.
+    pub fn checkpoint_durable(&mut self) -> io::Result<()> {
+        self.ensure_writable()?;
+        if let Some(pending) = self.pending_ingestion.take() {
+            return self.checkpoint_ingestion(pending, true);
+        }
+        self.checkpoint()?;
+        if self.published_ingestion.is_some() {
+            self.recovery_required = true;
+            durability::sync_directory(self.paths.root())?;
+            self.published_ingestion = None;
+            self.recovery_required = false;
+        }
+        Ok(())
+    }
+
     /// Let the runtime retire small pending epochs even when ingestion is idle.
     pub fn checkpoint_if_due(&mut self) -> io::Result<bool> {
         self.ensure_writable()?;
         if self.pending_ingestion.as_ref().is_some_and(|pending| {
             pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
         }) {
-            self.checkpoint()?;
+            self.checkpoint_durable()?;
             return Ok(true);
         }
         if self.pending_checkpoint.as_ref().is_some_and(|pending| {
             pending.started_at.elapsed() >= std::time::Duration::from_secs(5)
         }) {
-            self.checkpoint()?;
+            self.checkpoint_durable()?;
+            return Ok(true);
+        }
+        if self.published_ingestion.as_ref().is_some_and(|published| {
+            published.started_at.elapsed() >= std::time::Duration::from_secs(5)
+        }) {
+            self.checkpoint_durable()?;
             return Ok(true);
         }
         Ok(false)
@@ -2540,6 +2626,439 @@ mod tests {
     }
 
     #[test]
+    fn published_ingestion_orders_data_and_catalog_before_subsequent_writes() {
+        for historical in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let mut storage = NativeStorage::open(NativeStorageConfig {
+                data_dir: dir.path().to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+            let prior = ingestion_header(99, B256::ZERO);
+            let header = ingestion_header(100, prior.hash_slow());
+            ingest_test_batch(
+                &mut storage,
+                historical,
+                &ingestion_rows(3, &header),
+                &header,
+                &prior,
+            )
+            .unwrap();
+            durability::inject_failure(usize::MAX);
+            storage.checkpoint().unwrap();
+            let events = durability::take_events();
+            let position = |operation, path: &Path| {
+                events
+                    .iter()
+                    .position(|(op, p)| *op == operation && p == path)
+                    .unwrap()
+            };
+            let catalog = storage.paths.catalog_path();
+            let data = position("ingestion_data_ordered", &catalog);
+            let rename = position("rename_temporary", &catalog);
+            let directory = position("order_ingestion_catalog_directory", storage.paths.root());
+            assert!(data < rename && rename < directory, "{events:?}");
+            #[cfg(target_vendor = "apple")]
+            assert!(events[..data].iter().any(|(op, _)| *op == "order_device"));
+            assert!(storage.published_ingestion.is_some());
+            assert!(storage.pending_ingestion.is_none());
+            storage.checkpoint_durable().unwrap();
+            assert!(storage.published_ingestion.is_none());
+        }
+    }
+
+    fn assert_published_epoch_rewind(
+        config: NativeStorageConfig,
+        historical: bool,
+        counts: (usize, usize, usize),
+        publish_second: bool,
+        keep_first: bool,
+    ) {
+        let (initial_count, first_count, second_count) = counts;
+        let prior = ingestion_header(100, B256::ZERO);
+        let first = ingestion_header(if historical { 99 } else { 101 }, prior.hash_slow());
+        let second = ingestion_header(if historical { 98 } else { 102 }, first.hash_slow());
+        let initial = ingestion_rows(initial_count, &prior);
+        let first_rows = ingestion_rows(first_count, &first);
+        let second_rows = ingestion_rows(second_count, &second);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        if historical {
+            storage.ingest_historical_batch(&initial, &prior).unwrap();
+        } else {
+            storage
+                .ingest_canonical_batch(&initial, &prior, std::slice::from_ref(&prior), None)
+                .unwrap();
+        }
+        storage.checkpoint_durable().unwrap();
+        storage.mark_non_canonical(prior.hash_slow()).unwrap();
+        let previous = fs::read(storage.paths.catalog_path()).unwrap();
+        ingest_test_batch(&mut storage, historical, &first_rows, &first, &prior).unwrap();
+        storage.checkpoint().unwrap();
+        let first_catalog = fs::read(storage.paths.catalog_path()).unwrap();
+        ingest_test_batch(&mut storage, historical, &second_rows, &second, &first).unwrap();
+        if publish_second {
+            storage.checkpoint().unwrap();
+        }
+        let mut expected = initial.clone();
+        if keep_first {
+            expected.extend(first_rows.clone());
+        }
+        expected.sort_by_key(|r| (r.block_number, r.log_index));
+        drop(storage);
+        // Model the newest catalog rename not reaching stable media.
+        // Ordering preserves either predecessor, but does not promise which
+        // published catalog has reached stable media before a full flush.
+        fs::write(
+            config.data_dir.join("catalog.json"),
+            if keep_first { first_catalog } else { previous },
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let recovered = NativeStorage::open(config.clone()).unwrap();
+            assert_eq!(read_ingestion_rows(&recovered), expected);
+            let number = if historical {
+                recovered.historical_floor().unwrap().block_number
+            } else {
+                recovered.sync_head().unwrap().block_number
+            };
+            assert_eq!(
+                number,
+                if keep_first {
+                    first.number
+                } else {
+                    prior.number
+                }
+            );
+            for segment in recovered.segments().iter().filter(|s| s.row_count > 0) {
+                let reader = SegmentReader::open(&recovered.segment_path(segment.id)).unwrap();
+                let hashes = reader.read_b256("block_hash", None).unwrap();
+                let flags = reader.read_canonical().unwrap();
+                for (row, hash) in hashes.iter().enumerate() {
+                    assert_eq!(flags.is_present(row as u64), *hash != prior.hash_slow());
+                }
+            }
+        }
+        let mut recovered = NativeStorage::open(config.clone()).unwrap();
+        if !keep_first {
+            ingest_test_batch(&mut recovered, historical, &first_rows, &first, &prior).unwrap();
+        }
+        ingest_test_batch(&mut recovered, historical, &second_rows, &second, &first).unwrap();
+        recovered.checkpoint_durable().unwrap();
+        drop(recovered);
+        let recovered = NativeStorage::open(config).unwrap();
+        let mut expected = initial;
+        expected.extend(first_rows);
+        expected.extend(second_rows);
+        expected.sort_by_key(|r| (r.block_number, r.log_index));
+        assert_eq!(read_ingestion_rows(&recovered), expected);
+    }
+
+    #[test]
+    fn published_ingestion_rewinds_any_complete_checkpoint_in_the_window() {
+        for historical in [false, true] {
+            for counts in [
+                (0, 0, 0),
+                (0, 3, 2),
+                (0, 25, 25),
+                (3, 0, 0),
+                (3, 3, 2),
+                (3, 25, 25),
+            ] {
+                for (publish_second, keep_first) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    let dir = TempDir::new().unwrap();
+                    assert_published_epoch_rewind(
+                        NativeStorageConfig {
+                            data_dir: dir.path().to_owned(),
+                            hot_target_rows: 10,
+                            ..Default::default()
+                        },
+                        historical,
+                        counts,
+                        publish_second,
+                        keep_first,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn published_ingestion_hardens_before_wal_reorg_and_metadata_mutation() {
+        for action in 0..8 {
+            let dir = TempDir::new().unwrap();
+            let mut storage = NativeStorage::open(NativeStorageConfig {
+                data_dir: dir.path().to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+            let prior = ingestion_header(99, B256::ZERO);
+            let header = ingestion_header(100, prior.hash_slow());
+            ingest_test_batch(
+                &mut storage,
+                false,
+                &ingestion_rows(3, &header),
+                &header,
+                &prior,
+            )
+            .unwrap();
+            storage.checkpoint().unwrap();
+            assert!(storage.published_ingestion.is_some());
+            durability::inject_failure(usize::MAX);
+            match action {
+                0 => storage.write_batch(&ingestion_rows(2, &header)).unwrap(),
+                1 => {
+                    storage
+                        .write_historical_batch(&ingestion_rows(2, &prior))
+                        .unwrap();
+                }
+                2 => {
+                    storage.mark_non_canonical(header.hash_slow()).unwrap();
+                }
+                3 => storage.record_historical_floor(&prior).unwrap(),
+                4 => storage
+                    .record_chain_anchors(storage.chain_anchors())
+                    .unwrap(),
+                5 => storage
+                    .refresh_segment_manifest(storage.catalog.active_hot_segment.unwrap())
+                    .unwrap(),
+                6 => {
+                    storage.compact_eligible_segments_limit(1).unwrap();
+                }
+                _ => storage
+                    .record_sync_head(header.number, header.hash_slow(), header.timestamp)
+                    .unwrap(),
+            }
+            let events = durability::take_events();
+            assert_eq!(
+                events.first(),
+                Some(&("sync_directory", storage.paths.root().to_owned())),
+                "action {action}: {events:?}"
+            );
+            assert!(storage.published_ingestion.is_none());
+        }
+    }
+
+    #[test]
+    fn published_ingestion_blocks_compaction_until_hardened_or_reopened() {
+        for reopen in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: dir.path().to_owned(),
+                hot_target_rows: 10,
+                compaction_safety_margin_blocks: 0,
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let prior = ingestion_header(99, B256::ZERO);
+            let header = ingestion_header(100, prior.hash_slow());
+            ingest_test_batch(
+                &mut storage,
+                false,
+                &ingestion_rows(13, &header),
+                &header,
+                &prior,
+            )
+            .unwrap();
+            storage.checkpoint().unwrap();
+            assert!(storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+            let next = ingestion_header(101, header.hash_slow());
+            ingest_test_batch(
+                &mut storage,
+                false,
+                &ingestion_rows(13, &next),
+                &next,
+                &header,
+            )
+            .unwrap();
+            storage.checkpoint().unwrap();
+            assert!(storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+            durability::inject_failure(usize::MAX);
+            if reopen {
+                drop(storage);
+                storage = NativeStorage::open(config).unwrap();
+            } else {
+                storage.checkpoint_durable().unwrap();
+            }
+            let events = durability::take_events();
+            assert!(
+                events
+                    .iter()
+                    .any(|(op, path)| *op == "sync_directory" && path == storage.paths.root())
+            );
+            assert!(storage.published_ingestion.is_none());
+            assert!(!storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn published_ingestion_bounds_survive_frequent_checkpoints() {
+        for historical in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: dir.path().to_owned(),
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let mut prior = ingestion_header(100, B256::ZERO);
+            let mut origin = None;
+            for batch in 1..=64 {
+                let next = ingestion_header(
+                    if historical {
+                        prior.number - 1
+                    } else {
+                        prior.number + 1
+                    },
+                    prior.hash_slow(),
+                );
+                ingest_test_batch(&mut storage, historical, &[], &next, &prior).unwrap();
+                storage.checkpoint().unwrap();
+                if batch < 64 {
+                    let published = storage.published_ingestion.as_ref().unwrap();
+                    assert_eq!(published.batches, batch);
+                    assert_eq!(
+                        published.bytes,
+                        u64::from(batch) * crate::wal::validated_payload_len(&[]).unwrap() as u64
+                    );
+                    let original = origin
+                        .get_or_insert((published.origin.next_segment_id, published.started_at));
+                    assert_eq!(
+                        (published.origin.next_segment_id, published.started_at),
+                        *original,
+                    );
+                } else {
+                    assert!(storage.pending_ingestion.is_none());
+                    assert!(storage.published_ingestion.is_none());
+                }
+                prior = next;
+            }
+            drop(storage);
+            let recovered = NativeStorage::open(config).unwrap();
+            assert_eq!(recovered.total_rows(), 0);
+            if historical {
+                assert_eq!(recovered.historical_floor_header(), Some(&prior));
+            } else {
+                assert_eq!(recovered.sync_head().unwrap().block_hash, prior.hash_slow());
+            }
+        }
+    }
+
+    #[test]
+    fn published_ingestion_hardens_before_byte_deadline_or_route_boundaries() {
+        for historical in [false, true] {
+            for boundary in 0..3 {
+                let dir = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: dir.path().to_owned(),
+                    ..Default::default()
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let prior = ingestion_header(100, B256::ZERO);
+                if historical {
+                    storage.ingest_historical_batch(&[], &prior).unwrap();
+                } else {
+                    storage
+                        .ingest_canonical_batch(&[], &prior, std::slice::from_ref(&prior), None)
+                        .unwrap();
+                }
+                storage.checkpoint().unwrap();
+                let next_historical = if boundary == 2 {
+                    !historical
+                } else {
+                    historical
+                };
+                let next =
+                    ingestion_header(if next_historical { 99 } else { 101 }, prior.hash_slow());
+                let rows = ingestion_rows(3, &next);
+                let payload = crate::wal::validated_payload_len(&rows).unwrap() as u64;
+                let published = storage.published_ingestion.as_mut().unwrap();
+                match boundary {
+                    // Exercise accumulated-byte accounting without allocating a
+                    // 32 MiB fixture; oversized real batches are tested separately.
+                    0 => published.bytes = CHECKPOINT_INGEST_BYTES - payload,
+                    1 => published.started_at -= std::time::Duration::from_secs(6),
+                    _ => {}
+                }
+                durability::inject_failure(usize::MAX);
+                ingest_test_batch(
+                    &mut storage,
+                    if boundary == 2 {
+                        !historical
+                    } else {
+                        historical
+                    },
+                    &rows,
+                    &next,
+                    &prior,
+                )
+                .unwrap();
+                let events = durability::take_events();
+                assert_eq!(
+                    events.first(),
+                    Some(&("sync_directory", storage.paths.root().to_owned())),
+                    "boundary {boundary}: {events:?}",
+                );
+                assert!(storage.published_ingestion.is_none());
+                let pending = storage.pending_ingestion.as_ref().unwrap();
+                assert_eq!(pending.batches, 1);
+                assert_eq!(pending.bytes, payload);
+                storage.checkpoint_durable().unwrap();
+                drop(storage);
+                assert_eq!(
+                    read_ingestion_rows(&NativeStorage::open(config).unwrap()),
+                    rows
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn published_ingestion_idle_hardening_and_failure_are_explicit() {
+        let dir = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        let prior = ingestion_header(99, B256::ZERO);
+        let header = ingestion_header(100, prior.hash_slow());
+        ingest_test_batch(
+            &mut storage,
+            false,
+            &ingestion_rows(3, &header),
+            &header,
+            &prior,
+        )
+        .unwrap();
+        storage.checkpoint().unwrap();
+        assert!(!storage.checkpoint_if_due().unwrap());
+        storage.published_ingestion.as_mut().unwrap().started_at -=
+            std::time::Duration::from_secs(6);
+        assert!(storage.checkpoint_if_due().unwrap());
+        assert!(!storage.checkpoint_if_due().unwrap());
+        assert!(storage.published_ingestion.is_none());
+        let next = ingestion_header(101, header.hash_slow());
+        ingest_test_batch(
+            &mut storage,
+            false,
+            &ingestion_rows(2, &next),
+            &next,
+            &header,
+        )
+        .unwrap();
+        storage.checkpoint().unwrap();
+        durability::inject_failure(0);
+        assert!(storage.checkpoint_durable().is_err());
+        durability::take_events();
+        assert!(storage.published_ingestion.is_some());
+        assert!(storage.ensure_writable().is_err());
+        drop(storage);
+        let recovered = NativeStorage::open(config).unwrap();
+        assert_eq!(recovered.total_rows(), 5);
+        assert_eq!(recovered.sync_head().unwrap().block_number, next.number);
+    }
+
+    #[test]
     fn ingestion_restart_rewinds_rows_and_progress_before_retry() {
         for historical in [false, true] {
             for incoming_count in [0, 3, 25] {
@@ -3146,11 +3665,12 @@ mod tests {
                                     *op == "rename_temporary" && path == &catalog
                                 })
                                 .unwrap();
-                            assert!(
-                                events[..publish]
-                                    .iter()
-                                    .any(|(op, _)| *op == "cross_device_sync")
-                            );
+                            assert!(events[..publish].iter().any(|(op, path)| {
+                                matches!(*op, "cross_device_sync" | "sync_device")
+                                    && fs::metadata(path).is_ok_and(|metadata| {
+                                        metadata.dev() == fs::metadata(other).unwrap().dev()
+                                    })
+                            }));
                         }
                         #[cfg(not(target_vendor = "apple"))]
                         let _ = events;
@@ -3184,6 +3704,51 @@ mod tests {
                             expected.sort_by_key(|row| (row.block_number, row.log_index));
                             assert_eq!(read_ingestion_rows(&storage), expected);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires LOGEX_TEST_VOLUME_A and LOGEX_TEST_VOLUME_B on isolated distinct mounts"]
+    fn published_checkpoint_recovery_across_distinct_mounts() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let roots = ["LOGEX_TEST_VOLUME_A", "LOGEX_TEST_VOLUME_B"].map(|name| {
+            PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")))
+        });
+        assert_ne!(
+            fs::metadata(&roots[0]).unwrap().dev(),
+            fs::metadata(&roots[1]).unwrap().dev()
+        );
+        for (root, other) in [(&roots[0], &roots[1]), (&roots[1], &roots[0])] {
+            for historical in [false, true] {
+                for counts in [
+                    (0, 0, 0),
+                    (0, 3, 2),
+                    (0, 25, 25),
+                    (3, 0, 0),
+                    (3, 3, 2),
+                    (3, 25, 25),
+                ] {
+                    for (publish_second, keep_first) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                    {
+                        let data = TempDir::new_in(root).unwrap();
+                        let columns = TempDir::new_in(other).unwrap();
+                        symlink(columns.path(), data.path().join("segments")).unwrap();
+                        assert_published_epoch_rewind(
+                            NativeStorageConfig {
+                                data_dir: data.path().to_owned(),
+                                hot_target_rows: 10,
+                                ..Default::default()
+                            },
+                            historical,
+                            counts,
+                            publish_second,
+                            keep_first,
+                        );
                     }
                 }
             }

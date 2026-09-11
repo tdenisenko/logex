@@ -1,5 +1,11 @@
 # Combined sync ingestion checkpoints
 
+The sections below record the durable-checkpoint implementation through
+`683bcdf8`. A [bounded progress-publication successor](published-ingestion-checkpoints.md)
+is now implemented locally and in validation. It shares one bounded recovery
+window across pending and published sync work and adds `checkpoint_durable()`
+for the stronger boundary. Its recovery and performance acceptance remain open.
+
 This is an **unmerged prototype** continuing PR #130. It addresses B2-10 in the
 sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.

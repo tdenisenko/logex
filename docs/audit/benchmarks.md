@@ -121,7 +121,7 @@ cargo test -p logex-storage --test ingestion_publication --release --locked -- \
 | `LOGEX_PUBLICATION_REPEATS` | 3 | Fresh-directory repetitions |
 | `LOGEX_PUBLICATION_HEADER_FIELDS` | minimal | `rich` populates hash, bloom and fork fields with deterministic synthetic data; fixture v3 |
 | `LOGEX_PUBLICATION_ROUTE` | both | `live`, `historical` or `both` |
-| `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` forces a durable checkpoint after every live block; useful for sparse-live boundary cost without a wall-clock sleep |
+| `LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK` | 0 | `1` calls `checkpoint()` after every live block; useful for publication boundary cost without a wall-clock sleep. Since the ordered-publication successor, this is not a promise of per-block power-loss durability; report the candidate contract explicitly |
 
 Numeric sizes and repetition counts must be positive. Every sixteenth block is empty. This fixture holds the
 production 8,192-header window but does not warm an existing million-row hot

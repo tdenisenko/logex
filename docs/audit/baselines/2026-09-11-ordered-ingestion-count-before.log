@@ -1,0 +1,24 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.93s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints ... FAILED
+
+failures:
+
+---- native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints stdout ----
+
+thread 'native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints' (22155984) panicked at crates/logex-storage/src/native/storage.rs:2931:21:
+assertion failed: storage.published_ingestion.is_none()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 180 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `-p logex-storage --lib`

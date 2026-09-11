@@ -1,0 +1,17 @@
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.09s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 7 tests
+test native::storage::tests::published_ingestion_idle_hardening_and_failure_are_explicit ... ok
+test native::storage::tests::published_ingestion_orders_data_and_catalog_before_subsequent_writes ... ok
+test native::storage::tests::published_ingestion_blocks_compaction_until_hardened_or_reopened ... ok
+test native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries ... ok
+test native::storage::tests::published_ingestion_hardens_before_wal_reorg_and_metadata_mutation ... ok
+test native::storage::tests::published_ingestion_bounds_survive_frequent_checkpoints ... ok
+test native::storage::tests::published_ingestion_rewinds_any_complete_checkpoint_in_the_window ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 174 filtered out; finished in 6.74s
+

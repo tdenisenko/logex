@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)
+
+running 1 test
+test native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries ... FAILED
+
+failures:
+
+---- native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries stdout ----
+
+thread 'native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries' (22156033) panicked at crates/logex-storage/src/native/storage.rs:2996:17:
+assertion `left == right` failed: boundary 0: [("write_unpublished", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC/segments/s_0000000000000000/segment.json"), ("write_temporary", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC/segments/s_0000000000000000/segment.json"), ("rename_temporary", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC/segments/s_0000000000000000/segment.json"), ("ingestion_rows_applied", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC")]
+  left: Some(("write_unpublished", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC/segments/s_0000000000000000/segment.json"))
+ right: Some(("sync_directory", "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/.tmp1IPERC"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native::storage::tests::published_ingestion_hardens_before_byte_deadline_or_route_boundaries
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 180 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p logex-storage --lib`
