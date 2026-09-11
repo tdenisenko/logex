@@ -10,9 +10,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 5;
-pub const CATALOG_FORMAT_VERSION: u32 = 7;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT007";
+pub const STORAGE_FORMAT_VERSION: u32 = 6;
+pub const CATALOG_FORMAT_VERSION: u32 = 8;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT008";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;

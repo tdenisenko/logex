@@ -1,0 +1,60 @@
+{
+  "records": [
+    {
+      "name": "growth-before",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 5.97060637496179,
+      "log": "   Compiling logex-storage v0.1.0 (/private/tmp/logex-table-groups-probe-j3c7697x/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.42s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (/Users/tdenisenko/code/logex/target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 1 test\n\nthread 'bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata' (27938274) panicked at crates/logex-storage/src/bundle.rs:780:9:\nassertion failed: fs::metadata(path).unwrap().len() < 512 * 1024\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata ... FAILED\n\nfailures:\n\nfailures:\n    bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.75s\n\nerror: test failed, to rerun pass `-p logex-storage --lib`\n"
+    },
+    {
+      "name": "group-link-before",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 3.4362383750267327,
+      "log": "   Compiling logex-storage v0.1.0 (/private/tmp/logex-table-groups-probe-j3c7697x/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.76s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (/Users/tdenisenko/code/logex/target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 1 test\n\nthread 'bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary' (27938716) panicked at crates/logex-storage/src/bundle.rs:1129:9:\nassertion failed: BundleReader::open(&path, &forged).is_err()\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary ... FAILED\n\nfailures:\n\nfailures:\n    bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p logex-storage --lib`\n"
+    },
+    {
+      "name": "group-path-before",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 3.0402415419812314,
+      "log": "   Compiling logex-storage v0.1.0 (/private/tmp/logex-table-groups-probe-j3c7697x/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (/Users/tdenisenko/code/logex/target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 1 test\n\nthread 'bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement' (27939123) panicked at crates/logex-storage/src/bundle.rs:1389:38:\ncalled `Result::unwrap()` on an `Err` value: Custom { kind: InvalidData, error: \"bundle snapshot is truncated\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement ... FAILED\n\nfailures:\n\nfailures:\n    bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p logex-storage --lib`\n"
+    }
+  ],
+  "runner_source": "from pathlib import Path\nimport json,os,subprocess,time\nroot=Path('/private/tmp/logex-table-groups-probe-j3c7697x');source=root/'crates/logex-storage/src/bundle.rs';original=source.read_text();os.chdir(root)\nenv=os.environ|{'CARGO_TARGET_DIR':'/Users/tdenisenko/code/logex/target'}\nrecords=[]\ndef run(label,content,test,should_pass):\n source.write_text(content);path=root/(label+'.log');command=['cargo','test','-p','logex-storage','--lib','--locked','bundle::tests::'+test,'--','--exact','--nocapture'];start=time.monotonic()\n with path.open('w') as log:r=subprocess.run(command,env=env,stdout=log,stderr=subprocess.STDOUT)\n text=path.read_text();assert ('test result: ok' if should_pass else 'test result: FAILED') in text\n assert (r.returncode==0)==should_pass\n records.append({'name':label,'command':command,'exit_code':r.returncode,'elapsed_seconds':time.monotonic()-start,'log':text});print(label,r.returncode,flush=True)\ntry:\n baseline=subprocess.check_output(['git','-C','/Users/tdenisenko/code/logex','show','9215da2c:crates/logex-storage/src/bundle.rs'],text=True)\n needle='assert!(fs::metadata(path).unwrap().len() < 1024 * 1024);';assert baseline.count(needle)==1\n run('growth-before',baseline.replace(needle,'assert!(fs::metadata(path).unwrap().len() < 512 * 1024);'),'tiny_appends_do_not_repeat_all_previous_metadata',False)\n needle='            || parent.sequence.checked_add(table_span(reference.sequence))\\n                != Some(reference.sequence)';assert original.count(needle)==1\n run('group-link-before',original.replace(needle,''),'a_valid_checksum_cannot_skip_a_group_boundary',False)\n baseline=(root/'comparison8/bundle.rs').read_text()\n start=original.index('    #[cfg(unix)]\\n    #[test]\\n    fn a_group_carry_uses_the_inspected_file_after_path_replacement()')\n end=original.index('    #[cfg(unix)]\\n    #[test]\\n    fn inspected_append_',start)\n index=baseline.rfind('}');baseline=baseline[:index]+original[start:end]+baseline[index:]\n run('group-path-before',baseline,'a_group_carry_uses_the_inspected_file_after_path_replacement',False)\nfinally:\n source.write_text(original)\n (root/'proofs.json').write_text(json.dumps({'records':records,'runner_source':Path(__file__).read_text(),'source_restored':source.read_text()==original},indent=2))\nprint('Prototype restored',flush=True)\n",
+  "source_restored": true
+}

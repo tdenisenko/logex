@@ -1,9 +1,10 @@
 # Live segment bundles
 
 Unmerged successor to `c63fb9ed` in draft PR #130. Fresh live sync segments now
-use the existing immutable bundle representation. Catalog v7 (`LXCAT007`) and
-segment manifest v5 allow both hot and sealed bundle descriptors; bundle v3 is
-unchanged. Prior catalogs are rejected without rewriting or deleting their data.
+use the immutable bundle representation. The current grouped-table follow-up uses
+catalog v8 (`LXCAT008`), segment manifest v6 and bundle v4. It summarizes bounded
+groups of updates; see [format, measurements and remaining costs](bundle-table-groups.md).
+The live-bundle measurements below describe the preceding v7/v5/v3 milestone. Prior catalogs are rejected without rewriting or deleting their data.
 The user authorized fresh incompatible directories, but no production data reset
 or deployment has occurred.
 

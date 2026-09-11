@@ -84,5 +84,11 @@ bytes and exact oracles. The initial simultaneous stall does not repeat as a tai
 regression. No original sample was excluded.
 [Focused confirmation](baselines/2026-09-11-bundle-read-confirmation.jsonl).
 
-Platform recovery/query checks remain required for the final reader change. Excessive table growth and the gap against original
-sparse reads remain unresolved; this read optimization does not finish PR #130.
+Exact `9215da2c` release binaries pass on disposable ExFAT images on both Apple
+Silicon and Intel: 185 storage tests (four ignored), five query tests (one ignored),
+and all 128 cases in three cross-mount recovery tests. Both images were detached
+after validation. All six Linux/macOS CI jobs pass in run `34582923672`.
+[Platform evidence and binary identities](baselines/2026-09-11-bundle-reader-platform-validation.jsonl).
+
+Excessive table growth and the gap against original sparse reads remain
+unresolved; this read optimization does not finish PR #130.

@@ -1,0 +1,103 @@
+{
+  "base": "9215da2c7689b7225088bcf06d24645d5e582b84",
+  "changes": "base-eight grouped bundle v4, captured verified boundaries, catalog v8 / segment v6, snapshot and malformed-input regressions",
+  "checks": [
+    {
+      "name": "focused",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "bundle::tests"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 7.045480916975066
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.550706124980934
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 7.796608000004198
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 7.344761084008496
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 127.50952075002715
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 13.159986499988008
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 43.03776120801922
+    }
+  ],
+  "test_totals": {
+    "passed": 899,
+    "failed": 0,
+    "ignored": 9
+  },
+  "focused_log": "   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.30s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`\n     Running unittests src/lib.rs (target/debug/build/logex-storage/5d3241994722df1f/out/logex_storage-5d3241994722df1f)\n\nrunning 18 tests\ntest bundle::tests::a_valid_checksum_cannot_skip_a_group_boundary ... ok\ntest bundle::tests::a_reordered_data_prefix_is_invalid_even_with_a_valid_table_checksum ... ok\ntest bundle::tests::an_open_snapshot_keeps_its_file_after_path_replacement ... ok\ntest bundle::tests::inspected_append_rejects_file_replacement_even_with_identical_bytes ... ok\ntest bundle::tests::a_group_carry_uses_the_inspected_file_after_path_replacement ... ok\ntest bundle::tests::inline_indexes_enforce_encoding_and_cumulative_bounds ... ok\ntest bundle::tests::snapshots_preserve_data_and_metadata_across_appends ... ok\ntest bundle::tests::interrupted_extent_and_table_writes_leave_the_checkpoint_readable ... ok\ntest bundle::tests::invalid_appends_keep_the_writer_usable_and_prefix_intact ... ok\ntest bundle::tests::parent_tables_and_valid_checksum_delta_bounds_are_verified ... ok\ntest bundle::tests::valid_checksums_do_not_bypass_table_bounds ... ok\ntest bundle::tests::sparse_reads_preserve_snapshot_bounds_and_recheck_backing_integrity ... ok\ntest bundle::tests::truncations_and_mutations_fail_without_changing_the_artifact ... ok\ntest bundle::tests::selections_cross_bounded_extents_and_concurrent_columns ... ok\ntest bundle::tests::group_carries_survive_failed_writes_and_suffix_rollback ... ok\ntest bundle::tests::tiny_appends_do_not_repeat_all_previous_metadata ... ok\ntest bundle::tests::snapshots_match_an_independent_model_under_mixed_updates ... ok\ntest bundle::tests::table_groups_carry_without_losing_old_snapshots ... ok\n\ntest result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 174 filtered out; finished in 2.02s\n\n",
+  "remaining": "Exact integrated performance confirmation, current Linux/macOS CI and both ExFAT correctness suites; residual tiny-fragment size/read/index/startup costs."
+}

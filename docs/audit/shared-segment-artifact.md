@@ -6,6 +6,10 @@ Existing production directories and the protected external volume remain outside
 this work. The equal-bytes probe in `sync-ingestion-checkpoints.md` supports
 investigation, not acceptance of the new format.
 
+The current [grouped-table follow-up](bundle-table-groups.md) replaces the periodic
+full-table scheme described in the historical milestones below. Its stored
+versions are catalog v8 / segment v6 / bundle v4; publication invariants remain.
+
 ## Scope
 
 Reuse the current page encoders, logical column schema, catalog checkpoint model

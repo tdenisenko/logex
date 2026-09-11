@@ -5,8 +5,9 @@ PR #130. The user authorizes bounded verified re-ingestion, engineering judgment
 and fresh incompatible directories, while retaining the 10% ingestion ceiling.
 No production directory or service uses this implementation.
 
-The current [live-bundle successor](live-segment-bundles.md) adds catalog v7 /
-segment v5 support for hot bundles while retaining the publication contract below.
+The [live-bundle successor](live-segment-bundles.md) added catalog v7 / segment v5
+support for hot bundles. The current [grouped-table follow-up](bundle-table-groups.md)
+uses catalog v8 / segment v6 / bundle v4. Both retain the publication contract below.
 The measurements here describe the preceding implementation unless explicitly
 identified otherwise; its Intel ExFAT live failure remains recorded.
 

@@ -8,15 +8,17 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-const FILE_MAGIC: &[u8; 8] = b"LXBND003";
-const TABLE_MAGIC: &[u8; 8] = b"LXBT0003";
+const FILE_MAGIC: &[u8; 8] = b"LXBND004";
+const TABLE_MAGIC: &[u8; 8] = b"LXBT0004";
 // Column payloads and page-index entries are append-only; nullable bitmaps replace.
 pub(crate) const DATA_STREAMS: u8 = 28;
 const STREAMS: u8 = 33;
 pub(crate) const MAX_EXTENT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_EXTENTS: usize = 4096;
 const MAX_TABLE_BYTES: u32 = 4 * 1024 * 1024;
-const MAX_TABLE_DEPTH: u32 = 32;
+const GROUP_BITS: u32 = 3;
+const MAX_TABLE_DEPTH: u32 =
+    (64 / GROUP_BITS) * ((1 << GROUP_BITS) - 1) + (1 << (64 % GROUP_BITS)) - 1;
 pub(crate) const MAX_ROWS: u64 = MAX_EXTENTS as u64 * 16_384;
 const INDEX_BYTES: usize = MAX_EXTENTS * crate::page::PAGE_INDEX_ENTRY_BYTES;
 const READ_AHEAD_BYTES: usize = 64 * 1024;
@@ -28,6 +30,7 @@ fn inline_index(id: u8) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleReference {
+    pub sequence: u64,
     pub row_count: u64,
     pub table_offset: u64,
     pub table_len: u32,
@@ -38,12 +41,14 @@ pub struct BundleReference {
 
 impl BundleReference {
     pub(crate) fn end(&self) -> io::Result<u64> {
-        if self.row_count > MAX_ROWS
+        if self.sequence == 0
+            || self.row_count > MAX_ROWS
             || self.table_offset < FILE_MAGIC.len() as u64
-            || self.table_len < 24
+            || self.table_len < 32
             || self.table_len > MAX_TABLE_BYTES
             || self.depth == 0
             || self.depth > MAX_TABLE_DEPTH
+            || self.depth != table_depth(self.sequence)
             || self.chain_bytes < self.table_len
             || self.chain_bytes > MAX_TABLE_BYTES
         {
@@ -55,18 +60,73 @@ impl BundleReference {
     }
 }
 
-#[derive(Debug, Clone)]
+// Tables form the base-8 decomposition of the publication sequence. A carry
+// summarizes only its group, leaving older groups and snapshots immutable.
+fn table_depth(mut sequence: u64) -> u32 {
+    let mut depth = 0;
+    while sequence != 0 {
+        depth += (sequence & ((1 << GROUP_BITS) - 1)) as u32;
+        sequence >>= GROUP_BITS;
+    }
+    depth
+}
+
+fn table_span(sequence: u64) -> u64 {
+    1 << (sequence.trailing_zeros() / GROUP_BITS * GROUP_BITS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Extent {
     offset: u64,
     len: u32,
     checksum: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Stream {
     len: u64,
     extents: Vec<Extent>,
     inline: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct StreamBoundary {
+    len: u64,
+    extents: usize,
+    inline: usize,
+}
+
+#[derive(Debug)]
+struct GroupBase {
+    reference: BundleReference,
+    data: BTreeMap<u8, StreamBoundary>,
+    metadata: BTreeMap<u8, Stream>,
+}
+
+impl GroupBase {
+    fn capture(reference: BundleReference, streams: &BTreeMap<u8, Stream>) -> Self {
+        let mut data = BTreeMap::new();
+        let mut metadata = BTreeMap::new();
+        for (&id, stream) in streams {
+            if id < DATA_STREAMS {
+                data.insert(
+                    id,
+                    StreamBoundary {
+                        len: stream.len,
+                        extents: stream.extents.len(),
+                        inline: stream.inline.len(),
+                    },
+                );
+            } else {
+                metadata.insert(id, stream.clone());
+            }
+        }
+        Self {
+            reference,
+            data,
+            metadata,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +134,7 @@ pub(crate) struct BundleReader {
     file: Arc<Mutex<ReadWindow>>,
     reference: BundleReference,
     streams: Arc<BTreeMap<u8, Stream>>,
+    group_base: Option<Arc<GroupBase>>,
 }
 
 #[derive(Debug)]
@@ -186,14 +247,17 @@ impl BundleReader {
                 return Err(invalid("bundle table checksum mismatch"));
             }
             let (streams, parent) = decode_table(&bytes, &current)?;
-            tables.push(streams);
+            tables.push((current.clone(), streams));
             match parent {
                 Some(parent) => current = parent,
                 None => break,
             }
         }
+        let next_sequence = reference.sequence.checked_add(1).unwrap_or(1);
+        let base_sequence = next_sequence - table_span(next_sequence);
+        let mut group_base = None;
         let mut streams: BTreeMap<u8, Stream> = BTreeMap::new();
-        for table in tables.into_iter().rev() {
+        for (table_reference, table) in tables.into_iter().rev() {
             for (id, mut update) in table {
                 if id < DATA_STREAMS {
                     let stream = streams.entry(id).or_default();
@@ -213,6 +277,12 @@ impl BundleReader {
                     streams.insert(id, update);
                 }
             }
+            if base_sequence != reference.sequence && table_reference.sequence == base_sequence {
+                // Capture only the lengths at the next carry's already-verified
+                // boundary. Reopening the old prefix would duplicate table I/O
+                // and would need another file identity check after inspection.
+                group_base = Some(Arc::new(GroupBase::capture(table_reference, &streams)));
+            }
         }
         Ok(Self {
             file: Arc::new(Mutex::new(ReadWindow {
@@ -222,6 +292,7 @@ impl BundleReader {
             })),
             reference: reference.clone(),
             streams: Arc::new(streams),
+            group_base,
         })
     }
 
@@ -307,6 +378,7 @@ struct WriteState {
     streams: BTreeMap<u8, Stream>,
     updates: BTreeMap<u8, Stream>,
     parent: Option<BundleReference>,
+    group_base: Option<Arc<GroupBase>>,
     failed: bool,
     path: std::path::PathBuf,
 }
@@ -327,6 +399,7 @@ impl BundleWriter {
             streams: BTreeMap::new(),
             updates: BTreeMap::new(),
             parent: None,
+            group_base: None,
             failed: false,
             path: path.to_owned(),
         })))
@@ -371,6 +444,7 @@ impl BundleWriter {
             streams: Arc::try_unwrap(reader.streams).unwrap_or_else(|streams| (*streams).clone()),
             updates: BTreeMap::new(),
             parent: Some(reader.reference),
+            group_base: reader.group_base,
             failed: false,
             path: path.to_owned(),
         })))
@@ -478,13 +552,44 @@ impl BundleWriter {
         if state.failed || row_count < state.initial_rows || row_count > MAX_ROWS {
             return Err(invalid("invalid bundle snapshot completion"));
         }
-        let delta = state
+        let mut sequence = state
             .parent
             .as_ref()
-            .filter(|parent| parent.depth < MAX_TABLE_DEPTH)
-            .map(|parent| encode_table(row_count, &state.updates, Some(parent)))
+            .map_or(1, |parent| parent.sequence.checked_add(1).unwrap_or(1));
+        let base_sequence = sequence - table_span(sequence);
+        let parent = if base_sequence == 0 {
+            None
+        } else if state
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.sequence == base_sequence)
+        {
+            state.parent.as_ref()
+        } else {
+            Some(
+                state
+                    .group_base
+                    .as_ref()
+                    .map(|base| &base.reference)
+                    .filter(|parent| parent.sequence == base_sequence)
+                    .ok_or_else(|| invalid("bundle group boundary is missing"))?,
+            )
+        };
+        let delta = parent
+            .map(|parent| {
+                if state.parent.as_ref() == Some(parent) {
+                    encode_table(row_count, sequence, &state.updates, Some(parent))
+                } else {
+                    let base = state
+                        .group_base
+                        .as_ref()
+                        .ok_or_else(|| invalid("bundle group boundary is missing"))?;
+                    let updates = group_updates(&state.streams, base)?;
+                    encode_table(row_count, sequence, &updates, Some(parent))
+                }
+            })
             .transpose()?;
-        let (bytes, depth, chain_bytes) = match (delta, state.parent.as_ref()) {
+        let (bytes, depth, chain_bytes) = match (delta, parent) {
             (Some(bytes), Some(parent))
                 if u64::from(parent.chain_bytes) + bytes.len() as u64
                     <= u64::from(MAX_TABLE_BYTES) =>
@@ -493,12 +598,18 @@ impl BundleWriter {
                 (bytes, parent.depth + 1, chain_bytes)
             }
             _ => {
-                let bytes = encode_table(row_count, &state.streams, None)?;
+                if parent.is_some() {
+                    // The decoded-table budget is independent of grouping.
+                    // Restart the local counter when a full snapshot is needed.
+                    sequence = 1;
+                }
+                let bytes = encode_table(row_count, sequence, &state.streams, None)?;
                 let len = bytes.len() as u32;
                 (bytes, 1, len)
             }
         };
         let reference = BundleReference {
+            sequence,
             row_count,
             table_offset: state.offset,
             table_len: u32::try_from(bytes.len())
@@ -515,14 +626,56 @@ impl BundleWriter {
     }
 }
 
+fn group_updates(
+    streams: &BTreeMap<u8, Stream>,
+    base: &GroupBase,
+) -> io::Result<BTreeMap<u8, Stream>> {
+    let mut updates = BTreeMap::new();
+    for (&id, stream) in streams {
+        if id < DATA_STREAMS {
+            let Some(previous) = base.data.get(&id) else {
+                updates.insert(id, stream.clone());
+                continue;
+            };
+            let len = stream
+                .len
+                .checked_sub(previous.len)
+                .ok_or_else(|| invalid("bundle group shortened an append-only stream"))?;
+            if len != 0 {
+                updates.insert(
+                    id,
+                    Stream {
+                        len,
+                        extents: stream
+                            .extents
+                            .get(previous.extents..)
+                            .ok_or_else(|| invalid("bundle group shortened its extent prefix"))?
+                            .to_vec(),
+                        inline: stream
+                            .inline
+                            .get(previous.inline..)
+                            .ok_or_else(|| invalid("bundle group shortened its index prefix"))?
+                            .to_vec(),
+                    },
+                );
+            }
+        } else if base.metadata.get(&id) != Some(stream) {
+            updates.insert(id, stream.clone());
+        }
+    }
+    Ok(updates)
+}
+
 fn encode_table(
     rows: u64,
+    sequence: u64,
     streams: &BTreeMap<u8, Stream>,
     parent: Option<&BundleReference>,
 ) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TABLE_MAGIC);
     bytes.extend_from_slice(&rows.to_le_bytes());
+    bytes.extend_from_slice(&sequence.to_le_bytes());
     bytes.extend_from_slice(&(streams.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&u32::from(parent.is_some()).to_le_bytes());
     if let Some(parent) = parent {
@@ -532,6 +685,7 @@ fn encode_table(
         bytes.extend_from_slice(&parent.row_count.to_le_bytes());
         bytes.extend_from_slice(&parent.depth.to_le_bytes());
         bytes.extend_from_slice(&parent.chain_bytes.to_le_bytes());
+        bytes.extend_from_slice(&parent.sequence.to_le_bytes());
     }
     for (&id, stream) in streams {
         bytes.extend_from_slice(&[id, u8::from(inline_index(id)), 0, 0]);
@@ -555,7 +709,10 @@ fn decode_table(
     reference: &BundleReference,
 ) -> io::Result<(BTreeMap<u8, Stream>, Option<BundleReference>)> {
     let mut cursor = Cursor(bytes);
-    if &cursor.take::<8>()? != TABLE_MAGIC || cursor.u64()? != reference.row_count {
+    if &cursor.take::<8>()? != TABLE_MAGIC
+        || cursor.u64()? != reference.row_count
+        || cursor.u64()? != reference.sequence
+    {
         return Err(invalid("bundle table identity mismatch"));
     }
     let count = cursor.u32()?;
@@ -571,9 +728,12 @@ fn decode_table(
             row_count: cursor.u64()?,
             depth: cursor.u32()?,
             chain_bytes: cursor.u32()?,
+            sequence: cursor.u64()?,
         };
         if parent.end()? > reference.table_offset
             || parent.row_count > reference.row_count
+            || parent.sequence.checked_add(table_span(reference.sequence))
+                != Some(reference.sequence)
             || parent.depth + 1 != reference.depth
             || parent.chain_bytes.checked_add(reference.table_len) != Some(reference.chain_bytes)
         {
@@ -581,7 +741,10 @@ fn decode_table(
         }
         Some(parent)
     } else {
-        if reference.depth != 1 || reference.chain_bytes != reference.table_len {
+        if reference.depth != 1
+            || reference.chain_bytes != reference.table_len
+            || table_span(reference.sequence) != reference.sequence
+        {
             return Err(invalid("invalid full bundle table reference"));
         }
         None
@@ -777,7 +940,7 @@ mod tests {
         assert_eq!(reader.read_stream(0).unwrap(), vec![7; 1024 * 24]);
         assert_eq!(reader.read_stream(1).unwrap(), vec![9; 1024 * 24]);
         reader.verify_all().unwrap();
-        assert!(fs::metadata(path).unwrap().len() < 1024 * 1024);
+        assert!(fs::metadata(path).unwrap().len() < 512 * 1024);
     }
 
     #[test]
@@ -846,17 +1009,21 @@ mod tests {
     }
 
     #[test]
-    fn table_chains_flatten_without_losing_old_snapshots() {
+    fn table_groups_carry_without_losing_old_snapshots() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bundle");
         let mut writer = BundleWriter::create(&path).unwrap();
         let mut snapshots = Vec::new();
-        for rows in 1..=u64::from(MAX_TABLE_DEPTH * 2 + 3) {
+        for rows in 1..=1057 {
             writer.append_data(0, &[rows as u8]).unwrap();
             writer.append_data(14, &[rows as u8; 24]).unwrap();
             writer.replace_metadata(28, &[rows as u8]).unwrap();
             let reference = writer.finish(rows).unwrap();
-            assert_eq!(reference.depth, (rows as u32 - 1) % MAX_TABLE_DEPTH + 1);
+            assert_eq!(reference.sequence, rows);
+            assert_eq!(
+                reference.depth,
+                (rows % 8 + rows / 8 % 8 + rows / 64 % 8 + rows / 512) as u32
+            );
             assert!(reference.chain_bytes <= MAX_TABLE_BYTES);
             writer = BundleWriter::append(&path, &reference).unwrap();
             snapshots.push(reference);
@@ -875,6 +1042,100 @@ mod tests {
     }
 
     #[test]
+    fn group_carries_survive_failed_writes_and_suffix_rollback() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let mut writer = BundleWriter::create(&source).unwrap();
+        let mut boundaries = Vec::new();
+        for rows in 1..=1024 {
+            writer.append_data(0, &[rows as u8]).unwrap();
+            writer.append_data(14, &[rows as u8; 24]).unwrap();
+            writer.replace_metadata(28, &[rows as u8]).unwrap();
+            let reference = writer.finish(rows).unwrap();
+            if [7, 8, 63, 64, 511, 512, 1023, 1024].contains(&rows) {
+                boundaries.push(reference.clone());
+            }
+            writer = BundleWriter::append(&source, &reference).unwrap();
+        }
+        let source_bytes = fs::read(&source).unwrap();
+        for reference in boundaries {
+            let prefix = &source_bytes[..reference.end().unwrap() as usize];
+            for failure in 0..3 {
+                let path = tmp.path().join(format!("{}-{failure}", reference.sequence));
+                fs::write(&path, prefix).unwrap();
+                let old = BundleReader::open(&path, &reference).unwrap();
+                let writer = BundleWriter::append(&path, &reference).unwrap();
+                crate::durability::inject_failure(failure);
+                let result = writer
+                    .append_data(0, b"x")
+                    .and_then(|()| writer.append_data(14, &[9; 24]))
+                    .and_then(|()| writer.replace_metadata(28, b"new"));
+                assert_eq!(result.is_err(), failure < 2);
+                assert!(writer.finish(reference.row_count + 1).is_err());
+                assert_eq!(crate::durability::take_events().len(), failure + 1);
+                assert!(fs::read(&path).unwrap().starts_with(prefix));
+                old.verify_all().unwrap();
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(reference.end().unwrap())
+                    .unwrap();
+                let writer = BundleWriter::append(&path, &reference).unwrap();
+                writer.append_data(0, b"retry").unwrap();
+                writer.append_data(14, &[8; 24]).unwrap();
+                writer.replace_metadata(28, b"").unwrap();
+                let recovered = writer.finish(reference.row_count + 1).unwrap();
+                let reader = BundleReader::open(&path, &recovered).unwrap();
+                let mut expected: Vec<_> = (1..=reference.row_count).map(|n| n as u8).collect();
+                assert_eq!(old.read_stream(0).unwrap(), expected);
+                expected.extend_from_slice(b"retry");
+                assert_eq!(reader.read_stream(0).unwrap(), expected);
+                let mut index: Vec<_> = (1..=reference.row_count)
+                    .flat_map(|n| [n as u8; 24])
+                    .collect();
+                index.extend_from_slice(&[8; 24]);
+                assert_eq!(reader.read_stream(14).unwrap(), index);
+                assert!(reader.read_stream(28).unwrap().is_empty());
+                assert_eq!(old.read_stream(28).unwrap(), [reference.row_count as u8]);
+                reader.verify_all().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_valid_checksum_cannot_skip_a_group_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let first = create(&path);
+        let sequence = 2 << GROUP_BITS;
+        let bytes = encode_table(3, sequence, &BTreeMap::new(), Some(&first)).unwrap();
+        let forged = BundleReference {
+            sequence,
+            row_count: 3,
+            table_offset: first.end().unwrap(),
+            table_len: bytes.len() as u32,
+            checksum: crc32fast::hash(&bytes),
+            depth: 2,
+            chain_bytes: first.chain_bytes + bytes.len() as u32,
+        };
+        forged.end().unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(BundleReader::open(&path, &forged).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        BundleReader::open(&path, &first)
+            .unwrap()
+            .verify_all()
+            .unwrap();
+    }
+
+    #[test]
     fn inline_indexes_enforce_encoding_and_cumulative_bounds() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bundle");
@@ -890,9 +1151,9 @@ mod tests {
             let mut damaged = original.clone();
             let table = &mut damaged[first.table_offset as usize..];
             match case {
-                0 => table[25] = 0,
-                1 => table[28..36].copy_from_slice(&(INDEX_BYTES as u64 + 1).to_le_bytes()),
-                2 => table[36..40].copy_from_slice(&1u32.to_le_bytes()),
+                0 => table[33] = 0,
+                1 => table[36..44].copy_from_slice(&(INDEX_BYTES as u64 + 1).to_le_bytes()),
+                2 => table[44..48].copy_from_slice(&1u32.to_le_bytes()),
                 _ => unreachable!(),
             }
             let mut forged = first.clone();
@@ -912,8 +1173,9 @@ mod tests {
                 inline: vec![9],
             },
         )]);
-        let bytes = encode_table(2, &updates, Some(&first)).unwrap();
+        let bytes = encode_table(2, 2, &updates, Some(&first)).unwrap();
         let second = BundleReference {
+            sequence: 2,
             row_count: 2,
             table_offset: first.end().unwrap(),
             table_len: bytes.len() as u32,
@@ -955,16 +1217,16 @@ mod tests {
             let mut damaged = original.clone();
             let table = &mut damaged[second.table_offset as usize..];
             match case {
-                0 => table[24..32].copy_from_slice(&second.table_offset.to_le_bytes()),
-                1 => table[32..36].copy_from_slice(&u32::MAX.to_le_bytes()),
-                2 => table[36] ^= 1, // parent checksum
-                3 => table[40..48].copy_from_slice(&4u64.to_le_bytes()),
-                4 => table[48..52].copy_from_slice(&second.depth.to_le_bytes()),
-                5 => table[52..56].copy_from_slice(&u32::MAX.to_le_bytes()),
-                6 => table[72..80].copy_from_slice(&(first.end().unwrap() - 1).to_le_bytes()),
-                7 => table[80..84].copy_from_slice(&u32::MAX.to_le_bytes()),
-                8 => table[20] = 2,
-                9 => table[60..68].copy_from_slice(&u64::MAX.to_le_bytes()),
+                0 => table[32..40].copy_from_slice(&second.table_offset.to_le_bytes()),
+                1 => table[40..44].copy_from_slice(&u32::MAX.to_le_bytes()),
+                2 => table[44] ^= 1, // parent checksum
+                3 => table[48..56].copy_from_slice(&4u64.to_le_bytes()),
+                4 => table[56..60].copy_from_slice(&second.depth.to_le_bytes()),
+                5 => table[60..64].copy_from_slice(&u32::MAX.to_le_bytes()),
+                6 => table[88..96].copy_from_slice(&(first.end().unwrap() - 1).to_le_bytes()),
+                7 => table[96..100].copy_from_slice(&u32::MAX.to_le_bytes()),
+                8 => table[28] = 2,
+                9 => table[76..84].copy_from_slice(&u64::MAX.to_le_bytes()),
                 _ => unreachable!(),
             }
             let mut forged = second.clone();
@@ -973,7 +1235,7 @@ mod tests {
             assert!(BundleReader::open(&path, &forged).is_err(), "case {case}");
             assert_eq!(fs::read(&path).unwrap(), damaged);
         }
-        for case in 0..5 {
+        for case in 0..7 {
             let mut forged = second.clone();
             match case {
                 0 => forged.depth = 0,
@@ -981,6 +1243,8 @@ mod tests {
                 2 => forged.chain_bytes = MAX_TABLE_BYTES + 1,
                 3 => forged.chain_bytes = forged.table_len - 1,
                 4 => forged.row_count = MAX_ROWS + 1,
+                5 => forged.sequence = 0,
+                6 => forged.sequence = 32,
                 _ => unreachable!(),
             }
             assert!(forged.end().is_err(), "reference case {case}");
@@ -1051,16 +1315,16 @@ mod tests {
             let mut bytes = original.clone();
             let table = &mut bytes[reference.table_offset as usize..];
             match case {
-                0 => table[16..20].copy_from_slice(&u32::MAX.to_le_bytes()),
-                1 => table[24] = STREAMS,
-                2 => table[25] = 1,
-                3 => table[28..36].copy_from_slice(&u64::MAX.to_le_bytes()),
-                4 => table[36..40].copy_from_slice(&u32::MAX.to_le_bytes()),
-                5 => table[40..48].copy_from_slice(&0u64.to_le_bytes()),
-                6 => table[48..52].copy_from_slice(&u32::MAX.to_le_bytes()),
-                7 => table[56] = 0, // duplicated stream id
-                8 => table[72..80].copy_from_slice(&8u64.to_le_bytes()), // overlapping payload
-                9 => table[20] = 1,
+                0 => table[24..28].copy_from_slice(&u32::MAX.to_le_bytes()),
+                1 => table[32] = STREAMS,
+                2 => table[33] = 1,
+                3 => table[36..44].copy_from_slice(&u64::MAX.to_le_bytes()),
+                4 => table[44..48].copy_from_slice(&u32::MAX.to_le_bytes()),
+                5 => table[48..56].copy_from_slice(&0u64.to_le_bytes()),
+                6 => table[56..60].copy_from_slice(&u32::MAX.to_le_bytes()),
+                7 => table[64] = 0, // duplicated stream id
+                8 => table[80..88].copy_from_slice(&8u64.to_le_bytes()), // overlapping payload
+                9 => table[28] = 1,
                 _ => unreachable!(),
             }
             let mut forged = reference.clone();
@@ -1176,9 +1440,9 @@ mod tests {
         let mut reference = writer.finish(2).unwrap();
         let mut bytes = fs::read(&path).unwrap();
         let table = &mut bytes[reference.table_offset as usize..];
-        let first = table[40..56].to_vec();
-        table.copy_within(56..72, 40);
-        table[56..72].copy_from_slice(&first);
+        let first = table[48..64].to_vec();
+        table.copy_within(64..80, 48);
+        table[64..80].copy_from_slice(&first);
         reference.checksum = crc32fast::hash(table);
         fs::write(&path, &bytes).unwrap();
         assert!(BundleReader::open(&path, &reference).is_err());
@@ -1205,6 +1469,35 @@ mod tests {
                 .unwrap(),
             b"replacement"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_carry_uses_the_inspected_file_after_path_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let original = tmp.path().join("original");
+        let mut writer = BundleWriter::create(&path).unwrap();
+        let mut reference = None;
+        for rows in 1..16 {
+            writer.append_data(0, &[rows as u8]).unwrap();
+            let snapshot = writer.finish(rows).unwrap();
+            writer = BundleWriter::append(&path, &snapshot).unwrap();
+            reference = Some(snapshot);
+        }
+        let reader = BundleReader::open(&path, &reference.unwrap()).unwrap();
+        fs::rename(&path, &original).unwrap();
+        fs::write(&path, b"unrelated replacement").unwrap();
+        writer.append_data(0, &[16]).unwrap();
+        let next = writer.finish(16).unwrap();
+        assert_eq!(reader.read_stream(0).unwrap(), (1..16).collect::<Vec<u8>>());
+        let appended = BundleReader::open(&original, &next).unwrap();
+        assert_eq!(
+            appended.read_stream(0).unwrap(),
+            (1..=16).collect::<Vec<u8>>()
+        );
+        appended.verify_all().unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"unrelated replacement");
     }
 
     #[cfg(unix)]
