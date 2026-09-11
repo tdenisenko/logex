@@ -100,6 +100,10 @@ impl BundleReader {
         self.reference.row_count
     }
 
+    pub(crate) fn reference(&self) -> &BundleReference {
+        &self.reference
+    }
+
     pub(crate) fn has_complete_schema(&self) -> bool {
         self.streams.len() == usize::from(STREAMS)
     }
@@ -262,10 +266,34 @@ impl BundleWriter {
         })))
     }
 
+    #[cfg(test)]
     pub(crate) fn append(path: &Path, reference: &BundleReference) -> io::Result<Self> {
         let reader = BundleReader::open(path, reference)?;
+        Self::append_inspected(path, reader)
+    }
+
+    /// Reuse the immutable table checked during this append's preflight. Bind
+    /// the writable handle to that same file before modifying any bytes.
+    pub(crate) fn append_inspected(path: &Path, reader: BundleReader) -> io::Result<Self> {
+        // Unix supplies stable open-file identity. Keep a fresh table check on
+        // other platforms rather than assuming a pathname still names the file.
+        #[cfg(not(unix))]
+        let reader = BundleReader::open(path, &reader.reference)?;
         let file = OpenOptions::new().append(true).open(path)?;
-        let offset = reference.end()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let inspected = reader
+                .file
+                .lock()
+                .map_err(|_| invalid("bundle reader lock poisoned"))?
+                .metadata()?;
+            let opened = file.metadata()?;
+            if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+                return Err(invalid("bundle file changed after inspection"));
+            }
+        }
+        let offset = reader.reference.end()?;
         if file.metadata()?.len() != offset {
             return Err(invalid("unpublished bundle tail; recover before appending"));
         }
@@ -273,9 +301,9 @@ impl BundleWriter {
             file: BufWriter::with_capacity(64 * 1024, file),
             offset,
             initial_rows: reader.reference.row_count,
-            streams: (*reader.streams).clone(),
+            streams: Arc::try_unwrap(reader.streams).unwrap_or_else(|streams| (*streams).clone()),
             updates: BTreeMap::new(),
-            parent: Some(reference.clone()),
+            parent: Some(reader.reference),
             failed: false,
             path: path.to_owned(),
         })))
@@ -1045,6 +1073,36 @@ mod tests {
                 .unwrap(),
             b"replacement"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspected_append_rejects_file_replacement_even_with_identical_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let original = tmp.path().join("original");
+        let first = create(&path);
+        let reader = BundleReader::open(&path, &first).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        fs::rename(&path, &original).unwrap();
+        fs::copy(&original, &path).unwrap();
+        assert!(BundleWriter::append_inspected(&path, reader.clone()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read(&original).unwrap(), bytes);
+        assert_eq!(reader.read_stream(0).unwrap(), b"first");
+        let current = BundleReader::open(&path, &first).unwrap();
+        let writer = BundleWriter::append_inspected(&path, current.clone()).unwrap();
+        writer.append_data(0, b" next").unwrap();
+        let second = writer.finish(3).unwrap();
+        assert_eq!(
+            BundleReader::open(&path, &second)
+                .unwrap()
+                .read_stream(0)
+                .unwrap(),
+            b"first next"
+        );
+        assert_eq!(reader.read_stream(0).unwrap(), b"first");
+        assert_eq!(current.read_stream(0).unwrap(), b"first");
     }
 
     #[test]

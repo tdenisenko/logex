@@ -5,7 +5,7 @@ sync callers and tests the user's proposed bounded rewind/re-fetch approach.
 Performance acceptance, platform validation and the wider audit remain open.
 The user permits incompatible changes if they materially help performance and
 is willing to perform a fresh sync. The current candidate changes the catalog
-format to version 4 and segment manifests to version 2; compressed page codecs
+format to version 5 and segment manifests to version 3; compressed page codecs
 remain unchanged. Historical segments now use the [shared artifact candidate](shared-segment-artifact.md). No existing
 production dataset has been reset or modified.
 
@@ -35,14 +35,14 @@ it is not a hard wall-clock deadline. Route changes, generic durable writes,
 standalone metadata updates and relevant maintenance boundaries checkpoint first.
 Detached compaction plans exclude the epoch's affected segments.
 
-## Catalog version 4 recovery protocol
+## Catalog version 5 recovery protocol
 
 The checksummed catalog is the single durable authority for segment row counts,
 allocation IDs, bundled column table references, canonical head/header window,
 chain anchors and historical progress.
 The legacy filename `catalog.json` is deliberately retained: older binaries must
 fail to parse the new bytes at their known path rather than create another catalog.
-Its contents are now a binary frame: eight-byte `LXCAT004` magic, two little-endian
+Its contents are now a binary frame: eight-byte `LXCAT005` magic, two little-endian
 32-bit lengths (metadata and header list), a CRC32, JSON metadata and a canonical
 RLP list of the complete recent headers. The checksum covers the first 16 prefix
 bytes and both payloads. It detects accidental corruption, not malicious tampering.
@@ -93,12 +93,12 @@ JSON serialization. It intentionally drops automatic manifest adoption on startu
 
 ## Fresh-sync compatibility decision
 
-Version 1 and the unmerged version 2 directories are rejected with an actionable
+Catalog versions 1–4 are rejected with an actionable
 diagnostic; they are not migrated, reset or rewritten. A missing catalog alongside existing artifacts, or
 a dangling catalog alias, also fails instead of initializing an empty database.
 Older binaries fail to parse the binary frame at the original catalog path.
 A deployment must use a **new empty data directory** and verified fresh sync. Rolling back the binary
-requires its original directory or another fresh sync, not reuse of version 3.
+requires its original directory or another fresh sync, not reuse of version 5.
 Retain original directories until their owner explicitly chooses otherwise.
 The user's protected external-volume contents are outside this test scope.
 
@@ -809,3 +809,77 @@ Against `5df13474`, five alternating pairs × three release runs showed few logs
 small large-history change does not justify the tiny-batch regression. Compression
 levels, streaming encoders and dependencies remain unchanged.
 [Rejected compression comparison](baselines/2026-09-11-bulk-zstd-comparison.jsonl).
+
+
+The three-versus-one-file publication diagnostic did not establish a stable gain.
+Three independent release processes each ran 15 alternating pairs per size. Tiny
+publication varied from -9.71% to +0.44% to -3.42%; pooled tiny/short/large changes
+were -4.20% / +1.00% / -0.83%. Exact artifact-byte and checksum oracles passed, but
+these are not ingestion measurements and do not justify another format change.
+[File-count probe](baselines/2026-09-11-segment-file-count-probe.jsonl). The current
+bundle, canonical bitmap and manifest layout is retained.
+
+Expanded original confirmation found a separate many-appends regression. With
+1,024 one-block historical calls (960 rows; every sixteenth block is empty),
+original median is 2,151.38 ms and the inline-metadata candidate is 4,519.01 ms
+(+110.05%). The 128-call/15,360-row profile improves 350.95 → 243.99 ms (-30.48%).
+Five alternating pairs × three release runs preserve all exact oracles.
+[Many-appends comparison](baselines/2026-09-11-many-appends-original-comparison.jsonl).
+This is an additional acceptance failure; the smaller set of profiles did not
+cover it. Current append preflight loads the growing table chain separately for
+capacity, metadata inspection and writer construction. A local follow-up reuses
+one validated snapshot across those stages, verifies its manifest reference and
+writable-file identity before mutation, and moves uniquely owned metadata rather
+than cloning it. No cross-call cache or format change is introduced. The 166-test storage suite and both new identity/reference regressions pass.
+
+
+## Reused inspection and combined publication follow-up
+
+[Original comparisons](baselines/2026-09-11-reused-bundle-inspection-comparison.jsonl)
+with five alternating pairs × three release samples show that reader reuse reduces
+but does not resolve the many-appends failure: one-row history is 2,178.79 →
+3,588.11 ms (+64.68%); the 128-call profile is 344.70 → 198.04 ms (-42.55%).
+All exact row/head/floor/anchor/reopen oracles pass. These are storage-call timings,
+not peer-network throughput, and do not waive the 10% ceiling.
+
+[Three instrumented runs](baselines/2026-09-11-many-appends-phase-profile.jsonl)
+identify 1,817 ordering calls for the 1,024-call workload, with roughly 1.07–1.29 s
+inside those calls. The bitmap replacement orders separately before the manifest
+publication orders the same tree again. Nested/concurrent profile times are not
+additive or acceptance measurements. All temporary instrumentation is removed.
+
+The next candidate stages a bundled append's canonical bitmap until manifest
+publication, orders both complete replacement payloads with the immutable bundle,
+then renames the bitmap before the manifest. One barrier per device replaces the
+two separate barriers. Other devices still complete a full sync before the catalog
+can reference them; the catalog's final sync makes the publication durable.
+Before that commit, filesystem writeback may persist either rename first. Recovery
+therefore uses the catalog-pinned bundle and original row count, never a newer
+manifest's claimed progress. The previous canonical prefix remains complete in
+both bitmap versions. Per-column appends retain their existing publication path.
+
+All 167 storage tests pass, including every grouped-publication failure point and
+an expanded ten-phase recovery matrix. The added phases cover a newer manifest
+with the old bitmap and a complete or torn uncommitted bundle tail, repeated
+reopen, preserved non-canonical bits, retry and exact final rows. Original release
+comparison, workspace gates and platform validation for this candidate remain
+pending. No merge, deployment or production directory change is authorized by
+these results.
+
+
+The grouped candidate's five-pair original comparison still fails one-row history:
+2,148.96 → 3,215.89 ms (+49.65%); the 128-call profile is 347.43 → 224.84 ms
+(-35.29%). All exact oracles pass. This remains incomplete, and the 128-call result
+also warrants an isolated comparison with reader reuse before retaining the extra
+publication machinery. [Raw evidence](baselines/2026-09-11-grouped-manifest-original-comparison.jsonl).
+Moving canonical metadata into the immutable bundle is being evaluated as a way
+to avoid replacing committed bitmap data during an unfinished sync epoch; it is
+not implemented or measured yet.
+
+
+All six local workspace gates pass for the reader-reuse/grouped-publication
+checkpoint: 874 tests, eight explicitly ignored, strict Clippy, locked all-target
+check, doctests and release build. [Gate records](baselines/2026-09-11-grouped-inspection-gates.jsonl).
+The added failure loop enumerates the observed checkpoints rather than assuming
+a platform-specific fixed event count. These correctness checks do not resolve
+the remaining performance failures or replace current Linux/macOS/ExFAT checks.

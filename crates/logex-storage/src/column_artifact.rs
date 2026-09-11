@@ -57,6 +57,21 @@ pub(crate) struct ColumnArtifacts {
 
 impl ColumnArtifacts {
     pub(crate) fn open(dir: &Path, manifest: Option<&SegmentManifest>) -> io::Result<Self> {
+        Self::open_inspected(dir, manifest, None)
+    }
+
+    pub(crate) fn open_inspected(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+        inspected: Option<BundleReader>,
+    ) -> io::Result<Self> {
+        if inspected.is_some()
+            && manifest
+                .and_then(|manifest| manifest.column_bundle.as_ref())
+                .is_none()
+        {
+            return Err(invalid("unexpected bundle snapshot for unbundled segment"));
+        }
         let bundle = manifest
             .and_then(|manifest| {
                 manifest
@@ -89,7 +104,14 @@ impl ColumnArtifacts {
                         return Err(invalid("invalid bundled column descriptor"));
                     }
                 }
-                let reader = BundleReader::open(&dir.join(BUNDLE_PATH), reference)?;
+                let reader = if let Some(reader) = inspected {
+                    if reader.reference() != reference {
+                        return Err(invalid("bundle reference changed after inspection"));
+                    }
+                    reader
+                } else {
+                    BundleReader::open(&dir.join(BUNDLE_PATH), reference)?
+                };
                 if !reader.has_complete_schema() {
                     return Err(invalid("incomplete bundled column streams"));
                 }
@@ -100,6 +122,10 @@ impl ColumnArtifacts {
             dir: dir.to_owned(),
             bundle,
         })
+    }
+
+    pub(crate) fn bundle(&self) -> Option<&BundleReader> {
+        self.bundle.as_ref()
     }
 
     pub(crate) fn read(&self, path: &str) -> io::Result<Vec<u8>> {
