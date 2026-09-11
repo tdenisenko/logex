@@ -789,11 +789,21 @@ where
     T: Clone,
     F: FnMut(&PageIndexEntry) -> io::Result<Vec<T>>,
 {
+    let mut decode_checked_page = |entry: &PageIndexEntry| {
+        let page = decode_page(entry)?;
+        if page.len() != entry.row_count as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decoded page row count differs from its index",
+            ));
+        }
+        Ok(page)
+    };
     match row_ids {
         Some(ids) => {
             let mut result = vec![None; ids.len()];
             for selection in build_selections(ids, page_index)? {
-                let page = decode_page(&selection.entry)?;
+                let page = decode_checked_page(&selection.entry)?;
                 for (local_row, output_position) in selection
                     .local_rows
                     .iter()
@@ -807,7 +817,7 @@ where
         None => {
             let mut result = Vec::new();
             for entry in page_index {
-                result.extend(decode_page(entry)?);
+                result.extend(decode_checked_page(entry)?);
             }
             Ok(result)
         }
@@ -1052,6 +1062,72 @@ mod tests {
             .read_nullable_b256("topic0", Some(&[0]))
             .expect_err("page-index corruption should fail reads");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn assert_variable_page_row_count_is_checked(row_ids: Option<&[u32]>) {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
+        paths.ensure_base_dirs().unwrap();
+        let descriptor = SegmentDescriptor {
+            column_bundle: None,
+            id: 1,
+            generation: 0,
+            kind: SegmentKind::Sealed,
+            relative_path: PathBuf::from("segments/s_0000000000000001"),
+            manifest_relative_path: PathBuf::from("segments/s_0000000000000001/segment.json"),
+            min_block: Some(10),
+            max_block: Some(29),
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_228),
+            row_count: 20,
+        };
+        let dir = paths.segment_dir(descriptor.id);
+        fs::create_dir_all(&dir).unwrap();
+        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        persist_segment_manifest(&paths, &descriptor).unwrap();
+        compact_segment(&paths, &descriptor).unwrap();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let data = manifest.columns.iter().find(|c| c.name == "data").unwrap();
+
+        // Both files are valid individually: only their row counts disagree.
+        // Exercise too few and too many values, plus the valid control.
+        for count in [19, 21, 20] {
+            let values = vec![bytes!("deadbeef"); count];
+            let encoded = crate::page::encode_var_bytes_page(&values, data.codec).unwrap();
+            fs::write(dir.join(&data.data_path), &encoded).unwrap();
+            fs::write(
+                dir.join(data.page_index_path.as_ref().unwrap()),
+                crate::page::write_page_index(&[PageIndexEntry {
+                    first_row: 0,
+                    row_count: 20,
+                    offset: 0,
+                    encoded_len: encoded.len() as u32,
+                }]),
+            )
+            .unwrap();
+            let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+            let result = reader.read_var_bytes("data", row_ids);
+            if count == 20 {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![bytes!("deadbeef"); row_ids.map_or(20, <[u32]>::len)]
+                );
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
+    }
+
+    #[test]
+    fn full_variable_page_read_rejects_wrong_row_count() {
+        assert_variable_page_row_count_is_checked(None);
+    }
+
+    #[test]
+    fn selected_variable_page_read_rejects_wrong_row_count() {
+        assert_variable_page_row_count_is_checked(Some(&[19, 0, 19]));
+        // An extra row must also fail when selecting an otherwise valid prefix.
+        assert_variable_page_row_count_is_checked(Some(&[0]));
     }
 
     #[test]
