@@ -793,3 +793,19 @@ doctests and release build. The final format-diagnostic correction also passes
 focused catalog tests and refreshed formatting/check/Clippy.
 [Gate records](baselines/2026-09-11-inline-index-gates.jsonl). No merge or performance
 acceptance is implied.
+
+All six Linux/macOS CI jobs also pass for `5df13474` in run `34557667817`. The
+current phase profile puts tiny finalized history at 7.26 ms median: roughly
+1.01 ms writing rows and 6.22 ms checkpointing, including 4.77 ms in the final
+directory/device sync and 0.74 ms in ordering. The 0.22 ms column-encoding scope
+is not the dominant tiny-batch cost. These three instrumented samples identify
+work to inspect, not acceptance or additive component timings.
+[Phase records](baselines/2026-09-11-inline-index-phase-profile.jsonl).
+
+
+The stateless bulk-Zstd experiment passed all 165 storage tests but was removed.
+Against `5df13474`, five alternating pairs × three release runs showed few logs
++11.87%, tiny chunks +3.00%, short history -0.79% and large history -2.75%. The
+small large-history change does not justify the tiny-batch regression. Compression
+levels, streaming encoders and dependencies remain unchanged.
+[Rejected compression comparison](baselines/2026-09-11-bulk-zstd-comparison.jsonl).
