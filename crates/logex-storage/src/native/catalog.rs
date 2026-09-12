@@ -138,6 +138,88 @@ pub struct SegmentManifest {
     pub columns: Vec<ColumnDescriptor>,
 }
 
+#[derive(Debug)]
+pub(crate) enum ManifestLoadError {
+    Io(io::Error),
+    InvalidMetadata(io::Error),
+}
+
+impl ManifestLoadError {
+    pub(crate) fn is_invalid_metadata(&self) -> bool {
+        matches!(self, Self::InvalidMetadata(_))
+    }
+}
+
+impl From<io::Error> for ManifestLoadError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<ManifestLoadError> for io::Error {
+    fn from(error: ManifestLoadError) -> Self {
+        match error {
+            ManifestLoadError::Io(error) | ManifestLoadError::InvalidMetadata(error) => error,
+        }
+    }
+}
+
+impl SegmentManifest {
+    // Fourteen column descriptors and fixed-size metadata normally use a few
+    // KiB. Bound both file reads and writes; whitespace/unknown JSON fields must
+    // not turn corrupt metadata into an unbounded allocation.
+    pub(crate) const MAX_BYTES: usize = 1024 * 1024;
+
+    pub(crate) fn load(path: &Path) -> Result<Option<Self>, ManifestLoadError> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if artifact_exists(path)? {
+                    return Err(error.into());
+                }
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let invalid = |reason: &str| {
+            ManifestLoadError::InvalidMetadata(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid segment manifest {}: {reason}", path.display()),
+            ))
+        };
+        let size = usize::try_from(file.metadata()?.len())
+            .ok()
+            .filter(|&size| size <= Self::MAX_BYTES)
+            .ok_or_else(|| invalid("segment manifest exceeds the 1 MiB limit"))?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(io::Error::other)?;
+        file.take(Self::MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > Self::MAX_BYTES {
+            return Err(invalid("segment manifest exceeds the 1 MiB limit"));
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| invalid(&error.to_string()))
+    }
+
+    pub(crate) fn validate_read_bounds(&self) -> io::Result<()> {
+        if self.format_version != STORAGE_FORMAT_VERSION
+            || self.row_count > u64::from(u32::MAX)
+            || self.columns.iter().any(|column| {
+                column.page_index_path.is_some()
+                    && !(1..=crate::page::MAX_PAGE_ROWS).contains(&column.page_rows)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported segment format or row bounds",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnDescriptor {
     pub name: String,
@@ -525,6 +607,36 @@ fn artifact_exists(path: &Path) -> io::Result<bool> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn manifest_corruption_is_distinct_from_filesystem_errors() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("segment.json");
+        fs::write(&path, b"{").unwrap();
+        assert!(
+            SegmentManifest::load(&path)
+                .unwrap_err()
+                .is_invalid_metadata()
+        );
+        // A directory is an actual I/O failure, not parseable derived metadata.
+        assert!(
+            !SegmentManifest::load(tmp.path())
+                .unwrap_err()
+                .is_invalid_metadata()
+        );
+        // ErrorKind alone cannot authorize repair: a filesystem can also report
+        // InvalidData, and allocation/permission/unavailability failures propagate.
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            let error = ManifestLoadError::from(io::Error::new(kind, "read failed"));
+            assert!(!error.is_invalid_metadata());
+            assert_eq!(io::Error::from(error).kind(), kind);
+        }
+    }
 
     #[test]
     fn catalog_bootstraps_and_reloads() {

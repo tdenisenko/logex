@@ -14,6 +14,7 @@ const PAGE_INDEX_MAGIC: &[u8; 4] = b"LXPI";
 const PAGE_INDEX_VERSION: u32 = 1;
 pub(crate) const PAGE_INDEX_HEADER_BYTES: usize = 12;
 pub(crate) const PAGE_INDEX_ENTRY_BYTES: usize = 24;
+pub(crate) const MAX_PAGE_ROWS: u32 = 16_384;
 const ADAPTIVE_FIXED_NONE: u8 = 0;
 const ADAPTIVE_FIXED_DICTIONARY: u8 = 1;
 const ADAPTIVE_FIXED_ZSTD: u8 = 2;

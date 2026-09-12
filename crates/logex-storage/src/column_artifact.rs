@@ -200,7 +200,7 @@ impl ColumnArtifacts {
                         .ok_or_else(|| invalid("missing bundled column"))?;
                     let topic = matches!(*name, "topic0" | "topic1" | "topic2" | "topic3");
                     if column.codec != *codec
-                        || column.page_rows != 16_384
+                        || column.page_rows != crate::page::MAX_PAGE_ROWS
                         || column.data_path != format!("columns/{name}.pages")
                         || column.page_index_path != Some(format!("columns/{name}.pages.idx"))
                         || column.null_bitmap_path != topic.then(|| format!("columns/{name}.null"))

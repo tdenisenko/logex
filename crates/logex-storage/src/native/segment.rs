@@ -14,8 +14,8 @@ use logex_types::LogRow;
 
 use crate::column::{ColumnFile, ColumnFileHeader, NullBitmap};
 use crate::page::{
-    PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page, encode_u64_page,
-    encode_var_bytes_page, read_page_index, write_page_index,
+    MAX_PAGE_ROWS, PageIndexEntry, encode_fixed_width_page, encode_u8_page, encode_u32_page,
+    encode_u64_page, encode_var_bytes_page, read_page_index, write_page_index,
 };
 use crate::reader::{ColumnReader, RawBytesColumn, RawFixedColumn};
 use crate::segment_reader::SegmentReader;
@@ -25,7 +25,6 @@ use super::catalog::{
     StorageCatalogPaths,
 };
 
-const DEFAULT_PAGE_ROWS: u32 = 16_384;
 static NEXT_REWRITE: AtomicU64 = AtomicU64::new(0);
 const RAW_FIXED_COLUMNS: &[(&str, u64)] = &[
     ("address.col", 20),
@@ -184,7 +183,7 @@ impl<'a> PageOutput<'a> {
                 "topic0" | "topic1" | "topic2" | "topic3"
             );
             let null_path = is_topic.then(|| format!("{base}/{}.null", column.name));
-            if column.page_rows != DEFAULT_PAGE_ROWS
+            if column.page_rows != MAX_PAGE_ROWS
                 || column.page_index_path.as_deref() != Some(index.as_str())
                 || column.null_bitmap_path != null_path
             {
@@ -201,7 +200,7 @@ impl<'a> PageOutput<'a> {
                 if entry.first_row != rows
                     || entry.offset != offset
                     || entry.row_count == 0
-                    || entry.row_count > DEFAULT_PAGE_ROWS
+                    || entry.row_count > MAX_PAGE_ROWS
                     || entry.encoded_len == 0
                 {
                     return Err(invalid("page index does not describe a contiguous prefix"));
@@ -360,7 +359,7 @@ pub(crate) fn restore_bundled_checkpoint(
         .map(|(name, codec)| ColumnDescriptor {
             name: (*name).to_owned(),
             codec: *codec,
-            page_rows: DEFAULT_PAGE_ROWS,
+            page_rows: MAX_PAGE_ROWS,
             data_path: format!("columns/{name}.pages"),
             page_index_path: Some(format!("columns/{name}.pages.idx")),
             null_bitmap_path: matches!(*name, "topic0" | "topic1" | "topic2" | "topic3")
@@ -387,10 +386,10 @@ pub(crate) fn restore_bundled_checkpoint(
     // schema, row boundary and immutable canonical bitmap; an unpublished or
     // damaged manifest is never used to decide which data to retain.
     let previous: Option<SegmentManifest> =
-        match fs::read(paths.segment_manifest_path(descriptor.id)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).ok(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
+        match SegmentManifest::load(&paths.segment_manifest_path(descriptor.id)) {
+            Ok(manifest) => manifest,
+            Err(error) if error.is_invalid_metadata() => None,
+            Err(error) => return Err(error.into()),
         };
     if !tail && previous.as_ref() == Some(&prefix) {
         // Clean startup validates tables, schema, bitmaps and row boundaries.
@@ -517,7 +516,7 @@ pub(crate) fn repack_sparse_bundle(
     let Some(reference) = descriptor.column_bundle.as_ref() else {
         return Ok(None);
     };
-    if reference.sequence < MIN_PAGES || descriptor.row_count > u64::from(DEFAULT_PAGE_ROWS) {
+    if reference.sequence < MIN_PAGES || descriptor.row_count > u64::from(MAX_PAGE_ROWS) {
         return Ok(None);
     }
     let owner = match SegmentMaintenanceGuard::acquire(paths, descriptor) {
@@ -730,7 +729,7 @@ pub(crate) fn bundled_row_capacity(
     let mut data_extents = capacity[13];
     let mut accepted = 0;
     while accepted < rows.len() && pages > 0 && data_extents > 0 {
-        let page = &rows[accepted..rows.len().min(accepted + DEFAULT_PAGE_ROWS as usize)];
+        let page = &rows[accepted..rows.len().min(accepted + MAX_PAGE_ROWS as usize)];
         let raw_bytes = page
             .iter()
             .try_fold(16usize + page.len() * 8, |bytes, row| {
@@ -772,7 +771,7 @@ pub(crate) fn bundled_row_capacity(
         accepted += count;
         pages -= 1;
         data_extents -= encoded_bound.div_ceil(MAX_EXTENT_BYTES);
-        if count < DEFAULT_PAGE_ROWS as usize {
+        if count < MAX_PAGE_ROWS as usize {
             break;
         }
     }
@@ -786,9 +785,10 @@ pub(crate) fn append_compacted_rows(
     publication: Publication,
     inspected: Option<BundleReader>,
 ) -> std::io::Result<EncodedColumns> {
-    let manifest: SegmentManifest =
-        serde_json::from_slice(&fs::read(segment_dir.join("segment.json"))?)
-            .map_err(std::io::Error::other)?;
+    let manifest = SegmentManifest::load(&segment_dir.join("segment.json"))?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "missing append manifest")
+    })?;
+    manifest.validate_read_bounds()?;
     if manifest.row_count != existing_rows {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1154,6 +1154,12 @@ fn persist_manifest(
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
+    if json.len() > SegmentManifest::MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "segment manifest exceeds the 1 MiB limit",
+        ));
+    }
     match publication {
         Publication::Deferred => durability::write_bytes_deferred(&path, &json),
         Publication::Ordered => {
@@ -1407,14 +1413,10 @@ fn existing_columns(
     paths: &StorageCatalogPaths,
     segment_id: u64,
 ) -> std::io::Result<Option<Vec<ColumnDescriptor>>> {
-    let path = paths.segment_manifest_path(segment_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let json = fs::read(&path)?;
-    let manifest: SegmentManifest = serde_json::from_slice(&json).map_err(std::io::Error::other)?;
-    Ok(Some(manifest.columns))
+    Ok(
+        SegmentManifest::load(&paths.segment_manifest_path(segment_id))?
+            .map(|manifest| manifest.columns),
+    )
 }
 
 pub(super) fn default_columns() -> Vec<ColumnDescriptor> {
@@ -1435,7 +1437,7 @@ pub(super) fn default_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor {
             name: "data".to_owned(),
             codec: CompressionCodec::None,
-            page_rows: DEFAULT_PAGE_ROWS,
+            page_rows: MAX_PAGE_ROWS,
             data_path: "data.col".to_owned(),
             null_bitmap_path: None,
             page_index_path: None,
@@ -1447,7 +1449,7 @@ fn fixed_column(name: &str, data_path: &str) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.to_owned(),
         codec: CompressionCodec::None,
-        page_rows: DEFAULT_PAGE_ROWS,
+        page_rows: MAX_PAGE_ROWS,
         data_path: data_path.to_owned(),
         null_bitmap_path: None,
         page_index_path: None,
@@ -1458,7 +1460,7 @@ fn nullable_column(base_name: &str) -> ColumnDescriptor {
     ColumnDescriptor {
         name: base_name.to_owned(),
         codec: CompressionCodec::None,
-        page_rows: DEFAULT_PAGE_ROWS,
+        page_rows: MAX_PAGE_ROWS,
         data_path: format!("{base_name}.col"),
         null_bitmap_path: Some(format!("{base_name}.null")),
         page_index_path: None,
@@ -1682,7 +1684,7 @@ fn compact_data_column(
     codec: CompressionCodec,
 ) -> std::io::Result<ColumnDescriptor> {
     let column = RawBytesColumn::open(&output.dir.join("data.col"))?;
-    let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
+    let mut values = Vec::with_capacity(MAX_PAGE_ROWS as usize);
     write_encoded_pages(output, "data", codec, column.row_count(), |range| {
         values.clear();
         for row in range {
@@ -1698,7 +1700,7 @@ fn compact_data_values(
 ) -> std::io::Result<ColumnDescriptor> {
     // Borrow payloads for one page instead of cloning the entire column before
     // compression. This bounds temporary references and avoids Bytes refcounts.
-    let mut values = Vec::with_capacity(DEFAULT_PAGE_ROWS as usize);
+    let mut values = Vec::with_capacity(MAX_PAGE_ROWS as usize);
     write_typed_pages(
         output,
         "data",
@@ -1790,7 +1792,7 @@ fn write_pages<F>(
 where
     F: FnMut(Range<usize>) -> std::io::Result<Vec<u8>>,
 {
-    let page_rows = DEFAULT_PAGE_ROWS;
+    let page_rows = MAX_PAGE_ROWS;
     let previous = output.previous.get(name);
     let data_rel = previous
         .map(|p| p.column.data_path.clone())
@@ -2389,7 +2391,7 @@ mod tests {
                 .iter()
                 .map(|p| fs::read(dir.join(p)).unwrap())
                 .collect();
-            for case in 0..12 {
+            for case in 0..13 {
                 let mut manifest = original.clone();
                 match case {
                     0 => manifest.format_version += 1,
@@ -2453,9 +2455,13 @@ mod tests {
                         manifest.column_bundle = Some(writer.finish(2).unwrap());
                     }
                     11 => fs::write(dir.join("canonical.bitmap"), [0u8; 8]).unwrap(),
+                    12 => {}
                     _ => unreachable!(),
                 }
-                let json = serde_json::to_vec(&manifest).unwrap();
+                let mut json = serde_json::to_vec(&manifest).unwrap();
+                if case == 12 {
+                    json.resize(SegmentManifest::MAX_BYTES + 1, b' ');
+                }
                 fs::write(dir.join("segment.json"), &json).unwrap();
                 let before: Vec<_> = paths
                     .iter()
@@ -2541,7 +2547,7 @@ mod tests {
         let mut rows: Vec<_> = descending_rows()
             .into_iter()
             .cycle()
-            .take(DEFAULT_PAGE_ROWS as usize + 3)
+            .take(MAX_PAGE_ROWS as usize + 3)
             .collect();
         for (index, row) in rows.iter_mut().enumerate() {
             row.topic0 = (index % 3 == 0).then_some(row.tx_hash);

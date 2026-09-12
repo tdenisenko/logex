@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -59,13 +58,8 @@ impl SegmentReader {
         mut manifest: Option<SegmentManifest>,
     ) -> io::Result<Self> {
         for _ in 0..3 {
-            if manifest.as_ref().is_some_and(|manifest| {
-                manifest.format_version != crate::native::STORAGE_FORMAT_VERSION
-            }) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unsupported segment format",
-                ));
+            if let Some(manifest) = &manifest {
+                manifest.validate_read_bounds()?;
             }
             match ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection) {
                 Ok(artifacts) => {
@@ -235,8 +229,11 @@ impl SegmentReader {
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
         let data = self.artifacts.read(self.canonical_relative_path())?;
-        NullBitmap::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+        let bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
+        })?;
+        self.validate_bitmap_rows(bitmap.len())?;
+        Ok(bitmap)
     }
 
     pub fn read_canonical_len(&self) -> io::Result<u64> {
@@ -257,22 +254,50 @@ impl SegmentReader {
                 "canonical bitmap is truncated",
             ));
         }
+        self.validate_bitmap_rows(len)?;
         Ok(len)
+    }
+
+    fn validate_bitmap_rows(&self, rows: u64) -> io::Result<()> {
+        // An unbundled bitmap can include a newer append, but every bit in this
+        // reader's captured row boundary must exist. Missing bits are corruption,
+        // not null/noncanonical values.
+        if rows < self.read_row_count()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bitmap does not cover the captured segment rows",
+            ));
+        }
+        Ok(())
     }
 
     pub fn read_row_count(&self) -> io::Result<u64> {
         if let Some(manifest) = &self.manifest {
             Ok(manifest.row_count)
         } else {
-            let data = self.artifacts.read("address.col")?;
-            ColumnFileHeader::read_from(&data)
-                .map(|header| header.row_count)
+            let data = self
+                .artifacts
+                .read_range("address.col", 0..ColumnFileHeader::SIZE as u64)?;
+            let header = ColumnFileHeader::read_from(&data)
+                .filter(|header| {
+                    header.version == crate::column::COLUMN_VERSION
+                        && header.compression == 0
+                        && header.row_count <= u64::from(u32::MAX)
+                })
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         "corrupt captured row-count header",
                     )
-                })
+                })?;
+            let expected = (ColumnFileHeader::SIZE as u64) + header.row_count * 20;
+            if self.artifacts.len("address.col")? != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw row count does not match its address column",
+                ));
+            }
+            Ok(header.row_count)
         }
     }
 
@@ -592,8 +617,10 @@ impl SegmentReader {
             )
         })?;
         let data = self.artifacts.read(null_path)?;
-        NullBitmap::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt null bitmap"))
+        let bitmap = NullBitmap::read_from(&data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt null bitmap"))?;
+        self.validate_bitmap_rows(bitmap.len())?;
+        Ok(bitmap)
     }
 
     fn read_compacted_page_index(
@@ -705,13 +732,7 @@ fn raw_column_path(column: &str) -> &'static str {
 }
 
 fn load_manifest(dir: &Path) -> io::Result<Option<SegmentManifest>> {
-    let path = dir.join("segment.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let json = fs::read(&path)?;
-    let manifest = serde_json::from_slice(&json).map_err(io::Error::other)?;
-    Ok(Some(manifest))
+    Ok(SegmentManifest::load(&dir.join("segment.json"))?)
 }
 
 fn build_selections(
@@ -842,6 +863,7 @@ fn materialize_selected<T>(values: Vec<Option<T>>) -> io::Result<Vec<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
 
     use alloy_primitives::{Address, bytes};
@@ -1064,7 +1086,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    fn assert_variable_page_row_count_is_checked(row_ids: Option<&[u32]>) {
+    fn compacted_fixture() -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
@@ -1086,6 +1108,11 @@ mod tests {
         ColumnFile::write_batch(&dir, &make_rows()).unwrap();
         persist_segment_manifest(&paths, &descriptor).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
+        (tmp, dir)
+    }
+
+    fn assert_variable_page_row_count_is_checked(row_ids: Option<&[u32]>) {
+        let (_tmp, dir) = compacted_fixture();
         let manifest = load_manifest(&dir).unwrap().unwrap();
         let data = manifest.columns.iter().find(|c| c.name == "data").unwrap();
 
@@ -1128,6 +1155,174 @@ mod tests {
         assert_variable_page_row_count_is_checked(Some(&[19, 0, 19]));
         // An extra row must also fail when selecting an otherwise valid prefix.
         assert_variable_page_row_count_is_checked(Some(&[0]));
+    }
+
+    #[test]
+    fn integrity_short_topic_bitmap_is_not_a_null_value() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let topic = manifest
+            .columns
+            .iter()
+            .find(|c| c.name == "topic0")
+            .unwrap();
+        for len in [0, 19, 20, 21] {
+            let mut bitmap = NullBitmap::new();
+            for row in 0..len {
+                bitmap.push(row % 2 == 1);
+            }
+            let mut bytes = Vec::new();
+            bitmap.write_to(&mut bytes).unwrap();
+            fs::write(dir.join(topic.null_bitmap_path.as_ref().unwrap()), &bytes).unwrap();
+            let reader = SegmentReader::open_projected(&dir, &["topic0"]).unwrap();
+            for ids in [None, Some(&[19, 0, 19][..])] {
+                let result = reader.read_nullable_b256("topic0", ids);
+                if len < 20 {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                } else {
+                    let rows = ids.map_or_else(|| (0..20).collect(), <[u32]>::to_vec);
+                    assert_eq!(
+                        result.unwrap(),
+                        rows.iter()
+                            .map(|i| (i % 2 == 1).then(|| B256::repeat_byte(0xaa)))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_short_canonical_bitmap_is_not_a_noncanonical_row() {
+        let (_tmp, dir) = compacted_fixture();
+        for len in [0, 19, 20, 21] {
+            let mut bitmap = NullBitmap::new();
+            for row in 0..len {
+                bitmap.push(row % 2 == 1);
+            }
+            let mut bytes = Vec::new();
+            bitmap.write_to(&mut bytes).unwrap();
+            fs::write(dir.join("canonical.bitmap"), &bytes).unwrap();
+            let reader = SegmentReader::open_projected(&dir, &[]).unwrap();
+            if len < 20 {
+                assert_eq!(
+                    reader.read_canonical().unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    reader.read_canonical_len().unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            } else {
+                let bitmap = reader.read_canonical().unwrap();
+                assert!(bitmap.is_present(19));
+                assert!(!bitmap.is_present(0));
+                assert_eq!(reader.read_canonical_len().unwrap(), len);
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_manifest_reads_are_bounded() {
+        let (_tmp, dir) = compacted_fixture();
+        let path = dir.join("segment.json");
+        let mut bytes = fs::read(&path).unwrap();
+        // Valid JSON with excessive trailing whitespace, not a parse error.
+        for size in [1024 * 1024, 1024 * 1024 + 1] {
+            bytes.resize(size, b' ');
+            fs::write(&path, &bytes).unwrap();
+            let result = SegmentReader::open(&dir);
+            if size == 1024 * 1024 {
+                assert_eq!(result.unwrap().read_row_count().unwrap(), 20);
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn integrity_dangling_manifest_does_not_fall_back_to_raw_data() {
+        let tmp = TempDir::new().unwrap();
+        ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+        let manifest = tmp.path().join("segment.json");
+        std::os::unix::fs::symlink("unavailable-manifest", &manifest).unwrap();
+        assert_eq!(
+            SegmentReader::open(tmp.path()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs::read_link(manifest).unwrap(),
+            Path::new("unavailable-manifest")
+        );
+    }
+
+    #[test]
+    fn integrity_unbundled_page_rows_cannot_increase_decoder_limits() {
+        let (_tmp, dir) = compacted_fixture();
+        let mut manifest = load_manifest(&dir).unwrap().unwrap();
+        manifest
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "data_len")
+            .unwrap()
+            .page_rows = u32::MAX;
+        fs::write(
+            dir.join("segment.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn integrity_manifest_rows_must_fit_segment_addressing() {
+        let (_tmp, dir) = compacted_fixture();
+        let mut manifest = load_manifest(&dir).unwrap().unwrap();
+        manifest.row_count = u64::from(u32::MAX) + 1;
+        fs::write(
+            dir.join("segment.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn integrity_raw_row_count_validates_header_and_addressing() {
+        let tmp = TempDir::new().unwrap();
+        for (version, compression, row_count) in [
+            (2, 0, 0),
+            (1, 1, 0),
+            (1, 0, u64::MAX),
+            (1, 0, u64::from(u32::MAX)),
+            (1, 0, 1),
+            (1, 0, 0),
+        ] {
+            let mut bytes = Vec::new();
+            ColumnFileHeader {
+                version,
+                compression,
+                row_count,
+            }
+            .write_to(&mut bytes)
+            .unwrap();
+            fs::write(tmp.path().join("address.col"), bytes).unwrap();
+            let reader = SegmentReader::open(tmp.path()).unwrap();
+            let result = reader.read_row_count();
+            if (version, compression, row_count) == (1, 0, 0) {
+                assert_eq!(result.unwrap(), 0);
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
     }
 
     #[test]
