@@ -287,3 +287,14 @@ shape/revision and 250 per REST shape/revision, plus all process counters. Exact
 source/fixture/binary identities, full correctness logs and losslessly compressed
 original timing outputs are linked there. This is an offline query comparison;
 live-peer ingestion and integrated staging remain separate gates.
+
+
+The [named-subquery scope pass](sql-query-scope.md) reuses the unchanged REST
+fixture after final before/after scope and identifier checks. Five alternating
+pairs provide 250 latency samples per shape/revision and five process-memory
+observations per revision. Its release record embeds the runner and fixtures;
+the linked record and compressed logs retain every build, correctness outcome
+and timing observation.
+Newly accepted queries are validated against the independent reference, not
+benchmarked against the preceding rejection. The unchanged metadata path's
+prior measurements remain retained separately.
