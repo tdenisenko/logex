@@ -757,15 +757,22 @@ impl NativeStorage {
             }
             let active = Some(segment.id) == self.catalog.active_hot_segment
                 || Some(segment.id) == self.catalog.active_historical_segment;
-            let manifest = match fs::read(self.paths.segment_manifest_path(segment.id)) {
-                Ok(bytes) => match serde_json::from_slice::<SegmentManifest>(&bytes) {
-                    Ok(manifest) => Some(manifest),
-                    Err(_) if active && segment.row_count == 0 => None,
-                    Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
-                },
-                Err(error) if error.kind() == io::ErrorKind::NotFound && active => None,
-                Err(error) => return Err(error),
-            };
+            let manifest =
+                match SegmentManifest::load(&self.paths.segment_manifest_path(segment.id)) {
+                    Ok(None) if !active => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "missing committed segment manifest",
+                        ));
+                    }
+                    Ok(manifest) => manifest,
+                    Err(error)
+                        if error.is_invalid_metadata() && active && segment.row_count == 0 =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error.into()),
+                };
             if manifest
                 .as_ref()
                 .is_some_and(|manifest| manifest.segment_id != segment.id)
@@ -5401,6 +5408,114 @@ mod tests {
         .unwrap();
         assert_eq!(reloaded.total_rows(), 12);
         assert_eq!(reloaded.sealed_count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_segment_manifest_preserves_committed_artifacts() {
+        for bundled in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            if bundled {
+                let prior = ingestion_header(99, B256::ZERO);
+                let head = ingestion_header(100, prior.hash_slow());
+                ingest_test_batch(
+                    &mut storage,
+                    false,
+                    &ingestion_rows(3, &head),
+                    &head,
+                    &prior,
+                )
+                .unwrap();
+            } else {
+                storage.write_batch(&make_rows(3, 100)).unwrap();
+            }
+            storage.checkpoint_durable().unwrap();
+            let expected = read_ingestion_rows(&storage);
+            let descriptor = storage.catalog.active_hot_segment().unwrap();
+            assert_eq!(descriptor.column_bundle.is_some(), bundled);
+            let dir = storage.segment_path(descriptor.id);
+            let manifest = dir.join("segment.json");
+            let original = fs::read(&manifest).unwrap();
+            let catalog_path = storage.paths.catalog_path();
+            let catalog = fs::read(&catalog_path).unwrap();
+            let artifacts: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_file() && path != &manifest)
+                .map(|path| {
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            fs::remove_file(&manifest).unwrap();
+            std::os::unix::fs::symlink("unavailable-manifest", &manifest).unwrap();
+            drop(storage);
+            for _ in 0..2 {
+                assert_eq!(
+                    NativeStorage::open(config.clone()).err().unwrap().kind(),
+                    io::ErrorKind::NotFound
+                );
+                assert_eq!(
+                    fs::read_link(&manifest).unwrap(),
+                    Path::new("unavailable-manifest")
+                );
+                assert_eq!(fs::read(&catalog_path).unwrap(), catalog);
+                for (path, bytes) in &artifacts {
+                    assert_eq!(&fs::read(path).unwrap(), bytes);
+                }
+            }
+            fs::write(dir.join("unavailable-manifest"), original).unwrap();
+            let storage = NativeStorage::open(config).unwrap();
+            assert_eq!(read_ingestion_rows(&storage), expected);
+        }
+    }
+
+    #[test]
+    fn oversized_bundle_manifest_recovery_verifies_payload_before_replacement() {
+        for corrupt in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let prior = ingestion_header(99, B256::ZERO);
+            let head = ingestion_header(100, prior.hash_slow());
+            let rows = ingestion_rows(3, &head);
+            ingest_test_batch(&mut storage, false, &rows, &head, &prior).unwrap();
+            storage.checkpoint_durable().unwrap();
+            let descriptor = storage.catalog.active_hot_segment().unwrap();
+            let dir = storage.segment_path(descriptor.id);
+            let manifest = dir.join("segment.json");
+            let mut bytes = fs::read(&manifest).unwrap();
+            bytes.resize(SegmentManifest::MAX_BYTES + 1, b' ');
+            fs::write(&manifest, &bytes).unwrap();
+            let bundle = crate::column_artifact::bundle_path(&dir, descriptor.generation);
+            if corrupt {
+                corrupt_bundle_address(&bundle, descriptor.column_bundle.as_ref().unwrap());
+            }
+            let payload = fs::read(&bundle).unwrap();
+            drop(storage);
+            for _ in 0..2 {
+                let reopened = NativeStorage::open(config.clone());
+                if corrupt {
+                    assert_eq!(reopened.err().unwrap().kind(), io::ErrorKind::InvalidData);
+                    assert_eq!(fs::read(&manifest).unwrap(), bytes);
+                } else {
+                    let reopened = reopened.unwrap();
+                    assert_eq!(read_ingestion_rows(&reopened), rows);
+                    assert!(
+                        fs::metadata(&manifest).unwrap().len() < SegmentManifest::MAX_BYTES as u64
+                    );
+                }
+                assert_eq!(fs::read(&bundle).unwrap(), payload);
+            }
+        }
     }
 
     #[test]

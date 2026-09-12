@@ -29,7 +29,9 @@ The remaining work is partitioned into the review areas above and outcome-based
 items in the local roadmap. Continue each area through a recorded disposition:
 verified without changes, fixed with regression evidence, or explicitly blocked
 with the remaining condition. A merged fix does not close the rest of its area.
-The next storage review starts with [page row-count validation](page-row-count.md).
+The [page row-count fix](page-row-count.md) merged in PR #131 as `003df476`
+after all six CI gates passed. The current storage pass covers
+[segment-reader integrity](segment-read-integrity.md).
 
 Complete deterministic offline validation and merge implementation PRs before
 starting an actual live sync. Live-sync acceptance and the minimum 24-hour

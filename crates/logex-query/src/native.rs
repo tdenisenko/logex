@@ -967,4 +967,25 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].block_number, 101);
     }
+
+    #[test]
+    fn rejects_missing_canonical_bits_instead_of_omitting_rows() {
+        let (_tmp, storage) = setup_storage();
+        let filter = NativeLogFilter::new();
+        let expected = execute_log_filter(&storage, &filter).unwrap();
+        assert!(expected.len() > 1);
+        let path = storage.hot_partition().meta.path.join("canonical.bitmap");
+        let mut short = logex_storage::NullBitmap::new();
+        for _ in 1..expected.len() {
+            short.push(true);
+        }
+        let mut bytes = Vec::new();
+        short.write_to(&mut bytes).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            execute_log_filter(&storage, &filter).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }

@@ -44,8 +44,8 @@ workspace tests, 10 deliberately ignored benchmarks/subprocess entries, doc
 tests, formatting, checking, warning-free workspace Clippy and release node build.
 The initial sandboxed suite could not bind loopback mock servers; rerunning with
 socket access passed. The [release comparison](baselines/2026-09-12-page-row-count.md) passes: no
-repeatable median regression above 5% was established. Linux/macOS CI remains
-pending in the implementation PR.
+repeatable median regression above 5% was established. [PR #131](https://github.com/tdenisenko/logex/pull/131) passed all six CI gates,
+including Linux/macOS tests, and merged as `003df476`.
 
 Reviewed the touched helper and all four callers for obsolete paths: none need
 removal. Typed integer decoders retain their existing length validation; the
