@@ -59,8 +59,12 @@ median/p95 and peak process memory. This measures handler execution and response
 serialization, excluding network transport and live peers. The controlled tests
 prove writer availability while a query is still pending; a latency comparison
 alone cannot establish that guarantee. All six local gates pass: 981 tests (12 intentionally ignored), documentation
-tests and the release node build. Release-mode lock regressions and repeated
-handler comparisons remain before PR/CI/merge.
+tests and the release node build. All 12 gRPC tests also pass in release mode.
+[Release acceptance](baselines/2026-09-12-grpc-query-locks.md) retains all 250
+samples per shape/revision: median handler latency changes −1.94% to −1.15%,
+p95 −9.84% to −3.22%. Peak RSS median −1.70%, p95 +1.35%. No latency
+regression was measured; this is not a live-peer throughput claim. Implementation
+`47b75dee` awaits final PR/CI/merge.
 
 This milestone does not complete the remaining offline audit or establish
 live-sync/release readiness. All fixtures use temporary directories; production
