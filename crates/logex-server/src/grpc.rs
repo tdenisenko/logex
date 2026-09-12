@@ -48,8 +48,6 @@ impl LogExService for LogExGrpcService {
         let sql = &request.get_ref().sql;
         tracing::debug!(sql = %sql, "gRPC query");
 
-        let storage = self.state.storage.read().await;
-        let head_block = storage.head_block();
         let query_request = request.get_ref();
         let limit = query_request
             .limit
@@ -62,11 +60,21 @@ impl LogExService for LogExGrpcService {
             .transpose()
             .map_err(|_| Status::invalid_argument("offset is too large"))?
             .unwrap_or(0);
-        let result = match logex_query::execute_sql_page(
+        // The view owns captured row boundaries and reorg validity. Retaining
+        // the storage guard through SQL execution would stall ingestion.
+        let (snapshot, head_block) = {
+            let storage = self.state.storage.read().await;
+            (
+                logex_query::NativeStorageSnapshot::from_storage(&storage),
+                storage.head_block().unwrap_or(0),
+            )
+        };
+        let result = match logex_query::execute_sql_page_on_snapshot(
             sql,
-            &storage,
+            snapshot,
             head_block,
             SqlQueryPage::new(limit, offset),
+            None,
         )
         .await
         {
@@ -89,14 +97,12 @@ impl LogExService for LogExGrpcService {
         let next_offset = limit
             .filter(|limit| *limit > 0 && row_count as usize == *limit)
             .map(|_| (offset + row_count as usize) as u64);
-        let rows = result
-            .rows
-            .into_iter()
-            .map(|row| QueryRow {
-                json: serde_json::to_string(&row)
-                    .unwrap_or_else(|_| String::from("{\"error\":\"row serialization failed\"}")),
-            })
-            .collect();
+        let mut rows = Vec::with_capacity(result.rows.len());
+        for row in result.rows {
+            let json = serde_json::to_string(&row)
+                .map_err(|err| Status::internal(format!("cannot serialize SQL result: {err}")))?;
+            rows.push(QueryRow { json });
+        }
 
         Ok(Response::new(QueryResponse {
             rows,
@@ -393,6 +399,128 @@ mod tests {
         mgr.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
         (tmp, mgr)
+    }
+
+    fn setup_partitioned_state() -> (TempDir, Arc<AppState>) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        for row in make_test_rows() {
+            storage.write_batch(&[row]).unwrap();
+        }
+        storage.checkpoint().unwrap();
+        assert_eq!(storage.sealed_partitions().len(), 2);
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        (tmp, state)
+    }
+
+    fn aggregate_request() -> Request<QueryRequest> {
+        Request::new(QueryRequest {
+            sql: "SELECT MAX(block_number) AS maximum, COUNT(*) AS total FROM logs WHERE block_number <= latest".into(),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn pending_grpc_sql_releases_storage_for_ingestion() {
+        use std::task::Poll;
+
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let mut query = service.query(aggregate_request());
+        // Multiple input partitions make DataFusion spawn input tasks. On this
+        // current-thread runtime they cannot finish before this first poll yields.
+        let first = std::future::poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the fixture must pause an active query");
+        let mut writer = state
+            .storage
+            .try_write()
+            .expect("an active gRPC SQL query must not retain the ingestion lock");
+        let mut appended = make_test_rows().pop().unwrap();
+        appended.block_number = 300;
+        appended.block_hash = B256::repeat_byte(3);
+        appended.tx_hash = B256::repeat_byte(0x33);
+        appended.timestamp = 1_700_002_400;
+        writer.write_batch(&[appended]).unwrap();
+        assert_eq!(writer.total_rows(), 3);
+        drop(writer);
+        let result = query.await.unwrap().into_inner();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.rows[0].json).unwrap(),
+            serde_json::json!({"maximum":200,"total":2})
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_grpc_sql_aborts_on_reorg_and_fresh_queries_recover() {
+        use std::task::Poll;
+
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let mut query = service.query(aggregate_request());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let mut writer = state
+            .storage
+            .try_write()
+            .expect("reorg must not wait for SQL");
+        assert_eq!(
+            writer.mark_non_canonical(B256::repeat_byte(0x02)).unwrap(),
+            1
+        );
+        drop(writer);
+        assert_eq!(query.await.unwrap_err().code(), tonic::Code::Aborted);
+        let response = service
+            .query(aggregate_request())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response.rows[0].json).unwrap(),
+            serde_json::json!({"maximum":100,"total":1})
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_one_pending_grpc_query_preserves_other_queries_and_writer_access() {
+        use std::task::Poll;
+
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let mut first = service.query(aggregate_request());
+        let mut second = service.query(aggregate_request());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(first);
+        let writer = state
+            .storage
+            .try_write()
+            .expect("the remaining query must not retain the lock");
+        assert_eq!(writer.total_rows(), 2);
+        drop(writer);
+        let response = second.await.unwrap().into_inner();
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response.rows[0].json).unwrap(),
+            serde_json::json!({"maximum":200,"total":2})
+        );
     }
 
     #[tokio::test]
