@@ -279,16 +279,24 @@ pub(crate) fn write_index_file(
         output,
         logical_len,
         written: 0,
-        hash: page_hasher(logical_len, &file_id, 0),
+        page: [0; PAGE_BYTES],
+        flushed: 0,
+        failed: false,
         file_id,
         checksums,
     };
     write(&mut writer)?;
+    if writer.failed {
+        return Err(io::Error::other("index writer previously failed"));
+    }
     if writer.written != logical_len {
         return Err(invalid("index writer produced an incomplete logical file"));
     }
     if !logical_len.is_multiple_of(PAGE_BYTES as u64) {
-        writer.checksums.push(writer.hash.finalize().to_le_bytes());
+        writer.finish_buffered_page(
+            (logical_len % PAGE_BYTES as u64) as usize,
+            logical_len / PAGE_BYTES as u64,
+        )?;
     }
     for checksum in writer.checksums {
         writer.output.write_all(&checksum)?;
@@ -300,39 +308,92 @@ struct IndexWriter {
     output: BufWriter<File>,
     logical_len: u64,
     written: u64,
-    hash: crc32fast::Hasher,
+    page: [u8; PAGE_BYTES],
+    // Bytes from the current page already emitted by an explicit flush.
+    flushed: usize,
+    failed: bool,
     file_id: [u8; 16],
     checksums: Vec<[u8; 4]>,
 }
 
-impl Write for IndexWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+impl IndexWriter {
+    fn finish_buffered_page(&mut self, length: usize, index: u64) -> io::Result<()> {
+        self.output.write_all(&self.page[self.flushed..length])?;
+        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
+        hash.update(&self.page[..length]);
+        self.checksums.push(hash.finalize().to_le_bytes());
+        self.flushed = 0;
+        Ok(())
+    }
+}
+
+impl IndexWriter {
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         if bytes.len() as u64 > self.logical_len - self.written {
             return Err(invalid("index writer exceeded its declared logical length"));
         }
-        self.output.write_all(bytes)?;
         let mut remaining = bytes;
         while !remaining.is_empty() {
-            let available = PAGE_BYTES - (self.written % PAGE_BYTES as u64) as usize;
-            let count = available.min(remaining.len());
-            self.hash.update(&remaining[..count]);
-            self.written += count as u64;
-            remaining = &remaining[count..];
-            if self.written.is_multiple_of(PAGE_BYTES as u64) {
-                let next = page_hasher(
-                    self.logical_len,
-                    &self.file_id,
-                    self.written / PAGE_BYTES as u64,
-                );
-                let hash = std::mem::replace(&mut self.hash, next);
-                self.checksums.push(hash.finalize().to_le_bytes());
+            let offset = (self.written % PAGE_BYTES as u64) as usize;
+            if offset == 0 && remaining.len() >= PAGE_BYTES {
+                // Large serialized bitmaps retain their contiguous write and
+                // need no copy into the small-write accumulation buffer.
+                let count = remaining.len() / PAGE_BYTES * PAGE_BYTES;
+                self.output.write_all(&remaining[..count])?;
+                let first = self.written / PAGE_BYTES as u64;
+                for (page_index, page) in remaining[..count]
+                    .as_chunks::<PAGE_BYTES>()
+                    .0
+                    .iter()
+                    .enumerate()
+                {
+                    let mut hash =
+                        page_hasher(self.logical_len, &self.file_id, first + page_index as u64);
+                    hash.update(page);
+                    self.checksums.push(hash.finalize().to_le_bytes());
+                }
+                self.written += count as u64;
+                remaining = &remaining[count..];
+            } else {
+                // Roaring emits many small integer writes. Hashing each one
+                // separately repeats checksum setup; collect a complete page.
+                let count = (PAGE_BYTES - offset).min(remaining.len());
+                self.page[offset..offset + count].copy_from_slice(&remaining[..count]);
+                self.written += count as u64;
+                remaining = &remaining[count..];
+                if offset + count == PAGE_BYTES {
+                    self.finish_buffered_page(PAGE_BYTES, self.written / PAGE_BYTES as u64 - 1)?;
+                }
             }
         }
-        Ok(bytes.len())
+        Ok(())
+    }
+
+    fn flush_bytes(&mut self) -> io::Result<()> {
+        let length = (self.written % PAGE_BYTES as u64) as usize;
+        self.output.write_all(&self.page[self.flushed..length])?;
+        self.flushed = length;
+        self.output.flush()
+    }
+}
+
+impl Write for IndexWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.failed {
+            return Err(io::Error::other("index writer previously failed"));
+        }
+        let result = self.write_bytes(bytes);
+        self.failed = result.is_err();
+        result.map(|()| bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
+        if self.failed {
+            return Err(io::Error::other("index writer previously failed"));
+        }
+        let result = self.flush_bytes();
+        self.failed = result.is_err();
+        result
     }
 }
 
@@ -512,6 +573,79 @@ mod tests {
         assert!(write_index_file(&path, 1, |writer| writer.write_all(&[1, 2])).is_err());
         assert!(IndexFile::open(&path).is_err());
         assert!(write_index_file(&path, u64::MAX, |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn explicit_writer_flushes_preserve_page_checksums() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let original = data();
+        write_index_file(&path, original.len() as u64, |writer| {
+            for chunk in original.chunks(137) {
+                writer.write_all(chunk)?;
+                writer.flush()?;
+            }
+            writer.flush()
+        })
+        .unwrap();
+        let mut reader = IndexFile::open(&path).unwrap();
+        let mut read = vec![0; original.len()];
+        reader.read_exact(&mut read).unwrap();
+        assert_eq!(read, original);
+    }
+
+    #[test]
+    fn mixed_buffered_and_bulk_writes_preserve_the_complete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let original = data();
+        write_index_file(&path, original.len() as u64, |writer| {
+            writer.write_all(&original[..19])?;
+            writer.flush()?;
+            writer.write_all(&original[19..PAGE_BYTES])?;
+            writer.write_all(&original[PAGE_BYTES..PAGE_BYTES * 3])?;
+            writer.flush()?;
+            writer.write_all(&original[PAGE_BYTES * 3..])?;
+            writer.flush()
+        })
+        .unwrap();
+        let mut reader = IndexFile::open(&path).unwrap();
+        let mut read = vec![0; original.len()];
+        reader.read_exact(&mut read).unwrap();
+        assert_eq!(read, original);
+    }
+
+    #[test]
+    fn failed_page_write_cannot_be_reused_or_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let mut writer = IndexWriter {
+            output: BufWriter::new(File::create(&path).unwrap()),
+            logical_len: PAGE_BYTES as u64,
+            written: 0,
+            page: [0; PAGE_BYTES],
+            flushed: 0,
+            failed: false,
+            file_id: [0; 16],
+            checksums: Vec::new(),
+        };
+        writer.write_all(&[1; 19]).unwrap();
+        writer.flush().unwrap();
+        // A read-only fixture handle produces a local write error at completion
+        // of the already partially flushed page.
+        writer.output = BufWriter::with_capacity(1, File::open(&path).unwrap());
+        assert!(writer.write_all(&[1; PAGE_BYTES - 19]).is_err());
+        assert!(writer.flush().is_err());
+        assert!(writer.write_all(&[1]).is_err());
+        drop(writer);
+        assert_eq!(fs::read(&path).unwrap(), [1; 19]);
+        assert!(
+            write_index_file(&path, 1, |writer| {
+                assert!(writer.write_all(&[1, 2]).is_err());
+                Ok(())
+            })
+            .is_err()
+        );
     }
 
     #[test]

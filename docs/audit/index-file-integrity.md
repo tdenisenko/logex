@@ -125,3 +125,17 @@ new header is 48 bytes. A complete valid-file substitution remains outside this
 check and still needs source binding. All 57 focused index tests pass after these
 changes; their equivalent release measurements are pending. Writer buffering and
 page-granularity costs will be investigated separately if they remain excessive.
+
+Second screening (`0d77f36b`, `/private/tmp/logex-index-integrity-release-2`)
+retains another 5,952 timings/32 RSS. It still exceeds the budget: typical/many-key
+range medians +17.90%/+17.56%, B-tree writes +14–59%, and several bloom paths
+remain excessive. No performance acceptance is inferred. Five-second profiles of
+both retained binaries are in `logex-index-integrity-profiles-1`; profiled runs
+are separate from acceptance measurements. They identify allocation/free work,
+parser helpers and checksum work on the candidate range path.
+
+The third candidate changes only writer buffering: accumulate small serialized
+writes per page, retain contiguous bulk writes, handle explicit flush prefixes,
+and make a failed writer unusable. Finite mixed/flush/write-error fixtures bring
+the focused total to 60 passing tests; focused Clippy passes. Its separate fixed
+comparison is pending.
