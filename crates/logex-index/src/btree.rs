@@ -386,6 +386,182 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn integrity_fixture(version: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+        assert!(matches!(version, 1 | 2));
+        let mut data = b"LXIX".to_vec();
+        data.extend_from_slice(&version.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        let payloads: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|&(_, row)| {
+                let bitmap: RoaringBitmap = [row].into_iter().collect();
+                let mut payload = Vec::new();
+                bitmap.serialize_into(&mut payload).unwrap();
+                payload
+            })
+            .collect();
+        let mut offset = 20 + entries.len() * 16;
+        for (&(key, _), payload) in entries.iter().zip(&payloads) {
+            data.extend_from_slice(&key.to_be_bytes());
+            if version == 2 {
+                data.extend_from_slice(&(offset as u64).to_le_bytes());
+                offset += payload.len();
+            }
+            data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            if version == 1 {
+                data.extend_from_slice(payload);
+            }
+        }
+        if version == 2 {
+            for payload in payloads {
+                data.extend_from_slice(&payload);
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn explicit_legacy_index_fixtures_support_point_and_range_lookups() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("legacy.bptree");
+        for version in [1, 2] {
+            fs::write(&path, integrity_fixture(version, &[(1, 10), (3, 30)])).unwrap();
+            let reader = BTreeIndexReader::open(&path).unwrap();
+            let expected: RoaringBitmap = [10, 30].into_iter().collect();
+            assert_eq!(
+                reader.range_inclusive(&1u32.to_be_bytes(), &3u32.to_be_bytes()),
+                expected,
+                "version {version}"
+            );
+            assert_eq!(
+                BTreeIndexReader::get_from_file(&path, &1u32.to_be_bytes()).unwrap(),
+                Some([10].into_iter().collect()),
+                "version {version}"
+            );
+            assert!(
+                BTreeIndexReader::get_from_file(&path, &2u32.to_be_bytes())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn index_readers_reject_unsupported_versions() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unsupported.bptree");
+        for version in [0, 3, u32::MAX] {
+            let mut data = integrity_fixture(1, &[(2, 20)]);
+            data[4..8].copy_from_slice(&version.to_le_bytes());
+            fs::write(&path, data).unwrap();
+            assert!(BTreeIndexReader::open(&path).is_err(), "version {version}");
+            assert!(
+                BTreeIndexReader::get_from_file(&path, &2u32.to_be_bytes()).is_err(),
+                "version {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_point_lookup_rejects_partial_entries_even_for_absent_keys() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("partial.bptree");
+        for version in [1, 2] {
+            let fixture = integrity_fixture(version, &[(2, 20)]);
+            let payload_start = if version == 1 { 28 } else { 36 };
+            for end in [24, payload_start, payload_start + 1] {
+                let mut data = fixture[..end].to_vec();
+                if end >= payload_start {
+                    // Keep the declared length tiny, even before bounds checks exist.
+                    data[payload_start - 4..payload_start]
+                        .copy_from_slice(&8u32.to_le_bytes());
+                }
+                fs::write(&path, data).unwrap();
+                assert!(
+                    BTreeIndexReader::open(&path).is_err(),
+                    "version {version}, truncated at {end}"
+                );
+                for key in [1u32, 2, 3] {
+                    assert!(
+                        BTreeIndexReader::get_from_file(&path, &key.to_be_bytes()).is_err(),
+                        "version {version}, truncated at {end}, lookup {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn index_open_rejects_unsorted_and_duplicate_keys() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ordering.bptree");
+        for version in [1, 2] {
+            for entries in [[(2, 20), (1, 10)], [(1, 10), (1, 20)]] {
+                fs::write(&path, integrity_fixture(version, &entries)).unwrap();
+                assert!(
+                    BTreeIndexReader::open(&path).is_err(),
+                    "version {version}, entries {entries:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_v2_open_rejects_aliased_bitmap_descriptors() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("alias.bptree");
+        let mut data = integrity_fixture(2, &[(1, 10), (2, 20)]);
+        // Each table entry is a four-byte key followed by a twelve-byte descriptor.
+        data.copy_within(40..52, 24);
+        fs::write(&path, data).unwrap();
+        assert!(BTreeIndexReader::open(&path).is_err());
+    }
+
+    #[test]
+    fn index_v2_readers_reject_bitmap_offsets_into_the_key_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("table-offset.bptree");
+        let mut data = integrity_fixture(2, &[(1, 10)]);
+        data[24..32].copy_from_slice(&20u64.to_le_bytes());
+        fs::write(&path, data).unwrap();
+        assert!(BTreeIndexReader::open(&path).is_err());
+        assert!(BTreeIndexReader::get_from_file(&path, &1u32.to_be_bytes()).is_err());
+    }
+
+    #[test]
+    fn index_readers_reject_unconsumed_bytes_inside_bitmap_payloads() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("payload-trailing.bptree");
+        for version in [1, 2] {
+            let mut data = integrity_fixture(version, &[(1, 10)]);
+            let length_start = if version == 1 { 24 } else { 32 };
+            let length = u32::from_le_bytes(
+                data[length_start..length_start + 4].try_into().unwrap(),
+            );
+            data[length_start..length_start + 4].copy_from_slice(&(length + 1).to_le_bytes());
+            data.push(0);
+            fs::write(&path, data).unwrap();
+            assert!(BTreeIndexReader::open(&path).is_err(), "version {version}");
+            assert!(
+                BTreeIndexReader::get_from_file(&path, &1u32.to_be_bytes()).is_err(),
+                "version {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_open_rejects_trailing_bytes_after_declared_entries() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file-trailing.bptree");
+        for version in [1, 2] {
+            let mut data = integrity_fixture(version, &[(1, 10)]);
+            data.push(0);
+            fs::write(&path, data).unwrap();
+            assert!(BTreeIndexReader::open(&path).is_err(), "version {version}");
+        }
+    }
+
     #[test]
     fn index_ranges_match_independent_oracle_including_reversed_bounds() {
         let mut values = vec![0, 1, 2, u64::MAX - 1, u64::MAX];
