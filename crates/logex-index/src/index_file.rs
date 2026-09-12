@@ -25,19 +25,12 @@ fn physical_len(logical_len: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("index file length overflow"))
 }
 
-fn page_context(logical_len: u64, file_id: &[u8; 16]) -> crc32fast::Hasher {
+fn page_hasher(logical_len: u64, file_id: &[u8; 16], index: u64) -> crc32fast::Hasher {
     let mut hash = crc32fast::Hasher::new();
     hash.update(b"LogEx index page");
     hash.update(&VERSION.to_le_bytes());
     hash.update(&logical_len.to_le_bytes());
     hash.update(file_id);
-    hash
-}
-
-fn page_hasher(context: &crc32fast::Hasher, logical_len: u64, index: u64) -> crc32fast::Hasher {
-    // The file prefix is identical for every page; cloning retains its exact
-    // checksum state without hashing it again for each random bit probe.
-    let mut hash = context.clone();
     hash.update(&index.to_le_bytes());
     let length = (logical_len - index * PAGE_BYTES as u64).min(PAGE_BYTES as u64);
     hash.update(&length.to_le_bytes());
@@ -65,11 +58,13 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
-    page_context: crc32fast::Hasher,
+    file_id: [u8; 16],
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
     page_index: Option<u64>,
     page_len: usize,
+    // Page zero was read with the header but has not passed its checksum yet.
+    prefetched_page: bool,
     checksums: Box<[u8; PAGE_BYTES]>,
     checksum_start: Option<u64>,
     checksum_len: usize,
@@ -79,9 +74,13 @@ impl IndexFile {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         let length = file.metadata()?.len();
-        let mut header = [0; HEADER_BYTES];
+        // One bounded read captures the header and first page. A one-page file
+        // also fits its complete checksum footer, avoiding another small read.
+        let mut prefetch = [0; HEADER_BYTES + PAGE_BYTES + CHECKSUM_BYTES as usize];
+        let prefetch_len = length.min(prefetch.len() as u64) as usize;
+        read_at(&file, &mut prefetch[..prefetch_len], 0)?;
+        let header = &prefetch[..HEADER_BYTES];
         let header_len = length.min(HEADER_BYTES as u64) as usize;
-        read_at(&file, &mut header[..header_len], 0)?;
         let protected = &header[..8] == MAGIC;
         let logical_len = if protected {
             if header_len != HEADER_BYTES
@@ -106,19 +105,36 @@ impl IndexFile {
         };
         let mut file_id = [0; 16];
         file_id.copy_from_slice(&header[24..40]);
-        Ok(Self {
+        let mut reader = Self {
             file,
-            page_context: page_context(logical_len, &file_id),
+            file_id,
             logical_len,
             protected,
             position: 0,
             page: Box::new([0; PAGE_BYTES]),
             page_index: None,
             page_len: 0,
+            prefetched_page: false,
             checksums: Box::new([0; PAGE_BYTES]),
             checksum_start: None,
             checksum_len: 0,
-        })
+        };
+        if protected && logical_len != 0 {
+            reader.page_len = logical_len.min(PAGE_BYTES as u64) as usize;
+            reader.page[..reader.page_len]
+                .copy_from_slice(&prefetch[HEADER_BYTES..HEADER_BYTES + reader.page_len]);
+            reader.prefetched_page = true;
+            if length == prefetch_len as u64 {
+                // Exact physical geometry was checked above. Only a complete
+                // one-page footer fits this prefix; no partial cache is valid.
+                let footer = HEADER_BYTES + logical_len as usize;
+                reader.checksum_len = prefetch_len - footer;
+                reader.checksums[..reader.checksum_len]
+                    .copy_from_slice(&prefetch[footer..prefetch_len]);
+                reader.checksum_start = Some(0);
+            }
+        }
+        Ok(reader)
     }
 
     pub(crate) fn logical_len(&self) -> u64 {
@@ -133,18 +149,22 @@ impl IndexFile {
         if self.page_index == Some(index) {
             return Ok(());
         }
+        let prefetched = self.prefetched_page && index == 0;
+        self.prefetched_page = false;
         // Invalidate before any fallible read so a failed read cannot leave the
         // old cache identity attached to partially overwritten bytes.
         self.page_index = None;
         let start = index * PAGE_BYTES as u64;
         self.page_len = (self.logical_len - start).min(PAGE_BYTES as u64) as usize;
-        read_at(
-            &self.file,
-            &mut self.page[..self.page_len],
-            HEADER_BYTES as u64 + start,
-        )?;
+        if !prefetched {
+            read_at(
+                &self.file,
+                &mut self.page[..self.page_len],
+                HEADER_BYTES as u64 + start,
+            )?;
+        }
         let expected = self.page_checksum(index)?;
-        let mut hash = page_hasher(&self.page_context, self.logical_len, index);
+        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
         hash.update(&self.page[..self.page_len]);
         if hash.finalize().to_le_bytes() != expected {
             return Err(invalid(
@@ -190,6 +210,16 @@ impl Read for IndexFile {
             self.position += length as u64;
             return Ok(length);
         }
+        let index = self.position / PAGE_BYTES as u64;
+        let offset = (self.position % PAGE_BYTES as u64) as usize;
+        if (self.page_index == Some(index) || self.prefetched_page && index == 0)
+            && length <= PAGE_BYTES - offset
+        {
+            self.load_page(index)?;
+            output[..length].copy_from_slice(&self.page[offset..offset + length]);
+            self.position += length as u64;
+            return Ok(length);
+        }
         if length >= PAGE_BYTES && self.position.is_multiple_of(PAGE_BYTES as u64) {
             // Whole-index/range readers already provide a large destination.
             // Keep their contiguous read instead of issuing one syscall/page.
@@ -198,6 +228,7 @@ impl Read for IndexFile {
             } else {
                 length / PAGE_BYTES * PAGE_BYTES
             };
+            self.prefetched_page = false;
             read_at(
                 &self.file,
                 &mut output[..count],
@@ -206,7 +237,7 @@ impl Read for IndexFile {
             let first = self.position / PAGE_BYTES as u64;
             for (offset, page) in output[..count].chunks(PAGE_BYTES).enumerate() {
                 let index = first + offset as u64;
-                let mut hash = page_hasher(&self.page_context, self.logical_len, index);
+                let mut hash = page_hasher(self.logical_len, &self.file_id, index);
                 hash.update(page);
                 if hash.finalize().to_le_bytes() != self.page_checksum(index)? {
                     return Err(invalid(
@@ -292,7 +323,7 @@ pub(crate) fn write_index_file(
         page: [0; PAGE_BYTES],
         flushed: 0,
         failed: false,
-        page_context: page_context(logical_len, &file_id),
+        file_id,
         checksums,
     };
     write(&mut writer)?;
@@ -322,14 +353,14 @@ struct IndexWriter {
     // Bytes from the current page already emitted by an explicit flush.
     flushed: usize,
     failed: bool,
-    page_context: crc32fast::Hasher,
+    file_id: [u8; 16],
     checksums: Vec<[u8; 4]>,
 }
 
 impl IndexWriter {
     fn finish_buffered_page(&mut self, length: usize, index: u64) -> io::Result<()> {
         self.output.write_all(&self.page[self.flushed..length])?;
-        let mut hash = page_hasher(&self.page_context, self.logical_len, index);
+        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
         hash.update(&self.page[..length]);
         self.checksums.push(hash.finalize().to_le_bytes());
         self.flushed = 0;
@@ -357,11 +388,8 @@ impl IndexWriter {
                     .iter()
                     .enumerate()
                 {
-                    let mut hash = page_hasher(
-                        &self.page_context,
-                        self.logical_len,
-                        first + page_index as u64,
-                    );
+                    let mut hash =
+                        page_hasher(self.logical_len, &self.file_id, first + page_index as u64);
                     hash.update(page);
                     self.checksums.push(hash.finalize().to_le_bytes());
                 }
@@ -639,7 +667,7 @@ mod tests {
             page: [0; PAGE_BYTES],
             flushed: 0,
             failed: false,
-            page_context: page_context(PAGE_BYTES as u64, &[0; 16]),
+            file_id: [0; 16],
             checksums: Vec::new(),
         };
         writer.write_all(&[1; 19]).unwrap();

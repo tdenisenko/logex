@@ -159,4 +159,31 @@ The next isolated experiment increases the physical output buffer from 8 KiB to
 emit 1,024 scalar eight-byte writes; the page writer combines those into 4 KiB
 writes. The larger sink can reduce physical flushes. It does not remove scalar
 dispatch costs, which will require a separate measured change if still relevant.
-All ten file-container tests pass with the larger sink.
+All ten file-container tests pass with the larger sink. Screening five
+(`ba98f78d`, `logex-index-integrity-release-5`) retains 5,952 timings/32 RSS.
+Small/typical/many-key/large-payload write medians are +9.88%/+20.70%/-17.03%/
++14.17%; bloom medians remain +10.34–15.83%. It is insufficient by itself.
+
+Screening six (`a61cd867`, `logex-index-integrity-release-6`) adds a concrete
+64 KiB buffer before the checked writer. This lets the pinned bitmap serializer
+inline scalar writes and batches them before checksum processing, without
+retaining every serialized payload. Explicit final flush propagates errors.
+All 60 focused tests pass; another 5,952 timings/32 RSS show write medians
+-12.02%/-62.50%/-63.25%/-15.92% for small/typical/many-key/large payloads.
+Some write tails remain variable and require more final samples. Bloom medians
+remain excessive; this is progress on writes, not complete acceptance.
+
+Screening seven (`c6ed7e99`, `logex-index-integrity-release-7`) tests reusing the
+per-file checksum prefix. It retains 5,952 timings/32 RSS but does not establish
+a clear gain beyond noise; the change is dropped. A useful ordinary roundtrip
+test is retained: nine dense bitmap containers cross the 64 KiB serialization
+buffer, with exact row IDs checked through full and point readers. All 61 focused
+tests pass. Borrowed multi-bitmap union was also reviewed as a range-cost lead,
+but unconditional use can expand many sparse containers, so it is not introduced.
+
+The next experiment returns to screening six's production code and prefetches
+the header and first logical page in one bounded read. A complete single-page
+file also supplies its checksum footer. Prefetched data remains unverified until
+the existing checksum check succeeds; invalidation precedes fallible loads.
+Large full-file reads retain contiguous I/O. All 61 focused tests pass before
+its separate release comparison.
