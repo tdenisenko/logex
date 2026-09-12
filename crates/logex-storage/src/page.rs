@@ -4,9 +4,8 @@ use alloy_primitives::Bytes;
 
 use crate::compression::{
     delta_decode, delta_encode, delta_of_delta_decode, delta_of_delta_encode, dict_decode,
-    dict_encode_raw, lz4_compress, lz4_decompress, lz4_decompress_bounded, signed_delta_decode,
-    signed_delta_encode, zstd_compress, zstd_compress_level, zstd_decompress,
-    zstd_decompress_bounded,
+    dict_encode_raw, lz4_compress, lz4_decompress_bounded, signed_delta_decode,
+    signed_delta_encode, zstd_compress, zstd_compress_level, zstd_decompress_bounded,
 };
 use crate::native::CompressionCodec;
 
@@ -431,59 +430,49 @@ pub(crate) fn encode_var_bytes_page(
     }
 }
 
-pub fn decode_var_bytes_page(encoded: &[u8], codec: CompressionCodec) -> io::Result<Vec<Bytes>> {
-    let raw = match codec {
-        CompressionCodec::None => encoded.to_vec(),
-        CompressionCodec::Zstd => zstd_decompress(encoded)?,
-        CompressionCodec::Lz4 => lz4_decompress(encoded)?,
-        CompressionCodec::AdaptiveBytes => return decode_adaptive_var_bytes_page(encoded),
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unsupported bytes codec: {other:?}"),
-            ));
-        }
-    };
-
-    decode_var_bytes_raw_u64(&raw)
-}
-
-/// Maintenance uses an explicit payload budget, including offset metadata. A
-/// malformed compressed frame cannot allocate beyond that budget before validation.
+/// Decode against the exact companion `data_len` rows. Compressed output and
+/// offset metadata cannot allocate beyond the persisted page shape.
 pub(crate) fn decode_var_bytes_page_bounded(
     encoded: &[u8],
     codec: CompressionCodec,
-    row_count: usize,
-    data_bytes: usize,
+    data_lengths: &[u32],
 ) -> io::Result<Vec<Bytes>> {
-    let limit = row_count
-        .checked_add(1)
-        .and_then(|n| n.checked_mul(8))
-        .and_then(|n| n.checked_add(4))
-        .and_then(|n| n.checked_add(data_bytes))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page budget overflow"))?;
+    let data_bytes = data_lengths.iter().try_fold(0usize, |sum, &length| {
+        sum.checked_add(length as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page budget overflow"))
+    })?;
+    let raw_len = |offset_width: usize| {
+        data_lengths
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(offset_width))
+            .and_then(|n| n.checked_add(4))
+            .and_then(|n| n.checked_add(data_bytes))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page budget overflow"))
+    };
     let (raw, narrow) = match codec {
         CompressionCodec::AdaptiveBytes => {
             let (tag, payload) = encoded
                 .split_first()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty adaptive page"))?;
-            if !matches!(
-                *tag,
-                ADAPTIVE_BYTES_ZSTD_U64_OFFSETS | ADAPTIVE_BYTES_ZSTD_U32_OFFSETS
-            ) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid adaptive bytes tag",
-                ));
+            match *tag {
+                ADAPTIVE_BYTES_ZSTD_U64_OFFSETS => {
+                    (zstd_decompress_bounded(payload, raw_len(8)?)?, false)
+                }
+                ADAPTIVE_BYTES_ZSTD_U32_OFFSETS => {
+                    (zstd_decompress_bounded(payload, raw_len(4)?)?, true)
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid adaptive bytes tag",
+                    ));
+                }
             }
-            (
-                zstd_decompress_bounded(payload, limit)?,
-                *tag == ADAPTIVE_BYTES_ZSTD_U32_OFFSETS,
-            )
         }
-        CompressionCodec::Zstd => (zstd_decompress_bounded(encoded, limit)?, false),
-        CompressionCodec::Lz4 => (lz4_decompress_bounded(encoded, limit)?, false),
-        CompressionCodec::None if encoded.len() <= limit => (encoded.to_vec(), false),
+        CompressionCodec::Zstd => (zstd_decompress_bounded(encoded, raw_len(8)?)?, false),
+        CompressionCodec::Lz4 => (lz4_decompress_bounded(encoded, raw_len(8)?)?, false),
+        CompressionCodec::None if encoded.len() == raw_len(8)? => (encoded.to_vec(), false),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -491,20 +480,43 @@ pub(crate) fn decode_var_bytes_page_bounded(
             ));
         }
     };
+    if raw.len() != raw_len(if narrow { 4 } else { 8 })? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded bytes page has an unexpected length",
+        ));
+    }
+    let stored_rows = raw
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page is truncated"))?;
+    let expected_rows = u32::try_from(data_lengths.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bytes page row count exceeds storage format",
+        )
+    })?;
+    if stored_rows != expected_rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded bytes page has an unexpected row count",
+        ));
+    }
     let rows = if narrow {
         decode_var_bytes_raw_u32(&raw)?
     } else {
         decode_var_bytes_raw_u64(&raw)?
     };
-    if rows.len() != row_count
+    if rows.len() != data_lengths.len()
         || rows
             .iter()
-            .try_fold(0usize, |sum, row| sum.checked_add(row.len()))
-            .is_none_or(|sum| sum > data_bytes)
+            .zip(data_lengths)
+            .any(|(row, &expected)| row.len() != expected as usize)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "decoded bytes page exceeds its row or payload budget",
+            "decoded bytes page differs from its row-length metadata",
         ));
     }
     Ok(rows)
@@ -538,21 +550,6 @@ fn encode_adaptive_var_bytes_page(values: &[impl AsRef<[u8]>]) -> io::Result<Vec
     out.push(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS);
     out.extend_from_slice(&compressed_u32);
     Ok(out)
-}
-
-fn decode_adaptive_var_bytes_page(encoded: &[u8]) -> io::Result<Vec<Bytes>> {
-    let (tag, payload) = encoded.split_first().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "adaptive bytes page is empty")
-    })?;
-
-    match *tag {
-        ADAPTIVE_BYTES_ZSTD_U64_OFFSETS => decode_var_bytes_raw_u64(&zstd_decompress(payload)?),
-        ADAPTIVE_BYTES_ZSTD_U32_OFFSETS => decode_var_bytes_raw_u32(&zstd_decompress(payload)?),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported adaptive bytes tag: {other}"),
-        )),
-    }
 }
 
 fn encode_var_bytes_raw_u64(values: &[impl AsRef<[u8]>]) -> Vec<u8> {
@@ -747,12 +744,11 @@ mod tests {
         ] {
             let encoded = encode_var_bytes_page(&values, codec).unwrap();
             assert_eq!(
-                decode_var_bytes_page_bounded(&encoded, codec, 2, 2065).unwrap(),
+                decode_var_bytes_page_bounded(&encoded, codec, &[2048, 17]).unwrap(),
                 values
             );
-            assert!(decode_var_bytes_page_bounded(&encoded, codec, 2, 2064).is_err());
-            assert!(decode_var_bytes_page_bounded(&encoded, codec, 1, 4096).is_err());
-            assert!(decode_var_bytes_page_bounded(&encoded, codec, usize::MAX, 1).is_err());
+            assert!(decode_var_bytes_page_bounded(&encoded, codec, &[2048, 16]).is_err());
+            assert!(decode_var_bytes_page_bounded(&encoded, codec, &[4096]).is_err());
         }
         let enormous = u32::MAX.to_le_bytes();
         assert!(crate::compression::lz4_decompress_bounded(&enormous, 16).is_err());
@@ -775,6 +771,66 @@ mod tests {
             assert!(decode_fixed_width_page(&compressed, 1, 32, codec).is_err());
             assert!(decode_fixed_width_page(&compressed, usize::MAX, 32, codec).is_err());
         }
+    }
+
+    #[test]
+    fn bounded_variable_decoder_checks_row_shape_before_raw_offsets() {
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&3u32.to_le_bytes());
+        malformed.extend_from_slice(&[0; 4 * std::mem::size_of::<u64>()]);
+        let error =
+            decode_var_bytes_page_bounded(&malformed, CompressionCodec::None, &[4, 4]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("row count"));
+    }
+
+    #[test]
+    fn bounded_variable_decoder_preserves_large_supported_payloads() {
+        let payload = vec![0x5a; 32 * 1024 * 1024 + 1];
+        let values = [payload.as_slice()];
+        for codec in [
+            CompressionCodec::AdaptiveBytes,
+            CompressionCodec::Zstd,
+            CompressionCodec::Lz4,
+        ] {
+            let encoded = encode_var_bytes_page(&values, codec).unwrap();
+            let decoded = decode_var_bytes_page_bounded(
+                &encoded,
+                codec,
+                &[u32::try_from(payload.len()).unwrap()],
+            )
+            .unwrap();
+            assert_eq!(decoded.len(), 1);
+            assert!(
+                decoded[0].as_ref() == payload.as_slice(),
+                "codec: {codec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_dictionary_entrypoints_reject_missing_entries() {
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&1u32.to_le_bytes());
+        malformed.extend_from_slice(&1u32.to_le_bytes());
+        malformed.push(0x2a);
+        malformed.push(1);
+        malformed.push(1);
+        assert_eq!(
+            decode_u8_page(&malformed, 1, CompressionCodec::Dictionary)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut adaptive = vec![ADAPTIVE_FIXED_DICTIONARY];
+        adaptive.extend(malformed);
+        assert_eq!(
+            decode_fixed_width_page(&adaptive, 1, 1, CompressionCodec::AdaptiveFixed)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -833,7 +889,8 @@ mod tests {
         ];
 
         let encoded = encode_var_bytes_page(&values, CompressionCodec::Lz4).unwrap();
-        let decoded = decode_var_bytes_page(&encoded, CompressionCodec::Lz4).unwrap();
+        let decoded =
+            decode_var_bytes_page_bounded(&encoded, CompressionCodec::Lz4, &[0, 5, 5]).unwrap();
         assert_eq!(decoded, values);
     }
 
@@ -878,7 +935,9 @@ mod tests {
             encoded.first().copied(),
             Some(ADAPTIVE_BYTES_ZSTD_U32_OFFSETS)
         );
-        let decoded = decode_var_bytes_page(&encoded, CompressionCodec::AdaptiveBytes).unwrap();
+        let decoded =
+            decode_var_bytes_page_bounded(&encoded, CompressionCodec::AdaptiveBytes, &[0, 32, 64])
+                .unwrap();
         assert_eq!(decoded, values);
     }
 }

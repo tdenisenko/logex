@@ -91,7 +91,11 @@ impl ColumnArtifacts {
                 "unknown projected column",
             ));
         }
-        let includes = |name: &str| projection.is_none_or(|names| names.contains(&name));
+        let includes = |name: &str| {
+            projection.is_none_or(|names| {
+                names.contains(&name) || (name == "data_len" && names.contains(&"data"))
+            })
+        };
         let mut artifacts = Self::open_inspected(dir, manifest, None)?;
         if artifacts.bundle.is_none() {
             if let Some(manifest) = manifest {

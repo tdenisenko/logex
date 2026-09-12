@@ -158,6 +158,12 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     })?;
     let mut result = Vec::with_capacity(output_len);
     for idx in indices {
+        if idx as usize >= dict_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "dictionary index is out of bounds",
+            ));
+        }
         let offset = idx as usize * item_size;
         result.extend_from_slice(&dict_bytes[offset..offset + item_size]);
     }
@@ -627,6 +633,31 @@ mod tests {
         assert!(bitunpack_u64(&[], usize::MAX, 64).is_err());
         let encoded = dict_encode_raw(&[1, 2, 3], 1);
         assert!(dict_decode(&encoded[..encoded.len() - 1], 3, 1).is_err());
+    }
+
+    #[test]
+    fn dictionary_decoder_rejects_out_of_range_indices_without_panicking() {
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&1u32.to_le_bytes()); // One dictionary entry.
+        malformed.extend_from_slice(&1u32.to_le_bytes()); // One-byte items.
+        malformed.push(0x2a); // Dictionary entry zero.
+        malformed.push(1); // One-bit indices.
+        malformed.push(1); // Row zero selects missing dictionary entry one.
+        let result = std::panic::catch_unwind(|| dict_decode(&malformed, 1, 1));
+        assert!(result.is_ok(), "malformed dictionary index panicked");
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let valid_empty = dict_encode_raw(&[], 1);
+        assert_eq!(dict_decode(&valid_empty, 0, 1).unwrap(), Vec::<u8>::new());
+        let mut empty_with_row = valid_empty;
+        empty_with_row.push(0);
+        assert_eq!(
+            dict_decode(&empty_with_row, 1, 1).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
