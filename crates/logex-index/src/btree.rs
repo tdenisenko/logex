@@ -408,19 +408,21 @@ fn take_bytes<'a>(data: &'a [u8], position: &mut usize, len: usize) -> io::Resul
 }
 
 fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
-    // Bound the dependency's description/container allocations by actual bytes,
-    // and reject duplicate or descending container keys before binary-search use.
+    // Inspect borrowed descriptors and run ranges before the dependency allocates.
+    // Its decoder checks array/bitmap contents but ignores serialized offsets and
+    // run cardinality, and normalizes unordered/overlapping runs into a set.
     let mut position = 0;
     let cookie = u32::from_le_bytes(take_bytes(data, &mut position, 4)?.try_into().unwrap());
-    let (count, has_offsets) = if cookie == 12346 {
+    let (count, has_offsets, run_containers) = if cookie == 12346 {
         (
             u32::from_le_bytes(take_bytes(data, &mut position, 4)?.try_into().unwrap()) as usize,
             true,
+            None,
         )
     } else if cookie as u16 == 12347 {
         let count = ((cookie >> 16) + 1) as usize;
-        take_bytes(data, &mut position, count.div_ceil(8))?;
-        (count, count >= 4)
+        let runs = take_bytes(data, &mut position, count.div_ceil(8))?;
+        (count, count >= 4, Some(runs))
     } else {
         return Err(invalid_index("invalid Roaring bitmap cookie"));
     };
@@ -428,8 +430,13 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
         return Err(invalid_index("too many Roaring containers"));
     }
     let descriptions = take_bytes(data, &mut position, count * 4)?;
+    let offsets = if has_offsets {
+        Some(take_bytes(data, &mut position, count * 4)?)
+    } else {
+        None
+    };
     let mut previous = None;
-    for description in descriptions.chunks_exact(4) {
+    for (index, description) in descriptions.chunks_exact(4).enumerate() {
         let key = u16::from_le_bytes(description[..2].try_into().unwrap());
         if previous.is_some_and(|previous| previous >= key) {
             return Err(invalid_index(
@@ -437,9 +444,48 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
             ));
         }
         previous = Some(key);
+        if let Some(offsets) = offsets {
+            let offset = u32::from_le_bytes(offsets[index * 4..index * 4 + 4].try_into().unwrap());
+            if u64::from(offset) != position as u64 {
+                return Err(invalid_index("noncontiguous Roaring container offset"));
+            }
+        }
+        let cardinality =
+            usize::from(u16::from_le_bytes(description[2..4].try_into().unwrap())) + 1;
+        if run_containers.is_some_and(|runs| runs[index / 8] & (1 << (index % 8)) != 0) {
+            let run_count = usize::from(u16::from_le_bytes(
+                take_bytes(data, &mut position, 2)?.try_into().unwrap(),
+            ));
+            let runs = take_bytes(data, &mut position, run_count * 4)?;
+            let mut previous_end = None;
+            let mut actual_cardinality = 0;
+            for run in runs.chunks_exact(4) {
+                let start = u16::from_le_bytes(run[..2].try_into().unwrap());
+                let length_minus_one = u16::from_le_bytes(run[2..].try_into().unwrap());
+                let end = start
+                    .checked_add(length_minus_one)
+                    .ok_or_else(|| invalid_index("Roaring run range exceeds its container"))?;
+                if previous_end.is_some_and(|previous_end| start <= previous_end) {
+                    return Err(invalid_index("Roaring runs overlap or are not ordered"));
+                }
+                previous_end = Some(end);
+                // Ordered, disjoint u16 ranges contain at most 65,536 values.
+                actual_cardinality += usize::from(length_minus_one) + 1;
+            }
+            if actual_cardinality != cardinality {
+                return Err(invalid_index("Roaring run cardinality mismatch"));
+            }
+        } else {
+            let bytes = if cardinality <= 4096 {
+                cardinality * 2
+            } else {
+                8192
+            };
+            take_bytes(data, &mut position, bytes)?;
+        }
     }
-    if has_offsets {
-        take_bytes(data, &mut position, count * 4)?;
+    if position != data.len() {
+        return Err(invalid_index("trailing bitmap payload bytes"));
     }
     let mut remaining = data;
     let bitmap = RoaringBitmap::deserialize_from(&mut remaining)
@@ -598,7 +644,7 @@ mod tests {
 
     fn run_bitmap_fixture(containers: &[(u16, u16, &[(u16, u16)])]) -> Vec<u8> {
         // Fewer than four run containers have no offset table in this encoding.
-        assert!(!containers.is_empty() && containers.len() < 4);
+        assert!(!containers.is_empty() && containers.len() <= 4);
         let cookie = 12347 | (((containers.len() - 1) as u32) << 16);
         let mut payload = cookie.to_le_bytes().to_vec();
         payload.push((1 << containers.len()) - 1);
@@ -606,6 +652,13 @@ mod tests {
             assert!(cardinality > 0);
             payload.extend_from_slice(&key.to_le_bytes());
             payload.extend_from_slice(&(cardinality - 1).to_le_bytes());
+        }
+        if containers.len() >= 4 {
+            let mut offset = payload.len() + containers.len() * 4;
+            for &(_, _, runs) in containers {
+                payload.extend_from_slice(&(offset as u32).to_le_bytes());
+                offset += 2 + runs.len() * 4;
+            }
         }
         for &(_, _, runs) in containers {
             payload.extend_from_slice(&(runs.len() as u16).to_le_bytes());
@@ -651,6 +704,62 @@ mod tests {
         // Point the container back into the cookie instead of its two-byte data.
         payload[12..16].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_bitmap(&payload).is_err());
+    }
+
+    #[test]
+    fn bitmap_decode_accepts_empty_array_dense_and_mixed_run_encodings() {
+        for bitmap in [
+            RoaringBitmap::new(),
+            [1, 9, 65537].into_iter().collect(),
+            (0..5000).collect(),
+        ] {
+            let mut payload = Vec::new();
+            bitmap.serialize_into(&mut payload).unwrap();
+            assert_eq!(decode_bitmap(&payload).unwrap(), bitmap);
+            payload.pop();
+            assert!(decode_bitmap(&payload).is_err());
+        }
+
+        // Two containers, one run and one array; this run-cookie encoding has
+        // no offset table. The container payloads have different byte lengths.
+        let mut mixed = (12347u32 | (1 << 16)).to_le_bytes().to_vec();
+        mixed.push(1);
+        for value in [0u16, 0, 1, 2, 1, 7, 0, 3, 9, 12] {
+            mixed.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(
+            decode_bitmap(&mixed).unwrap(),
+            [7, 65539, 65545, 65548].into_iter().collect()
+        );
+
+        let with_offsets = run_bitmap_fixture(&[
+            (0, 1, &[(7, 0)]),
+            (1, 1, &[(9, 0)]),
+            (2, 1, &[(11, 0)]),
+            (3, 1, &[(13, 0)]),
+        ]);
+        assert_eq!(
+            decode_bitmap(&with_offsets).unwrap(),
+            [7, 65545, 131083, 196621].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn bitmap_decode_rejects_unordered_overlapping_and_overflowing_runs() {
+        for runs in [
+            vec![(7, 0), (5, 0)],
+            vec![(5, 2), (7, 1)],
+            vec![(u16::MAX, 1)],
+        ] {
+            let cardinality = runs.iter().map(|(_, length)| length + 1).sum();
+            let payload = run_bitmap_fixture(&[(0, cardinality, &runs)]);
+            assert!(decode_bitmap(&payload).is_err(), "runs {runs:?}");
+        }
+        let adjacent = run_bitmap_fixture(&[(0, 2, &[(5, 0), (6, 0)])]);
+        assert_eq!(
+            decode_bitmap(&adjacent).unwrap(),
+            [5, 6].into_iter().collect()
+        );
     }
 
     #[test]
