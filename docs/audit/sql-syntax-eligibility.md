@@ -6,8 +6,8 @@ Implementation: `1b43f00b`, followed by stack correction `fe400c7f041e76556d1e73
 Direct review, focused checks, all six required local gates and additional
 release checks pass. The first workspace run exposed an existing query-boundary
 regression, corrected before repeating all gates. Paired release performance
-acceptance passes after the retained tail-latency investigation. Final-head CI
-and merge remain pending.
+acceptance passes after the retained tail-latency investigation. All six
+final-head CI jobs passed; PR #145 merged as `c24d56b6`.
 
 ## Confirmed findings
 
@@ -177,8 +177,13 @@ recalculated, and combined records were checked against every original record.
 
 No ingestion write, storage format, dependency or toolchain changes are included.
 These offline query measurements exclude transport and live peers; they do not
-establish whole-node ingestion throughput. Final-head Linux/macOS CI and merge
-follow this local acceptance.
+establish whole-node ingestion throughput.
+
+The [final CI record](baselines/2026-09-12-sql-syntax-eligibility-ci-final.json)
+confirms all six jobs passed on final head `05c6a6f5`, run `34709291323`, attempt 1,
+including Linux and macOS tests. [PR #145](https://github.com/tdenisenko/logex/pull/145)
+merged on 2026-09-12 as `c24d56b6`. The local merge tree matches the reviewed head;
+all 102 validated source/configuration hashes remain unchanged.
 
 ## Cleanup and remaining work
 
