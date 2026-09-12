@@ -1,8 +1,9 @@
-//! Direct gRPC handler latency, independent of network transport and live peers.
+//! Direct query handler latency, independent of network transport and live peers.
 use std::sync::Arc;
 use std::time::Instant;
 
 use alloy_primitives::{Address, Bytes, keccak256};
+use axum::{Json, extract::State, http::StatusCode};
 use logex_index::IndexBuilder;
 use logex_server::grpc::LogExGrpcService;
 use logex_server::grpc::pb::QueryRequest;
@@ -16,6 +17,16 @@ use tonic::Request;
 #[tokio::test]
 #[ignore = "explicit release gRPC benchmark; see docs/audit/grpc-query-locks.md"]
 async fn benchmark_grpc_query_latency() {
+    benchmark_query_latency(false).await;
+}
+
+#[tokio::test]
+#[ignore = "explicit release REST benchmark; see docs/audit/query-cancellation.md"]
+async fn benchmark_rest_query_latency() {
+    benchmark_query_latency(true).await;
+}
+
+async fn benchmark_query_latency(rest: bool) {
     let rows: Vec<_> = (0..20_000_u32)
         .map(|index| {
             let block = 15_000_000 + u64::from(index / 128);
@@ -68,7 +79,7 @@ async fn benchmark_grpc_query_latency() {
         None,
         SyncStatus::default(),
     ));
-    let service = LogExGrpcService::new(state);
+    let service = LogExGrpcService::new(state.clone());
     let expected_page: Vec<_> = rows.iter().rev().take(1000).map(|r| json!({
         "block_number":r.block_number,"block_hash":r.block_hash.to_string(),"timestamp":r.timestamp,
         "tx_hash":r.tx_hash.to_string(),"tx_index":r.tx_index,"log_index":r.log_index,
@@ -96,27 +107,49 @@ async fn benchmark_grpc_query_latency() {
     println!(
         "{}",
         json!({"kind":"config","rows":rows.len(),"repeats":50,"segment_rows":8192,"batch_rows":4096,
-        "fixture_digest":keccak256(serde_json::to_vec(&rows).unwrap()).to_string()})
+        "fixture_digest":keccak256(serde_json::to_vec(&rows).unwrap()).to_string(),
+        "protocol":if rest { "rest" } else { "grpc" }})
     );
     for iteration in 0..=50 {
         for offset in 0..queries.len() {
             let (metric, sql, expected) = &queries[(iteration + offset) % queries.len()];
             let start = Instant::now();
-            let result = service
-                .query(Request::new(QueryRequest {
-                    sql: (*sql).to_owned(),
-                    ..Default::default()
-                }))
-                .await
-                .unwrap()
-                .into_inner();
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
-            assert_eq!(result.row_count as usize, expected.len());
-            let values: Vec<Value> = result
-                .rows
-                .iter()
-                .map(|row| serde_json::from_str(&row.json).unwrap())
-                .collect();
+            let (values, row_count, elapsed_ms) = if rest {
+                let response = logex_server::rest::handle_query(
+                    State(state.clone()),
+                    Json(logex_server::rest::QueryRequest {
+                        sql: (*sql).to_owned(),
+                        limit: None,
+                        offset: 0,
+                    }),
+                )
+                .await;
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                let result: logex_server::rest::QueryResponse =
+                    serde_json::from_slice(&body).unwrap();
+                (result.rows, result.row_count, elapsed_ms)
+            } else {
+                let result = service
+                    .query(Request::new(QueryRequest {
+                        sql: (*sql).to_owned(),
+                        ..Default::default()
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+                let values: Vec<Value> = result
+                    .rows
+                    .iter()
+                    .map(|row| serde_json::from_str(&row.json).unwrap())
+                    .collect();
+                (values, result.row_count as usize, elapsed_ms)
+            };
+            assert_eq!(row_count, expected.len());
             assert_eq!(values, *expected);
             if iteration > 0 {
                 println!(

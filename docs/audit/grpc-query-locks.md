@@ -64,7 +64,8 @@ tests and the release node build. All 12 gRPC tests also pass in release mode.
 samples per shape/revision: median handler latency changes −1.94% to −1.15%,
 p95 −9.84% to −3.22%. Peak RSS median −1.70%, p95 +1.35%. No latency
 regression was measured; this is not a live-peer throughput claim. Implementation
-`47b75dee` awaits final PR/CI/merge.
+`47b75dee` and evidence `e5ede21f` merged in PR #136 as `73443007` after
+all six CI jobs passed (run `34672473779`).
 
 This milestone does not complete the remaining offline audit or establish
 live-sync/release readiness. All fixtures use temporary directories; production

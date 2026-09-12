@@ -822,6 +822,102 @@ mod tests {
         setup_storage_with_rows(&make_test_rows())
     }
 
+    fn setup_query_cancellation_state() -> (TempDir, Arc<AppState>) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        for row in make_test_rows() {
+            storage.write_batch(&[row]).unwrap();
+        }
+        storage.checkpoint().unwrap();
+        assert_eq!(storage.sealed_partitions().len(), 2);
+        (
+            tmp,
+            Arc::new(AppState::new(storage, None, SyncStatus::default())),
+        )
+    }
+
+    fn cancellation_test_query() -> Json<QueryRequest> {
+        Json(QueryRequest {
+            sql: "SELECT MAX(block_number) AS maximum, COUNT(*) AS total FROM logs".into(),
+            limit: None,
+            offset: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_rest_query_then_start_fresh_query() {
+        use std::task::Poll;
+
+        let (_tmp, state) = setup_query_cancellation_state();
+        let mut pending = Box::pin(handle_query(
+            State(state.clone()),
+            cancellation_test_query(),
+        ));
+        // Two DataFusion input partitions yield while their tasks have not yet
+        // run on this current-thread runtime; no sleep or timing threshold.
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let busy = handle_query(State(state.clone()), cancellation_test_query()).await;
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        assert!(handle_query_cancel(State(state.clone())).await.canceled);
+        let response = pending.await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error":"query canceled"})
+        );
+        assert!(!state.query_control.cancel_active());
+        let response = handle_query(State(state), cancellation_test_query()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            result.rows,
+            vec![serde_json::json!({"maximum":200,"total":2})]
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_rest_query_releases_admission() {
+        use std::task::Poll;
+
+        let (_tmp, state) = setup_query_cancellation_state();
+        let mut pending = Box::pin(handle_query(
+            State(state.clone()),
+            cancellation_test_query(),
+        ));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(pending);
+        assert!(!state.query_control.cancel_active());
+        let response = handle_query(State(state), cancellation_test_query()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let result: QueryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            result.rows,
+            vec![serde_json::json!({"maximum":200,"total":2})]
+        );
+    }
+
     fn basic_auth_header(password: &str) -> String {
         let credentials = format!("logex:{password}");
         format!(
