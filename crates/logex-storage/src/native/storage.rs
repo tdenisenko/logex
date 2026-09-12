@@ -3,6 +3,7 @@ use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use alloy_consensus::{BlockHeader, Header};
@@ -45,6 +46,27 @@ enum CompactionOrder {
 
 #[derive(Debug)]
 struct DataDirectoryLock(File);
+
+/// Optimistic validity of a captured read view. Appends and compaction preserve
+/// existing row positions; callers must also retain each segment's row boundary.
+/// Canonical changes invalidate the token before mutation. Closing storage also
+/// invalidates it, so a later reopen cannot silently change an existing view.
+#[derive(Debug, Clone)]
+pub struct ReadViewToken(Arc<AtomicBool>);
+
+impl ReadViewToken {
+    pub fn is_valid(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct ReadViewEpoch(Arc<AtomicBool>);
+
+impl Drop for ReadViewEpoch {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 impl Drop for DataDirectoryLock {
     fn drop(&mut self) {
@@ -181,6 +203,8 @@ struct PendingIngestion {
 }
 
 pub struct NativeStorage {
+    // Drop the validity owner before releasing files or directory exclusivity.
+    read_view: ReadViewEpoch,
     config: NativeStorageConfig,
     paths: StorageCatalogPaths,
     catalog: NativeStorageCatalog,
@@ -229,6 +253,7 @@ impl NativeStorage {
             pending_ingestion: None,
             published_ingestion: None,
             directory_lock,
+            read_view: ReadViewEpoch(Arc::new(AtomicBool::new(true))),
         };
 
         storage.verify_recovery_evidence()?;
@@ -247,6 +272,10 @@ impl NativeStorage {
 
     pub fn data_dir(&self) -> &Path {
         self.paths.root()
+    }
+
+    pub fn read_view_token(&self) -> ReadViewToken {
+        ReadViewToken(Arc::clone(&self.read_view.0))
     }
 
     pub fn sync_head(&self) -> Option<SyncHead> {
@@ -1396,6 +1425,7 @@ impl NativeStorage {
         self.recovery_required = true;
         let mut total_marked = 0u64;
         let mut changed_bundles = Vec::new();
+        let mut view_invalidated = false;
 
         for descriptor in &mut self.catalog.segments {
             if descriptor.row_count == 0 {
@@ -1423,6 +1453,10 @@ impl NativeStorage {
             }
 
             if modified {
+                if !view_invalidated {
+                    self.read_view = ReadViewEpoch(Arc::new(AtomicBool::new(false)));
+                    view_invalidated = true;
+                }
                 if let Some(reference) = &descriptor.column_bundle {
                     descriptor.column_bundle = Some(super::segment::append_bundled_canonical(
                         &dir,
@@ -1446,6 +1480,10 @@ impl NativeStorage {
             )?;
         }
         self.recovery_required = false;
+        if view_invalidated {
+            // Failed publication leaves the new view invalid until reopen.
+            self.read_view.0.store(true, Ordering::SeqCst);
+        }
         Ok(total_marked)
     }
 
@@ -2612,6 +2650,54 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn read_views_invalidate_on_reorg_failure_and_close_but_not_append_or_noop() {
+        for bundled in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let initial = storage.read_view_token();
+            let header = ingestion_header(100, B256::ZERO);
+            let rows = ingestion_rows(2, &header);
+            if bundled {
+                ingest_test_initial_batch(&mut storage, false, &rows, &header).unwrap();
+            } else {
+                storage.write_batch(&rows).unwrap();
+            }
+            storage.checkpoint_durable().unwrap();
+            assert!(initial.is_valid());
+            assert_eq!(
+                storage.mark_non_canonical(B256::repeat_byte(0xee)).unwrap(),
+                0
+            );
+            assert!(initial.is_valid());
+            durability::inject_failure(0);
+            let failed = storage.mark_non_canonical(header.hash_slow());
+            let events = durability::take_events();
+            assert!(failed.is_err(), "{events:?}");
+            assert!(
+                !initial.is_valid(),
+                "invalidated before the first canonical write: {events:?}"
+            );
+            assert!(!storage.read_view_token().is_valid());
+            drop(storage);
+            let mut storage = NativeStorage::open(config).unwrap();
+            let recovered = storage.read_view_token();
+            assert!(recovered.is_valid());
+            assert_eq!(storage.mark_non_canonical(header.hash_slow()).unwrap(), 2);
+            assert!(!recovered.is_valid());
+            let current = storage.read_view_token();
+            assert!(current.is_valid());
+            assert_eq!(storage.mark_non_canonical(header.hash_slow()).unwrap(), 0);
+            assert!(current.is_valid());
+            drop(storage);
+            assert!(!current.is_valid());
+        }
+    }
 
     fn make_rows(count: usize, start_block: u64) -> Vec<LogRow> {
         (0..count)

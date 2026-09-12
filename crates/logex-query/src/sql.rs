@@ -48,6 +48,8 @@ pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlQueryError {
+    #[error("query snapshot changed during a reorg or storage restart; retry")]
+    SnapshotChanged,
     #[error("storage error: {0}")]
     Storage(#[from] std::io::Error),
     #[error("sql error: {0}")]
@@ -158,8 +160,9 @@ impl TableProvider for LogexTableProvider {
                 continue;
             }
 
-            let mut row_ids = candidate_row_ids(&partition.path, &filter, true)
-                .map_err(DataFusionError::IoError)?;
+            let mut row_ids =
+                candidate_row_ids(&partition.path, &filter, true, partition.row_count)
+                    .map_err(DataFusionError::IoError)?;
             if row_ids.is_empty() {
                 continue;
             }
@@ -407,6 +410,32 @@ pub async fn execute_sql_page_on_snapshot(
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
 ) -> Result<SqlQueryResult, SqlQueryError> {
+    let validity = snapshot.validity.clone();
+    if validity.as_ref().is_some_and(|token| !token.is_valid()) {
+        return Err(SqlQueryError::SnapshotChanged);
+    }
+    let view_check = validity.clone();
+    let cancel_check: Option<QueryCancelCheck> = Some(Arc::new(move || {
+        cancel_check.as_ref().is_some_and(|check| check())
+            || view_check.as_ref().is_some_and(|token| !token.is_valid())
+    }));
+    let result =
+        execute_sql_page_on_snapshot_inner(sql, snapshot, head_block, page, cancel_check).await;
+    // Validate even after errors: a changed view is retryable, and no partial
+    // aggregate/page produced across a reorg may become a successful result.
+    if validity.as_ref().is_some_and(|token| !token.is_valid()) {
+        return Err(SqlQueryError::SnapshotChanged);
+    }
+    result
+}
+
+async fn execute_sql_page_on_snapshot_inner(
+    sql: &str,
+    snapshot: StorageSnapshot,
+    head_block: u64,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+) -> Result<SqlQueryResult, SqlQueryError> {
     let SqlQueryPage { limit, offset } = page;
     if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
@@ -522,11 +551,18 @@ fn execute_native_sql_filter(
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
                 let path = partition.path.clone();
+                let visible_rows = partition.row_count;
                 let filter = filter.clone();
                 let cancel_check = cancel_check.cloned();
                 let limit = scan_limit;
                 handles.push(scope.spawn(move || {
-                    scan_native_sql_partition(&path, &filter, limit, cancel_check.as_ref())
+                    scan_native_sql_partition(
+                        &path,
+                        &filter,
+                        limit,
+                        cancel_check.as_ref(),
+                        visible_rows,
+                    )
                 }));
             }
             handles
@@ -577,6 +613,7 @@ fn scan_native_sql_partition(
     filter: &NativeLogFilter,
     limit: Option<usize>,
     cancel_check: Option<&QueryCancelCheck>,
+    visible_rows: u64,
 ) -> std::io::Result<Vec<logex_types::LogRow>> {
     if cancel_check.is_some_and(|is_canceled| is_canceled()) {
         return Err(std::io::Error::new(
@@ -584,7 +621,7 @@ fn scan_native_sql_partition(
             "query canceled",
         ));
     }
-    let mut row_ids = candidate_row_ids(path, filter, true)?;
+    let mut row_ids = candidate_row_ids(path, filter, true, visible_rows)?;
     if row_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -738,6 +775,7 @@ enum NativeGroupKey {
 
 #[derive(Clone)]
 struct NativeDataSumPartitionScan {
+    visible_rows: u64,
     filter: NativeLogFilter,
     candidate_filters: Vec<NativeLogFilter>,
     selection: Option<SqlAstExpr>,
@@ -1072,10 +1110,17 @@ fn execute_native_count_aggregate(
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
                 let path = partition.path.clone();
+                let visible_rows = partition.row_count;
                 let filter = filter.clone();
                 let cancel_check = cancel_check.cloned();
                 handles.push(scope.spawn(move || {
-                    scan_native_count_partition(&path, &filter, group_by, cancel_check.as_ref())
+                    scan_native_count_partition(
+                        &path,
+                        &filter,
+                        group_by,
+                        cancel_check.as_ref(),
+                        visible_rows,
+                    )
                 }));
             }
             handles
@@ -1110,6 +1155,7 @@ fn scan_native_count_partition(
     filter: &NativeLogFilter,
     group_by: NativeCountGroupBy,
     cancel_check: Option<&QueryCancelCheck>,
+    visible_rows: u64,
 ) -> std::io::Result<(BTreeMap<u8, u64>, u64)> {
     if cancel_check.is_some_and(|is_canceled| is_canceled()) {
         return Err(std::io::Error::new(
@@ -1117,7 +1163,7 @@ fn scan_native_count_partition(
             "query canceled",
         ));
     }
-    let row_ids = candidate_row_ids(path, filter, true)?;
+    let row_ids = candidate_row_ids(path, filter, true, visible_rows)?;
     if row_ids.is_empty() {
         return Ok((BTreeMap::new(), 0));
     }
@@ -1703,6 +1749,7 @@ fn execute_native_data_sum(
             for partition in chunk {
                 let path = partition.path.clone();
                 let scan = NativeDataSumPartitionScan {
+                    visible_rows: partition.row_count,
                     filter: filter.clone(),
                     candidate_filters: candidate_filters.to_vec(),
                     selection: selection.cloned(),
@@ -1804,6 +1851,7 @@ fn scan_native_data_sum_partition(
                 candidate_filter,
                 true,
                 bloom_exclusions.is_some(),
+                scan.visible_rows,
             )?
         };
         row_bitmap.extend(row_ids);
@@ -4292,6 +4340,61 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn lazy_batches_preserve_captured_rows_across_append_and_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let count = DATAFUSION_BATCH_SIZE * 2 + 1;
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_owned(),
+            partition_target_rows: count as u64,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let template = make_test_rows().remove(0);
+        let rows: Vec<_> = (0..count)
+            .map(|i| LogRow {
+                log_index: i as u32,
+                ..template.clone()
+            })
+            .collect();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint().unwrap();
+        let path = storage.sealed_partitions()[0].meta.path.clone();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "log_index",
+            DataType::UInt64,
+            false,
+        )]));
+        let mut generator = LogSegmentBatchGenerator::new(
+            path,
+            schema,
+            vec!["log_index".to_owned()],
+            (0..count as u32).collect(),
+            None,
+        );
+        let first = generator.generate_next_batch().unwrap().unwrap();
+        assert_eq!(first.num_rows(), DATAFUSION_BATCH_SIZE);
+        storage
+            .write_batch(&[LogRow {
+                block_number: 101,
+                ..template
+            }])
+            .unwrap();
+        storage.checkpoint().unwrap();
+        assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
+        let mut batches = vec![first];
+        while let Some(batch) = generator.generate_next_batch().unwrap() {
+            batches.push(batch);
+        }
+        assert_eq!(batches.len(), 3);
+        assert_eq!(
+            record_batches_to_json(&batches),
+            (0..count)
+                .map(|i| serde_json::json!({"log_index":i}))
+                .collect::<Vec<_>>()
+        );
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![

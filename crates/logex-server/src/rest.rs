@@ -100,6 +100,15 @@ pub async fn handle_query(
     .await
     {
         Ok(r) => r,
+        Err(error @ SqlQueryError::SnapshotChanged) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+                .into_response();
+        }
         Err(SqlQueryError::DataFusion(e))
             if query_guard.was_canceled() || e.to_string().contains("query canceled") =>
         {
