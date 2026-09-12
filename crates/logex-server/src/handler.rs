@@ -1,5 +1,5 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::response::Json;
@@ -45,72 +45,64 @@ impl AppState {
 
 #[derive(Debug, Default)]
 pub(crate) struct QueryControl {
-    next_query_id: AtomicU64,
-    active_query_id: AtomicU64,
-    cancel_requested: AtomicBool,
+    // Admission, cancellation and completion share one linearization point.
+    // The query's hot cancellation checks only read its own atomic token.
+    // Critical sections only replace owned pointers/read or write atomics; no
+    // user code runs under the lock, so recovering its value after poison is safe.
+    active: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl QueryControl {
     pub(crate) fn start(self: &Arc<Self>) -> Option<ActiveQueryGuard> {
-        let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed) + 1;
-        if self
-            .active_query_id
-            .compare_exchange(0, query_id, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
+        if active.is_some() {
             return None;
         }
-        self.cancel_requested.store(false, Ordering::Release);
+        let canceled = Arc::new(AtomicBool::new(false));
+        *active = Some(Arc::clone(&canceled));
         Some(ActiveQueryGuard {
             control: Arc::clone(self),
-            query_id,
+            canceled,
         })
     }
 
     pub(crate) fn cancel_active(&self) -> bool {
-        let active = self.active_query_id.load(Ordering::Acquire) != 0;
-        if active {
-            self.cancel_requested.store(true, Ordering::Release);
+        let active = self.active.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(canceled) = active.as_ref() {
+            canceled.store(true, Ordering::Release);
         }
-        active
-    }
-
-    fn finish(&self, query_id: u64) {
-        if self
-            .active_query_id
-            .compare_exchange(query_id, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.cancel_requested.store(false, Ordering::Release);
-        }
-    }
-
-    fn is_canceled(&self, query_id: u64) -> bool {
-        self.active_query_id.load(Ordering::Acquire) != query_id
-            || self.cancel_requested.load(Ordering::Acquire)
+        active.is_some()
     }
 }
 
 pub(crate) struct ActiveQueryGuard {
     control: Arc<QueryControl>,
-    query_id: u64,
+    canceled: Arc<AtomicBool>,
 }
 
 impl ActiveQueryGuard {
     pub(crate) fn cancel_check(&self) -> logex_query::QueryCancelCheck {
-        let control = Arc::clone(&self.control);
-        let query_id = self.query_id;
-        Arc::new(move || control.is_canceled(query_id))
+        let canceled = Arc::clone(&self.canceled);
+        Arc::new(move || canceled.load(Ordering::Acquire))
     }
 
     pub(crate) fn was_canceled(&self) -> bool {
-        self.control.is_canceled(self.query_id)
+        self.canceled.load(Ordering::Acquire)
     }
 }
 
 impl Drop for ActiveQueryGuard {
     fn drop(&mut self) {
-        self.control.finish(self.query_id);
+        let mut active = self
+            .control
+            .active
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        // Retained checks/tasks stay canceled after their request is dropped.
+        // This token is never reused or reset for a later request.
+        self.canceled.store(true, Ordering::Release);
+        // Admission permits exactly one non-cloneable guard until this drop.
+        *active = None;
     }
 }
 
@@ -207,6 +199,140 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::eth_filter::{AddressFilter, BlockId};
+
+    #[test]
+    fn acknowledged_query_cancellation_survives_concurrent_start() {
+        use std::sync::Barrier;
+
+        let control = Arc::new(QueryControl::default());
+        let start = Barrier::new(2);
+        let canceled = Barrier::new(2);
+        let mut lost = 0;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..20_000 {
+                    start.wait();
+                    while !control.cancel_active() {
+                        std::hint::spin_loop();
+                    }
+                    canceled.wait();
+                }
+            });
+            for _ in 0..20_000 {
+                start.wait();
+                let query = control.start().unwrap();
+                canceled.wait();
+                // Cancellation has returned true, the query still owns its
+                // slot, and there is no other client that could finish it.
+                if !query.was_canceled() {
+                    lost += 1;
+                }
+                drop(query);
+            }
+        });
+        assert_eq!(lost, 0, "acknowledged cancellations must remain observable");
+    }
+
+    #[test]
+    fn finishing_previous_query_cannot_clear_new_query_cancellation() {
+        use std::sync::Barrier;
+
+        let control = Arc::new(QueryControl::default());
+        let ready = Barrier::new(2);
+        let finished = Barrier::new(2);
+        let next = Barrier::new(2);
+        let mut lost = 0;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..20_000 {
+                    let previous = control.start().unwrap();
+                    ready.wait();
+                    drop(previous);
+                    finished.wait();
+                    next.wait();
+                }
+            });
+            for _ in 0..20_000 {
+                ready.wait();
+                let query = loop {
+                    if let Some(query) = control.start() {
+                        break query;
+                    }
+                    std::hint::spin_loop();
+                };
+                assert!(control.cancel_active());
+                finished.wait();
+                if !query.was_canceled() {
+                    lost += 1;
+                }
+                drop(query);
+                next.wait();
+            }
+        });
+        assert_eq!(lost, 0, "previous completion must not erase cancellation");
+    }
+
+    #[test]
+    fn query_cancellation_tokens_are_permanent_and_isolated() {
+        let control = Arc::new(QueryControl::default());
+        assert!(!control.cancel_active());
+        let first = control.start().unwrap();
+        let first_check = first.cancel_check();
+        assert!(!first_check());
+        assert!(control.start().is_none());
+        drop(first);
+        assert!(first_check(), "abandoned work must stay canceled");
+        assert!(!control.cancel_active());
+
+        let second = control.start().unwrap();
+        let second_check = second.cancel_check();
+        assert!(!second_check());
+        assert!(first_check());
+        assert!(control.cancel_active());
+        assert!(control.cancel_active(), "cancellation is idempotent");
+        assert!(second_check());
+        assert!(control.start().is_none(), "cancel is not completion");
+        drop(second);
+        let third = control.start().unwrap();
+        assert!(!third.was_canceled());
+        assert!(first_check() && second_check());
+    }
+
+    #[test]
+    fn concurrent_query_admission_has_exactly_one_owner() {
+        use std::sync::Barrier;
+
+        let control = Arc::new(QueryControl::default());
+        let start = Barrier::new(9);
+        let admitted = Barrier::new(9);
+        let canceled = Barrier::new(9);
+        let owners = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        let query = control.start();
+                        admitted.wait();
+                        canceled.wait();
+                        if let Some(query) = query {
+                            assert!(query.was_canceled());
+                            1
+                        } else {
+                            0
+                        }
+                    })
+                })
+                .collect();
+            start.wait();
+            admitted.wait();
+            assert!(control.cancel_active());
+            canceled.wait();
+            handles.into_iter().map(|h| h.join().unwrap()).sum::<u32>()
+        });
+        assert_eq!(owners, 1);
+        assert!(!control.cancel_active());
+        assert!(control.start().is_some());
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![

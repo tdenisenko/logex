@@ -1,0 +1,35 @@
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-server v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-server)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-server` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.66s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-server/a25691344de63286/out/logex_server-a25691344de63286)
+
+running 1 test
+test handler::tests::acknowledged_query_cancellation_survives_concurrent_start ... FAILED
+
+failures:
+
+---- handler::tests::acknowledged_query_cancellation_survives_concurrent_start stdout ----
+
+thread 'handler::tests::acknowledged_query_cancellation_survives_concurrent_start' (56596615) panicked at crates/logex-server/src/handler.rs:241:9:
+assertion `left == right` failed: acknowledged cancellations must remain observable
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    handler::tests::acknowledged_query_cancellation_survives_concurrent_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 83 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p logex-server --lib`
