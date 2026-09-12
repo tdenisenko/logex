@@ -4,7 +4,8 @@ Base: `2d443187` (merged PR #143). Implementation `b4522da9` corrects the
 immediate table check for declared common table expressions (CTEs). Direct
 review, focused checks, all six required local gates and additional release
 correctness checks pass. Fresh release reference and paired performance
-acceptance also pass; exact-head CI and merge remain required.
+acceptance also pass. All six final-head CI jobs passed; PR #144 merged as
+`c78e519c`.
 
 ## Confirmed finding
 
@@ -117,7 +118,15 @@ retains all 2,500 latency samples and ten process-memory observations. The
 and [all six fresh-build logs](baselines/2026-09-12-sql-query-scope-build-logs.json.gz)
 are also retained. All compressed artifacts round-trip exactly, and summaries
 were independently recalculated from raw samples. Compressed/decoded hashes
-are in the release record. Exact-head CI and merge remain outstanding.
+are in the release record.
+
+The [final CI record](baselines/2026-09-12-sql-query-scope-ci-final.json) confirms
+all six jobs passed on final head `b2762fd1`, run `34706024807`, including Linux
+and macOS tests, without retries. The [preceding evidence head](baselines/2026-09-12-sql-query-scope-ci-initial.json)
+`b8e1dc45` also passed all six jobs in run `34705859792`. The final commit only
+clarified validation labels; all 101 validated source/configuration hashes remain
+unchanged. [PR #144](https://github.com/tdenisenko/logex/pull/144) merged as
+`c78e519c` on 2026-09-12. The local merge tree matches the reviewed final head.
 
 ## Cleanup and remaining work
 

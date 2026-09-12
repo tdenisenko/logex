@@ -1,0 +1,380 @@
+{
+  "environment": {
+    "kind": "rest_confirmation_environment",
+    "initial_environment": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/environment.json",
+    "initial_environment_sha256": "74f3de0b2e3a2c5cda5ab73ad2ca3bcc42e3eef2282a0823f605e7b5a0aa9c61",
+    "initial_results": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/results.jsonl",
+    "initial_results_sha256": "c54e2acfc54717459df9287bd74c8f652dc8097a30d88b5efe57152808c4b556",
+    "base_commit": "c78e519cabca8be3eb78822677ef86d3b3a774f9",
+    "candidate_commit": "fe400c7f041e76556d1e7343c76e9edd4c2269fd",
+    "binary_sha256": {
+      "base": "c011a0cf1e24a7a5502652a47c7e8dc8d842a522a7b6ab36c5e99bf589ad569d",
+      "candidate": "4b92ee7b1ccdab647f362c9dd812a20fcf4ffae7e4a188898f8ac6e91a90d9a5"
+    },
+    "fixture_path": "crates/logex-server/tests/query_latency.rs",
+    "fixture_sha256": "a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3",
+    "fixture_digest": "0x8ca8bf60cc64f61261348c1e2d52bd8232bc102a2ef3f13d7343e0acb36d6e68",
+    "initial_native_count_change_percent": {
+      "median": 1.211616304733032,
+      "p95": 5.385590082972658
+    },
+    "original_environment": {
+      "hardware": "Mac14,15\n17179869184\n8",
+      "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+      "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+      "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+      "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   813Gi    83Gi    91%    6.0M  875M    1%   /System/Volumes/Data"
+    },
+    "current_environment": {
+      "hardware": "Mac14,15\n17179869184\n8",
+      "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+      "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+      "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+      "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   814Gi    83Gi    91%    6.0M  867M    1%   /System/Volumes/Data"
+    },
+    "conditions": "REST-only confirmation reuses the exact immutable base and candidate query_latency release binaries and unchanged query_latency fixture from the initial acceptance. Five sequential alternating pairs continue as pair indexes 5 through 9, starting candidate-first, with 50 samples for each of the same five shapes per process. All 2,500 confirmation latency samples, 10 RSS records, full logs and /usr/bin/time -l counters are retained. Initial, confirmation and combined datasets are separate; the original results remain unchanged and the initial native_count +5.385590% p95 result is retained. No exclusions, metadata repeat, rebuild, concurrent process, cache eviction, production data, external target, network service, volume or live peer is used.",
+    "runner": "\"\"\"Confirm REST latency using immutable binaries from the syntax acceptance run.\"\"\"\nfrom pathlib import Path\nimport hashlib\nimport json\nimport math\nimport os\nimport re\nimport statistics\nimport subprocess\nimport sys\n\n\nREPO = Path('/Users/tdenisenko/code/logex')\nINITIAL = Path('/private/tmp/logex-sql-syntax-eligibility-acceptance-1')\nROOT = Path(sys.argv[1])\nROOT.mkdir(exist_ok=False)\n\nBASE = 'c78e519cabca8be3eb78822677ef86d3b3a774f9'\nCANDIDATE = 'fe400c7f041e76556d1e7343c76e9edd4c2269fd'\nREST_FIXTURE = Path('crates/logex-server/tests/query_latency.rs')\nINITIAL_ENV_SHA256 = '74f3de0b2e3a2c5cda5ab73ad2ca3bcc42e3eef2282a0823f605e7b5a0aa9c61'\nINITIAL_RESULTS_SHA256 = 'c54e2acfc54717459df9287bd74c8f652dc8097a30d88b5efe57152808c4b556'\nREST_FIXTURE_SHA256 = 'a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3'\nBINARY_SHA256 = {\n    'base': 'c011a0cf1e24a7a5502652a47c7e8dc8d842a522a7b6ab36c5e99bf589ad569d',\n    'candidate': '4b92ee7b1ccdab647f362c9dd812a20fcf4ffae7e4a188898f8ac6e91a90d9a5',\n}\nMETRICS = [\n    'datafusion_aggregate',\n    'expression_chain',\n    'literal_in_list',\n    'native_count',\n    'native_wide_page',\n]\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef percentile_95(values):\n    return sorted(values)[math.ceil(len(values) * .95) - 1]\n\n\ndef time_record(log, revision, pair):\n    lines = log.read_text().splitlines()\n    start = next(\n        index for index, line in enumerate(lines)\n        if re.match(r'^\\s*[0-9.]+ real\\s+[0-9.]+ user\\s+[0-9.]+ sys\\s*$', line)\n    )\n    time_lines = lines[start:]\n    timing = re.match(\n        r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$',\n        time_lines[0],\n    )\n    assert timing is not None, log\n    counters = {\n        'real_seconds': float(timing.group(1)),\n        'user_seconds': float(timing.group(2)),\n        'sys_seconds': float(timing.group(3)),\n    }\n    for line in time_lines[1:]:\n        match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n        assert match is not None, (log, line)\n        counters[match.group(2).replace(' ', '_')] = int(match.group(1))\n    return {\n        'kind': 'rest_confirmation_time_counters',\n        'dataset': 'confirmation',\n        'revision': revision,\n        'pair': pair,\n        'log': str(log),\n        'counters': counters,\n        'raw_time_output': '\\n'.join(time_lines),\n    }\n\n\ndef config_signature(record):\n    return {\n        key: value for key, value in record.items()\n        if key not in {'suite', 'pair', 'revision', 'dataset'}\n    }\n\n\ndef runtime_records(records):\n    return [record for record in records if record.get('kind') in {'config', 'sample', 'rss'}]\n\n\ndef summary(records, dataset, expected_samples_per_metric, expected_rss):\n    summaries = []\n    samples = [record for record in records if record.get('kind') == 'sample']\n    rss = [record for record in records if record.get('kind') == 'rss']\n    assert sorted({record['metric'] for record in samples}) == METRICS\n    for metric in [*METRICS, 'peak_rss']:\n        values = {\n            revision: [\n                record['bytes'] if metric == 'peak_rss' else record['elapsed_ms']\n                for record in (rss if metric == 'peak_rss' else samples)\n                if record['revision'] == revision\n                and (metric == 'peak_rss' or record['metric'] == metric)\n            ]\n            for revision in ['base', 'candidate']\n        }\n        expected = expected_rss if metric == 'peak_rss' else expected_samples_per_metric\n        assert all(len(items) == expected for items in values.values()), (dataset, metric)\n        medians = {\n            revision: statistics.median(items) for revision, items in values.items()\n        }\n        tails = {\n            revision: percentile_95(items) for revision, items in values.items()\n        }\n        summaries.append({\n            'kind': 'rest_dataset_summary',\n            'dataset': dataset,\n            'metric': metric,\n            'samples_per_revision': expected,\n            'median': medians,\n            'p95': tails,\n            'median_change_percent': 100 * (medians['candidate'] / medians['base'] - 1),\n            'p95_change_percent': 100 * (tails['candidate'] / tails['base'] - 1),\n        })\n    return summaries\n\n\ndef pair_summaries(records, dataset, pairs):\n    summaries = []\n    for pair in pairs:\n        pair_records = [record for record in records if record.get('pair') == pair]\n        samples = [record for record in pair_records if record.get('kind') == 'sample']\n        rss = [record for record in pair_records if record.get('kind') == 'rss']\n        for metric in [*METRICS, 'peak_rss']:\n            values = {\n                revision: [\n                    record['bytes'] if metric == 'peak_rss' else record['elapsed_ms']\n                    for record in (rss if metric == 'peak_rss' else samples)\n                    if record['revision'] == revision\n                    and (metric == 'peak_rss' or record['metric'] == metric)\n                ]\n                for revision in ['base', 'candidate']\n            }\n            expected = 1 if metric == 'peak_rss' else 50\n            assert all(len(items) == expected for items in values.values()), (pair, metric)\n            medians = {\n                revision: statistics.median(items) for revision, items in values.items()\n            }\n            tails = {\n                revision: percentile_95(items) for revision, items in values.items()\n            }\n            summaries.append({\n                'kind': 'rest_pair_summary',\n                'dataset': dataset,\n                'pair': pair,\n                'metric': metric,\n                'samples_per_revision': expected,\n                'median': medians,\n                'p95': tails,\n                'median_change_percent': 100 * (medians['candidate'] / medians['base'] - 1),\n                'p95_change_percent': 100 * (tails['candidate'] / tails['base'] - 1),\n            })\n    return summaries\n\n\ndef write_records(path, records):\n    with path.open('w') as stream:\n        for record in records:\n            stream.write(json.dumps(record) + '\\n')\n\n\ninitial_environment_path = INITIAL / 'environment.json'\ninitial_results_path = INITIAL / 'results.jsonl'\nassert sha(initial_environment_path) == INITIAL_ENV_SHA256\nassert sha(initial_results_path) == INITIAL_RESULTS_SHA256\n\ninitial_environment = json.loads(initial_environment_path.read_text())\nassert initial_environment['base_commit'] == BASE\nassert initial_environment['candidate_commit'] == CANDIDATE\nassert initial_environment['results_jsonl']['sha256'] == INITIAL_RESULTS_SHA256\nassert initial_environment['fixture_sha256'][str(REST_FIXTURE)] == REST_FIXTURE_SHA256\nassert sha(REPO / REST_FIXTURE) == REST_FIXTURE_SHA256\nfor revision, commit in [('base', BASE), ('candidate', CANDIDATE)]:\n    binary = INITIAL / f'{revision}-query_latency'\n    assert sha(binary) == BINARY_SHA256[revision]\n    assert initial_environment['builds'][revision]['query_latency']['binary_sha256'] == BINARY_SHA256[revision]\n    assert initial_environment['builds'][revision]['fixture_sha256'][str(REST_FIXTURE)] == REST_FIXTURE_SHA256\n    assert sha(INITIAL / f'{revision}-source' / REST_FIXTURE) == REST_FIXTURE_SHA256\n    assert hashlib.sha256(subprocess.check_output(\n        ['git', 'show', f'{commit}:{REST_FIXTURE}'], cwd=REPO,\n    )).hexdigest() == REST_FIXTURE_SHA256\n\ncurrent_environment = {\n    'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']),\n    'rustc': output(['rustc', '-Vv']),\n    'cargo': output(['cargo', '-V']),\n    'filesystem': output(['df', '-h', '/private/tmp']),\n}\nfor field in ['hardware', 'os', 'rustc', 'cargo']:\n    assert current_environment[field] == initial_environment[field], field\n\nall_initial_records = [\n    json.loads(line) for line in initial_results_path.read_text().splitlines()\n]\ninitial_rest_records = [\n    record for record in all_initial_records\n    if record.get('suite') == 'rest' or str(record.get('kind', '')).startswith('rest_')\n]\ninitial_runtime = runtime_records(initial_rest_records)\ninitial_samples = [record for record in initial_runtime if record['kind'] == 'sample']\ninitial_configs = [record for record in initial_runtime if record['kind'] == 'config']\ninitial_rss = [record for record in initial_runtime if record['kind'] == 'rss']\nassert len(initial_samples) == 2_500\nassert len(initial_configs) == 10\nassert len(initial_rss) == 10\nassert {record['pair'] for record in initial_runtime} == set(range(5))\nassert len({record['fixture_digest'] for record in initial_configs}) == 1\nassert all(record['shapes'] == 5 and record['repeats'] == 50 for record in initial_configs)\ninitial_config_signature = config_signature(initial_configs[0])\nassert all(config_signature(record) == initial_config_signature for record in initial_configs)\nfor record in initial_rest_records:\n    if record.get('kind') == 'rest_run':\n        assert sha(Path(record['log'])) == record['log_sha256'], record['log']\n\ninitial_summaries = summary(initial_runtime, 'initial', 250, 5)\ninitial_native_count = next(\n    record for record in initial_summaries if record['metric'] == 'native_count'\n)\nassert abs(initial_native_count['median_change_percent'] - 1.211616304733032) < 1e-12\nassert abs(initial_native_count['p95_change_percent'] - 5.385590082972658) < 1e-12\ninitial_pair_summaries = pair_summaries(initial_runtime, 'initial', range(5))\n\ninitial_dataset = [{\n    'kind': 'rest_dataset_provenance',\n    'dataset': 'initial',\n    'source_results': str(initial_results_path),\n    'source_results_sha256': INITIAL_RESULTS_SHA256,\n    'source_environment': str(initial_environment_path),\n    'source_environment_sha256': INITIAL_ENV_SHA256,\n    'records': len(initial_rest_records),\n    'samples': 2_500,\n    'rss': 10,\n    'native_count_initial_median_change_percent': initial_native_count['median_change_percent'],\n    'native_count_initial_p95_change_percent': initial_native_count['p95_change_percent'],\n}]\ninitial_dataset.extend(\n    {'kind': 'source_record', 'dataset': 'initial', 'record': record}\n    for record in initial_rest_records\n)\ninitial_dataset.extend(initial_pair_summaries)\ninitial_dataset.extend(initial_summaries)\ninitial_dataset_path = ROOT / 'initial-rest-results.jsonl'\nwrite_records(initial_dataset_path, initial_dataset)\n\nconfirmation_environment = {\n    'kind': 'rest_confirmation_environment',\n    'initial_environment': str(initial_environment_path),\n    'initial_environment_sha256': INITIAL_ENV_SHA256,\n    'initial_results': str(initial_results_path),\n    'initial_results_sha256': INITIAL_RESULTS_SHA256,\n    'base_commit': BASE,\n    'candidate_commit': CANDIDATE,\n    'binary_sha256': BINARY_SHA256,\n    'fixture_path': str(REST_FIXTURE),\n    'fixture_sha256': REST_FIXTURE_SHA256,\n    'fixture_digest': initial_configs[0]['fixture_digest'],\n    'initial_native_count_change_percent': {\n        'median': initial_native_count['median_change_percent'],\n        'p95': initial_native_count['p95_change_percent'],\n    },\n    'original_environment': {\n        field: initial_environment[field]\n        for field in ['hardware', 'os', 'rustc', 'cargo', 'filesystem']\n    },\n    'current_environment': current_environment,\n    'conditions': 'REST-only confirmation reuses the exact immutable base and candidate '\n        'query_latency release binaries and unchanged query_latency fixture from the initial '\n        'acceptance. Five sequential alternating pairs continue as pair indexes 5 through 9, '\n        'starting candidate-first, with 50 samples for each of the same five shapes per process. '\n        'All 2,500 confirmation latency samples, 10 RSS records, full logs and /usr/bin/time -l '\n        'counters are retained. Initial, confirmation and combined datasets are separate; the '\n        'original results remain unchanged and the initial native_count +5.385590% p95 result is '\n        'retained. No exclusions, metadata repeat, rebuild, concurrent process, cache eviction, '\n        'production data, external target, network service, volume or live peer is used.',\n    'runner': Path(__file__).read_text(),\n}\n(ROOT / 'environment.json').write_text(json.dumps(confirmation_environment))\n\nconfirmation_records = [confirmation_environment]\nconfirmation_runtime = []\nfor offset, pair in enumerate(range(5, 10)):\n    order = ['candidate', 'base'] if offset % 2 == 0 else ['base', 'candidate']\n    for revision in order:\n        binary = INITIAL / f'{revision}-query_latency'\n        assert sha(binary) == BINARY_SHA256[revision]\n        command = [\n            '/usr/bin/time', '-l', str(binary),\n            'benchmark_rest_query_latency', '--exact', '--ignored', '--nocapture',\n            '--test-threads=1',\n        ]\n        log = ROOT / f'rest-confirmation-{pair}-{revision}.log'\n        with log.open('w') as stream:\n            result = subprocess.run(\n                command,\n                stdout=stream,\n                stderr=subprocess.STDOUT,\n                env=os.environ | {'TMPDIR': '/private/tmp'},\n            )\n        run = {\n            'kind': 'rest_confirmation_run',\n            'dataset': 'confirmation',\n            'pair': pair,\n            'revision': revision,\n            'command': command,\n            'exit': result.returncode,\n            'log': str(log),\n            'log_sha256': sha(log),\n            'binary_sha256': sha(binary),\n        }\n        confirmation_records.append(run)\n        assert result.returncode == 0, log\n        confirmation_records.append(time_record(log, revision, pair))\n\n        process_records = []\n        for line in log.read_text().splitlines():\n            record = None\n            if '{' in line:\n                try:\n                    record = json.loads(line[line.index('{'):])\n                except json.JSONDecodeError:\n                    continue\n            elif 'maximum resident set size' in line:\n                record = {'kind': 'rss', 'bytes': int(line.split()[0])}\n            if record is not None:\n                record |= {\n                    'suite': 'rest',\n                    'dataset': 'confirmation',\n                    'pair': pair,\n                    'revision': revision,\n                }\n                process_records.append(record)\n                confirmation_runtime.append(record)\n                confirmation_records.append(record)\n\n        samples = [record for record in process_records if record['kind'] == 'sample']\n        configs = [record for record in process_records if record['kind'] == 'config']\n        rss = [record for record in process_records if record['kind'] == 'rss']\n        assert len(samples) == 250 and len(configs) == 1 and len(rss) == 1, log\n        assert config_signature(configs[0]) == initial_config_signature, log\n        assert sorted({record['metric'] for record in samples}) == METRICS, log\n        assert all(sum(record['metric'] == metric for record in samples) == 50\n                   for metric in METRICS), log\n        for metric in [*METRICS, 'peak_rss']:\n            values = ([record['bytes'] for record in rss] if metric == 'peak_rss' else\n                      [record['elapsed_ms'] for record in samples if record['metric'] == metric])\n            confirmation_records.append({\n                'kind': 'rest_process_summary',\n                'dataset': 'confirmation',\n                'pair': pair,\n                'revision': revision,\n                'metric': metric,\n                'samples': len(values),\n                'median': statistics.median(values),\n                'p95': percentile_95(values),\n            })\n        write_records(ROOT / 'confirmation-rest-results.jsonl', confirmation_records)\n        print(pair, revision, 'rest', len(samples), 'samples retained', flush=True)\n\n    completed_pair_summaries = pair_summaries(confirmation_runtime, 'confirmation', [pair])\n    confirmation_records.extend(completed_pair_summaries)\n    write_records(ROOT / 'confirmation-rest-results.jsonl', confirmation_records)\n\nconfirmation_samples = [record for record in confirmation_runtime if record['kind'] == 'sample']\nconfirmation_configs = [record for record in confirmation_runtime if record['kind'] == 'config']\nconfirmation_rss = [record for record in confirmation_runtime if record['kind'] == 'rss']\nassert len(confirmation_samples) == 2_500\nassert len(confirmation_configs) == 10\nassert len(confirmation_rss) == 10\nassert len({record['fixture_digest'] for record in confirmation_configs}) == 1\nassert confirmation_configs[0]['fixture_digest'] == initial_configs[0]['fixture_digest']\nassert all(config_signature(record) == initial_config_signature for record in confirmation_configs)\nconfirmation_summaries = summary(confirmation_runtime, 'confirmation', 250, 5)\nconfirmation_records.extend(confirmation_summaries)\nconfirmation_records.append({\n    'kind': 'retained_record_counts',\n    'dataset': 'confirmation',\n    'samples': 2_500,\n    'rss': 10,\n    'configs': 10,\n})\nconfirmation_dataset_path = ROOT / 'confirmation-rest-results.jsonl'\nwrite_records(confirmation_dataset_path, confirmation_records)\n\ncombined_runtime = [*initial_runtime, *confirmation_runtime]\ncombined_summaries = summary(combined_runtime, 'combined', 500, 10)\ncombined_records = [{\n    'kind': 'rest_combined_provenance',\n    'dataset': 'combined',\n    'initial_dataset': str(initial_dataset_path),\n    'initial_dataset_sha256': sha(initial_dataset_path),\n    'confirmation_dataset': str(confirmation_dataset_path),\n    'confirmation_dataset_sha256': sha(confirmation_dataset_path),\n    'initial_results': str(initial_results_path),\n    'initial_results_sha256': INITIAL_RESULTS_SHA256,\n    'samples': 5_000,\n    'rss': 20,\n    'configs': 20,\n}]\ncombined_records.extend(\n    {'kind': 'source_record', 'dataset': 'initial', 'record': record}\n    for record in initial_rest_records\n)\ncombined_records.extend(\n    {'kind': 'source_record', 'dataset': 'confirmation', 'record': record}\n    for record in confirmation_records\n)\ncombined_records.extend(combined_summaries)\ncombined_records.append({\n    'kind': 'retained_record_counts',\n    'dataset': 'combined',\n    'samples': 5_000,\n    'rss': 20,\n    'configs': 20,\n})\ncombined_dataset_path = ROOT / 'combined-rest-results.jsonl'\nwrite_records(combined_dataset_path, combined_records)\n\nconfirmation_environment['outputs'] = {\n    'initial': {\n        'path': str(initial_dataset_path),\n        'sha256': sha(initial_dataset_path),\n    },\n    'confirmation': {\n        'path': str(confirmation_dataset_path),\n        'sha256': sha(confirmation_dataset_path),\n    },\n    'combined': {\n        'path': str(combined_dataset_path),\n        'sha256': sha(combined_dataset_path),\n    },\n}\n(ROOT / 'environment.json').write_text(json.dumps(confirmation_environment))\n",
+    "outputs": {
+      "initial": {
+        "path": "/private/tmp/logex-sql-syntax-eligibility-confirmation-1/initial-rest-results.jsonl",
+        "sha256": "93c313a17210ab02024066267f4064e5033f680fedefc7767671725af522f9c9"
+      },
+      "confirmation": {
+        "path": "/private/tmp/logex-sql-syntax-eligibility-confirmation-1/confirmation-rest-results.jsonl",
+        "sha256": "876e1bbb28d75753eee6b7857f0e4e68773a19052d9981c5250b8fd625067b84"
+      },
+      "combined": {
+        "path": "/private/tmp/logex-sql-syntax-eligibility-confirmation-1/combined-rest-results.jsonl",
+        "sha256": "38a46692fadc3937d02393935c7b4e375ff9de3f91da11a603fbab706014e0c0"
+      }
+    }
+  },
+  "files": [
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-initial-rest.jsonl.gz",
+      "bytes": 32955,
+      "sha256": "f687a542d3d944416c19bdffc1e1709ffac4cb3cb3412d9d72f612ac3d7637c8",
+      "decoded_bytes": 556629,
+      "decoded_sha256": "93c313a17210ab02024066267f4064e5033f680fedefc7767671725af522f9c9"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-confirmation-rest.jsonl.gz",
+      "bytes": 38848,
+      "sha256": "420f5e517534b0b6fdbc0ff86d1a6c116545d6b5c9facf63d744e2062c62d5be",
+      "decoded_bytes": 495308,
+      "decoded_sha256": "876e1bbb28d75753eee6b7857f0e4e68773a19052d9981c5250b8fd625067b84"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-combined-rest.jsonl.gz",
+      "bytes": 70874,
+      "sha256": "e5ed80085c961a1301e052072a818a18ebbcf2945c7537252815268318e7c03d",
+      "decoded_bytes": 1211351,
+      "decoded_sha256": "38a46692fadc3937d02393935c7b4e375ff9de3f91da11a603fbab706014e0c0"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-confirmation-run-logs.json.gz",
+      "bytes": 20009,
+      "sha256": "52c2ddd41f05b3e488a76bd3af9e354f0f306b09efeb513ea006edf650f92208",
+      "decoded_bytes": 264351,
+      "decoded_sha256": "77ad4e8e1716650264a63993f40ae74daa61a6f359cff139b006d9c4c6f3e11d"
+    }
+  ],
+  "summaries": {
+    "initial": [
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "datafusion_aggregate",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 1.757917,
+          "candidate": 1.773667
+        },
+        "p95": {
+          "base": 2.020708,
+          "candidate": 2.0462919999999998
+        },
+        "median_change_percent": 0.8959467369619833,
+        "p95_change_percent": 1.266090894874461
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "expression_chain",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 12.958604000000001,
+          "candidate": 12.944792
+        },
+        "p95": {
+          "base": 13.383541000000001,
+          "candidate": 13.370125
+        },
+        "median_change_percent": -0.10658555504899914,
+        "p95_change_percent": -0.1002425292379705
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "literal_in_list",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 51.304437500000006,
+          "candidate": 51.2750205
+        },
+        "p95": {
+          "base": 53.054292000000004,
+          "candidate": 52.589833000000006
+        },
+        "median_change_percent": -0.057338120118766156,
+        "p95_change_percent": -0.8754409539571184
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "native_count",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 0.6757915000000001,
+          "candidate": 0.6839795
+        },
+        "p95": {
+          "base": 0.786042,
+          "candidate": 0.828375
+        },
+        "median_change_percent": 1.211616304733032,
+        "p95_change_percent": 5.385590082972658
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "native_wide_page",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 5.5865415,
+          "candidate": 5.6014165
+        },
+        "p95": {
+          "base": 5.9855,
+          "candidate": 6.0055000000000005
+        },
+        "median_change_percent": 0.26626491542218744,
+        "p95_change_percent": 0.33414084036422764
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "initial",
+        "metric": "peak_rss",
+        "samples_per_revision": 5,
+        "median": {
+          "base": 282886144,
+          "candidate": 284966912
+        },
+        "p95": {
+          "base": 284229632,
+          "candidate": 286097408
+        },
+        "median_change_percent": 0.7355496351210578,
+        "p95_change_percent": 0.6571362693105876
+      }
+    ],
+    "confirmation": [
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "datafusion_aggregate",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 1.752104,
+          "candidate": 1.7755
+        },
+        "p95": {
+          "base": 1.9997499999999997,
+          "candidate": 2.049042
+        },
+        "median_change_percent": 1.3353088629442178,
+        "p95_change_percent": 2.464908113514208
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "expression_chain",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 12.956541999999999,
+          "candidate": 12.921916
+        },
+        "p95": {
+          "base": 13.441291,
+          "candidate": 13.295292
+        },
+        "median_change_percent": -0.26724723309660137,
+        "p95_change_percent": -1.0861977469277306
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "literal_in_list",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 51.458521,
+          "candidate": 51.461
+        },
+        "p95": {
+          "base": 53.804459,
+          "candidate": 53.882082999999994
+        },
+        "median_change_percent": 0.004817472309404103,
+        "p95_change_percent": 0.14427057058596926
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "native_count",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 0.6788959999999999,
+          "candidate": 0.6816665
+        },
+        "p95": {
+          "base": 0.839375,
+          "candidate": 0.830083
+        },
+        "median_change_percent": 0.4080890151068717,
+        "p95_change_percent": -1.107014147431118
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "native_wide_page",
+        "samples_per_revision": 250,
+        "median": {
+          "base": 5.6284790000000005,
+          "candidate": 5.6044789999999995
+        },
+        "p95": {
+          "base": 6.1537500000000005,
+          "candidate": 6.065583
+        },
+        "median_change_percent": -0.4264029411853665,
+        "p95_change_percent": -1.432736136502133
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "confirmation",
+        "metric": "peak_rss",
+        "samples_per_revision": 5,
+        "median": {
+          "base": 282181632,
+          "candidate": 284065792
+        },
+        "p95": {
+          "base": 283115520,
+          "candidate": 285278208
+        },
+        "median_change_percent": 0.6677117807582844,
+        "p95_change_percent": 0.7638888888888973
+      }
+    ],
+    "combined": [
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "datafusion_aggregate",
+        "samples_per_revision": 500,
+        "median": {
+          "base": 1.755896,
+          "candidate": 1.774875
+        },
+        "p95": {
+          "base": 1.9997499999999997,
+          "candidate": 2.04775
+        },
+        "median_change_percent": 1.080872671274391,
+        "p95_change_percent": 2.40030003750471
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "expression_chain",
+        "samples_per_revision": 500,
+        "median": {
+          "base": 12.9577295,
+          "candidate": 12.9289375
+        },
+        "p95": {
+          "base": 13.387334000000001,
+          "candidate": 13.298084
+        },
+        "median_change_percent": -0.22219942158847594,
+        "p95_change_percent": -0.6666749331868616
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "literal_in_list",
+        "samples_per_revision": 500,
+        "median": {
+          "base": 51.369437500000004,
+          "candidate": 51.369167000000004
+        },
+        "p95": {
+          "base": 53.575959,
+          "candidate": 53.504541
+        },
+        "median_change_percent": -0.0005265776951479673,
+        "p95_change_percent": -0.13330232688880672
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "native_count",
+        "samples_per_revision": 500,
+        "median": {
+          "base": 0.677438,
+          "candidate": 0.6825625
+        },
+        "p95": {
+          "base": 0.809042,
+          "candidate": 0.828375
+        },
+        "median_change_percent": 0.7564529890558225,
+        "p95_change_percent": 2.3896163610789056
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "native_wide_page",
+        "samples_per_revision": 500,
+        "median": {
+          "base": 5.595708500000001,
+          "candidate": 5.6034585
+        },
+        "p95": {
+          "base": 6.0094579999999995,
+          "candidate": 6.031084
+        },
+        "median_change_percent": 0.1384989943632675,
+        "p95_change_percent": 0.35986606446039016
+      },
+      {
+        "kind": "rest_dataset_summary",
+        "dataset": "combined",
+        "metric": "peak_rss",
+        "samples_per_revision": 10,
+        "median": {
+          "base": 282738688.0,
+          "candidate": 284459008.0
+        },
+        "p95": {
+          "base": 284229632,
+          "candidate": 286097408
+        },
+        "median_change_percent": 0.6084487454366405,
+        "p95_change_percent": 0.6571362693105876
+      }
+    ]
+  },
+  "verification": "All summaries independently recalculated; combined records preserve initial and confirmation records exactly, without exclusions. Original initial latency/RSS samples and the +5.385590% native-count p95 remain unchanged. No source or binary change and no additional timing attempt beyond the predefined five-pair confirmation.",
+  "limits": "The observed tail increase did not repeat in the confirmation; combined increases remain below 5%. This does not identify a particular operating-system cause or establish whole-node ingestion performance."
+}
