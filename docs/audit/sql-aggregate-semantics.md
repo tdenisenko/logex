@@ -3,9 +3,11 @@
 Base: `84a7889d` (merged PR #140). This milestone checks custom exact-integer
 aggregate predicates, CASE/null/cast behavior and default NULL ordering against
 an independent in-memory SQL table. Final source `a4f7032e` passes all local
-workspace/release gates and repeated performance acceptance. PR/CI completion
-remains. Shared identifier binding, mixed-output typing and broader query-resource
-work remain separate audit items after this coherent correction.
+workspace/release gates and repeated performance acceptance.
+[PR #141](https://github.com/tdenisenko/logex/pull/141) merged as `f45f2640` after
+all six CI jobs passed on evidence head `80659701`. Shared identifier binding,
+mixed-output typing and broader query-resource work remain separate audit items
+after this coherent correction.
 
 ## Confirmed behavior
 
@@ -201,6 +203,9 @@ context construction were removed after checking callers. Existing native
 candidate validation, canonical parsing, snapshot and cancellation paths remain
 used. No new unsafe block or dependency was introduced.
 
-Implementation and local acceptance are complete. PR, exact-head Linux/macOS CI
-and merge remain. The wider audit stays open; actual live sync and staging follow
-offline completion.
+Implementation, local acceptance, exact-head Linux/macOS CI and merge are
+complete. [CI run 34698630663](https://github.com/tdenisenko/logex/actions/runs/34698630663)
+passed all six jobs on `80659701` without retries. The
+[retained CI record](baselines/2026-09-12-sql-aggregates-ci.json) records the exact
+head and job results. Merge `f45f2640` has identical source. The wider audit stays
+open; actual live sync and staging follow offline completion.
