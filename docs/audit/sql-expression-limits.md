@@ -69,11 +69,15 @@ existing query unit tests pass. REST/gRPC consistency tests include excessive
 syntax/text, exact storage-tree immutability and successful subsequent queries.
 All six required local gates pass: format, workspace all-target check/Clippy,
 996 tests (14 ignored), documentation tests and the release node build.
-Additional release regressions, measured acceptance and PR/CI/merge remain.
+All 66 query unit tests, the subprocess parent and both protocol consistency
+tests also pass in release mode. [Equivalent release measurements](baselines/2026-09-12-sql-limits.md)
+retain 250 samples per shape/revision: all positive latency/memory median and
+tail changes are below 5%. No speedup is claimed. Implementation `af88a02b`
+is committed; CI and merge remain.
 
 The existing release handler benchmark now also covers a 10,000-value IN list
 and a maximum admitted addition chain, with independent exact JSON oracles.
-Identical fixtures must be used in baseline and candidate; native count/full
+Identical fixtures were used in baseline and candidate; native count/full
 projection and DataFusion aggregate remain timing controls. Production ingestion
 and storage write paths are unchanged.
 
