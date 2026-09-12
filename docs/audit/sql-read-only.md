@@ -50,8 +50,12 @@ is introduced. The pinned implementation and its `sql_with_options`,
 All six local workspace gates pass: format, all-target check/Clippy, 995 tests
 (13 ignored), documentation tests and release node build. All 66 query unit tests
 and two protocol integration tests also pass in release mode. Equivalent release
-handler measurements and PR/CI/merge remain. Performance acceptance must include native fast paths and a
-DataFusion aggregate because the two checks run at different execution stages.
+handler measurements pass for implementation `f73b316b`: [250 requests per
+shape/revision](baselines/2026-09-12-sql-read-only.md) show latency medians
+−0.43% to +0.47%, with all median/tail changes below 1%; RSS median is +1.06%.
+All samples are retained and no speedup is claimed. Native fast paths and a
+DataFusion aggregate cover the checks at their different execution stages.
+PR/CI/merge remain.
 
 ## Cleanup and limits
 
