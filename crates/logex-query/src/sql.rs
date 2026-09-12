@@ -3889,18 +3889,29 @@ fn validate_supported_tables(sql: &str) -> Result<(), SqlQueryError> {
 fn validate_supported_query_tables(
     query: &datafusion::sql::sqlparser::ast::Query,
 ) -> Result<(), SqlQueryError> {
+    // DataFusion plans this query's WITH definitions before its outer body.
+    // Definition ordering and all deeper/nested scopes remain planner-owned.
+    let cte_names = query
+        .with
+        .iter()
+        .flat_map(|with| &with.cte_tables)
+        .map(|cte| normalize_sql_ident(&cte.alias.name))
+        .collect::<Vec<_>>();
     if let SetExpr::Select(select) = query.body.as_ref() {
         for table in &select.from {
-            validate_supported_table_factor(&table.relation)?;
+            validate_supported_table_factor(&table.relation, &cte_names)?;
             for join in &table.joins {
-                validate_supported_table_factor(&join.relation)?;
+                validate_supported_table_factor(&join.relation, &cte_names)?;
             }
         }
     }
     Ok(())
 }
 
-fn validate_supported_table_factor(table: &TableFactor) -> Result<(), SqlQueryError> {
+fn validate_supported_table_factor(
+    table: &TableFactor,
+    cte_names: &[String],
+) -> Result<(), SqlQueryError> {
     let TableFactor::Table { name, .. } = table else {
         return Ok(());
     };
@@ -3909,7 +3920,7 @@ fn validate_supported_table_factor(table: &TableFactor) -> Result<(), SqlQueryEr
             "unsupported computed SQL table name".to_owned(),
         )));
     };
-    if matches!(table_name.as_slice(), [table] if table == "logs")
+    if matches!(table_name.as_slice(), [table] if table == "logs" || cte_names.contains(table))
         || matches!(table_name.as_slice(), [schema, table]
             if schema == "information_schema" && matches!(table.as_str(), "tables" | "columns"))
     {

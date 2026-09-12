@@ -2,8 +2,8 @@
 
 Base: `99beaa83` (merged PR #142). Implementation `9cff21c5` corrects filters on
 the two fixed metadata tables. Direct review, all six required local gates,
-additional release checks and paired performance acceptance pass. Exact-head CI
-and merge remain.
+additional release checks and paired performance acceptance pass. All six
+exact-head CI jobs passed; PR #143 merged as `2d443187`.
 
 ## Confirmed findings
 
@@ -43,7 +43,7 @@ independently specified row counts. Separate counted cases cover a NULL range
 bound with a true or false other comparison, and membership with a NULL plus a
 matching or nonmatching value.
 
-Parent source review checked the pinned engine's comparison coercion and its
+Direct source review checked the pinned engine's comparison coercion and its
 common-type calculation across both range bounds and all membership values.
 The reference cases and final before/after run validate those assumptions within
 the existing supported metadata grammar.
@@ -74,7 +74,9 @@ binds 100 source/configuration hashes to committed source `9cff21c5`. All six
 required gates pass: 1,012 workspace tests, 17 intentionally ignored,
 documentation tests, formatting, workspace checking, strict Clippy and the
 release node build. Additional release checks pass 117 query tests with six
-ignored benchmarks, and both protocol-consistency tests.
+ignored entries, and both protocol-consistency tests. These six query exclusions
+are five explicit benchmarks and a child-process entry invoked by its normal
+parent test.
 
 The [final release record](baselines/2026-09-12-sql-metadata-release.json)
 contains the complete final fixtures, runner, correctness logs, binary and
@@ -124,6 +126,12 @@ No production ingestion write, storage format, dependency or toolchain change is
 included. These synthetic warm query measurements do not establish live-peer or
 whole-node ingestion throughput. PR #142's separately investigated pooled metadata
 p95 observation remains retained in its historical acceptance record.
+
+The [final CI record](baselines/2026-09-12-sql-metadata-ci-final.json) confirms
+all six jobs passed on final head `a3da0858`, run `34703886508`, including Linux
+and macOS tests, without retries. [PR #143](https://github.com/tdenisenko/logex/pull/143)
+merged as `2d443187` on 2026-09-12. Its merge tree exactly matches the reviewed
+final head.
 
 ## Cleanup and remaining work
 
