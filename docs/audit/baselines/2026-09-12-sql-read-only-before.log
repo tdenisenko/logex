@@ -1,0 +1,33 @@
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.27s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+
+thread 'sql::tests::rejects_select_into_in_top_level_and_nested_plans' (57385791) panicked at crates/logex-query/src/sql.rs:5590:9:
+unexpectedly accepted DDL:
+SELECT block_number INTO scratch FROM logs: SqlQueryResult { rows: [], total_scanned: 2 }
+SELECT block_number INTO scratch FROM logs WHERE block_number > 0 LIMIT 1: SqlQueryResult { rows: [], total_scanned: 2 }
+SELECT 1 AS value INTO scratch: SqlQueryResult { rows: [], total_scanned: 0 }
+SELECT block_number INTO scratch FROM logs UNION ALL SELECT block_number FROM logs: SqlQueryResult { rows: [Object {"block_number": Number(100)}, Object {"block_number": Number(200)}, Object {"block_number": Number(100)}, Object {"block_number": Number(200)}], total_scanned: 2 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sql::tests::rejects_select_into_in_top_level_and_nested_plans ... FAILED
+
+failures:
+
+failures:
+    sql::tests::rejects_select_into_in_top_level_and_nested_plans
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p logex-query --lib`

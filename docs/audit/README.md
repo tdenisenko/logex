@@ -17,7 +17,7 @@ data and running deployments are not modified by the benchmark suite.
 | 5 | Live/historical sync, reorgs, ingestion, coverage | Pending; publish only verified contiguous data across crashes and reorgs. |
 | 6 | Indexes, bloom filters, index publication | In progress: [numeric range boundary fixes](sql-predicates.md) cover reversed ranges and inclusive maximum keys. Other index families, damaged-index fallbacks and publication remain under review. |
 | 7 | Native and SQL queries, snapshots, pushdown, cancellation | In progress: [ordering/pagination fixes](query-pagination.md) have before-fix regressions and reference/DataFusion equivalence tests. [Snapshot consistency](query-snapshots.md) fixes captured row boundaries and explicit reorg invalidation. [SQL result values and projections](sql-result-values.md) merged in PR #135 as `a52d79e9`, with all six CI jobs passing and explicit performance acceptance. [Native filter/pushdown predicates](sql-predicates.md) have independent-oracle reproductions and corrections. Remaining binding, custom aggregate and resource review is pending. |
-| 8 | HTTP, JSON-RPC, gRPC, WebSocket, authentication | In progress: [gRPC SQL lock lifetime](grpc-query-locks.md) merged in PR #136 after all six CI jobs passed. [REST cancellation ownership](query-cancellation.md) merged in PR #137 after all six CI jobs passed. Remaining protocol, resource and security review is pending. |
+| 8 | HTTP, JSON-RPC, gRPC, WebSocket, authentication | In progress: [gRPC SQL lock lifetime](grpc-query-locks.md) merged in PR #136 after all six CI jobs passed. [REST cancellation ownership](query-cancellation.md) merged in PR #137 after all six CI jobs passed. [Read-only SQL execution](sql-read-only.md) has SELECT INTO reproductions and AST/plan corrections. Remaining protocol, resource and security review is pending. |
 | 9 | Dashboard, metrics, health, status | Pending; safe rendering, responsive controls, accurate unavailable/stale states. |
 | 10 | CLI/runtime and volume supervision | Directory exclusivity prerequisite implemented with journal recovery; remaining work pending: preflight volume identity and writability, runtime loss detection, launchd/systemd templates. |
 | 11 | Offline automatic segment repair | Pending; dry-run, quarantine, verified refetch, resumable publication, exclusive access. |
@@ -36,7 +36,9 @@ six CI jobs passed. [Snapshot consistency](query-snapshots.md) merged in PR #134
 all six CI jobs passed. [SQL result values](sql-result-values.md) merged in PR #135 as `a52d79e9` after
 all six CI jobs passed. [gRPC SQL lock lifetime](grpc-query-locks.md) merged in PR #136 as `73443007` after
 all six CI jobs passed. [REST cancellation ownership](query-cancellation.md) merged in PR #137 as `f19f47c4` after
-all six CI jobs passed. The current pass covers [native filters and predicate pushdown](sql-predicates.md).
+all six CI jobs passed. PR #138 merged the [native filters and predicate pushdown](sql-predicates.md)
+corrections as `13bd33cc`, with all six CI jobs passing. The current pass checks
+[read-only SQL execution boundaries](sql-read-only.md).
 
 Complete deterministic offline validation and merge implementation PRs before
 starting an actual live sync. Live-sync acceptance and the minimum 24-hour

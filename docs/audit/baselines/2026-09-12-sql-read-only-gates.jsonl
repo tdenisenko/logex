@@ -1,0 +1,9 @@
+{"gate": 0, "command": ["cargo", "fmt", "--all", "--", "--check"], "exit": 0, "seconds": 0.62, "log": "/private/tmp/logex-sql-read-only-gate-0.log"}
+{"gate": 1, "command": ["cargo", "check", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 8.59, "log": "/private/tmp/logex-sql-read-only-gate-1.log"}
+{"gate": 2, "command": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], "exit": 0, "seconds": 8.36, "log": "/private/tmp/logex-sql-read-only-gate-2.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 201.53, "log": "/private/tmp/logex-sql-read-only-gate-3.log"}
+{"gate": 4, "command": ["cargo", "test", "--workspace", "--doc", "--locked"], "exit": 0, "seconds": 13.45, "log": "/private/tmp/logex-sql-read-only-gate-4.log"}
+{"gate": 5, "command": ["cargo", "build", "-p", "logex-node", "--release", "--locked"], "exit": 0, "seconds": 52.07, "log": "/private/tmp/logex-sql-read-only-gate-5.log"}
+{"gate": 6, "command": ["cargo", "test", "-p", "logex-server", "--test", "query_latency", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 37.13, "log": "/private/tmp/logex-sql-read-only-gate-6.log"}
+{"gate": 7, "command": ["cargo", "test", "-p", "logex-query", "--lib", "--release", "--locked"], "exit": 0, "seconds": 26.91, "log": "/private/tmp/logex-sql-read-only-gate-7.log"}
+{"gate": 8, "command": ["cargo", "test", "-p", "logex-server", "--test", "consistency", "--release", "--locked"], "exit": 0, "seconds": 16.29, "log": "/private/tmp/logex-sql-read-only-gate-8.log"}
