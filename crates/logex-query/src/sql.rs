@@ -3999,12 +3999,7 @@ fn validate_sql_statement(sql: &str) -> Result<(), SqlQueryError> {
         ));
     };
     if let ControlFlow::Break(violation) = statement.visit(&mut SqlEligibilityVisitor) {
-        return Err(match violation {
-            SqlEligibilityViolation::ReadOnly(reason) => read_only_sql_error(reason),
-            SqlEligibilityViolation::Unsupported(clause) => SqlQueryError::DataFusion(
-                DataFusionError::Plan(format!("LogEx does not support {clause}")),
-            ),
-        });
+        return Err(violation.into_error());
     }
     Ok(())
 }
@@ -4057,9 +4052,67 @@ fn read_only_sql_error(reason: &str) -> SqlQueryError {
     )))
 }
 
+// Keep this payload-free: sqlparser propagates the break type through every
+// recursive visitor frame, including valid expressions at the complexity limit.
 enum SqlEligibilityViolation {
-    ReadOnly(&'static str),
-    Unsupported(&'static str),
+    OnlySelect,
+    SelectInto,
+    Fetch,
+    Locks,
+    ForClause,
+    QuerySettings,
+    Format,
+    Interpolate,
+    Prewhere,
+    ConnectBy,
+    ValueTableMode,
+    SelectExclude,
+    GroupModifiers,
+    TableFunctionSettings,
+    TableHints,
+    TableVersion,
+    WithOrdinality,
+    Partitions,
+    JsonPath,
+    TableSample,
+    IndexHints,
+    FunctionParameters,
+}
+
+impl SqlEligibilityViolation {
+    fn into_error(self) -> SqlQueryError {
+        let (read_only, message) = match self {
+            Self::OnlySelect => (true, "only SELECT and WITH queries are allowed"),
+            Self::SelectInto => (true, "SELECT INTO is not allowed"),
+            Self::Fetch => (false, "FETCH"),
+            Self::Locks => (false, "FOR UPDATE/SHARE"),
+            Self::ForClause => (false, "FOR JSON/XML"),
+            Self::QuerySettings => (false, "SETTINGS"),
+            Self::Format => (false, "FORMAT"),
+            Self::Interpolate => (false, "ORDER BY INTERPOLATE"),
+            Self::Prewhere => (false, "PREWHERE"),
+            Self::ConnectBy => (false, "CONNECT BY"),
+            Self::ValueTableMode => (false, "SELECT AS VALUE/STRUCT"),
+            Self::SelectExclude => (false, "SELECT EXCLUDE"),
+            Self::GroupModifiers => (false, "GROUP BY WITH modifiers"),
+            Self::TableFunctionSettings => (false, "table function SETTINGS"),
+            Self::TableHints => (false, "table hints"),
+            Self::TableVersion => (false, "table version qualifiers"),
+            Self::WithOrdinality => (false, "WITH ORDINALITY"),
+            Self::Partitions => (false, "PARTITION selection"),
+            Self::JsonPath => (false, "table JSON paths"),
+            Self::TableSample => (false, "TABLESAMPLE/SAMPLE"),
+            Self::IndexHints => (false, "index hints"),
+            Self::FunctionParameters => (false, "parametric function arguments"),
+        };
+        if read_only {
+            read_only_sql_error(message)
+        } else {
+            SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "LogEx does not support {message}"
+            )))
+        }
+    }
 }
 
 struct SqlEligibilityVisitor;
@@ -4071,9 +4124,7 @@ impl Visitor for SqlEligibilityVisitor {
         if matches!(statement, SqlStatement::Query(_)) {
             ControlFlow::Continue(())
         } else {
-            ControlFlow::Break(SqlEligibilityViolation::ReadOnly(
-                "only SELECT and WITH queries are allowed",
-            ))
+            ControlFlow::Break(SqlEligibilityViolation::OnlySelect)
         }
     }
 
@@ -4081,27 +4132,27 @@ impl Visitor for SqlEligibilityVisitor {
         &mut self,
         query: &datafusion::sql::sqlparser::ast::Query,
     ) -> ControlFlow<Self::Break> {
-        let unsupported_query_clause = if query.fetch.is_some() {
-            Some("FETCH")
+        let violation = if query.fetch.is_some() {
+            Some(SqlEligibilityViolation::Fetch)
         } else if !query.locks.is_empty() {
-            Some("FOR UPDATE/SHARE")
+            Some(SqlEligibilityViolation::Locks)
         } else if query.for_clause.is_some() {
-            Some("FOR JSON/XML")
+            Some(SqlEligibilityViolation::ForClause)
         } else if query.settings.is_some() {
-            Some("SETTINGS")
+            Some(SqlEligibilityViolation::QuerySettings)
         } else if query.format_clause.is_some() {
-            Some("FORMAT")
+            Some(SqlEligibilityViolation::Format)
         } else if query
             .order_by
             .as_ref()
             .is_some_and(|order_by| order_by.interpolate.is_some())
         {
-            Some("ORDER BY INTERPOLATE")
+            Some(SqlEligibilityViolation::Interpolate)
         } else {
             None
         };
-        if let Some(clause) = unsupported_query_clause {
-            return ControlFlow::Break(SqlEligibilityViolation::Unsupported(clause));
+        if let Some(violation) = violation {
+            return ControlFlow::Break(violation);
         }
 
         // SELECT-level controls can occur in any set-operation arm. DataFusion
@@ -4113,30 +4164,28 @@ impl Visitor for SqlEligibilityVisitor {
         loop {
             match body {
                 SetExpr::Select(select) if select.into.is_some() => {
-                    return ControlFlow::Break(SqlEligibilityViolation::ReadOnly(
-                        "SELECT INTO is not allowed",
-                    ));
+                    return ControlFlow::Break(SqlEligibilityViolation::SelectInto);
                 }
                 SetExpr::Select(select) => {
-                    let unsupported_select_clause = if select.prewhere.is_some() {
-                        Some("PREWHERE")
+                    let violation = if select.prewhere.is_some() {
+                        Some(SqlEligibilityViolation::Prewhere)
                     } else if select.connect_by.is_some() {
-                        Some("CONNECT BY")
+                        Some(SqlEligibilityViolation::ConnectBy)
                     } else if select.value_table_mode.is_some() {
-                        Some("SELECT AS VALUE/STRUCT")
+                        Some(SqlEligibilityViolation::ValueTableMode)
                     } else if select.exclude.is_some() {
-                        Some("SELECT EXCLUDE")
+                        Some(SqlEligibilityViolation::SelectExclude)
                     } else if matches!(
                         &select.group_by,
                         GroupByExpr::All(modifiers) | GroupByExpr::Expressions(_, modifiers)
                             if !modifiers.is_empty()
                     ) {
-                        Some("GROUP BY WITH modifiers")
+                        Some(SqlEligibilityViolation::GroupModifiers)
                     } else {
                         None
                     };
-                    if let Some(clause) = unsupported_select_clause {
-                        return ControlFlow::Break(SqlEligibilityViolation::Unsupported(clause));
+                    if let Some(violation) = violation {
+                        return ControlFlow::Break(violation);
                     }
                 }
                 SetExpr::SetOperation { left, right, .. } => {
@@ -4168,27 +4217,27 @@ impl Visitor for SqlEligibilityVisitor {
         else {
             return ControlFlow::Continue(());
         };
-        let unsupported_clause = if args.as_ref().is_some_and(|args| args.settings.is_some()) {
-            Some("table function SETTINGS")
+        let violation = if args.as_ref().is_some_and(|args| args.settings.is_some()) {
+            Some(SqlEligibilityViolation::TableFunctionSettings)
         } else if !with_hints.is_empty() {
-            Some("table hints")
+            Some(SqlEligibilityViolation::TableHints)
         } else if version.is_some() {
-            Some("table version qualifiers")
+            Some(SqlEligibilityViolation::TableVersion)
         } else if *with_ordinality {
-            Some("WITH ORDINALITY")
+            Some(SqlEligibilityViolation::WithOrdinality)
         } else if !partitions.is_empty() {
-            Some("PARTITION selection")
+            Some(SqlEligibilityViolation::Partitions)
         } else if json_path.is_some() {
-            Some("table JSON paths")
+            Some(SqlEligibilityViolation::JsonPath)
         } else if sample.is_some() {
-            Some("TABLESAMPLE/SAMPLE")
+            Some(SqlEligibilityViolation::TableSample)
         } else if !index_hints.is_empty() {
-            Some("index hints")
+            Some(SqlEligibilityViolation::IndexHints)
         } else {
             None
         };
-        match unsupported_clause {
-            Some(clause) => ControlFlow::Break(SqlEligibilityViolation::Unsupported(clause)),
+        match violation {
+            Some(violation) => ControlFlow::Break(violation),
             None => ControlFlow::Continue(()),
         }
     }
@@ -4199,9 +4248,7 @@ impl Visitor for SqlEligibilityVisitor {
             SqlAstExpr::Function(function)
                 if !matches!(&function.parameters, FunctionArguments::None)
         ) {
-            ControlFlow::Break(SqlEligibilityViolation::Unsupported(
-                "parametric function arguments",
-            ))
+            ControlFlow::Break(SqlEligibilityViolation::FunctionParameters)
         } else {
             ControlFlow::Continue(())
         }
