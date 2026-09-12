@@ -1,0 +1,61 @@
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "pagination") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.16s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/pagination.rs (target/debug/build/logex-query/d3b3eb99d54a5780/out/pagination-d3b3eb99d54a5780)
+
+running 4 tests
+test native_pagination_sorts_reverse_ingestion_before_limiting ... FAILED
+test sql_pagination_applies_api_page_after_sql_limit ... FAILED
+test sql_pagination_merges_overlapping_segment_ranges ... FAILED
+test native_pagination_merges_overlapping_segment_ranges ... FAILED
+
+failures:
+
+---- native_pagination_sorts_reverse_ingestion_before_limiting stdout ----
+
+thread 'native_pagination_sorts_reverse_ingestion_before_limiting' (54635006) panicked at crates/logex-query/tests/pagination.rs:51:5:
+assertion `left == right` failed
+  left: [LogRow { block_number: 30, block_hash: 0x44c4ec9a3468e2363536a2bd7ce7c992c7153ddcef6b0f9259176fd45bf2b561, timestamp: 360, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }, LogRow { block_number: 40, block_hash: 0x6d71a04314cdc96666ee8d6f4e15ade71ee2fa53a05a4fea9e4bde39418aa707, timestamp: 480, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }]
+ right: [LogRow { block_number: 10, block_hash: 0x170278e9683450199456e7ffa3c27fb0a2726ee988442663ec9ab02c1acf6274, timestamp: 120, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }, LogRow { block_number: 20, block_hash: 0x803ffad2da23fd2002d3546bdabef0803eaef534d554eb06a7ba565b81590142, timestamp: 240, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }]
+
+---- sql_pagination_applies_api_page_after_sql_limit stdout ----
+
+thread 'sql_pagination_applies_api_page_after_sql_limit' (54635007) panicked at crates/logex-query/tests/pagination.rs:95:5:
+assertion `left == right` failed
+  left: [Object {"block_number": Number(30)}, Object {"block_number": Number(40)}, Object {"block_number": Number(50)}]
+ right: [Object {"block_number": Number(30)}]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- sql_pagination_merges_overlapping_segment_ranges stdout ----
+
+thread 'sql_pagination_merges_overlapping_segment_ranges' (54635008) panicked at crates/logex-query/tests/pagination.rs:80:9:
+assertion `left == right` failed
+  left: [Object {"block_number": Number(10)}, Object {"block_number": Number(40)}]
+ right: [Object {"block_number": Number(10)}, Object {"block_number": Number(20)}]
+
+---- native_pagination_merges_overlapping_segment_ranges stdout ----
+
+thread 'native_pagination_merges_overlapping_segment_ranges' (54635005) panicked at crates/logex-query/tests/pagination.rs:65:9:
+assertion `left == right` failed
+  left: [LogRow { block_number: 10, block_hash: 0x170278e9683450199456e7ffa3c27fb0a2726ee988442663ec9ab02c1acf6274, timestamp: 120, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }, LogRow { block_number: 40, block_hash: 0x6d71a04314cdc96666ee8d6f4e15ade71ee2fa53a05a4fea9e4bde39418aa707, timestamp: 480, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }]
+ right: [LogRow { block_number: 10, block_hash: 0x170278e9683450199456e7ffa3c27fb0a2726ee988442663ec9ab02c1acf6274, timestamp: 120, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }, LogRow { block_number: 20, block_hash: 0x803ffad2da23fd2002d3546bdabef0803eaef534d554eb06a7ba565b81590142, timestamp: 240, tx_hash: 0x0101010101010101010101010101010101010101010101010101010101010101, tx_index: 0, log_index: 0, address: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, topic0: None, topic1: None, topic2: None, topic3: None, data: 0x, data_len: 0, source: Receipt }]
+
+
+failures:
+    native_pagination_merges_overlapping_segment_ranges
+    native_pagination_sorts_reverse_ingestion_before_limiting
+    sql_pagination_applies_api_page_after_sql_limit
+    sql_pagination_merges_overlapping_segment_ranges
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `-p logex-query --test pagination`

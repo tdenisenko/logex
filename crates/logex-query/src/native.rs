@@ -42,9 +42,11 @@ impl StorageSnapshot {
         if let Some(hot) = &self.hot_partition {
             partitions.push(hot.clone());
         }
-        partitions.sort_by_key(|partition| partition.min_block);
-        if matches!(order, LogOrder::Descending) {
-            partitions.reverse();
+        match order {
+            LogOrder::Ascending => partitions.sort_by_key(|partition| partition.min_block),
+            LogOrder::Descending => {
+                partitions.sort_by_key(|partition| std::cmp::Reverse(partition.max_block));
+            }
         }
         partitions
     }
@@ -54,6 +56,9 @@ pub fn execute_log_filter(
     storage: &PartitionManager,
     filter: &NativeLogFilter,
 ) -> std::io::Result<Vec<LogRow>> {
+    if filter.limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let snapshot = StorageSnapshot::from_storage(storage);
     let mut rows = Vec::new();
     let scan_limit = filter
@@ -61,6 +66,9 @@ pub fn execute_log_filter(
         .map(|limit| limit.saturating_add(filter.offset));
 
     for partition in snapshot.partitions_in_order(filter.order) {
+        if ordered_page_is_complete(&partition, &rows, filter.order, scan_limit) {
+            break;
+        }
         if !partition_matches_filter(&partition, filter) {
             continue;
         }
@@ -74,25 +82,11 @@ pub fn execute_log_filter(
         let mut partition_rows = reader.read_log_rows(Some(&candidate_ids))?;
         partition_rows.retain(|row| matches_native_filter(row, filter));
 
-        if matches!(filter.order, LogOrder::Descending) {
-            partition_rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
-        }
-
         rows.extend(partition_rows);
-
-        if let Some(limit) = scan_limit
-            && rows.len() >= limit
-        {
-            rows.truncate(limit);
-            break;
-        }
+        retain_ordered_prefix(&mut rows, filter.order, scan_limit);
     }
 
-    if matches!(filter.order, LogOrder::Ascending) {
-        rows.sort_by_key(native_log_sort_key);
-    } else {
-        rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
-    }
+    sort_native_rows(&mut rows, filter.order);
 
     if filter.offset > 0 {
         if filter.offset >= rows.len() {
@@ -107,6 +101,48 @@ pub fn execute_log_filter(
     }
 
     Ok(rows)
+}
+
+pub(crate) fn sort_native_rows(rows: &mut [LogRow], order: LogOrder) {
+    match order {
+        LogOrder::Ascending => rows.sort_by_key(native_log_sort_key),
+        LogOrder::Descending => {
+            rows.sort_by_key(|row| std::cmp::Reverse(native_log_sort_key(row)));
+        }
+    }
+}
+
+pub(crate) fn retain_ordered_prefix(rows: &mut Vec<LogRow>, order: LogOrder, limit: Option<usize>) {
+    if let Some(limit) = limit {
+        // Physical row order can run backwards after historical ingestion.
+        // Keep the global best rows, including matches from overlapping ranges.
+        sort_native_rows(rows, order);
+        rows.truncate(limit);
+    }
+}
+
+/// `next` must be the first remaining partition in `partitions_in_order`, and
+/// `rows` the retained sorted prefix. Equal block boundaries must still be read:
+/// transaction/log ordering can improve the page within that same block.
+pub(crate) fn ordered_page_is_complete(
+    next: &PartitionMeta,
+    rows: &[LogRow],
+    order: LogOrder,
+    limit: Option<usize>,
+) -> bool {
+    let Some(limit) = limit else {
+        return false;
+    };
+    if rows.len() < limit {
+        return false;
+    }
+    let Some(last) = rows.last() else {
+        return false;
+    };
+    match order {
+        LogOrder::Ascending => next.min_block > last.block_number,
+        LogOrder::Descending => next.max_block < last.block_number,
+    }
 }
 
 pub fn partition_matches_filter(meta: &PartitionMeta, filter: &NativeLogFilter) -> bool {
