@@ -79,9 +79,18 @@ A [manual Node check](baselines/2026-09-12-sql-predicates-builder.mjs) loads the
 actual embedded functions, checks whole-script syntax and four token cases with
 isolated UI-input stubs; [results and source hashes](baselines/2026-09-12-sql-predicates-builder.jsonl)
 are retained. Run it from the repository root. This checks generated SQL,
-not a browser layout or the whole dashboard. All six local workspace gates pass: format, check, Clippy, 992 tests
-(13 ignored), documentation tests and the release node build. Release regressions,
-equivalent workload comparisons and PR/CI/merge remain. Performance comparisons must use baseline
+not a browser layout or the whole dashboard.
+
+All six local workspace gates pass: format, check, Clippy, 992 tests
+(13 ignored), documentation tests and the release node build. Release query/index
+regressions and the generated-SQL check also pass. Implementation `0329745c`
+passes [repeated equivalent release comparisons](baselines/2026-09-12-sql-predicates.md):
+45 standard samples per metric/profile/revision and 100 DataFusion samples per
+shape/profile/revision. All initial and confirmation observations are retained.
+Dense mixed historical-write/reopen/COUNT tails remain +7.52%/+7.63%/+7.00%,
+explicitly below the 10% ceiling. A separate 100-sample phase-isolation check
+shows no positive median/tail difference above 1%; no speedup is claimed.
+PR/CI/merge remain. Performance comparisons use baseline
 queries with already-correct outputs; timing a wrong equality result against a
 correct inequality is not a meaningful regression measurement. Common valid
 range/address/topic predicates retain their native/indexed paths.
