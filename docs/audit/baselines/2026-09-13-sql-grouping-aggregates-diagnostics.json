@@ -1,0 +1,634 @@
+{
+  "isolated_environment": {
+    "base_commit": "c24d56b6caa7d7834411da0b5ac21a5a8f4158d1",
+    "candidate_commit": "8b7812bb11f47434dd5d2c8bcac3d1cb2062ba64",
+    "recorded_at_utc": "2026-09-12T20:15:18.345870+00:00",
+    "plan": {
+      "base_commit": "c24d56b6caa7d7834411da0b5ac21a5a8f4158d1",
+      "candidate_commit": "8b7812bb11f47434dd5d2c8bcac3d1cb2062ba64",
+      "binaries": {
+        "base": {
+          "path": "/private/tmp/logex-grouping-isolated-review/build-1/base-audit_harness",
+          "sha256": "032d4d2c0543d584072c9fd3ff6f4564022cc13ec1c144e625922cf89c2923c9",
+          "fixture_path": "/private/tmp/logex-grouping-isolated-review/build-1/base-source/crates/logex-query/tests/audit_harness.rs"
+        },
+        "candidate": {
+          "path": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-audit_harness",
+          "sha256": "33f26bd2df55ccfacbbec93bf5bd26ded1991fd85700be574587f6eee07ab9b7",
+          "fixture_path": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-source/crates/logex-query/tests/audit_harness.rs"
+        }
+      },
+      "fixture_sha256": "4388d6b1c88cf7c6ae5e53857d23edb30bb48bf8685397f2bab49770f3bbb053",
+      "purpose": "Replay the exact retained PR135 isolated native-query/reopen fragment with its original workload parameters. Diagnose repeated execution versus mixed pipeline effects. This is a separate diagnostic dataset, not a replacement for the initial and fixed confirmation observations.",
+      "benchmarks": [
+        {
+          "name": "warm_dense",
+          "target": "audit_harness",
+          "test": "audit_warm_concurrent_and_reopen",
+          "environment": {
+            "LOGEX_BENCH_ROWS": "200000",
+            "LOGEX_BENCH_REPEATS": "30",
+            "LOGEX_BENCH_SEGMENT_ROWS": "50000",
+            "LOGEX_BENCH_BATCH_ROWS": "8192",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_PROFILE": "dense"
+          },
+          "samples_per_process": {
+            "warm_concurrent_native_queries": 30,
+            "warm_reopen": 30
+          }
+        },
+        {
+          "name": "warm_sparse",
+          "target": "audit_harness",
+          "test": "audit_warm_concurrent_and_reopen",
+          "environment": {
+            "LOGEX_BENCH_ROWS": "200000",
+            "LOGEX_BENCH_REPEATS": "30",
+            "LOGEX_BENCH_SEGMENT_ROWS": "50000",
+            "LOGEX_BENCH_BATCH_ROWS": "8192",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_PROFILE": "sparse"
+          },
+          "samples_per_process": {
+            "warm_concurrent_native_queries": 30,
+            "warm_reopen": 30
+          }
+        }
+      ],
+      "build_metadata": {
+        "path": "/private/tmp/logex-grouping-isolated-review/build-1/build-metadata.json",
+        "sha256": "d74a53de6d902d969b3060a7b43694393fb3ca9436f2f1a5bd35a50bc4cbe1e9"
+      },
+      "prospective_protocol_sha256": "f6df16509871e7cde6aeee2ba1fd6942f732de2e8b14ca1b3cf56366caf48ffb"
+    },
+    "plan_sha256": "e26a209a216396960898bfd36d1ec25f96fe58587c9c831608aa85bbda74444f",
+    "runner_source": "\"\"\"Retain paired release evidence for the grouping engine integration.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nfrom datetime import datetime, timezone\nimport hashlib\nimport io\nimport json\nimport math\nimport os\nimport re\nimport shutil\nimport statistics\nimport subprocess\nimport sys\nimport tarfile\n\nREPO = Path('/Users/tdenisenko/code/logex')\nBASE = 'c24d56b6caa7d7834411da0b5ac21a5a8f4158d1'\nMANIFEST = Path(sys.argv[1])\nROOT = Path(sys.argv[2])\nPLAN = json.loads(MANIFEST.read_text())\nROOT.mkdir(exist_ok=False)\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef append(path, record):\n    with path.open('a') as stream:\n        stream.write(json.dumps(record) + '\\n')\n\n\ndef stats(values):\n    assert values and all(math.isfinite(v) and v >= 0 for v in values)\n    return {'samples': len(values), 'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1]}\n\n\ndef artifact(log, target):\n    found = []\n    for line in log.read_text().splitlines():\n        try:\n            record = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n        if (record.get('reason') == 'compiler-artifact' and record.get('executable')\n                and record['target']['name'] == target):\n            found.append(record)\n    assert len(found) == 1 and not found[0]['fresh'], (target, log)\n    return Path(found[0]['executable'])\n\n\ndef counters(log):\n    lines = log.read_text().splitlines()\n    timing = None\n    values = {}\n    for index, line in enumerate(lines):\n        match = re.match(r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$', line)\n        if match:\n            assert timing is None, log\n            timing = index\n            values.update(zip(['real_seconds', 'user_seconds', 'sys_seconds'],\n                              map(float, match.groups())))\n        elif timing is not None:\n            match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n            assert match is not None, (log, line)\n            values[match.group(2).replace(' ', '_')] = int(match.group(1))\n    assert timing is not None and 'maximum_resident_set_size' in values, log\n    return {'counters': values, 'raw_time_output': '\\n'.join(lines[timing:])}\n\n\ndef timed(command, log, additions):\n    started_at = datetime.now(timezone.utc).isoformat()\n    command = ['/usr/bin/time', '-l', *command]\n    # Explicit benchmark parameters below must not inherit another experiment's settings.\n    env = {key: value for key, value in os.environ.items()\n           if not key.startswith(('LOGEX_BENCH_', 'LOGEX_PUBLICATION_', 'LOGEX_INLIST_'))}\n    env.update({'TMPDIR': '/private/tmp', **additions})\n    with log.open('w') as stream:\n        result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, env=env)\n    return {'command': command, 'started_at_utc': started_at,\n            'finished_at_utc': datetime.now(timezone.utc).isoformat(),\n            'environment_overrides': additions, 'exit': result.returncode,\n            'log': str(log), 'log_sha256': sha(log), **counters(log)}\n\n\nassert output(['git', 'rev-parse', 'HEAD']) == PLAN['candidate_commit']\nfor label in ('base', 'candidate'):\n    assert sha(Path(PLAN['binaries'][label]['path'])) == PLAN['binaries'][label]['sha256']\n    assert sha(Path(PLAN['binaries'][label]['fixture_path'])) == PLAN['fixture_sha256']\nassert PLAN['binaries']['base']['sha256'] != PLAN['binaries']['candidate']['sha256']\nmetadata = {'base_commit': PLAN['base_commit'], 'candidate_commit': PLAN['candidate_commit'],\n    'recorded_at_utc': datetime.now(timezone.utc).isoformat(), 'plan': PLAN, 'plan_sha256': sha(MANIFEST),\n    'runner_source': Path(__file__).read_text(), 'runner_sha256': sha(Path(__file__)),\n    'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']), 'rustc': output(['rustc', '-Vv']), 'cargo': output(['cargo', '-V']),\n    'filesystem': output(['df', '-h', '/private/tmp'])}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nall_records = []\nfor suite in PLAN['benchmarks']:\n    name = suite['name']\n    suite_records = []\n    for pair in range(5):\n        for label in (('base', 'candidate') if pair % 2 == 0 else ('candidate', 'base')):\n            target = suite['target']\n            log = ROOT / f'{name}-{pair}-{label}.log'\n            command = [PLAN['binaries'][label]['path'], suite['test'], '--exact',\n                       '--ignored', '--nocapture', '--test-threads=1']\n            run = {'kind': 'run', 'suite': name, 'pair': pair, 'revision': label,\n                   **timed(command, log, suite['environment'])}\n            append(ROOT / 'results.jsonl', run)\n            assert run['exit'] == 0, log\n            parsed = []\n            for line in log.read_text().splitlines():\n                if '{' not in line:\n                    continue\n                try:\n                    record = json.loads(line[line.index('{'):])\n                except json.JSONDecodeError:\n                    continue\n                record = {'raw_record': record, 'suite': name, 'pair': pair, 'revision': label}\n                parsed.append(record)\n                append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **record})\n            configs = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'config']\n            samples = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'sample']\n            assert len(configs) == 1, log\n            assert Counter(r['metric'] for r in samples) == Counter(suite['samples_per_process']), log\n            for metric, expected in suite['samples_per_process'].items():\n                iterations = [r['iteration'] for r in samples if r['metric'] == metric]\n                assert len(iterations) == expected and len(set(iterations)) == expected, log\n            rss = {'raw_record': {'kind': 'rss', 'bytes': run['counters']['maximum_resident_set_size']},\n                   'suite': name, 'pair': pair, 'revision': label}\n            parsed.append(rss)\n            append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **rss})\n            suite_records.extend(parsed)\n            for metric in [*suite['samples_per_process'], 'peak_rss']:\n                values = ([rss['raw_record']['bytes']] if metric == 'peak_rss' else\n                          [r['elapsed_ms'] for r in samples if r['metric'] == metric])\n                append(ROOT / 'results.jsonl', {'kind': 'process_summary', 'suite': name,\n                       'pair': pair, 'revision': label, 'metric': metric, **stats(values)})\n            print(name, pair, label, len(samples), 'samples retained', flush=True)\n    configs = [r['raw_record'] for r in suite_records if r['raw_record'].get('kind') == 'config']\n    assert len(configs) == 10 and len({json.dumps(c, sort_keys=True) for c in configs}) == 1, name\n    for metric in [*suite['samples_per_process'], 'peak_rss']:\n        values = {}\n        for label in ('base', 'candidate'):\n            records = [r['raw_record'] for r in suite_records if r['revision'] == label]\n            values[label] = ([r['bytes'] for r in records if r.get('kind') == 'rss']\n                             if metric == 'peak_rss' else\n                             [r['elapsed_ms'] for r in records if r.get('kind') == 'sample'\n                              and r['metric'] == metric])\n            expected = 5 if metric == 'peak_rss' else 5 * suite['samples_per_process'][metric]\n            assert len(values[label]) == expected, (name, metric, label)\n        summarized = {label: stats(v) for label, v in values.items()}\n        record = {'kind': 'comparison', 'suite': name, 'metric': metric, 'values': summarized}\n        for measure in ('median', 'p95'):\n            before, after = (summarized[label][measure] for label in ('base', 'candidate'))\n            record[f'{measure}_change_percent'] = 100 * (after / before - 1)\n        append(ROOT / 'results.jsonl', record)\n        print(record, flush=True)\n    all_records.extend(suite_records)\n\nmetadata['retained_counts'] = dict(Counter(r['raw_record']['kind'] for r in all_records))\nassert metadata['retained_counts']['sample'] == 1200\nassert metadata['retained_counts']['rss'] == 20\nfor name in ('results.jsonl',):\n    metadata[name] = {'path': str(ROOT / name), 'sha256': sha(ROOT / name)}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nprint('Complete:', metadata['retained_counts'], flush=True)\n",
+    "runner_sha256": "f12033a770ecd2ea092b3a2dec2c7a0218dece8e02161ec9397bd30a2080438c",
+    "hardware": "Mac14,15\n17179869184\n8",
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+    "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   845Gi    52Gi    95%    6.0M  540M    1%   /System/Volumes/Data",
+    "retained_counts": {
+      "config": 20,
+      "sample": 1200,
+      "rss": 20
+    },
+    "results.jsonl": {
+      "path": "/private/tmp/logex-sql-grouping-aggregates-isolated-1/results.jsonl",
+      "sha256": "9d63b3a8bf4b08eee20d6c77d5c079b9ea3a856bd063835089a3601c186f5e6e"
+    }
+  },
+  "isolated_build_metadata": {
+    "kind": "build_preparation",
+    "completed_at_utc": "2026-09-12T20:13:55Z",
+    "benchmark_executed": false,
+    "shared_target": "/Users/tdenisenko/code/logex/target",
+    "source_inputs_unchanged": {
+      "base": "/private/tmp/logex-sql-grouping-aggregates-acceptance-1/base-source",
+      "candidate": "/private/tmp/logex-sql-grouping-aggregates-acceptance-1/candidate-source"
+    },
+    "staged_sources": {
+      "base": "/private/tmp/logex-grouping-isolated-review/build-1/base-source",
+      "candidate": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-source",
+      "base_source_inventory": "/private/tmp/logex-grouping-isolated-review/build-1/base-source-sha256.txt",
+      "candidate_source_inventory": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-source-sha256.txt",
+      "base_source_inventory_sha256": "4c979d356a9385fc3a6ba577fd956ec8fc7351a8a49e147dc286638c91e08a28",
+      "candidate_source_inventory_sha256": "7f65561b94004e22604dc7d2ee0a34b62132428c9fb81934cc9aef6efc6292ba",
+      "base_key_inputs": "/private/tmp/logex-grouping-isolated-review/build-1/base-key-inputs-sha256.txt",
+      "candidate_key_inputs": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-key-inputs-sha256.txt",
+      "base_key_inputs_sha256": "d5a54f954092687787c92ccc259a395c235909519e9eda55fe27ec781d9c8fa1",
+      "candidate_key_inputs_sha256": "9d3e8a10a650b0562c3b4ae4afb824ffe52ce3c4f781a6202cde77d9a11f28da",
+      "input_harness_sha256": "bcba22564e3b389f5d2d9cc9ae878a903b69e08a573a4d8eee63d2e606764ddb",
+      "fragment": "/private/tmp/logex-grouping-isolated-review/pr135-isolated-test-fragment.rs",
+      "fragment_sha256": "d6e25af3204bd61077dbb9a313fdfa426b451dd3a3f3ddc4442b838438653bd4",
+      "staged_harness_sha256": "4388d6b1c88cf7c6ae5e53857d23edb30bb48bf8685397f2bab49770f3bbb053",
+      "fragment_suffix_byte_identical": true
+    },
+    "build_command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-query",
+      "--test",
+      "audit_harness",
+      "--release",
+      "--locked",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "build_order": [
+      "base",
+      "candidate"
+    ],
+    "base": {
+      "compiler_stdout": "/private/tmp/logex-grouping-isolated-review/build-1/base-compiler.jsonl",
+      "compiler_stdout_sha256": "a7198cb3e266828a96831726f45676a34c3ef310c32d2a2f54f039c4af82b69b",
+      "compiler_stderr": "/private/tmp/logex-grouping-isolated-review/build-1/base-build.stderr.log",
+      "compiler_stderr_sha256": "090f3a50472854376bf6bc5c1df73a0565a55a0ad24724ab3448b59bc346b2c7",
+      "artifact_record": "/private/tmp/logex-grouping-isolated-review/build-1/base-audit-harness-artifact.jsonl",
+      "artifact_record_sha256": "441e30dbfb3bfe00b0473275b81d82a526e383f838db1ef4559d5908bcdfc796",
+      "fresh": false,
+      "profile": "release opt-level 3 test executable",
+      "copied_executable": "/private/tmp/logex-grouping-isolated-review/build-1/base-audit_harness",
+      "copied_executable_sha256": "032d4d2c0543d584072c9fd3ff6f4564022cc13ec1c144e625922cf89c2923c9",
+      "copied_executable_bytes": 117743136
+    },
+    "candidate": {
+      "compiler_stdout": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-compiler.jsonl",
+      "compiler_stdout_sha256": "115ecbfded2eb88d1643394110b9fffba3f3161a8d89dfdcbc3deef35fe3efbc",
+      "compiler_stderr": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-build.stderr.log",
+      "compiler_stderr_sha256": "8c375248812e4378590ff7779fca1cc2f76608655584a6865d1d96a6d20d6927",
+      "artifact_record": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-audit-harness-artifact.jsonl",
+      "artifact_record_sha256": "55dced6d019c018eff0fd178e4b52bc8d2e2f882827262363bc34cfad4b25c05",
+      "fresh": false,
+      "profile": "release opt-level 3 test executable",
+      "copied_executable": "/private/tmp/logex-grouping-isolated-review/build-1/candidate-audit_harness",
+      "copied_executable_sha256": "33f26bd2df55ccfacbbec93bf5bd26ded1991fd85700be574587f6eee07ab9b7",
+      "copied_executable_bytes": 117785776
+    },
+    "stderr_disposition": "Both builds completed successfully. Stderr contains compilation progress and the same proc-macro-error2 future-incompatibility warning; no build error.",
+    "root_mtime_refresh": {
+      "completed": true,
+      "tracked_rust_and_cargo_manifest_files": 187,
+      "reason": "Make repository sources newer after staged shared-target builds so later repository Cargo work cannot reuse a staged-source fingerprint."
+    },
+    "cargo_ownership": "released"
+  },
+  "isolated_summaries": [
+    {
+      "kind": "comparison",
+      "suite": "warm_dense",
+      "metric": "warm_concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 150,
+          "median": 111.31464600000001,
+          "p95": 131.300209
+        },
+        "candidate": {
+          "samples": 150,
+          "median": 112.234917,
+          "p95": 119.09758400000001
+        }
+      },
+      "median_change_percent": 0.8267294853544938,
+      "p95_change_percent": -9.293682845546714
+    },
+    {
+      "kind": "comparison",
+      "suite": "warm_dense",
+      "metric": "warm_reopen",
+      "values": {
+        "base": {
+          "samples": 150,
+          "median": 5.885125,
+          "p95": 6.685791
+        },
+        "candidate": {
+          "samples": 150,
+          "median": 6.027,
+          "p95": 7.74475
+        }
+      },
+      "median_change_percent": 2.410738939274859,
+      "p95_change_percent": 15.838948600098334
+    },
+    {
+      "kind": "comparison",
+      "suite": "warm_dense",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 5,
+          "median": 825475072,
+          "p95": 1510555648
+        },
+        "candidate": {
+          "samples": 5,
+          "median": 706641920,
+          "p95": 832536576
+        }
+      },
+      "median_change_percent": -14.395728718019962,
+      "p95_change_percent": -44.88540841892903
+    },
+    {
+      "kind": "comparison",
+      "suite": "warm_sparse",
+      "metric": "warm_concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 150,
+          "median": 111.465375,
+          "p95": 120.513791
+        },
+        "candidate": {
+          "samples": 150,
+          "median": 111.99822900000001,
+          "p95": 131.369
+        }
+      },
+      "median_change_percent": 0.4780444151379015,
+      "p95_change_percent": 9.007441314330578
+    },
+    {
+      "kind": "comparison",
+      "suite": "warm_sparse",
+      "metric": "warm_reopen",
+      "values": {
+        "base": {
+          "samples": 150,
+          "median": 5.650042,
+          "p95": 6.704708999999999
+        },
+        "candidate": {
+          "samples": 150,
+          "median": 5.667438,
+          "p95": 7.056792
+        }
+      },
+      "median_change_percent": 0.3078915165586338,
+      "p95_change_percent": 5.251279362012595
+    },
+    {
+      "kind": "comparison",
+      "suite": "warm_sparse",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 5,
+          "median": 800112640,
+          "p95": 838451200
+        },
+        "candidate": {
+          "samples": 5,
+          "median": 790380544,
+          "p95": 872775680
+        }
+      },
+      "median_change_percent": -1.21634073922392,
+      "p95_change_percent": 4.093795798729838
+    }
+  ],
+  "same_binary_environment": {
+    "comparison_type": "same_candidate_executable_A_A",
+    "plan": {
+      "candidate_commit": "8b7812bb11f47434dd5d2c8bcac3d1cb2062ba64",
+      "initial_directory": "/private/tmp/logex-sql-grouping-aggregates-acceptance-1",
+      "suite": {
+        "name": "integrated_sparse",
+        "target": "audit_harness",
+        "test": "benchmark_storage_indexes_and_queries",
+        "environment": {
+          "LOGEX_BENCH_PROFILE": "sparse",
+          "LOGEX_BENCH_ROWS": "20000",
+          "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+          "LOGEX_BENCH_BATCH_ROWS": "4096",
+          "LOGEX_BENCH_WORKERS": "4",
+          "LOGEX_BENCH_REPEATS": "10"
+        },
+        "samples_per_process": {
+          "live_storage_ingest": 10,
+          "index_build": 10,
+          "compaction": 10,
+          "reopen": 10,
+          "native_filter": 10,
+          "sql_count": 10,
+          "sql_ordered": 10,
+          "concurrent_native_queries": 10,
+          "historical_storage_ingest": 10
+        }
+      },
+      "binary": "/private/tmp/logex-sql-grouping-aggregates-acceptance-1/candidate-audit_harness",
+      "binary_sha256": "117b0d0b9040ed23610db8e43b909068b69b6b10d23ee5e93f58791be5886752",
+      "process_order": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "A",
+          "B"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ],
+        [
+          "B",
+          "A"
+        ]
+      ],
+      "purpose": "Same-executable calibration of the mixed sparse workload. A and B are scheduling labels for the identical candidate executable; they are not different revisions. Diagnose host/pipeline variance for retained historical-ingestion tail differences. Do not pool with revision comparisons or treat this control as proving absence of a source regression.",
+      "conditions": "Twenty fixed pairs, ten A-first and ten B-first in recorded seeded order. Original fixture parameters. No concurrent builds/tests. All observations retained; no repeat-until-pass.",
+      "expected_samples": 3600,
+      "expected_rss": 40
+    },
+    "recorded_at_utc": "2026-09-12T20:18:37.006472+00:00",
+    "runner_source": "\"\"\"Retain paired release evidence for the grouping engine integration.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nfrom datetime import datetime, timezone\nimport hashlib\nimport io\nimport json\nimport math\nimport os\nimport re\nimport shutil\nimport statistics\nimport subprocess\nimport sys\nimport tarfile\n\nREPO = Path('/Users/tdenisenko/code/logex')\nBASE = 'c24d56b6caa7d7834411da0b5ac21a5a8f4158d1'\nMANIFEST = Path(sys.argv[1])\nROOT = Path(sys.argv[2])\nPLAN = json.loads(MANIFEST.read_text())\nROOT.mkdir(exist_ok=False)\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef append(path, record):\n    with path.open('a') as stream:\n        stream.write(json.dumps(record) + '\\n')\n\n\ndef stats(values):\n    assert values and all(math.isfinite(v) and v >= 0 for v in values)\n    return {'samples': len(values), 'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1]}\n\n\ndef artifact(log, target):\n    found = []\n    for line in log.read_text().splitlines():\n        try:\n            record = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n        if (record.get('reason') == 'compiler-artifact' and record.get('executable')\n                and record['target']['name'] == target):\n            found.append(record)\n    assert len(found) == 1 and not found[0]['fresh'], (target, log)\n    return Path(found[0]['executable'])\n\n\ndef counters(log):\n    lines = log.read_text().splitlines()\n    timing = None\n    values = {}\n    for index, line in enumerate(lines):\n        match = re.match(r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$', line)\n        if match:\n            assert timing is None, log\n            timing = index\n            values.update(zip(['real_seconds', 'user_seconds', 'sys_seconds'],\n                              map(float, match.groups())))\n        elif timing is not None:\n            match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n            assert match is not None, (log, line)\n            values[match.group(2).replace(' ', '_')] = int(match.group(1))\n    assert timing is not None and 'maximum_resident_set_size' in values, log\n    return {'counters': values, 'raw_time_output': '\\n'.join(lines[timing:])}\n\n\ndef timed(command, log, additions):\n    started_at = datetime.now(timezone.utc).isoformat()\n    command = ['/usr/bin/time', '-l', *command]\n    # Explicit benchmark parameters below must not inherit another experiment's settings.\n    env = {key: value for key, value in os.environ.items()\n           if not key.startswith(('LOGEX_BENCH_', 'LOGEX_PUBLICATION_', 'LOGEX_INLIST_'))}\n    env.update({'TMPDIR': '/private/tmp', **additions})\n    with log.open('w') as stream:\n        result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, env=env)\n    return {'command': command, 'started_at_utc': started_at,\n            'finished_at_utc': datetime.now(timezone.utc).isoformat(),\n            'environment_overrides': additions, 'exit': result.returncode,\n            'log': str(log), 'log_sha256': sha(log), **counters(log)}\n\n\nassert sha(Path(PLAN['binary'])) == PLAN['binary_sha256']\nassert Counter(order[0] for order in PLAN['process_order']) == {'A': 10, 'B': 10}\nmetadata = {'comparison_type': 'same_candidate_executable_A_A', 'plan': PLAN,\n    'recorded_at_utc': datetime.now(timezone.utc).isoformat(),\n    'runner_source': Path(__file__).read_text(), 'runner_sha256': sha(Path(__file__)),\n    'plan_sha256': sha(MANIFEST), 'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']), 'rustc': output(['rustc', '-Vv']), 'filesystem': output(['df', '-h', '/private/tmp'])}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nsuite = PLAN['suite']\nretained = []\nfor pair, order in enumerate(PLAN['process_order']):\n    for label in order:\n        log = ROOT / f'{pair}-{label}.log'\n        command = [PLAN['binary'], suite['test'], '--exact', '--ignored', '--nocapture', '--test-threads=1']\n        run = {'kind': 'run', 'pair': pair, 'label': label, **timed(command, log, suite['environment'])}\n        append(ROOT / 'results.jsonl', run)\n        assert run['exit'] == 0, log\n        parsed = []\n        for line in log.read_text().splitlines():\n            if '{' not in line:\n                continue\n            try:\n                raw = json.loads(line[line.index('{'):])\n            except json.JSONDecodeError:\n                continue\n            record = {'kind': 'fixture_record', 'pair': pair, 'label': label, 'raw_record': raw}\n            append(ROOT / 'results.jsonl', record)\n            parsed.append(record)\n        samples = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'sample']\n        assert Counter(s['metric'] for s in samples) == Counter(suite['samples_per_process'])\n        assert sum(r['raw_record'].get('kind') == 'config' for r in parsed) == 1\n        for metric, n in suite['samples_per_process'].items():\n            assert len({s['iteration'] for s in samples if s['metric'] == metric}) == n\n        rss = {'kind': 'fixture_record', 'pair': pair, 'label': label,\n               'raw_record': {'kind': 'rss', 'bytes': run['counters']['maximum_resident_set_size']}}\n        append(ROOT / 'results.jsonl', rss)\n        parsed.append(rss)\n        retained.extend(parsed)\n        print(pair, label, 'same-executable samples retained', flush=True)\nconfigs = [r['raw_record'] for r in retained if r['raw_record'].get('kind') == 'config']\nassert len(configs) == 40 and len({json.dumps(c, sort_keys=True) for c in configs}) == 1\nfor metric in [*suite['samples_per_process'], 'peak_rss']:\n    values = {}\n    for label in ('A', 'B'):\n        raw = [r['raw_record'] for r in retained if r['label'] == label]\n        v = [r['bytes'] for r in raw if r.get('kind') == 'rss'] if metric == 'peak_rss' else [r['elapsed_ms'] for r in raw if r.get('kind') == 'sample' and r['metric'] == metric]\n        assert len(v) == (20 if metric == 'peak_rss' else 20 * suite['samples_per_process'][metric])\n        values[label] = stats(v)\n    summary = {'kind': 'same_binary_comparison', 'metric': metric, 'values': values}\n    for measure in ('median', 'p95'):\n        summary[measure + '_change_percent'] = 100 * (values['B'][measure] / values['A'][measure] - 1)\n    append(ROOT / 'results.jsonl', summary)\n    print(summary, flush=True)\nmetadata['retained_counts'] = dict(Counter(r['raw_record']['kind'] for r in retained))\nassert metadata['retained_counts']['sample'] == PLAN['expected_samples']\nassert metadata['retained_counts']['rss'] == PLAN['expected_rss']\nmetadata['results_sha256'] = sha(ROOT / 'results.jsonl')\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nprint('Complete:', metadata['retained_counts'], flush=True)\n",
+    "runner_sha256": "c6641cdd565c8e556d998f00e7268d28797305a7e9520039e557fb20bb6fe2cd",
+    "plan_sha256": "ada163d17e2461125280ffa624ff6c910a93da5f1056d941806ad49e62edab7f",
+    "hardware": "Mac14,15\n17179869184\n8",
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   845Gi    53Gi    95%    6.0M  551M    1%   /System/Volumes/Data",
+    "retained_counts": {
+      "config": 40,
+      "sample": 3600,
+      "storage": 400,
+      "summary": 360,
+      "rss": 40
+    },
+    "results_sha256": "5a2c2fec357e17825fb4b27c203393d94d6c448a4e9cefc047c4b0a146b2b092"
+  },
+  "same_binary_summaries": [
+    {
+      "kind": "same_binary_comparison",
+      "metric": "live_storage_ingest",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 82.0810625,
+          "p95": 96.217
+        },
+        "B": {
+          "samples": 200,
+          "median": 82.4963125,
+          "p95": 88.281584
+        }
+      },
+      "median_change_percent": 0.5059023206479552,
+      "p95_change_percent": -8.247415737343722
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "index_build",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 78.1957295,
+          "p95": 90.073167
+        },
+        "B": {
+          "samples": 200,
+          "median": 77.732021,
+          "p95": 83.292667
+        }
+      },
+      "median_change_percent": -0.5930100057446208,
+      "p95_change_percent": -7.527769063565848
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "compaction",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 23.1095415,
+          "p95": 25.398958999999998
+        },
+        "B": {
+          "samples": 200,
+          "median": 23.2159585,
+          "p95": 25.076041
+        }
+      },
+      "median_change_percent": 0.46048944761625243,
+      "p95_change_percent": -1.2713828153350648
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "reopen",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 6.3070415,
+          "p95": 7.424875
+        },
+        "B": {
+          "samples": 200,
+          "median": 6.272166500000001,
+          "p95": 7.1135
+        }
+      },
+      "median_change_percent": -0.55295339344128,
+      "p95_change_percent": -4.193673294163203
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "native_filter",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 9.036229,
+          "p95": 10.12575
+        },
+        "B": {
+          "samples": 200,
+          "median": 8.971833,
+          "p95": 10.06625
+        }
+      },
+      "median_change_percent": -0.7126424086861927,
+      "p95_change_percent": -0.58761079426215
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "sql_count",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 1.033271,
+          "p95": 1.506292
+        },
+        "B": {
+          "samples": 200,
+          "median": 1.0279585,
+          "p95": 1.119125
+        }
+      },
+      "median_change_percent": -0.5141439177137497,
+      "p95_change_percent": -25.703316488436514
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "sql_ordered",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 3.3641249999999996,
+          "p95": 3.766167
+        },
+        "B": {
+          "samples": 200,
+          "median": 3.363646,
+          "p95": 3.746833
+        }
+      },
+      "median_change_percent": -0.014238472113836664,
+      "p95_change_percent": -0.5133601351188011
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 12.269520499999999,
+          "p95": 17.314666
+        },
+        "B": {
+          "samples": 200,
+          "median": 12.2430415,
+          "p95": 16.497375
+        }
+      },
+      "median_change_percent": -0.21581120468397996,
+      "p95_change_percent": -4.720223884191577
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "A": {
+          "samples": 200,
+          "median": 52.925062499999996,
+          "p95": 58.152542000000004
+        },
+        "B": {
+          "samples": 200,
+          "median": 52.960521,
+          "p95": 56.859
+        }
+      },
+      "median_change_percent": 0.0669975590487093,
+      "p95_change_percent": -2.224394593103085
+    },
+    {
+      "kind": "same_binary_comparison",
+      "metric": "peak_rss",
+      "values": {
+        "A": {
+          "samples": 20,
+          "median": 121225216.0,
+          "p95": 127680512
+        },
+        "B": {
+          "samples": 20,
+          "median": 122970112.0,
+          "p95": 126566400
+        }
+      },
+      "median_change_percent": 1.4393837005000742,
+      "p95_change_percent": -0.872577954574616
+    }
+  ],
+  "files": [
+    {
+      "file": "2026-09-13-sql-grouping-aggregates-isolated-final.jsonl.gz",
+      "bytes": 17280,
+      "sha256": "0488584724e399b77e1f7326196ed0f1ca7cd5e1c5d53aea7c1982e51fe9aaf0",
+      "decoded_sha256": "9d63b3a8bf4b08eee20d6c77d5c079b9ea3a856bd063835089a3601c186f5e6e",
+      "decoded_bytes": 299225
+    },
+    {
+      "file": "2026-09-13-sql-grouping-aggregates-isolated-run-logs.json.gz",
+      "bytes": 14416,
+      "sha256": "5914efbd9be9b945c32d9ccb26e7e804f30e1731ccf5cdcc2c1328b16d49cb18",
+      "decoded_sha256": "da8e1d8d421db5a1d60a5ccc620531b098e816e81a93d12a2a1f192d488a7c2b",
+      "decoded_bytes": 196059
+    },
+    {
+      "file": "2026-09-13-sql-grouping-aggregates-isolated-build-review.json.gz",
+      "bytes": 86962,
+      "sha256": "eb213891f3169674735ead8ffd30622b87cf1254a3156183d36650cedeca424f",
+      "decoded_sha256": "cef7e199324bb97efd8649890661b4d0a71f270ae1e72eda88d1f76366bb81bd",
+      "decoded_bytes": 880032
+    },
+    {
+      "file": "2026-09-13-sql-grouping-aggregates-same-binary-final.jsonl.gz",
+      "bytes": 91230,
+      "sha256": "d70c4efb3a78f789f6530296c0b34554c35b5c267bb399a92b4023c8d42cdbda",
+      "decoded_sha256": "5a2c2fec357e17825fb4b27c203393d94d6c448a4e9cefc047c4b0a146b2b092",
+      "decoded_bytes": 1038116
+    },
+    {
+      "file": "2026-09-13-sql-grouping-aggregates-same-binary-run-logs.json.gz",
+      "bytes": 86219,
+      "sha256": "d0a9e8fe1df7d1559ba94ae23ff639bfad7b87e8f3df9b1cf1c3334bb500d959",
+      "decoded_sha256": "1f509cad7ef84fde21e94352251624aa7062f99fecd8e0e61a5261f0a6ce5116",
+      "decoded_bytes": 810150
+    }
+  ],
+  "diagnostic_latency_observations": 4800,
+  "diagnostic_memory_observations": 60,
+  "verification_script": "\"\"\"Retain bounded diagnostics separately from the revision acceptance dataset.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nimport ast\nimport gzip\nimport hashlib\nimport json\nimport math\nimport re\nimport statistics\nimport sys\n\nISOLATED, CONTROL, REVIEW = map(Path, sys.argv[1:4])\nOUT = Path('/Users/tdenisenko/code/logex/docs/audit/baselines')\nPREFIX = '2026-09-13-sql-grouping-aggregates-'\n\n# Reuse the already-reviewed validation functions without running that packager.\nvalidation_source = Path('/private/tmp/logex-grouping-confirmation-package.py').read_text()\ndefinitions = ast.Module(body=[node for node in ast.parse(validation_source).body\n                              if isinstance(node, ast.FunctionDef)], type_ignores=[])\nexec(compile(definitions, '<retained-validation-functions>', 'exec'))\n\nisolated = read(ISOLATED)\nraw, fixtures, runs, summaries = validate(ISOLATED, isolated, 1200, 20)\nplan = isolated['plan']\nbuild_path = Path(plan['build_metadata']['path'])\nassert digest(build_path.read_bytes()) == plan['build_metadata']['sha256']\nbuild = json.loads(build_path.read_text())\nfor label, record in plan['binaries'].items():\n    with Path(record['path']).open('rb') as stream:\n        assert hashlib.file_digest(stream, 'sha256').hexdigest() == record['sha256']\n    assert digest(Path(record['fixture_path']).read_bytes()) == plan['fixture_sha256']\n\ncontrol = read(CONTROL)\nraw_control = (CONTROL / 'results.jsonl').read_bytes()\nassert digest(raw_control) == control['results_sha256']\ncontrol_records = [json.loads(line) for line in raw_control.splitlines()]\ncontrol_rows = [r for r in control_records if r['kind'] == 'fixture_record']\ncontrol_runs = [r for r in control_records if r['kind'] == 'run']\ncontrol_summaries = [r for r in control_records if r['kind'] == 'same_binary_comparison']\ncontrol_plan = control['plan']\nwith Path(control_plan['binary']).open('rb') as stream:\n    assert hashlib.file_digest(stream, 'sha256').hexdigest() == control_plan['binary_sha256']\nassert len(control_runs) == 40\nassert [(r['pair'], r['label']) for r in control_runs] == [(p, label) for p, labels in enumerate(control_plan['process_order']) for label in labels]\nassert sum(r['raw_record'].get('kind') == 'sample' for r in control_rows) == 3600\nassert sum(r['raw_record'].get('kind') == 'rss' for r in control_rows) == 40\nfor run in control_runs:\n    assert run['exit'] == 0 and run['command'][2] == control_plan['binary']\n    output = Path(run['log']).read_text()\n    assert digest(output.encode()) == run['log_sha256']\n    run['output'] = output\n    emitted = []\n    for line in output.splitlines():\n        if '{' in line:\n            try:\n                emitted.append(json.loads(line[line.index('{'):]))\n            except json.JSONDecodeError:\n                pass\n    matching = [r['raw_record'] for r in control_rows if r['pair'] == run['pair'] and r['label'] == run['label']]\n    assert [r for r in matching if r.get('kind') != 'rss'] == emitted\n    rss = re.findall(r'^\\s*(\\d+)\\s+maximum resident set size\\s*$', output, re.M)\n    assert len(rss) == 1 and int(rss[0]) == run['counters']['maximum_resident_set_size']\n    assert [r for r in matching if r.get('kind') == 'rss'] == [{'kind': 'rss', 'bytes': int(rss[0])}]\n    expected = control_plan['suite']['samples_per_process']\n    assert Counter(r['metric'] for r in matching if r.get('kind') == 'sample') == Counter(expected)\n    for metric, count in expected.items():\n        assert len({r['iteration'] for r in matching if r.get('kind') == 'sample' and r['metric'] == metric}) == count\n    assert run['environment_overrides'] == control_plan['suite']['environment']\nconfigs = [r['raw_record'] for r in control_rows if r['raw_record'].get('kind') == 'config']\nassert len(configs) == 40 and len({json.dumps(c, sort_keys=True) for c in configs}) == 1\nassert len(control_summaries) == len(control_plan['suite']['samples_per_process']) + 1\nfor summary in control_summaries:\n    recomputed = {label: stats(values([r['raw_record'] for r in control_rows if r['label'] == label], summary['metric'])) for label in ('A', 'B')}\n    assert recomputed == summary['values']\n    for measure in ('median', 'p95'):\n        change = 100 * (recomputed['B'][measure] / recomputed['A'][measure] - 1)\n        assert math.isclose(change, summary[measure + '_change_percent'], abs_tol=1e-12)\n\nretained = []\nfor path in sorted(REVIEW.rglob('*')):\n    if path.is_file() and 'base-source' not in path.parts and 'candidate-source' not in path.parts:\n        with path.open('rb') as stream:\n            checksum = hashlib.file_digest(stream, 'sha256').hexdigest()\n        record = {'path': str(path), 'bytes': path.stat().st_size, 'sha256': checksum}\n        if path.suffix in ('.py', '.json', '.jsonl', '.md', '.rs', '.log', '.txt', '.stderr'):\n            record['output'] = path.read_text()\n        retained.append(record)\nfiles = [save('isolated-final.jsonl.gz', raw),\n         save('isolated-run-logs.json.gz', json.dumps(runs, indent=2).encode()),\n         save('isolated-build-review.json.gz', json.dumps(retained, indent=2).encode()),\n         save('same-binary-final.jsonl.gz', raw_control),\n         save('same-binary-run-logs.json.gz', json.dumps(control_runs, indent=2).encode())]\nreport = {'isolated_environment': isolated, 'isolated_build_metadata': build, 'isolated_summaries': summaries,\n          'same_binary_environment': control, 'same_binary_summaries': control_summaries,\n          'files': files, 'diagnostic_latency_observations': 4800, 'diagnostic_memory_observations': 60,\n          'verification_script': Path(__file__).read_text(), 'reused_validation_source': validation_source,\n          'interpretation': 'Diagnostics remain separate from all 55,500 initial/confirmation revision latency samples and 240 memory observations. Isolated results use the retained 200,000-row fixture. A/B control labels execute the same candidate binary and do not compare revisions. Neither control removes original observations or proves absence of a source regression by itself.'}\nsave('diagnostics.json', (json.dumps(report, indent=2) + '\\n').encode())\nfor name in ('isolated_summaries', 'same_binary_summaries'):\n    print(name)\n    for record in report[name]:\n        print(record.get('suite', 'same_candidate'), record['metric'], round(record['median_change_percent'], 3), round(record['p95_change_percent'], 3))\n",
+  "reused_validation_source": "\"\"\"Verify and retain the initial and fixed confirmation measurements together.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nimport gzip\nimport hashlib\nimport json\nimport math\nimport re\nimport statistics\nimport sys\n\nINITIAL, CONFIRMATION = map(Path, sys.argv[1:3])\nOUT = Path('/Users/tdenisenko/code/logex/docs/audit/baselines')\nPREFIX = '2026-09-13-sql-grouping-aggregates-'\n\n\ndef digest(data):\n    return hashlib.sha256(data).hexdigest()\n\n\ndef read(root):\n    return json.loads((root / 'environment.json').read_text())\n\n\ndef stats(values):\n    assert values and all(math.isfinite(v) and v >= 0 for v in values)\n    return {'samples': len(values), 'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1]}\n\n\ndef save(name, data):\n    path = OUT / (PREFIX + name)\n    assert not path.exists(), path\n    if name.endswith('.gz'):\n        encoded = gzip.compress(data, mtime=0)\n        assert gzip.decompress(encoded) == data\n    else:\n        encoded = data\n    path.write_bytes(encoded)\n    return {'file': path.name, 'bytes': len(encoded), 'sha256': digest(encoded),\n            'decoded_sha256': digest(data), 'decoded_bytes': len(data)}\n\n\ndef validate(root, environment, samples_expected, processes_expected):\n    raw = (root / 'results.jsonl').read_bytes()\n    assert digest(raw) == environment['results.jsonl']['sha256']\n    data = [json.loads(line) for line in raw.splitlines()]\n    fixtures = [r for r in data if r['kind'] == 'fixture_record']\n    runs = [r for r in data if r['kind'] == 'run']\n    assert len(runs) == processes_expected\n    assert len({(r['suite'], r['pair'], r['revision']) for r in runs}) == processes_expected\n    assert sum(r['raw_record'].get('kind') == 'sample' for r in fixtures) == samples_expected\n    assert sum(r['raw_record'].get('kind') == 'rss' for r in fixtures) == processes_expected\n    suites = {s['name']: s for s in environment['plan']['benchmarks']}\n    for run in runs:\n        assert run['exit'] == 0\n        output = Path(run['log']).read_text()\n        assert digest(output.encode()) == run['log_sha256']\n        run['output'] = output\n        emitted = []\n        for line in output.splitlines():\n            if '{' in line:\n                try:\n                    emitted.append(json.loads(line[line.index('{'):]))\n                except json.JSONDecodeError:\n                    pass\n        matching = [r['raw_record'] for r in fixtures\n                    if all(r[k] == run[k] for k in ('suite', 'pair', 'revision'))]\n        assert [r for r in matching if r.get('kind') != 'rss'] == emitted\n        rss = re.findall(r'^\\s*(\\d+)\\s+maximum resident set size\\s*$', output, re.M)\n        assert len(rss) == 1\n        assert int(rss[0]) == run['counters']['maximum_resident_set_size']\n        assert [r for r in matching if r.get('kind') == 'rss'] == [{'kind': 'rss', 'bytes': int(rss[0])}]\n        suite = suites[run['suite']]\n        samples = [r for r in matching if r.get('kind') == 'sample']\n        assert Counter(r['metric'] for r in samples) == Counter(suite['samples_per_process'])\n        for metric, expected in suite['samples_per_process'].items():\n            assert len({r['iteration'] for r in samples if r['metric'] == metric}) == expected\n        assert run['environment_overrides'] == suite['environment']\n    for name in suites:\n        selected = [r for r in runs if r['suite'] == name]\n        suite = suites[name]\n        order = suite.get('process_order', [list(('base', 'candidate') if p % 2 == 0 else ('candidate', 'base')) for p in range(5)])\n        assert [(r['pair'], r['revision']) for r in selected] == [(p, label) for p, labels in enumerate(order) for label in labels]\n        configs = [r['raw_record'] for r in fixtures if r['suite'] == name and r['raw_record'].get('kind') == 'config']\n        assert len(configs) == len(selected)\n        assert len({json.dumps(c, sort_keys=True) for c in configs}) == 1\n    for summary in (r for r in data if r['kind'] in ('process_summary', 'comparison')):\n        labels = ('base', 'candidate') if summary['kind'] == 'comparison' else (summary['revision'],)\n        calculated = {}\n        for label in labels:\n            matching = [r['raw_record'] for r in fixtures if r['suite'] == summary['suite']\n                        and r['revision'] == label and (summary['kind'] == 'comparison' or r['pair'] == summary['pair'])]\n            calculated[label] = stats(values(matching, summary['metric']))\n        if summary['kind'] == 'process_summary':\n            assert calculated[summary['revision']] == {k: summary[k] for k in ('samples', 'median', 'p95')}\n        else:\n            assert calculated == summary['values']\n            for measure in ('median', 'p95'):\n                change = 100 * (calculated['candidate'][measure] / calculated['base'][measure] - 1)\n                assert math.isclose(change, summary[measure + '_change_percent'], abs_tol=1e-12)\n    return raw, fixtures, runs, [r for r in data if r['kind'] == 'comparison']\n\n\ndef values(records, metric):\n    return ([r['bytes'] for r in records if r.get('kind') == 'rss'] if metric == 'peak_rss'\n            else [r['elapsed_ms'] for r in records if r.get('kind') == 'sample' and r['metric'] == metric])\n\n\ninitial, confirmation = read(INITIAL), read(CONFIRMATION)\nassert confirmation['original_environment_sha256'] == digest((INITIAL / 'environment.json').read_bytes())\nassert initial['candidate_commit'] == confirmation['candidate_commit']\nassert initial['base_commit'] == confirmation['base_commit']\nassert confirmation['plan']['confirmation']['initial_results_sha256'] == initial['results.jsonl']['sha256']\nfor target, expected in confirmation['binaries'].items():\n    assert expected == initial['binary_comparisons'][target]\n    for label, checksum in expected['sha256'].items():\n        with (INITIAL / f'{label}-{target}').open('rb') as stream:\n            assert hashlib.file_digest(stream, 'sha256').hexdigest() == checksum\nraw_first, rows_first, runs_first, summaries_first = validate(INITIAL, initial, 39_500, 80)\nraw_next, rows_next, runs_next, summaries_next = validate(CONFIRMATION, confirmation, 16_000, 160)\nfor suite in confirmation['plan']['benchmarks']:\n    for field in ('environment', 'samples_per_process', 'test', 'target'):\n        assert suite[field] == next(s for s in initial['plan']['benchmarks'] if s['name'] == suite['name'])[field]\n    configs = [r['raw_record'] for r in rows_first + rows_next if r['suite'] == suite['name'] and r['raw_record'].get('kind') == 'config']\n    assert len({json.dumps(c, sort_keys=True) for c in configs}) == 1\ncombined = []\nfor summary in summaries_first:\n    result = {'suite': summary['suite'], 'metric': summary['metric'], 'values': {}}\n    for label in ('base', 'candidate'):\n        selected = [r['raw_record'] for r in rows_first + rows_next if r['suite'] == summary['suite'] and r['revision'] == label]\n        result['values'][label] = stats(values(selected, summary['metric']))\n    for measure in ('median', 'p95'):\n        result[measure + '_change_percent'] = 100 * (result['values']['candidate'][measure] / result['values']['base'][measure] - 1)\n    combined.append(result)\nfiles = [save('confirmation-final.jsonl.gz', raw_next),\n         save('confirmation-run-logs.json.gz', json.dumps(runs_next, indent=2).encode())]\nreport = {'environment': confirmation, 'initial_environment_sha256': digest((INITIAL / 'environment.json').read_bytes()),\n          'verification_script': Path(__file__).read_text(), 'verification_script_sha256': digest(Path(__file__).read_bytes()),\n          'retained_samples': 55_500, 'retained_rss': 240,\n          'initial': summaries_first, 'confirmation': summaries_next, 'combined': combined, 'files': files,\n          'verification': 'Original logs, emitted records, expected configurations, predefined process order, executable hashes, every sample, process counter and all summaries independently checked. No original observations excluded. Five initial pairs plus twenty fixed confirmation pairs per affected workload. Unaffected workloads retain their initial five pairs.'}\nsave('confirmation.json', (json.dumps(report, indent=2) + '\\n').encode())\nfor section in ('confirmation', 'combined'):\n    print(section)\n    for r in report[section]:\n        print(r['suite'], r['metric'], round(r['median_change_percent'], 3), round(r['p95_change_percent'], 3))\n",
+  "interpretation": "Diagnostics remain separate from all 55,500 initial/confirmation revision latency samples and 240 memory observations. Isolated results use the retained 200,000-row fixture. A/B control labels execute the same candidate binary and do not compare revisions. Neither control removes original observations or proves absence of a source regression by itself."
+}
