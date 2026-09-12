@@ -277,3 +277,13 @@ sample with five additional pairs. Initial, confirmation and pooled results
 remain separate, including the initial candidate tail outlier and retained
 +6.30% pooled table-metadata p95. The observation was investigated and remains
 below the 10% ceiling; it is not silently removed or described as a speedup.
+
+
+The [metadata predicate pass](sql-metadata-semantics.md) reuses the same ignored
+metadata and REST benchmarks after independent before/after predicate validation.
+Its release record embeds the final reference/benchmark fixtures and complete
+archive/build runner. Five alternating pairs retain 5,000 samples per metadata
+shape/revision and 250 per REST shape/revision, plus all process counters. Exact
+source/fixture/binary identities, full correctness logs and losslessly compressed
+original timing outputs are linked there. This is an offline query comparison;
+live-peer ingestion and integrated staging remain separate gates.

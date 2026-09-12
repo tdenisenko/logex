@@ -2,10 +2,10 @@
 
 Base: `f45f2640` (merged PR #141). Implementation `b81a9bb2` corrects native
 query and introspection name resolution against the pinned DataFusion 51
-planner. All six local gates, focused validation, direct review and paired performance
-acceptance pass. PR #142 is open. The main REST comparison and additional metadata investigation
-pass acceptance. Final validation of the added fixture also passes; exact-head
-CI and merge remain.
+planner. All six local gates, focused validation, direct review and paired
+performance acceptance pass. The main REST comparison and additional metadata
+investigation pass acceptance. All six final CI jobs passed on `3148528b`;
+PR #142 merged as `99beaa83` with an identical tree.
 
 ## Confirmed findings
 
@@ -180,7 +180,11 @@ production source is unchanged from the main REST measurements.
 
 The [initial CI record](baselines/2026-09-12-sql-identifiers-ci-initial.json)
 confirms all six jobs passed on evidence head `e36d2147`, run `34700622826`.
-Updated exact-head CI is required after the benchmark/evidence addition.
+The [final CI record](baselines/2026-09-12-sql-identifiers-ci-final.json)
+confirms all six jobs passed on final head `3148528b`, run `34701683623`,
+including Linux and macOS tests, without retries. [PR #142](https://github.com/tdenisenko/logex/pull/142)
+merged as `99beaa83` on 2026-09-12. Its merge tree exactly matches the reviewed
+final head.
 
 ## Cleanup and remaining work
 
@@ -193,4 +197,4 @@ unused dependency was added.
 Explicit group-key ordering for exact aggregates was already unsupported and
 remains a separate capability question. Mixed aggregate output types, broader
 query resource handling, metadata NULL semantics and legacy text rewriting
-remain open offline audit items. Exact-head CI and merge remain for PR #142. Actual live sync and staging follow offline completion.
+remain open offline audit items. PR #142 is merged. Actual live sync and staging follow offline completion.
