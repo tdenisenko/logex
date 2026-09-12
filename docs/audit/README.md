@@ -16,7 +16,7 @@ data and running deployments are not modified by the benchmark suite.
 | 4 | EL discovery, peer management, requests, serving cache | Pending; bounded accounting, correct response attribution and cancellation. |
 | 5 | Live/historical sync, reorgs, ingestion, coverage | Pending; publish only verified contiguous data across crashes and reorgs. |
 | 6 | Indexes, bloom filters, index publication | Pending; exact equivalence to an independent scan oracle, including damaged indexes. |
-| 7 | Native and SQL queries, snapshots, pushdown, cancellation | In progress: [ordering/pagination fixes](query-pagination.md) have before-fix regressions and reference/DataFusion equivalence tests. [Snapshot consistency](query-snapshots.md) fixes captured row boundaries and explicit reorg invalidation. Remaining SQL value/filter semantics and resource review is pending. |
+| 7 | Native and SQL queries, snapshots, pushdown, cancellation | In progress: [ordering/pagination fixes](query-pagination.md) have before-fix regressions and reference/DataFusion equivalence tests. [Snapshot consistency](query-snapshots.md) fixes captured row boundaries and explicit reorg invalidation. [SQL result values and projections](sql-result-values.md) are under validation. Remaining binding/filter semantics and resource review is pending. |
 | 8 | HTTP, JSON-RPC, gRPC, WebSocket, authentication | Pending; consistent results/errors, bounded clients and correct cancellation ownership. |
 | 9 | Dashboard, metrics, health, status | Pending; safe rendering, responsive controls, accurate unavailable/stale states. |
 | 10 | CLI/runtime and volume supervision | Directory exclusivity prerequisite implemented with journal recovery; remaining work pending: preflight volume identity and writability, runtime loss detection, launchd/systemd templates. |
@@ -32,7 +32,8 @@ with the remaining condition. A merged fix does not close the rest of its area.
 The [page row-count fix](page-row-count.md) merged in PR #131 as `003df476`
 after all six CI gates passed. [Segment-reader integrity](segment-read-integrity.md)
 merged in PR #132 as `7ebc3795`, also with all six CI jobs passing. [Query pagination](query-pagination.md) merged in PR #133 as `6ffc1201` after all
-six CI jobs passed. The current pass covers [snapshot consistency](query-snapshots.md).
+six CI jobs passed. [Snapshot consistency](query-snapshots.md) merged in PR #134 as `4be5250c` after
+all six CI jobs passed. The current pass covers [SQL result values](sql-result-values.md).
 
 Complete deterministic offline validation and merge implementation PRs before
 starting an actual live sync. Live-sync acceptance and the minimum 24-hour

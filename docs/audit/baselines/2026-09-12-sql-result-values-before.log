@@ -1,0 +1,263 @@
+
+REPRODUCER: logex-sql-values-before.log
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "result_values") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/result_values.rs (target/debug/build/logex-query/013be67d84a5d02b/out/result_values-013be67d84a5d02b)
+
+running 6 tests
+test sql_string_view_results_preserve_text ... ok
+test sql_rejects_duplicate_json_object_fields ... FAILED
+test sql_decimal_results_preserve_exact_values ... FAILED
+test sql_temporal_and_binary_results_are_values ... FAILED
+test sql_nested_results_preserve_values_and_nulls ... FAILED
+test sql_narrow_numeric_results_are_values ... FAILED
+
+failures:
+
+---- sql_rejects_duplicate_json_object_fields stdout ----
+
+thread 'sql_rejects_duplicate_json_object_fields' (55518407) panicked at crates/logex-query/tests/result_values.rs:67:9:
+duplicate JSON fields cannot be represented without losing values: SELECT named_struct('item', 1, 'item', 2) AS value: Ok(SqlQueryResult { rows: [Object {"value": String("Struct([Field { data_type: Int64, nullable: true }, Field { data_type: Int64, nullable: true }])")}], total_scanned: 0 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- sql_decimal_results_preserve_exact_values stdout ----
+
+thread 'sql_decimal_results_preserve_exact_values' (55518404) panicked at crates/logex-query/tests/result_values.rs:20:5:
+assertion `left == right` failed
+  left: Object {"value": String("Decimal128(38, 18)")}
+ right: Object {"value": String("12345678901234567890.123456789012345678")}
+
+---- sql_temporal_and_binary_results_are_values stdout ----
+
+thread 'sql_temporal_and_binary_results_are_values' (55518409) panicked at crates/logex-query/tests/result_values.rs:49:5:
+assertion `left == right` failed
+  left: Object {"bytes": String("Binary"), "day": String("Date32"), "moment": String("Timestamp(Nanosecond, None)")}
+ right: Object {"bytes": String("00ff"), "day": String("2024-01-02"), "moment": String("2024-01-02T03:04:05")}
+
+---- sql_nested_results_preserve_values_and_nulls stdout ----
+
+thread 'sql_nested_results_preserve_values_and_nulls' (55518406) panicked at crates/logex-query/tests/result_values.rs:43:5:
+assertion `left == right` failed
+  left: Object {"numbers": Null, "person": String("Struct([Field { name: \"name\", data_type: Utf8, nullable: true }, Field { name: \"count\", data_type: Int64, nullable: true }])")}
+ right: Object {"numbers": Array [Number(1), Null, Number(3)], "person": Object {"count": Number(2), "name": String("alice")}}
+
+---- sql_narrow_numeric_results_are_values stdout ----
+
+thread 'sql_narrow_numeric_results_are_values' (55518405) panicked at crates/logex-query/tests/result_values.rs:29:5:
+assertion `left == right` failed
+  left: Object {"f32": String("Float32"), "i16": String("Int16"), "i8": String("Int8")}
+ right: Object {"f32": Number(1.25), "i16": Number(-12), "i8": Number(7)}
+
+
+failures:
+    sql_decimal_results_preserve_exact_values
+    sql_narrow_numeric_results_are_values
+    sql_nested_results_preserve_values_and_nulls
+    sql_rejects_duplicate_json_object_fields
+    sql_temporal_and_binary_results_are_values
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p logex-query --test result_values`
+
+REPRODUCER: logex-sql-values-encoder-before.log
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: unused import: `Array`
+  --> crates/logex-query/src/sql.rs:10:5
+   |
+10 |     Array, ArrayRef, ListBuilder, StringArray, StringBuilder, UInt64Array, new_empty_array,
+   |     ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.42s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 2 tests
+test json::tests::null_dictionary_values_remain_null ... ok
+test json::tests::unrepresentable_temporal_values_are_errors ... FAILED
+
+failures:
+
+---- json::tests::unrepresentable_temporal_values_are_errors stdout ----
+
+thread 'json::tests::unrepresentable_temporal_values_are_errors' (55531894) panicked at crates/logex-query/src/json.rs:306:9:
+assertion failed: values(Arc::new(Date32Array::from(vec![i32::MAX]))).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    json::tests::unrepresentable_temporal_values_are_errors
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p logex-query --lib`
+
+REPRODUCER: logex-sql-projection-before.log
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.71s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+test sql::tests::native_projections_reject_duplicate_output_names ... FAILED
+
+failures:
+
+---- sql::tests::native_projections_reject_duplicate_output_names stdout ----
+
+thread 'sql::tests::native_projections_reject_duplicate_output_names' (55535121) panicked at crates/logex-query/src/sql.rs:4262:13:
+duplicate output names lose values: SELECT block_number AS value, log_index AS value FROM logs: Ok(SqlQueryResult { rows: [Object {"value": Number(0)}, Object {"value": Number(0)}], total_scanned: 2 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sql::tests::native_projections_reject_duplicate_output_names
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p logex-query --lib`
+
+REPRODUCER: logex-sql-wildcard-before.log
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+test sql::tests::native_wildcards_preserve_additional_columns_and_respect_options ... FAILED
+
+failures:
+
+---- sql::tests::native_wildcards_preserve_additional_columns_and_respect_options stdout ----
+
+thread 'sql::tests::native_wildcards_preserve_additional_columns_and_respect_options' (55535215) panicked at crates/logex-query/src/sql.rs:4280:13:
+assertion `left == right` failed: SELECT *, block_number AS extra FROM logs
+  left: Null
+ right: Number(100)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sql::tests::native_wildcards_preserve_additional_columns_and_respect_options
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p logex-query --lib`
+
+REPRODUCER: logex-sql-unknown-column-before.log
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.29s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+test sql::tests::projections_reject_unknown_columns_even_without_matching_rows ... FAILED
+
+failures:
+
+---- sql::tests::projections_reject_unknown_columns_even_without_matching_rows stdout ----
+
+thread 'sql::tests::projections_reject_unknown_columns_even_without_matching_rows' (55546195) panicked at crates/logex-query/src/sql.rs:4293:13:
+unknown columns must not become NULL: SELECT misspelled FROM logs: Ok(SqlQueryResult { rows: [Object {"misspelled": Null}, Object {"misspelled": Null}], total_scanned: 2 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sql::tests::projections_reject_unknown_columns_even_without_matching_rows
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `-p logex-query --lib`
+
+REPRODUCER: logex-sql-topics-before.log
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+test sql::tests::datafusion_can_project_the_virtual_topics_column ... FAILED
+
+failures:
+
+---- sql::tests::datafusion_can_project_the_virtual_topics_column stdout ----
+
+thread 'sql::tests::datafusion_can_project_the_virtual_topics_column' (55546236) panicked at crates/logex-query/src/sql.rs:4309:10:
+called `Result::unwrap()` on an `Err` value: DataFusion(IoError(Custom { kind: InvalidInput, error: "unknown projected column" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sql::tests::datafusion_can_project_the_virtual_topics_column
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p logex-query --lib`
+
+REPRODUCER: logex-sql-introspection-before.log
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "result_values") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.39s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/result_values.rs (target/debug/build/logex-query/013be67d84a5d02b/out/result_values-013be67d84a5d02b)
+
+running 1 test
+test information_schema_projections_cannot_silently_lose_fields ... FAILED
+
+failures:
+
+---- information_schema_projections_cannot_silently_lose_fields stdout ----
+
+thread 'information_schema_projections_cannot_silently_lose_fields' (55564402) panicked at crates/logex-query/tests/result_values.rs:90:9:
+invalid/unsupported projection must be explicit: SELECT column_name AS value, data_type AS value FROM information_schema.columns: Ok(SqlQueryResult { rows: [Object {"value": String("bigint")}, Object {"value": String("text")}, Object {"value": String("bigint")}, Object {"value": String("text")}, Object {"value": String("bigint")}, Object {"value": String("bigint")}, Object {"value": String("text")}, Object {"value": String("text")}, Object {"value": String("text")}, Object {"value": String("text")}, Object {"value": String("text")}, Object {"value": String("ARRAY")}, Object {"value": String("text")}, Object {"value": String("bigint")}, Object {"value": String("bigint")}], total_scanned: 15 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    information_schema_projections_cannot_silently_lose_fields
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p logex-query --test result_values`

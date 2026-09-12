@@ -509,6 +509,15 @@ WHERE topic0 = event'Transfer(address,address,uint256)'
   AND block_number <= latest;
 ```
 
+SQL results use JSON numbers for integer and finite floating-point values, and
+strings for exact decimals (including arithmetic promoted to a decimal type).
+Arrays and objects retain their nested values and explicit nulls. SQL temporal
+values use Arrow's textual format; SQL binary values use hexadecimal without a
+prefix. The existing log hash, address and data columns keep their `0x` prefix.
+Non-finite floating-point results remain JSON null. Use unique output names or
+aliases: duplicate fields, unsupported result types and invalid temporal values
+return an error instead of a partial or misleading result.
+
 ## Operating Notes
 
 - Keep `30303/tcp`, `30303/udp`, `9000/tcp`, and `9000/udp` reachable when

@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray,
-    ListArray, ListBuilder, StringArray, StringBuilder, UInt32Array, UInt64Array, new_empty_array,
+    ArrayRef, ListBuilder, StringArray, StringBuilder, UInt64Array, new_empty_array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -36,6 +35,7 @@ use serde_json::{Map, Value};
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
 
+use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader, erc20_event_bloom_exclusions,
@@ -473,7 +473,7 @@ async fn execute_sql_page_on_snapshot_inner(
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     let batches = dataframe.collect().await?;
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-    let rows = record_batches_to_json(&batches);
+    let rows = record_batches_to_json(&batches)?;
 
     Ok(SqlQueryResult {
         rows,
@@ -490,6 +490,13 @@ fn try_execute_native_select(
     let Some(mut native_query) = parse_native_select_query(sql)? else {
         return Ok(None);
     };
+    unique_names(
+        native_query
+            .columns
+            .iter()
+            .map(|column| column.output.as_str()),
+    )
+    .map_err(DataFusionError::from)?;
 
     // API pagination applies to the SQL result, so its offset consumes rows
     // within SQL LIMIT. The scan adds that offset exactly once below.
@@ -509,7 +516,7 @@ fn try_execute_native_select(
     let rows = rows
         .iter()
         .map(|row| native_log_row_to_json(row, &native_query.columns))
-        .collect();
+        .collect::<DataFusionResult<Vec<_>>>()?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -834,6 +841,13 @@ fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQue
     let Some(columns) = native_projection_columns(&select.projection) else {
         return Ok(None);
     };
+    if columns
+        .iter()
+        .any(|column| !LOG_COLUMN_NAMES.contains(&column.source.as_str()))
+    {
+        // Let the SQL planner report unknown fields, even on an empty result.
+        return Ok(None);
+    }
     let Some(order) = native_order(query.order_by.as_ref()) else {
         return Ok(None);
     };
@@ -866,6 +880,17 @@ fn try_execute_native_count_aggregate(
     let Some(native_query) = parse_native_count_query(sql)? else {
         return Ok(None);
     };
+    unique_names(
+        native_query
+            .projections
+            .iter()
+            .map(|projection| match projection {
+                NativeCountProjection::Source(name) | NativeCountProjection::Count(name) => {
+                    name.as_str()
+                }
+            }),
+    )
+    .map_err(DataFusionError::from)?;
 
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
@@ -1246,6 +1271,18 @@ fn try_execute_native_data_sum(
     let Some(native_query) = parse_native_data_sum_query(sql)? else {
         return Ok(None);
     };
+    unique_names(
+        native_query
+            .projections
+            .iter()
+            .map(|projection| match projection {
+                NativeDataSumProjection::GroupColumn { output_column, .. } => {
+                    output_column.as_str()
+                }
+                NativeDataSumProjection::Aggregate(projection) => projection.output_column.as_str(),
+            }),
+    )
+    .map_err(DataFusionError::from)?;
 
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
@@ -2335,15 +2372,19 @@ fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<NativeProj
     let mut columns = Vec::new();
     for item in projection {
         match item {
-            SelectItem::Wildcard(_) => {
-                return Some(
-                    all_log_columns()
-                        .into_iter()
+            SelectItem::Wildcard(options) => {
+                // EXCLUDE/REPLACE/RENAME and other wildcard modifiers need the
+                // full SQL planner. A plain wildcard expands at its position.
+                if options != &Default::default() {
+                    return None;
+                }
+                columns.extend(
+                    LOG_COLUMN_NAMES
+                        .iter()
                         .map(|column| NativeProjectionColumn {
-                            source: column.clone(),
-                            output: column,
-                        })
-                        .collect(),
+                            source: (*column).to_owned(),
+                            output: (*column).to_owned(),
+                        }),
                 );
             }
             SelectItem::UnnamedExpr(expr) => {
@@ -2363,28 +2404,23 @@ fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<NativeProj
     Some(columns)
 }
 
-fn all_log_columns() -> Vec<String> {
-    [
-        "block_number",
-        "block_hash",
-        "timestamp",
-        "tx_hash",
-        "tx_index",
-        "log_index",
-        "address",
-        "topic0",
-        "topic1",
-        "topic2",
-        "topic3",
-        "topics",
-        "data",
-        "data_len",
-        "source",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
+const LOG_COLUMN_NAMES: &[&str] = &[
+    "block_number",
+    "block_hash",
+    "timestamp",
+    "tx_hash",
+    "tx_index",
+    "log_index",
+    "address",
+    "topic0",
+    "topic1",
+    "topic2",
+    "topic3",
+    "topics",
+    "data",
+    "data_len",
+    "source",
+];
 
 fn native_order(
     order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
@@ -2675,7 +2711,10 @@ fn sql_usize(expr: &SqlAstExpr) -> Option<usize> {
     sql_u64(expr).and_then(|value| usize::try_from(value).ok())
 }
 
-fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[NativeProjectionColumn]) -> Value {
+fn native_log_row_to_json(
+    row: &logex_types::LogRow,
+    columns: &[NativeProjectionColumn],
+) -> DataFusionResult<Value> {
     let mut out = Map::with_capacity(columns.len());
     for column in columns {
         let value = match column.source.as_str() {
@@ -2700,11 +2739,16 @@ fn native_log_row_to_json(row: &logex_types::LogRow, columns: &[NativeProjection
             "data" => Value::String(to_hex_bytes(row.data.as_ref())),
             "data_len" => Value::Number((row.data_len as u64).into()),
             "source" => Value::Number((row.source as u8 as u64).into()),
-            _ => Value::Null,
+            _ => {
+                return Err(DataFusionError::Plan(format!(
+                    "unknown SQL projection column: {}",
+                    column.source
+                )));
+            }
         };
         out.insert(column.output.clone(), value);
     }
-    Value::Object(out)
+    Ok(Value::Object(out))
 }
 
 fn optional_topic_to_json(topic: Option<B256>) -> Value {
@@ -2723,14 +2767,6 @@ impl IntrospectionRow {
         self.values
             .iter()
             .find_map(|(name, value)| name.eq_ignore_ascii_case(column).then_some(value))
-    }
-
-    fn project_all(&self) -> Value {
-        let mut out = Map::with_capacity(self.values.len());
-        for (name, value) in &self.values {
-            out.insert((*name).to_owned(), value.clone());
-        }
-        Value::Object(out)
     }
 }
 
@@ -2796,6 +2832,10 @@ fn try_execute_introspection(
         }
     };
 
+    let schema = rows.first().ok_or_else(|| {
+        DataFusionError::Internal("information_schema lacks its fixed schema".to_owned())
+    })?;
+    let projection = introspection_projection_columns(schema, &select.projection)?;
     if let Some(selection) = &select.selection {
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2814,7 +2854,7 @@ fn try_execute_introspection(
 
     let rows = rows
         .iter()
-        .map(|row| project_introspection_row(row, &select.projection))
+        .map(|row| project_introspection_row(row, &projection))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Some(SqlQueryResult {
@@ -3103,46 +3143,65 @@ fn sort_introspection_rows(
     Ok(())
 }
 
+fn introspection_projection_columns(
+    schema: &IntrospectionRow,
+    projection: &[SelectItem],
+) -> Result<Vec<NativeProjectionColumn>, SqlQueryError> {
+    let mut columns = Vec::new();
+    for item in projection {
+        let (expr, alias) =
+            match item {
+                SelectItem::Wildcard(options) if options == &Default::default() => {
+                    columns.extend(
+                        schema
+                            .values
+                            .iter()
+                            .map(|(name, _)| NativeProjectionColumn {
+                                source: (*name).to_owned(),
+                                output: (*name).to_owned(),
+                            }),
+                    );
+                    continue;
+                }
+                SelectItem::UnnamedExpr(expr) => (expr, None),
+                SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias.value.clone())),
+                _ => return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                    "information_schema does not support wildcard modifiers or qualified wildcards"
+                        .to_owned(),
+                ))),
+            };
+        let column = sql_identifier(expr).ok_or_else(|| {
+            DataFusionError::Plan("information_schema projections must be column names".to_owned())
+        })?;
+        if schema.get(&column).is_none() {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "unsupported information_schema column: {column}",
+            ))));
+        }
+        let output = alias.unwrap_or_else(|| column.clone());
+        columns.push(NativeProjectionColumn {
+            source: column,
+            output,
+        });
+    }
+    unique_names(columns.iter().map(|column| column.output.as_str()))
+        .map_err(DataFusionError::from)?;
+    Ok(columns)
+}
+
 fn project_introspection_row(
     row: &IntrospectionRow,
-    projection: &[SelectItem],
+    columns: &[NativeProjectionColumn],
 ) -> Result<Value, SqlQueryError> {
-    let mut out = Map::new();
-    for item in projection {
-        match item {
-            SelectItem::Wildcard(_) => return Ok(row.project_all()),
-            SelectItem::UnnamedExpr(expr) => {
-                let Some(column) = sql_identifier(expr) else {
-                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
-                        "information_schema projections must be column names".to_owned(),
-                    )));
-                };
-                let Some(value) = row.get(&column) else {
-                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                        "unsupported information_schema column: {column}"
-                    ))));
-                };
-                out.insert(column, value.clone());
-            }
-            SelectItem::ExprWithAlias { expr, alias } => {
-                let Some(column) = sql_identifier(expr) else {
-                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
-                        "information_schema projections must be column names".to_owned(),
-                    )));
-                };
-                let Some(value) = row.get(&column) else {
-                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                        "unsupported information_schema column: {column}"
-                    ))));
-                };
-                out.insert(alias.value.clone(), value.clone());
-            }
-            SelectItem::QualifiedWildcard(_, _) => {
-                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
-                    "information_schema does not support qualified wildcards".to_owned(),
-                )));
-            }
-        }
+    let mut out = Map::with_capacity(columns.len());
+    for column in columns {
+        let value = row.get(&column.source).ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "information_schema row lacks column {}",
+                column.source
+            ))
+        })?;
+        out.insert(column.output.clone(), value.clone());
     }
     Ok(Value::Object(out))
 }
@@ -3357,10 +3416,19 @@ fn build_projected_batch(
             .map_err(std::io::Error::other);
     }
 
-    let projection = projected_columns
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
+    let mut projection = Vec::with_capacity(projected_columns.len());
+    for column in projected_columns {
+        if column == "topics" {
+            // `topics` is virtual; the reader needs its four physical inputs.
+            for source in ["topic0", "topic1", "topic2", "topic3"] {
+                if !projection.contains(&source) {
+                    projection.push(source);
+                }
+            }
+        } else if !projection.contains(&column.as_str()) {
+            projection.push(column.as_str());
+        }
+    }
     let reader = SegmentReader::open_projected(dir, &projection)?;
     let mut arrays = Vec::with_capacity(projected_columns.len());
 
@@ -4228,97 +4296,6 @@ fn is_identifier_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-fn record_batches_to_json(batches: &[RecordBatch]) -> Vec<Value> {
-    let mut rows = Vec::new();
-    for batch in batches {
-        let fields = batch.schema().fields().clone();
-        for row_index in 0..batch.num_rows() {
-            let mut row = Map::with_capacity(batch.num_columns());
-            for (field, column) in fields.iter().zip(batch.columns()) {
-                row.insert(
-                    field.name().clone(),
-                    array_value_to_json(column.as_ref(), row_index),
-                );
-            }
-            rows.push(Value::Object(row));
-        }
-    }
-    rows
-}
-
-fn array_value_to_json(array: &dyn Array, row_index: usize) -> Value {
-    if array.is_null(row_index) {
-        return Value::Null;
-    }
-
-    match array.data_type() {
-        DataType::Utf8 => array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .map(|array| Value::String(array.value(row_index).to_owned()))
-            .unwrap_or(Value::Null),
-        DataType::LargeUtf8 => array
-            .as_any()
-            .downcast_ref::<LargeStringArray>()
-            .map(|array| Value::String(array.value(row_index).to_owned()))
-            .unwrap_or(Value::Null),
-        DataType::UInt64 => array
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .map(|array| Value::Number(array.value(row_index).into()))
-            .unwrap_or(Value::Null),
-        DataType::UInt32 => array
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .map(|array| Value::Number((array.value(row_index) as u64).into()))
-            .unwrap_or(Value::Null),
-        DataType::Int64 => array
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .map(|array| Value::Number(array.value(row_index).into()))
-            .unwrap_or(Value::Null),
-        DataType::Int32 => array
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .map(|array| Value::Number((array.value(row_index) as i64).into()))
-            .unwrap_or(Value::Null),
-        DataType::Float64 => array
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .and_then(|array| serde_json::Number::from_f64(array.value(row_index)))
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        DataType::Boolean => array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .map(|array| Value::Bool(array.value(row_index)))
-            .unwrap_or(Value::Null),
-        DataType::List(_) => array
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .map(|array| {
-                let values = array.value(row_index);
-                let strings = values.as_any().downcast_ref::<StringArray>();
-                match strings {
-                    Some(strings) => Value::Array(
-                        (0..strings.len())
-                            .map(|index| {
-                                if strings.is_null(index) {
-                                    Value::Null
-                                } else {
-                                    Value::String(strings.value(index).to_owned())
-                                }
-                            })
-                            .collect(),
-                    ),
-                    None => Value::Null,
-                }
-            })
-            .unwrap_or(Value::Null),
-        _ => Value::String(format!("{:?}", array.data_type())),
-    }
-}
-
 fn to_hex_hash(hash: impl AsRef<[u8]>) -> String {
     format!("0x{}", hex::encode(hash))
 }
@@ -4340,6 +4317,105 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn datafusion_arithmetic_returns_exact_decimal_values() {
+        let (_tmp, storage) = setup_storage();
+        let source = execute_sql(
+            "SELECT block_number FROM logs ORDER BY block_number",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        let result = execute_sql(
+            "SELECT block_number + 0 AS number FROM logs ORDER BY block_number",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rows, source.rows.iter()
+            .map(|row| serde_json::json!({"number":row["block_number"].as_u64().unwrap().to_string()}))
+            .collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn projections_reject_unknown_columns_even_without_matching_rows() {
+        let (_tmp, storage) = setup_storage();
+        for sql in [
+            "SELECT misspelled FROM logs",
+            "SELECT misspelled FROM logs WHERE block_number = 0",
+        ] {
+            let result = execute_sql(sql, &storage, storage.head_block()).await;
+            assert!(
+                result.is_err(),
+                "unknown columns must not become NULL: {sql}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn datafusion_can_project_the_virtual_topics_column() {
+        let (_tmp, storage) = setup_storage();
+        let expected = execute_sql(
+            "SELECT topics FROM logs ORDER BY block_number",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        let actual = execute_sql(
+            "SELECT topics FROM logs ORDER BY block_number + 0",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual.rows, expected.rows);
+    }
+
+    #[tokio::test]
+    async fn native_projections_reject_duplicate_output_names() {
+        let (_tmp, storage) = setup_storage();
+        for sql in [
+            "SELECT block_number AS value, log_index AS value FROM logs",
+            "SELECT COUNT(*) AS value, COUNT(*) AS value FROM logs",
+            "SELECT SUM(data) AS value, SUM(data) AS value FROM logs",
+        ] {
+            let result = execute_sql(sql, &storage, storage.head_block()).await;
+            assert!(
+                result.is_err(),
+                "duplicate output names lose values: {sql}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_wildcards_preserve_additional_columns_and_respect_options() {
+        let (_tmp, storage) = setup_storage();
+        for sql in [
+            "SELECT *, block_number AS extra FROM logs",
+            "SELECT block_number AS extra, * FROM logs",
+        ] {
+            let result = execute_sql(sql, &storage, storage.head_block())
+                .await
+                .unwrap();
+            assert_eq!(result.rows.len(), 2);
+            assert_eq!(
+                result.rows[0]["extra"], result.rows[0]["block_number"],
+                "{sql}"
+            );
+        }
+        let result = execute_sql(
+            "SELECT * EXCLUDE (data) FROM logs",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.rows[0].as_object().unwrap().contains_key("data"));
+    }
 
     #[test]
     fn lazy_batches_preserve_captured_rows_across_append_and_compaction() {
@@ -4389,7 +4465,7 @@ mod tests {
         }
         assert_eq!(batches.len(), 3);
         assert_eq!(
-            record_batches_to_json(&batches),
+            record_batches_to_json(&batches).unwrap(),
             (0..count)
                 .map(|i| serde_json::json!({"log_index":i}))
                 .collect::<Vec<_>>()
