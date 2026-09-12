@@ -21,6 +21,8 @@ next partition's bound is strictly beyond the last retained block in the selecte
 direction; equal boundaries remain eligible because transaction/log keys can
 still change the page. Empty limits return empty results without storage reads.
 Native SQL merges every result in a scanned window before pruning later windows.
+Its scan count includes the materialized per-partition candidates in that window,
+rather than ignoring work after the first partition fills the page.
 
 The shared row-order helper replaces duplicate sorting logic. SQL partition
 materialization already follows sorted row IDs, so its redundant second sort was
@@ -43,7 +45,9 @@ full-database scan. No production files or services are involved.
 
 Focused query tests pass (60 tests, one intentional ignored benchmark). All six
 workspace gates pass (943 tests/ten ignored, plus documentation tests). Release
-performance comparisons and all six CI jobs remain before merge.
+[Performance comparisons](baselines/2026-09-12-query-pagination.md) pass: all 15
+dense and 45 sparse samples are retained; 150 limited-page samples per profile/
+order change −0.72% to +0.38%. Required CI remains before merge.
 
 ## Remaining scope
 

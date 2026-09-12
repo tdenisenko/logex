@@ -1,0 +1,7 @@
+{"gate": 0, "command": ["cargo", "fmt", "--all", "--", "--check"], "exit": 0, "seconds": 0.59, "log": "/private/tmp/logex-query-pagination-gate-0.log"}
+{"gate": 1, "command": ["cargo", "check", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 4.42, "log": "/private/tmp/logex-query-pagination-gate-1.log"}
+{"gate": 2, "command": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], "exit": 0, "seconds": 5.92, "log": "/private/tmp/logex-query-pagination-gate-2.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 162.32, "log": "/private/tmp/logex-query-pagination-gate-3.log"}
+{"gate": 4, "command": ["cargo", "test", "--workspace", "--doc", "--locked"], "exit": 0, "seconds": 11.13, "log": "/private/tmp/logex-query-pagination-gate-4.log"}
+{"gate": 5, "command": ["cargo", "build", "-p", "logex-node", "--release", "--locked"], "exit": 0, "seconds": 49.97, "log": "/private/tmp/logex-query-pagination-gate-5.log"}
+{"gate": 6, "command": ["cargo", "test", "-p", "logex-query", "--test", "audit_harness", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 23.54, "log": "/private/tmp/logex-query-pagination-gate-6.log"}
