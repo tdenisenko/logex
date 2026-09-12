@@ -90,7 +90,8 @@ shape/profile/revision. All initial and confirmation observations are retained.
 Dense mixed historical-write/reopen/COUNT tails remain +7.52%/+7.63%/+7.00%,
 explicitly below the 10% ceiling. A separate 100-sample phase-isolation check
 shows no positive median/tail difference above 1%; no speedup is claimed.
-PR/CI/merge remain. Performance comparisons use baseline
+PR #138 merged as `13bd33cc` after all six Linux/macOS CI jobs passed on
+`e37bf072` in run `34675680605`. Performance comparisons use baseline
 queries with already-correct outputs; timing a wrong equality result against a
 correct inequality is not a meaningful regression measurement. Common valid
 range/address/topic predicates retain their native/indexed paths.

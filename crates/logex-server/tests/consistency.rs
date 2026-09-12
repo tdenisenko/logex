@@ -211,3 +211,75 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
     assert_eq!(direct_sql, grpc_logs);
     assert_eq!(direct_sql, eth_logs);
 }
+
+#[tokio::test]
+async fn rest_and_grpc_reject_sql_writes_without_changing_storage() {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    fn tree(path: &Path) -> BTreeMap<PathBuf, (bool, Vec<u8>)> {
+        let mut entries = BTreeMap::new();
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let is_dir = path.is_dir();
+            if is_dir {
+                entries.extend(tree(&path));
+            }
+            entries.insert(
+                path.clone(),
+                (
+                    is_dir,
+                    if is_dir {
+                        Vec::new()
+                    } else {
+                        std::fs::read(path).unwrap()
+                    },
+                ),
+            );
+        }
+        entries
+    }
+
+    fn request(sql: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"sql":sql}).to_string()))
+            .unwrap()
+    }
+
+    let (tmp, storage) = setup_storage();
+    let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+    let app = logex_server::build_router(Arc::clone(&state));
+    let grpc = LogExGrpcService::new(Arc::clone(&state));
+    let before = tree(tmp.path());
+    let copy_target = tmp.path().join("forbidden-copy");
+    for sql in [
+        "SELECT block_number INTO scratch FROM logs".to_owned(),
+        "SELECT block_number INTO scratch FROM logs UNION ALL SELECT block_number FROM logs".to_owned(),
+        "WITH copied AS (SELECT block_number INTO scratch FROM logs) SELECT * FROM (SELECT * FROM copied) AS result".to_owned(),
+        "DELETE FROM logs".to_owned(),
+        "CREATE TABLE scratch AS SELECT * FROM logs".to_owned(),
+        format!("COPY logs TO '{}' STORED AS CSV", copy_target.display()),
+    ] {
+        let response = app.clone().oneshot(request(&sql)).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST, "{sql}");
+        let error = grpc.query(tonic::Request::new(pb::QueryRequest { sql: sql.clone(), limit: None, offset: None })).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{sql}");
+        assert_eq!(tree(tmp.path()), before, "{sql}");
+
+        // Failed admission must release the REST owner; both protocols remain
+        // usable and observe the original dataset after every rejection.
+        let sql = "SELECT COUNT(*) AS total FROM logs";
+        let response = app.clone().oneshot(request(sql)).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let response: QueryResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response.rows, vec![serde_json::json!({"total":3})]);
+        let response = grpc.query(tonic::Request::new(pb::QueryRequest { sql: sql.to_owned(), limit: None, offset: None })).await.unwrap().into_inner();
+        assert_eq!(response.row_count, 1);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&response.rows[0].json).unwrap(), serde_json::json!({"total":3}));
+    }
+    assert_eq!(tree(tmp.path()), before);
+}

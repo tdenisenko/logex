@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,6 +16,7 @@ use datafusion::catalog::Session;
 use datafusion::common::ScalarValue;
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::execution::context::SQLOptions;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
     Between, BinaryExpr, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
@@ -26,7 +28,7 @@ use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, DuplicateTreatment, Expr as SqlAstExpr, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr,
-    Statement as SqlStatement, TableFactor, Value as SqlValue,
+    Statement as SqlStatement, TableFactor, Value as SqlValue, Visit, Visitor,
 };
 use num_bigint::{BigInt, BigUint};
 use roaring::RoaringBitmap;
@@ -464,7 +466,15 @@ async fn execute_sql_page_on_snapshot_inner(
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(table))?;
 
-    let dataframe = ctx.sql(&sql).await?;
+    let dataframe = ctx
+        .sql_with_options(
+            &sql,
+            SQLOptions::new()
+                .with_allow_ddl(false)
+                .with_allow_dml(false)
+                .with_allow_statements(false),
+        )
+        .await?;
     let dataframe = if offset > 0 || limit.is_some() {
         dataframe.limit(offset, limit)?
     } else {
@@ -3340,14 +3350,63 @@ fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
         ))
     })?;
 
-    if !matches!(statement, DFStatement::Statement(stmt) if matches!(stmt.as_ref(), SqlStatement::Query(_)))
-    {
-        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
-            "LogEx SQL is read-only; only SELECT and WITH queries are allowed".to_owned(),
-        )));
+    let DFStatement::Statement(statement) = statement else {
+        return Err(read_only_sql_error(
+            "only SELECT and WITH queries are allowed",
+        ));
+    };
+    if let ControlFlow::Break(reason) = statement.visit(&mut ReadOnlySqlVisitor) {
+        return Err(read_only_sql_error(reason));
+    }
+    Ok(())
+}
+
+fn read_only_sql_error(reason: &str) -> SqlQueryError {
+    SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+        "LogEx SQL is read-only; {reason}"
+    )))
+}
+
+struct ReadOnlySqlVisitor;
+
+impl Visitor for ReadOnlySqlVisitor {
+    type Break = &'static str;
+
+    fn pre_visit_statement(&mut self, statement: &SqlStatement) -> ControlFlow<Self::Break> {
+        if matches!(statement, SqlStatement::Query(_)) {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break("only SELECT and WITH queries are allowed")
+        }
     }
 
-    Ok(())
+    fn pre_visit_query(
+        &mut self,
+        query: &datafusion::sql::sqlparser::ast::Query,
+    ) -> ControlFlow<Self::Break> {
+        // INTO can occur in any set-operation arm. DataFusion may discard it
+        // while planning UNION, so plan restrictions alone are insufficient.
+        // Nested queries/CTEs/subqueries are visited by the AST visitor itself.
+        let mut pending = Vec::new();
+        let mut body = query.body.as_ref();
+        loop {
+            match body {
+                SetExpr::Select(select) if select.into.is_some() => {
+                    return ControlFlow::Break("SELECT INTO is not allowed");
+                }
+                SetExpr::SetOperation { left, right, .. } => {
+                    pending.push(right.as_ref());
+                    body = left;
+                    continue;
+                }
+                _ => {}
+            }
+            match pending.pop() {
+                Some(next) => body = next,
+                None => return ControlFlow::Continue(()),
+            }
+        }
+    }
 }
 
 fn unsupported_from_alias_sort_shorthand(sql: &str) -> Option<String> {
@@ -5567,6 +5626,72 @@ mod tests {
         assert_eq!(
             result.rows[0]["address"],
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_select_into_in_top_level_and_nested_plans() {
+        let (_tmp, storage) = setup_storage();
+        let mut accepted = Vec::new();
+        for sql in [
+            "SELECT block_number INTO scratch FROM logs",
+            "SELECT block_number INTO scratch FROM logs WHERE block_number > 0 LIMIT 1",
+            "SELECT 1 AS value INTO scratch",
+            "SELECT * FROM (SELECT block_number INTO scratch FROM logs) AS copied",
+            "WITH copied AS (SELECT block_number INTO scratch FROM logs) SELECT * FROM (SELECT * FROM copied) AS result",
+            "SELECT (SELECT block_number INTO scratch FROM logs LIMIT 1) AS value",
+            "SELECT block_number INTO scratch FROM logs UNION ALL SELECT block_number FROM logs",
+        ] {
+            if let Ok(result) = execute_sql(sql, &storage, storage.head_block()).await {
+                accepted.push(format!("{sql}: {result:?}"));
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "unexpectedly accepted DDL:\n{}",
+            accepted.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_queries_preserve_nested_and_native_results() {
+        let (_tmp, storage) = setup_storage();
+        for sql in [
+            "SELECT MAX(block_number) AS maximum FROM logs",
+            "SELECT (SELECT MAX(block_number) FROM logs) AS maximum",
+            "WITH source AS (SELECT block_number FROM logs) SELECT MAX(block_number) AS maximum FROM (SELECT * FROM source) AS copied",
+            "SELECT MAX(block_number) AS maximum FROM (SELECT block_number FROM logs UNION ALL SELECT block_number FROM logs) AS copied",
+        ] {
+            let result = execute_sql(sql, &storage, storage.head_block())
+                .await
+                .unwrap();
+            assert_eq!(
+                result.rows,
+                vec![serde_json::json!({"maximum":200})],
+                "{sql}"
+            );
+        }
+        let result = execute_sql(
+            "SELECT COUNT(*) AS total FROM logs",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rows, vec![serde_json::json!({"total":2})]);
+        let result = execute_sql(
+            "SELECT block_number FROM logs ORDER BY block_number, tx_index, log_index",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.rows,
+            vec![
+                serde_json::json!({"block_number":100}),
+                serde_json::json!({"block_number":200})
+            ]
         );
     }
 
