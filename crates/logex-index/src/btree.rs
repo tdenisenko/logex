@@ -129,19 +129,13 @@ impl BTreeIndexReader {
         Self::open_file(IndexFile::open(path)?)
     }
 
-    fn open_file(mut file: IndexFile) -> io::Result<Self> {
+    fn open_file(file: IndexFile) -> io::Result<Self> {
         // IndexFile has already bounded logical_len by the opened file's extent.
         // Read it contiguously, then validate counts before allocating entries.
-        let len = usize::try_from(file.logical_len())
-            .map_err(|_| invalid_index("index file too large for this platform"))?;
-        let mut data = Vec::new();
-        data.try_reserve_exact(len)
-            .map_err(|_| invalid_index("index allocation failed"))?;
-        data.resize(len, 0);
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut data)?;
+        let logical_len = file.logical_len();
+        let data = file.read_all()?;
         let header = IndexHeader::parse(&data)?;
-        header.validate_geometry(file.logical_len())?;
+        header.validate_geometry(logical_len)?;
         let count = usize::try_from(header.entry_count)
             .map_err(|_| invalid_index("too many index entries"))?;
         let mut entries = Vec::new();

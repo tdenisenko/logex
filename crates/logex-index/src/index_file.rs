@@ -38,6 +38,23 @@ fn page_hasher(logical_len: u64, file_id: &[u8; 16], index: u64) -> crc32fast::H
     hash
 }
 
+fn verify_page(
+    logical_len: u64,
+    file_id: &[u8; 16],
+    index: u64,
+    page: &[u8],
+    expected: [u8; 4],
+) -> io::Result<()> {
+    let mut hash = page_hasher(logical_len, file_id, index);
+    hash.update(page);
+    if hash.finalize().to_le_bytes() != expected {
+        return Err(invalid(
+            "index page checksum mismatch; rebuild derived indexes",
+        ));
+    }
+    Ok(())
+}
+
 fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -159,6 +176,45 @@ impl IndexFile {
         self.protected
     }
 
+    /// Full readers need the whole footer, so read it contiguously with the
+    /// logical bytes instead of loading checksum cache windows separately.
+    pub(crate) fn read_all(mut self) -> io::Result<Vec<u8>> {
+        let logical_len = usize::try_from(self.logical_len)
+            .map_err(|_| invalid("index file too large for this platform"))?;
+        let length = if self.protected && logical_len > PAGE_BYTES {
+            usize::try_from(physical_len(self.logical_len)? - HEADER_BYTES as u64)
+                .map_err(|_| invalid("index file too large for this platform"))?
+        } else {
+            logical_len
+        };
+        let mut data = Vec::new();
+        data.try_reserve_exact(length)
+            .map_err(|_| invalid("index allocation failed"))?;
+        data.resize(length, 0);
+        if length == logical_len {
+            // Reuse the already prefetched bytes and footer for one-page files.
+            self.seek(SeekFrom::Start(0))?;
+            self.read_exact(&mut data)?;
+        } else {
+            read_at(&self.file, &mut data, HEADER_BYTES as u64)?;
+            let (logical, checksums) = data.split_at(logical_len);
+            for (index, page) in logical.chunks(PAGE_BYTES).enumerate() {
+                let offset = index * CHECKSUM_BYTES as usize;
+                // The exact physical geometry fixes four footer bytes/page.
+                let expected = checksums[offset..offset + 4].try_into().unwrap();
+                verify_page(
+                    self.logical_len,
+                    &self.file_id,
+                    index as u64,
+                    page,
+                    expected,
+                )?;
+            }
+            data.truncate(logical_len);
+        }
+        Ok(data)
+    }
+
     fn load_page(&mut self, index: u64) -> io::Result<()> {
         if self.page_index == Some(index) {
             return Ok(());
@@ -178,13 +234,13 @@ impl IndexFile {
             )?;
         }
         let expected = self.page_checksum(index)?;
-        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
-        hash.update(&self.page[..self.page_len]);
-        if hash.finalize().to_le_bytes() != expected {
-            return Err(invalid(
-                "index page checksum mismatch; rebuild derived indexes",
-            ));
-        }
+        verify_page(
+            self.logical_len,
+            &self.file_id,
+            index,
+            &self.page[..self.page_len],
+            expected,
+        )?;
         self.page_index = Some(index);
         Ok(())
     }
@@ -253,13 +309,8 @@ impl Read for IndexFile {
             let first = self.position / PAGE_BYTES as u64;
             for (offset, page) in output[..count].chunks(PAGE_BYTES).enumerate() {
                 let index = first + offset as u64;
-                let mut hash = page_hasher(self.logical_len, &self.file_id, index);
-                hash.update(page);
-                if hash.finalize().to_le_bytes() != self.page_checksum(index)? {
-                    return Err(invalid(
-                        "index page checksum mismatch; rebuild derived indexes",
-                    ));
-                }
+                let expected = self.page_checksum(index)?;
+                verify_page(self.logical_len, &self.file_id, index, page, expected)?;
             }
             self.position += count as u64;
             return Ok(count);
@@ -588,6 +639,10 @@ mod tests {
         let mut all = vec![0; expected.len()];
         reader.read_exact(&mut all).unwrap();
         assert_eq!(all, expected);
+        assert_eq!(
+            IndexFile::open(&path).unwrap().read_all().unwrap(),
+            expected
+        );
     }
 
     #[test]
