@@ -215,3 +215,31 @@ build equivalent release binaries sequentially, verify source/binary hashes and
 fresh Cargo artifacts, then alternate at least five process pairs. Preserve all
 samples and record median/p95 and process RSS; caches are not forcibly evicted.
 Do not compare speed against a baseline that returns incorrect values.
+
+## Exact aggregate evaluation
+
+The aggregate fixture measures plain, conditional, residual-filter, nested-CASE
+and grouped totals on indexed synthetic rows with 32-byte amounts. An independent
+in-memory numeric table supplies each expected value outside the timed interval.
+The fixture uses a temporary directory, warms each shape once, then rotates
+50 measurements per shape. Set `LOGEX_AGGREGATE_BENCH_ROWS` to 100 or 20000;
+the default is 20000 and the fixture is bounded to at most 20000 rows.
+
+```bash
+LOGEX_AGGREGATE_BENCH_ROWS=20000 \
+  cargo test -p logex-query --test sql_aggregates --release --locked \
+  aggregate_latency -- --exact --ignored --nocapture --test-threads=1
+```
+
+Use identical fixture source in both isolated revisions and alternate at least
+five process pairs per size. Copy each executable before building the next
+revision, verify fresh Cargo artifacts and distinct binary hashes, and retain
+all latency and process-memory samples. The [aggregate acceptance record](sql-aggregate-semantics.md)
+includes the complete runner, environment, all initial/prototype measurements
+and final results. Compacted/reopened correctness is tested separately; this
+timing fixture does not establish live-peer or concurrent-ingestion throughput.
+
+The ignored library test `aggregate_expression_preparation_latency` is a bounded
+1000-iteration diagnostic for context construction, query-state snapshots and
+expression preparation. Its averages identify fixed setup cost; they do not
+replace repeated end-to-end query latency and memory acceptance.
