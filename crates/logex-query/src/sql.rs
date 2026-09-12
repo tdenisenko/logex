@@ -24,12 +24,14 @@ use datafusion::logical_expr::{
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
 use datafusion::prelude::SessionContext;
-use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+use datafusion::sql::parser::{DFParser, DFParserBuilder, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, DuplicateTreatment, Expr as SqlAstExpr, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr,
     Statement as SqlStatement, TableFactor, Value as SqlValue, Visit, Visitor,
 };
+use datafusion::sql::sqlparser::keywords::Keyword;
+use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
 use num_bigint::{BigInt, BigUint};
 use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
@@ -46,6 +48,12 @@ use crate::native::{
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
+// Bound text before legacy rewriting/tokenization, and syntax before creating
+// any recursive AST. The parser's recursion limit alone does not bound a
+// left-associative chain, nor its later traversal, cloning or destruction.
+const MAX_SQL_BYTES: usize = 256 * 1_024;
+const MAX_SQL_SYNTAX_TOKENS: usize = 128;
+const MAX_SQL_PARSER_RECURSION: usize = 16;
 pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
@@ -439,6 +447,7 @@ async fn execute_sql_page_on_snapshot_inner(
     cancel_check: Option<QueryCancelCheck>,
 ) -> Result<SqlQueryResult, SqlQueryError> {
     let SqlQueryPage { limit, offset } = page;
+    validate_sql_text_size(sql)?;
     if let Some(message) = unsupported_from_alias_sort_shorthand(sql) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
     }
@@ -3336,8 +3345,44 @@ fn validate_supported_table_factor(table: &TableFactor) -> Result<(), SqlQueryEr
     ))))
 }
 
+fn validate_sql_text_size(sql: &str) -> Result<(), SqlQueryError> {
+    if sql.len() > MAX_SQL_BYTES {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+            "SQL text exceeds the {MAX_SQL_BYTES}-byte limit"
+        ))));
+    }
+    Ok(())
+}
+
 fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
-    let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
+    // Legacy literals may expand during rewriting. Check the resulting text
+    // too, before building the same token stream used for the first parse.
+    validate_sql_text_size(sql)?;
+    let mut parser = DFParserBuilder::new(sql)
+        .with_recursion_limit(MAX_SQL_PARSER_RECURSION)
+        .build()?;
+    let mut syntax_tokens = 0;
+    for index in 0.. {
+        let token = &parser.parser.token_at(index).token;
+        if matches!(token, SqlToken::EOF) {
+            break;
+        }
+        if counts_toward_sql_complexity(token) {
+            syntax_tokens += 1;
+            if syntax_tokens > MAX_SQL_SYNTAX_TOKENS {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                    "SQL exceeds the complexity limit of {MAX_SQL_SYNTAX_TOKENS} syntax tokens; reduce expression size or use literal IN lists"
+                ))));
+            }
+        }
+    }
+    // Some parser alternatives turn recursion exhaustion into an ordinary
+    // syntax error. Preserve that error and include the configured budget.
+    let mut statements = parser.parse_statements().map_err(|error| {
+        error.context(format!(
+            "SQL parser recursion limit: {MAX_SQL_PARSER_RECURSION}"
+        ))
+    })?;
     if statements.len() != 1 {
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
             "only a single read-only SQL statement is allowed".to_owned(),
@@ -3359,6 +3404,48 @@ fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
         return Err(read_only_sql_error(reason));
     }
     Ok(())
+}
+
+// Literals, whitespace, separators and closing delimiters do not grow an
+// expression chain. Count identifiers too: implicit FROM joins and repeated
+// function/field access must not bypass the bound. All other/future token kinds
+// consume the budget; large flat literal IN lists remain possible within the
+// text bound. Borrow tokens without advancing or retokenizing the parser.
+fn counts_toward_sql_complexity(token: &SqlToken) -> bool {
+    match token {
+        SqlToken::Word(word)
+            if word.quote_style.is_none()
+                && matches!(word.keyword, Keyword::NULL | Keyword::TRUE | Keyword::FALSE) =>
+        {
+            false
+        }
+        SqlToken::Whitespace(_)
+        | SqlToken::Number(..)
+        | SqlToken::SingleQuotedString(_)
+        | SqlToken::DoubleQuotedString(_)
+        | SqlToken::TripleSingleQuotedString(_)
+        | SqlToken::TripleDoubleQuotedString(_)
+        | SqlToken::DollarQuotedString(_)
+        | SqlToken::SingleQuotedByteStringLiteral(_)
+        | SqlToken::DoubleQuotedByteStringLiteral(_)
+        | SqlToken::TripleSingleQuotedByteStringLiteral(_)
+        | SqlToken::TripleDoubleQuotedByteStringLiteral(_)
+        | SqlToken::SingleQuotedRawStringLiteral(_)
+        | SqlToken::DoubleQuotedRawStringLiteral(_)
+        | SqlToken::TripleSingleQuotedRawStringLiteral(_)
+        | SqlToken::TripleDoubleQuotedRawStringLiteral(_)
+        | SqlToken::NationalStringLiteral(_)
+        | SqlToken::EscapedStringLiteral(_)
+        | SqlToken::UnicodeStringLiteral(_)
+        | SqlToken::HexStringLiteral(_)
+        | SqlToken::Placeholder(_)
+        | SqlToken::Comma
+        | SqlToken::SemiColon
+        | SqlToken::RParen
+        | SqlToken::RBracket
+        | SqlToken::RBrace => false,
+        _ => true,
+    }
 }
 
 fn read_only_sql_error(reason: &str) -> SqlQueryError {

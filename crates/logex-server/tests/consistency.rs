@@ -213,7 +213,7 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
 }
 
 #[tokio::test]
-async fn rest_and_grpc_reject_sql_writes_without_changing_storage() {
+async fn rest_and_grpc_reject_disallowed_sql_without_changing_storage() {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -262,6 +262,8 @@ async fn rest_and_grpc_reject_sql_writes_without_changing_storage() {
         "DELETE FROM logs".to_owned(),
         "CREATE TABLE scratch AS SELECT * FROM logs".to_owned(),
         format!("COPY logs TO '{}' STORED AS CSV", copy_target.display()),
+        format!("SELECT {} AS value", vec!["1"; 1500].join(" + ")),
+        format!("SELECT '{}' AS value", "x".repeat(256 * 1024)),
     ] {
         let response = app.clone().oneshot(request(&sql)).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST, "{sql}");

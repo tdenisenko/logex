@@ -1,0 +1,34 @@
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "sql_limits") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.57s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/sql_limits.rs (target/debug/build/logex-query/105fdfe1d9d2bda3/out/sql_limits-105fdfe1d9d2bda3)
+
+running 2 tests
+test sql_limit_child ... ignored, subprocess entry invoked by complex_sql_is_bounded_in_child_processes
+
+thread 'complex_sql_is_bounded_in_child_processes' (57990434) panicked at crates/logex-query/tests/sql_limits.rs:47:9:
+boundary_additions: signal: 6 (SIGABRT)
+
+thread 'sql_limit_child' (57990461) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test complex_sql_is_bounded_in_child_processes ... FAILED
+
+failures:
+
+failures:
+    complex_sql_is_bounded_in_child_processes
+
+test result: FAILED. 0 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+error: test failed, to rerun pass `-p logex-query --test sql_limits`

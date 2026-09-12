@@ -55,7 +55,8 @@ shape/revision](baselines/2026-09-12-sql-read-only.md) show latency medians
 −0.43% to +0.47%, with all median/tail changes below 1%; RSS median is +1.06%.
 All samples are retained and no speedup is claimed. Native fast paths and a
 DataFusion aggregate cover the checks at their different execution stages.
-PR/CI/merge remain.
+PR #139 merged as `452d0874` after all six Linux/macOS CI jobs passed on
+`b261e019` in run `34676545184`.
 
 ## Cleanup and limits
 

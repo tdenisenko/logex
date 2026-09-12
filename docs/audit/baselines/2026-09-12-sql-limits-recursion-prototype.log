@@ -1,0 +1,86 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "sql_limits") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.39s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/sql_limits.rs (target/debug/build/logex-query/105fdfe1d9d2bda3/out/sql_limits-105fdfe1d9d2bda3)
+
+running 2 tests
+test sql_limit_child ... ignored, subprocess entry invoked by complex_sql_is_bounded_in_child_processes
+
+thread 'complex_sql_is_bounded_in_child_processes' (58328350) panicked at crates/logex-query/tests/sql_limits.rs:50:9:
+generated_expressions: signal: 6 (SIGABRT)
+
+running 1 test
+generated shape=0 count=1
+generated shape=1 count=1
+generated shape=2 count=1
+generated shape=3 count=1
+generated shape=4 count=1
+generated shape=5 count=1
+generated shape=0 count=2
+generated shape=1 count=2
+generated shape=2 count=2
+generated shape=3 count=2
+generated shape=4 count=2
+generated shape=5 count=2
+generated shape=0 count=3
+generated shape=1 count=3
+generated shape=2 count=3
+generated shape=3 count=3
+generated shape=4 count=3
+generated shape=5 count=3
+generated shape=0 count=4
+generated shape=1 count=4
+generated shape=2 count=4
+generated shape=3 count=4
+generated shape=4 count=4
+generated shape=5 count=4
+generated shape=0 count=390
+generated shape=1 count=83
+generated shape=2 count=184
+generated shape=3 count=25
+generated shape=4 count=397
+generated shape=5 count=271
+generated shape=0 count=310
+generated shape=1 count=30
+generated shape=2 count=203
+generated shape=3 count=33
+generated shape=4 count=322
+generated shape=5 count=235
+generated shape=0 count=146
+generated shape=1 count=69
+generated shape=2 count=225
+generated shape=3 count=391
+generated shape=4 count=181
+generated shape=5 count=182
+generated shape=0 count=143
+generated shape=1 count=233
+generated shape=2 count=187
+generated shape=3 count=141
+generated shape=4 count=201
+generated shape=5 count=286
+generated shape=0 count=399
+generated shape=1 count=162
+generated shape=2 count=42
+generated shape=3 count=391
+generated shape=4 count=52
+
+thread 'sql_limit_child' (58328452) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test complex_sql_is_bounded_in_child_processes ... FAILED
+
+failures:
+
+failures:
+    complex_sql_is_bounded_in_child_processes
+
+test result: FAILED. 0 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.10s
+
+error: test failed, to rerun pass `-p logex-query --test sql_limits`
