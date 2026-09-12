@@ -1,0 +1,1012 @@
+{
+  "base": "f45f26401f363839570a6e2f3530c3e890fd2932",
+  "candidate": "46d068eaddd0d668194ce426ed7cd12bf8c597cd",
+  "files": {
+    "initial": {
+      "file": "2026-09-12-sql-identifiers-metadata-initial.jsonl.gz",
+      "original_path": "/private/tmp/logex-identifier-metadata-acceptance-1/results.jsonl",
+      "original_sha256": "b222dc191a23a3812372a473705fa0eb93b177ccd762881e9a177e5d9663cb85",
+      "gzip_sha256": "8e88e0568c7ef213a552789593a52441fffa024766679704a8466e801ac7bc56",
+      "uncompressed_bytes": 3847555,
+      "compressed_bytes": 171796
+    },
+    "confirmation": {
+      "file": "2026-09-12-sql-identifiers-metadata-confirmation.jsonl.gz",
+      "original_path": "/private/tmp/logex-identifier-metadata-confirmation-1/results.jsonl",
+      "original_sha256": "5479f7991453c509223b1cd0c4b86441c0e535f3ce7e96cdb84786340a4be8cb",
+      "gzip_sha256": "2a90440808847b87733ddd61c7f8ea5f9315ecaede7e9a88c78b2ef51cc1fbe7",
+      "uncompressed_bytes": 5198689,
+      "compressed_bytes": 184328
+    },
+    "debug_smoke": {
+      "file": "2026-09-12-sql-identifiers-metadata-debug.log.gz",
+      "original_path": "/private/tmp/logex-metadata-local.log",
+      "original_sha256": "fc0a3900b0f1ac3dbc5d3b85163be46171f8eec01b373ff6bf09c74ac6ce6606",
+      "gzip_sha256": "9d9b7d9aaf569f8d2743157d15dcc4678834f18577950729ac9eb1d3255d8249",
+      "uncompressed_bytes": 258822,
+      "compressed_bytes": 17705
+    }
+  },
+  "initial_summary": [
+    {
+      "kind": "summary",
+      "metric": "canonical_tables",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.029625,
+        "candidate": 0.029207999999999998
+      },
+      "p95": {
+        "base": 0.034584,
+        "candidate": 0.038583
+      },
+      "median_change_percent": -1.407594936708867,
+      "p95_change_percent": 11.563150589868165
+    },
+    {
+      "kind": "summary",
+      "metric": "filtered_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.05575,
+        "candidate": 0.054833999999999994
+      },
+      "p95": {
+        "base": 0.06579199999999999,
+        "candidate": 0.072666
+      },
+      "median_change_percent": -1.6430493273542734,
+      "p95_change_percent": 10.448078793774318
+    },
+    {
+      "kind": "summary",
+      "metric": "aliased_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.054417,
+        "candidate": 0.053417
+      },
+      "p95": {
+        "base": 0.064292,
+        "candidate": 0.07045799999999999
+      },
+      "median_change_percent": -1.8376610250473213,
+      "p95_change_percent": 9.590617806258939
+    },
+    {
+      "kind": "summary",
+      "metric": "peak_rss",
+      "samples_per_revision": 5,
+      "median": {
+        "base": 14532608,
+        "candidate": 14499840
+      },
+      "p95": {
+        "base": 14565376,
+        "candidate": 14532608
+      },
+      "median_change_percent": -0.22547914317925244,
+      "p95_change_percent": -0.22497187851518996
+    }
+  ],
+  "initial_per_pair": [
+    {
+      "pair": 0,
+      "metric": "canonical_tables",
+      "median": {
+        "base": 0.029875000000000002,
+        "candidate": 0.029334
+      },
+      "p95": {
+        "base": 0.032625,
+        "candidate": 0.052666
+      },
+      "median_change_percent": -1.810878661087878,
+      "p95_change_percent": 61.428352490421446
+    },
+    {
+      "pair": 0,
+      "metric": "filtered_columns",
+      "median": {
+        "base": 0.056,
+        "candidate": 0.055625
+      },
+      "p95": {
+        "base": 0.061958000000000006,
+        "candidate": 0.089
+      },
+      "median_change_percent": -0.6696428571428603,
+      "p95_change_percent": 43.64569547112558
+    },
+    {
+      "pair": 0,
+      "metric": "aliased_columns",
+      "median": {
+        "base": 0.05475,
+        "candidate": 0.054229
+      },
+      "p95": {
+        "base": 0.06145799999999999,
+        "candidate": 0.088292
+      },
+      "median_change_percent": -0.9515981735159884,
+      "p95_change_percent": 43.662338507598704
+    },
+    {
+      "pair": 1,
+      "metric": "canonical_tables",
+      "median": {
+        "base": 0.029,
+        "candidate": 0.029167000000000002
+      },
+      "p95": {
+        "base": 0.033624999999999995,
+        "candidate": 0.035457999999999996
+      },
+      "median_change_percent": 0.5758620689655158,
+      "p95_change_percent": 5.451301115241636
+    },
+    {
+      "pair": 1,
+      "metric": "filtered_columns",
+      "median": {
+        "base": 0.05466699999999999,
+        "candidate": 0.054833
+      },
+      "p95": {
+        "base": 0.066542,
+        "candidate": 0.06770799999999999
+      },
+      "median_change_percent": 0.3036566850202149,
+      "p95_change_percent": 1.752276757536575
+    },
+    {
+      "pair": 1,
+      "metric": "aliased_columns",
+      "median": {
+        "base": 0.053375000000000006,
+        "candidate": 0.053417
+      },
+      "p95": {
+        "base": 0.0625,
+        "candidate": 0.064541
+      },
+      "median_change_percent": 0.07868852459014253,
+      "p95_change_percent": 3.265600000000002
+    },
+    {
+      "pair": 2,
+      "metric": "canonical_tables",
+      "median": {
+        "base": 0.028916499999999998,
+        "candidate": 0.029249999999999998
+      },
+      "p95": {
+        "base": 0.033334,
+        "candidate": 0.033457999999999995
+      },
+      "median_change_percent": 1.153320768419408,
+      "p95_change_percent": 0.3719925601487706
+    },
+    {
+      "pair": 2,
+      "metric": "filtered_columns",
+      "median": {
+        "base": 0.05450000000000001,
+        "candidate": 0.054917
+      },
+      "p95": {
+        "base": 0.063583,
+        "candidate": 0.065084
+      },
+      "median_change_percent": 0.7651376146788902,
+      "p95_change_percent": 2.360693896167221
+    },
+    {
+      "pair": 2,
+      "metric": "aliased_columns",
+      "median": {
+        "base": 0.053208000000000005,
+        "candidate": 0.053458000000000006
+      },
+      "p95": {
+        "base": 0.064375,
+        "candidate": 0.060458000000000005
+      },
+      "median_change_percent": 0.4698541572695891,
+      "p95_change_percent": -6.084660194174751
+    },
+    {
+      "pair": 3,
+      "metric": "canonical_tables",
+      "median": {
+        "base": 0.029,
+        "candidate": 0.029167000000000002
+      },
+      "p95": {
+        "base": 0.036208000000000004,
+        "candidate": 0.033958
+      },
+      "median_change_percent": 0.5758620689655158,
+      "p95_change_percent": -6.214096332302255
+    },
+    {
+      "pair": 3,
+      "metric": "filtered_columns",
+      "median": {
+        "base": 0.054666,
+        "candidate": 0.05483349999999999
+      },
+      "p95": {
+        "base": 0.06854199999999999,
+        "candidate": 0.06466599999999999
+      },
+      "median_change_percent": 0.3064061756850478,
+      "p95_change_percent": -5.654926906130553
+    },
+    {
+      "pair": 3,
+      "metric": "aliased_columns",
+      "median": {
+        "base": 0.053333,
+        "candidate": 0.053375000000000006
+      },
+      "p95": {
+        "base": 0.066,
+        "candidate": 0.062583
+      },
+      "median_change_percent": 0.07875049219059349,
+      "p95_change_percent": -5.17727272727273
+    },
+    {
+      "pair": 4,
+      "metric": "canonical_tables",
+      "median": {
+        "base": 0.029917,
+        "candidate": 0.029124999999999998
+      },
+      "p95": {
+        "base": 0.034458,
+        "candidate": 0.034749999999999996
+      },
+      "median_change_percent": -2.647324263796502,
+      "p95_change_percent": 0.8474084392593673
+    },
+    {
+      "pair": 4,
+      "metric": "filtered_columns",
+      "median": {
+        "base": 0.056083,
+        "candidate": 0.05475
+      },
+      "p95": {
+        "base": 0.065292,
+        "candidate": 0.067292
+      },
+      "median_change_percent": -2.376834334825173,
+      "p95_change_percent": 3.063162408870923
+    },
+    {
+      "pair": 4,
+      "metric": "aliased_columns",
+      "median": {
+        "base": 0.054709,
+        "candidate": 0.053333
+      },
+      "p95": {
+        "base": 0.06533399999999999,
+        "candidate": 0.064959
+      },
+      "median_change_percent": -2.515125482096181,
+      "p95_change_percent": -0.5739737349618634
+    }
+  ],
+  "confirmation_summary": [
+    {
+      "kind": "confirmation_summary",
+      "metric": "canonical_tables",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.029124999999999998,
+        "candidate": 0.029249999999999998
+      },
+      "p95": {
+        "base": 0.034292,
+        "candidate": 0.034334
+      },
+      "median_change_percent": 0.42918454935623185,
+      "p95_change_percent": 0.12247754578327275
+    },
+    {
+      "kind": "confirmation_summary",
+      "metric": "filtered_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.054708,
+        "candidate": 0.054792
+      },
+      "p95": {
+        "base": 0.064167,
+        "candidate": 0.06475
+      },
+      "median_change_percent": 0.15354244351830637,
+      "p95_change_percent": 0.9085667087443738
+    },
+    {
+      "kind": "confirmation_summary",
+      "metric": "aliased_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.053416,
+        "candidate": 0.053417
+      },
+      "p95": {
+        "base": 0.06275,
+        "candidate": 0.063375
+      },
+      "median_change_percent": 0.001872098247712728,
+      "p95_change_percent": 0.9960159362549792
+    },
+    {
+      "kind": "confirmation_summary",
+      "metric": "peak_rss",
+      "samples_per_revision": 5,
+      "median": {
+        "base": 14532608,
+        "candidate": 14499840
+      },
+      "p95": {
+        "base": 14548992,
+        "candidate": 14516224
+      },
+      "median_change_percent": -0.22547914317925244,
+      "p95_change_percent": -0.22522522522522292
+    }
+  ],
+  "pooled_summary": [
+    {
+      "kind": "pooled_summary",
+      "metric": "canonical_tables",
+      "samples_per_revision": 10000,
+      "median": {
+        "base": 0.029207999999999998,
+        "candidate": 0.029209000000000002
+      },
+      "p95": {
+        "base": 0.034375,
+        "candidate": 0.036542
+      },
+      "median_change_percent": 0.0034237195289055222,
+      "p95_change_percent": 6.303999999999976
+    },
+    {
+      "kind": "pooled_summary",
+      "metric": "filtered_columns",
+      "samples_per_revision": 10000,
+      "median": {
+        "base": 0.054875,
+        "candidate": 0.054833
+      },
+      "p95": {
+        "base": 0.06516699999999999,
+        "candidate": 0.06820899999999999
+      },
+      "median_change_percent": -0.07653758542141009,
+      "p95_change_percent": 4.66800681326438
+    },
+    {
+      "kind": "pooled_summary",
+      "metric": "aliased_columns",
+      "samples_per_revision": 10000,
+      "median": {
+        "base": 0.053583,
+        "candidate": 0.053417
+      },
+      "p95": {
+        "base": 0.0635,
+        "candidate": 0.06629199999999999
+      },
+      "median_change_percent": -0.3097997499206806,
+      "p95_change_percent": 4.396850393700769
+    },
+    {
+      "kind": "pooled_summary",
+      "metric": "peak_rss",
+      "samples_per_revision": 10,
+      "median": {
+        "base": 14532608.0,
+        "candidate": 14499840.0
+      },
+      "p95": {
+        "base": 14565376,
+        "candidate": 14532608
+      },
+      "median_change_percent": -0.22547914317925244,
+      "p95_change_percent": -0.22497187851518996
+    }
+  ],
+  "time_counters": [
+    {
+      "kind": "original_time_counters",
+      "pair": 0,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/0-base.log",
+      "counters": {
+        "real_seconds": 2.8,
+        "user_seconds": 0.15,
+        "sys_seconds": 0.02,
+        "maximum_resident_set_size": 14516224,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1291,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 37,
+        "involuntary_context_switches": 213,
+        "instructions_retired": 2669678316,
+        "cycles_elapsed": 556250328,
+        "peak_memory_footprint": 6078920
+      },
+      "raw_time_output": "        2.80 real         0.15 user         0.02 sys\n            14516224  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1291  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  37  voluntary context switches\n                 213  involuntary context switches\n          2669678316  instructions retired\n           556250328  cycles elapsed\n             6078920  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 0,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/0-candidate.log",
+      "counters": {
+        "real_seconds": 1.49,
+        "user_seconds": 0.16,
+        "sys_seconds": 0.02,
+        "maximum_resident_set_size": 14434304,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1286,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 98,
+        "instructions_retired": 2661014471,
+        "cycles_elapsed": 544826550,
+        "peak_memory_footprint": 6062512
+      },
+      "raw_time_output": "        1.49 real         0.16 user         0.02 sys\n            14434304  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1286  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  98  involuntary context switches\n          2661014471  instructions retired\n           544826550  cycles elapsed\n             6062512  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 1,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/1-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14499840,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 79,
+        "instructions_retired": 2654092535,
+        "cycles_elapsed": 530709859,
+        "peak_memory_footprint": 6144456
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14499840  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  79  involuntary context switches\n          2654092535  instructions retired\n           530709859  cycles elapsed\n             6144456  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 1,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/1-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14548992,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1293,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 72,
+        "instructions_retired": 2644272815,
+        "cycles_elapsed": 528266865,
+        "peak_memory_footprint": 6095280
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14548992  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1293  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  72  involuntary context switches\n          2644272815  instructions retired\n           528266865  cycles elapsed\n             6095280  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 2,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/2-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14532608,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1292,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 69,
+        "instructions_retired": 2649317382,
+        "cycles_elapsed": 529665562,
+        "peak_memory_footprint": 6095304
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14532608  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1292  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  69  involuntary context switches\n          2649317382  instructions retired\n           529665562  cycles elapsed\n             6095304  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 2,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/2-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14532608,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1291,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 59,
+        "instructions_retired": 2653719982,
+        "cycles_elapsed": 530719041,
+        "peak_memory_footprint": 6160816
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14532608  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1291  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  59  involuntary context switches\n          2653719982  instructions retired\n           530719041  cycles elapsed\n             6160816  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 3,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/3-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14499840,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1290,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 67,
+        "instructions_retired": 2648738569,
+        "cycles_elapsed": 529030942,
+        "peak_memory_footprint": 6144456
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14499840  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1290  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  67  involuntary context switches\n          2648738569  instructions retired\n           529030942  cycles elapsed\n             6144456  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 3,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/3-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14516224,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1291,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 146,
+        "instructions_retired": 2649381739,
+        "cycles_elapsed": 532534550,
+        "peak_memory_footprint": 6078920
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14516224  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1291  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                 146  involuntary context switches\n          2649381739  instructions retired\n           532534550  cycles elapsed\n             6078920  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 4,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/4-base.log",
+      "counters": {
+        "real_seconds": 0.19,
+        "user_seconds": 0.15,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14565376,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1294,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 66,
+        "instructions_retired": 2644032566,
+        "cycles_elapsed": 540888774,
+        "peak_memory_footprint": 6128072
+      },
+      "raw_time_output": "        0.19 real         0.15 user         0.01 sys\n            14565376  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1294  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  66  involuntary context switches\n          2644032566  instructions retired\n           540888774  cycles elapsed\n             6128072  peak memory footprint"
+    },
+    {
+      "kind": "original_time_counters",
+      "pair": 4,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-acceptance-1/4-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14483456,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 57,
+        "instructions_retired": 2654893531,
+        "cycles_elapsed": 529294683,
+        "peak_memory_footprint": 6128072
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14483456  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  57  involuntary context switches\n          2654893531  instructions retired\n           529294683  cycles elapsed\n             6128072  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 0,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/0-candidate.log",
+      "counters": {
+        "real_seconds": 0.19,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14467072,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1288,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 28,
+        "involuntary_context_switches": 65,
+        "instructions_retired": 2640735756,
+        "cycles_elapsed": 528320981,
+        "peak_memory_footprint": 6111688
+      },
+      "raw_time_output": "        0.19 real         0.14 user         0.01 sys\n            14467072  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1288  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  28  voluntary context switches\n                  65  involuntary context switches\n          2640735756  instructions retired\n           528320981  cycles elapsed\n             6111688  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 0,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/0-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14532608,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1292,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 28,
+        "involuntary_context_switches": 62,
+        "instructions_retired": 2643764520,
+        "cycles_elapsed": 528350768,
+        "peak_memory_footprint": 6095304
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14532608  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1292  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  28  voluntary context switches\n                  62  involuntary context switches\n          2643764520  instructions retired\n           528350768  cycles elapsed\n             6095304  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 1,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/1-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14548992,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1293,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 51,
+        "instructions_retired": 2643947812,
+        "cycles_elapsed": 528843522,
+        "peak_memory_footprint": 6095280
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14548992  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1293  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  51  involuntary context switches\n          2643947812  instructions retired\n           528843522  cycles elapsed\n             6095280  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 1,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/1-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14499840,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1290,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 62,
+        "instructions_retired": 2654081941,
+        "cycles_elapsed": 530831931,
+        "peak_memory_footprint": 6128048
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14499840  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1290  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  62  involuntary context switches\n          2654081941  instructions retired\n           530831931  cycles elapsed\n             6128048  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 2,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/2-candidate.log",
+      "counters": {
+        "real_seconds": 0.19,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14483456,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 30,
+        "involuntary_context_switches": 83,
+        "instructions_retired": 2650322101,
+        "cycles_elapsed": 533652641,
+        "peak_memory_footprint": 6128072
+      },
+      "raw_time_output": "        0.19 real         0.14 user         0.01 sys\n            14483456  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  30  voluntary context switches\n                  83  involuntary context switches\n          2650322101  instructions retired\n           533652641  cycles elapsed\n             6128072  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 2,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/2-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14483456,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 59,
+        "instructions_retired": 2645942358,
+        "cycles_elapsed": 527694197,
+        "peak_memory_footprint": 6046152
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14483456  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  59  involuntary context switches\n          2645942358  instructions retired\n           527694197  cycles elapsed\n             6046152  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 3,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/3-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14483456,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 47,
+        "instructions_retired": 2644545096,
+        "cycles_elapsed": 527381573,
+        "peak_memory_footprint": 6046152
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14483456  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  47  involuntary context switches\n          2644545096  instructions retired\n           527381573  cycles elapsed\n             6046152  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 3,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/3-candidate.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14516224,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1291,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 59,
+        "instructions_retired": 2651855297,
+        "cycles_elapsed": 529249843,
+        "peak_memory_footprint": 6160840
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14516224  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1291  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                  59  involuntary context switches\n          2651855297  instructions retired\n           529249843  cycles elapsed\n             6160840  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 4,
+      "revision": "candidate",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/4-candidate.log",
+      "counters": {
+        "real_seconds": 0.19,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14499840,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1289,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 30,
+        "involuntary_context_switches": 54,
+        "instructions_retired": 2653464907,
+        "cycles_elapsed": 530761942,
+        "peak_memory_footprint": 6128048
+      },
+      "raw_time_output": "        0.19 real         0.14 user         0.01 sys\n            14499840  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1289  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  30  voluntary context switches\n                  54  involuntary context switches\n          2653464907  instructions retired\n           530761942  cycles elapsed\n             6128048  peak memory footprint"
+    },
+    {
+      "kind": "confirmation_time_counters",
+      "pair": 4,
+      "revision": "base",
+      "log": "/private/tmp/logex-identifier-metadata-confirmation-1/4-base.log",
+      "counters": {
+        "real_seconds": 0.18,
+        "user_seconds": 0.14,
+        "sys_seconds": 0.01,
+        "maximum_resident_set_size": 14532608,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 1292,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 27,
+        "involuntary_context_switches": 120,
+        "instructions_retired": 2646231705,
+        "cycles_elapsed": 529865969,
+        "peak_memory_footprint": 6078896
+      },
+      "raw_time_output": "        0.18 real         0.14 user         0.01 sys\n            14532608  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1292  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n                 120  involuntary context switches\n          2646231705  instructions retired\n           529865969  cycles elapsed\n             6078896  peak memory footprint"
+    }
+  ],
+  "source_provenance": "Candidate 46d068ea adds only an ignored metadata benchmark to the previously validated identifier implementation. The production code remains byte-identical to b81a9bb2. The ordinary REST measurements remain unchanged. Each archive uses identical committed benchmark source and fresh copied binaries. Confirmation verifies and reuses both immutable original binaries; it does not rebuild or exclude any original observation. Compressed artifacts round-trip exactly and retain the full environment, fixture and runner source. The debug smoke log is validation evidence, not release acceptance.",
+  "interpretation": "Initial pooled metadata tails exceeded 10% for two shapes and 5% for all three. Pair analysis localizes most of the increase to the first candidate process; its cause is not proven. First baseline/candidate wall time was 2.80/1.49 seconds versus later ~0.18 seconds, with similar CPU time/instruction counts. A five-pair candidate-first confirmation does not reproduce the large increase. All 60,000 samples remain pooled; canonical metadata p95 remains +6.304% (2.167 microseconds), explicitly retained below the 10% ceiling after investigation, with no claimed speedup or OS-cause attribution. Larger integrated workloads remain a separate audit gate."
+}

@@ -243,3 +243,37 @@ The ignored library test `aggregate_expression_preparation_latency` is a bounded
 1000-iteration diagnostic for context construction, query-state snapshots and
 expression preparation. Its averages identify fixed setup cost; they do not
 replace repeated end-to-end query latency and memory acceptance.
+
+
+## Identifier binding acceptance
+
+The [identifier-binding record](sql-identifier-binding.md) compares merged
+`f45f2640` with implementation `b81a9bb2`. Its linked final measurement record
+contains the complete Python runner, exact hardware/toolchain/filesystem,
+binary and fixture hashes, every latency/RSS sample and summaries. Use a new
+empty output destination when rerunning that stored runner; it refuses to
+replace an existing result directory. It creates local archives and uses the
+existing target directory, refreshing source mtimes and verifying fresh artifacts
+before copying each executable. Keep other builds and tests stopped during timing.
+
+The same final identifier fixture runs in both archives before timing. All six
+regressions fail on the baseline and pass on the candidate. The unchanged REST
+fixture then creates/indexes/compacts/reopens 20,000 rows per process, warms each
+shape and rotates 50 calls across five shapes. Five alternating process pairs
+provide 250 samples per shape and revision and five peak-RSS observations per
+revision. Every successful response matches exact expected values. This measures
+handler/query/serialization work, excluding network transport and live peers;
+it does not establish production ingestion throughput. All six workspace gates,
+the release query suite and protocol-consistency checks pass separately.
+
+The separate metadata coverage uses `metadata_latency` in the same identifier
+fixture: three exact-result shapes, 1,000 rotating samples each and five
+alternating process pairs. The metadata investigation record links the complete
+gzip-compressed JSONL streams and their original hashes. Decompress with a
+standard gzip reader before reading their embedded fixture/runner or samples;
+the bytes match the original logs exactly. Its confirmation runner verifies and
+reuses the same two binaries, begins candidate-first and pools every original
+sample with five additional pairs. Initial, confirmation and pooled results
+remain separate, including the initial candidate tail outlier and retained
++6.30% pooled table-metadata p95. The observation was investigated and remains
+below the 10% ceiling; it is not silently removed or described as a speedup.

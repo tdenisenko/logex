@@ -32,8 +32,8 @@ use datafusion::sql::parser::{DFParser, DFParserBuilder, Statement as DFStatemen
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CastKind, DataType as SqlDataType, DuplicateTreatment,
     ExactNumberInfo, Expr as SqlAstExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr, Statement as SqlStatement,
-    TableFactor, Value as SqlValue, Visit, Visitor,
+    GroupByExpr, Ident, LimitClause, ObjectName, ObjectNamePart, OrderByKind, SelectItem, SetExpr,
+    Statement as SqlStatement, TableFactor, Value as SqlValue, Visit, Visitor,
 };
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
@@ -903,7 +903,7 @@ fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQue
         // Let the SQL planner report unknown fields, even on an empty result.
         return Ok(None);
     }
-    let Some(order) = native_order(query.order_by.as_ref()) else {
+    let Some(order) = native_order(query.order_by.as_ref(), &columns) else {
         return Ok(None);
     };
     let Some(sql_limit) = native_limit(query.limit_clause.as_ref()) else {
@@ -1074,7 +1074,7 @@ fn native_count_projections(
             }
             SelectItem::ExprWithAlias { expr, alias } if is_count_all_expr(expr) => {
                 has_count = true;
-                NativeCountProjection::Count(alias.value.clone())
+                NativeCountProjection::Count(normalize_sql_ident(alias))
             }
             SelectItem::UnnamedExpr(expr)
                 if sql_identifier(expr).is_some_and(|column| column == "source") =>
@@ -1086,7 +1086,7 @@ fn native_count_projections(
                 if sql_identifier(expr).is_some_and(|column| column == "source") =>
             {
                 has_source = true;
-                NativeCountProjection::Source(alias.value.clone())
+                NativeCountProjection::Source(normalize_sql_ident(alias))
             }
             _ => return None,
         };
@@ -1154,12 +1154,21 @@ fn native_count_order_descending(
         return None;
     }
     let order_column = sql_identifier(&expression.expr)?;
-    let source_output = projections.iter().find_map(|projection| match projection {
-        NativeCountProjection::Source(output) => Some(output.as_str()),
-        NativeCountProjection::Count(_) => None,
-    })?;
-    if order_column != "source" && !order_column.eq_ignore_ascii_case(source_output) {
-        return None;
+    match &expression.expr {
+        SqlAstExpr::Identifier(_) => {
+            let mut matching = projections.iter().filter(|projection| match projection {
+                NativeCountProjection::Source(output) | NativeCountProjection::Count(output) => {
+                    output == &order_column
+                }
+            });
+            match (matching.next(), matching.next()) {
+                (Some(NativeCountProjection::Source(_)), None) => {}
+                (None, None) if order_column == "source" => {}
+                _ => return None,
+            }
+        }
+        SqlAstExpr::CompoundIdentifier(_) if order_column == "source" => {}
+        _ => return None,
     }
     Some(!expression.options.asc.unwrap_or(true))
 }
@@ -1523,13 +1532,13 @@ fn native_data_sum_projections(
                 if let Some(group_column) = native_data_sum_group_projection(expr, group_by) {
                     projections.push(NativeDataSumProjection::GroupColumn {
                         column: group_column,
-                        output_column: alias.value.clone(),
+                        output_column: normalize_sql_ident(alias),
                     });
                 } else {
                     has_aggregate = true;
                     projections.push(NativeDataSumProjection::Aggregate(
                         NativeAggregateProjection {
-                            output_column: alias.value.clone(),
+                            output_column: normalize_sql_ident(alias),
                             expr: parse_native_aggregate_expr(expr, &mut sums)?,
                         },
                     ));
@@ -1577,7 +1586,10 @@ fn native_data_sum_having(
     ) {
         return None;
     }
-    let (column, literal, reversed) = normalize_sql_binary(left, right)?;
+    let (column, literal, reversed) = normalize_unqualified_sql_binary(left, right)?;
+    if LOG_COLUMN_NAMES.contains(&column.as_str()) {
+        return None;
+    }
     let projection_index = native_aggregate_projection_index(projections, &column)?;
     let value = sql_bigint_expr(literal)?;
     Some(Some(NativeAggregateHaving {
@@ -1608,7 +1620,7 @@ fn native_data_sum_order(
     if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
         return None;
     }
-    let order_column = sql_identifier(&expression.expr)?;
+    let order_column = sql_unqualified_identifier(&expression.expr)?;
     let projection_index = native_aggregate_projection_index(projections, &order_column)?;
     Some(Some(NativeAggregateOrder {
         projection_index,
@@ -1625,7 +1637,7 @@ fn native_aggregate_projection_index(
         .enumerate()
         .find_map(|(index, projection)| match projection {
             NativeDataSumProjection::Aggregate(projection)
-                if projection.output_column.eq_ignore_ascii_case(output_column) =>
+                if projection.output_column == output_column =>
             {
                 Some(index)
             }
@@ -2544,7 +2556,7 @@ fn select_has_logs_from(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]
             index_hints,
             ..
         } => {
-            name.to_string().eq_ignore_ascii_case("logs")
+            normalize_sql_object_name(name).is_some_and(|parts| parts == ["logs"])
                 && alias.is_none()
                 && args.is_none()
                 && with_hints.is_empty()
@@ -2587,7 +2599,7 @@ fn native_projection_columns(projection: &[SelectItem]) -> Option<Vec<NativeProj
             }
             SelectItem::ExprWithAlias { expr, alias } => columns.push(NativeProjectionColumn {
                 source: sql_identifier(expr)?,
-                output: alias.value.clone(),
+                output: normalize_sql_ident(alias),
             }),
             SelectItem::QualifiedWildcard(_, _) => return None,
         }
@@ -2615,6 +2627,7 @@ const LOG_COLUMN_NAMES: &[&str] = &[
 
 fn native_order(
     order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
+    columns: &[NativeProjectionColumn],
 ) -> Option<logex_storage::native::LogOrder> {
     let Some(order_by) = order_by else {
         return Some(logex_storage::native::LogOrder::Ascending);
@@ -2628,7 +2641,20 @@ fn native_order(
     }
     let mut descending = None;
     for (expr, expected) in expressions.iter().zip(expected) {
-        if sql_identifier(&expr.expr)?.eq_ignore_ascii_case(expected) {
+        let order_column = match &expr.expr {
+            SqlAstExpr::Identifier(_) => {
+                let output = sql_unqualified_identifier(&expr.expr)?;
+                let mut matching = columns.iter().filter(|column| column.output == output);
+                match (matching.next(), matching.next()) {
+                    (Some(column), None) => column.source.clone(),
+                    (None, None) => output,
+                    _ => return None,
+                }
+            }
+            SqlAstExpr::CompoundIdentifier(_) => sql_identifier(&expr.expr)?,
+            _ => return None,
+        };
+        if order_column == expected {
             let is_desc = !expr.options.asc.unwrap_or(true);
             if let Some(existing) = descending {
                 if existing != is_desc {
@@ -2879,13 +2905,50 @@ fn supports_numeric_operator(operator: Operator) -> bool {
 
 fn sql_identifier(expr: &SqlAstExpr) -> Option<String> {
     match expr {
-        SqlAstExpr::Identifier(ident) => Some(ident.value.to_ascii_lowercase()),
+        SqlAstExpr::Identifier(ident) => Some(normalize_sql_ident(ident)),
         SqlAstExpr::CompoundIdentifier(parts) if parts.len() == 2 => {
-            (parts[0].value.eq_ignore_ascii_case("logs"))
-                .then(|| parts[1].value.to_ascii_lowercase())
+            (normalize_sql_ident(&parts[0]) == "logs").then(|| normalize_sql_ident(&parts[1]))
         }
         _ => None,
     }
+}
+
+fn sql_unqualified_identifier(expr: &SqlAstExpr) -> Option<String> {
+    match expr {
+        SqlAstExpr::Identifier(ident) => Some(normalize_sql_ident(ident)),
+        _ => None,
+    }
+}
+
+fn normalize_sql_ident(ident: &Ident) -> String {
+    if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_ascii_lowercase()
+    }
+}
+
+fn normalize_sql_object_name(name: &ObjectName) -> Option<Vec<String>> {
+    name.0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(normalize_sql_ident(ident)),
+            ObjectNamePart::Function(_) => None,
+        })
+        .collect()
+}
+
+fn normalize_unqualified_sql_binary<'a>(
+    left: &'a SqlAstExpr,
+    right: &'a SqlAstExpr,
+) -> Option<(String, &'a SqlAstExpr, bool)> {
+    if let Some(column) = sql_unqualified_identifier(left) {
+        return Some((column, right, false));
+    }
+    if let Some(column) = sql_unqualified_identifier(right) {
+        return Some((column, left, true));
+    }
+    None
 }
 
 fn sql_string(expr: &SqlAstExpr) -> Option<&str> {
@@ -2970,7 +3033,7 @@ impl IntrospectionRow {
     fn get(&self, column: &str) -> Option<&Value> {
         self.values
             .iter()
-            .find_map(|(name, value)| name.eq_ignore_ascii_case(column).then_some(value))
+            .find_map(|(name, value)| (*name == column).then_some(value))
     }
 }
 
@@ -2994,8 +3057,10 @@ fn try_execute_introspection(
     let Some(table_name) = select_single_from_table(select) else {
         return Ok(None);
     };
-    let table_name = table_name.to_ascii_lowercase();
-    if !table_name.starts_with("information_schema.") {
+    let [schema_name, table_name] = table_name.as_slice() else {
+        return Ok(None);
+    };
+    if schema_name != "information_schema" {
         return Ok(None);
     }
 
@@ -3027,20 +3092,21 @@ fn try_execute_introspection(
     }
 
     let mut rows = match table_name.as_str() {
-        "information_schema.tables" => introspection_table_rows(),
-        "information_schema.columns" => introspection_column_rows(),
+        "tables" => introspection_table_rows(),
+        "columns" => introspection_column_rows(),
         _ => {
             return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                "unsupported information_schema table: {table_name}"
+                "unsupported information_schema table: information_schema.{table_name}"
             ))));
         }
     };
 
-    let schema = rows.first().ok_or_else(|| {
+    let schema = rows.first().cloned().ok_or_else(|| {
         DataFusionError::Internal("information_schema lacks its fixed schema".to_owned())
     })?;
-    let projection = introspection_projection_columns(schema, &select.projection)?;
+    let projection = introspection_projection_columns(&schema, &select.projection)?;
     if let Some(selection) = &select.selection {
+        validate_introspection_predicate_columns(&schema, selection)?;
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows {
             if eval_introspection_predicate(&row, selection)? {
@@ -3049,7 +3115,7 @@ fn try_execute_introspection(
         }
         rows = filtered;
     }
-    sort_introspection_rows(&mut rows, query.order_by.as_ref())?;
+    sort_introspection_rows(&mut rows, &schema, &projection, query.order_by.as_ref())?;
     let total_scanned = rows.len() as u64;
 
     let (sql_limit, sql_offset) = limit_offset(query.limit_clause.as_ref())?;
@@ -3067,7 +3133,9 @@ fn try_execute_introspection(
     }))
 }
 
-fn select_single_from_table(select: &datafusion::sql::sqlparser::ast::Select) -> Option<String> {
+fn select_single_from_table(
+    select: &datafusion::sql::sqlparser::ast::Select,
+) -> Option<Vec<String>> {
     if select.from.len() != 1 || !select.from[0].joins.is_empty() {
         return None;
     }
@@ -3092,7 +3160,7 @@ fn select_single_from_table(select: &datafusion::sql::sqlparser::ast::Select) ->
             && sample.is_none()
             && index_hints.is_empty() =>
         {
-            Some(name.to_string())
+            normalize_sql_object_name(name)
         }
         _ => None,
     }
@@ -3168,6 +3236,42 @@ fn information_schema_udt_name(data_type: &DataType) -> &'static str {
     }
 }
 
+fn validate_introspection_predicate_columns(
+    schema: &IntrospectionRow,
+    expr: &SqlAstExpr,
+) -> Result<(), SqlQueryError> {
+    let mut visitor = IntrospectionIdentifierVisitor { schema };
+    if let ControlFlow::Break(message) = expr.visit(&mut visitor) {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
+    }
+    Ok(())
+}
+
+struct IntrospectionIdentifierVisitor<'a> {
+    schema: &'a IntrospectionRow,
+}
+
+impl Visitor for IntrospectionIdentifierVisitor<'_> {
+    type Break = String;
+
+    fn pre_visit_expr(&mut self, expr: &SqlAstExpr) -> ControlFlow<Self::Break> {
+        match expr {
+            SqlAstExpr::Identifier(ident) => {
+                let column = normalize_sql_ident(ident);
+                if self.schema.get(&column).is_some() {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(format!("unsupported information_schema column: {column}"))
+                }
+            }
+            SqlAstExpr::CompoundIdentifier(_) => ControlFlow::Break(
+                "information_schema column references must be unqualified".to_owned(),
+            ),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
 fn eval_introspection_predicate(
     row: &IntrospectionRow,
     expr: &SqlAstExpr,
@@ -3183,7 +3287,8 @@ fn eval_introspection_predicate(
                 || eval_introspection_predicate(row, right)?)
         }
         SqlAstExpr::BinaryOp { left, op, right } => {
-            let Some((column, literal, reversed)) = normalize_sql_binary(left, right) else {
+            let Some((column, literal, reversed)) = normalize_unqualified_sql_binary(left, right)
+            else {
                 return unsupported_introspection_predicate(expr);
             };
             let Some(cell) = row.get(&column) else {
@@ -3207,7 +3312,7 @@ fn eval_introspection_predicate(
             low,
             high,
         } => {
-            let Some(column) = sql_identifier(expr) else {
+            let Some(column) = sql_unqualified_identifier(expr) else {
                 return unsupported_introspection_predicate(expr);
             };
             let Some(cell) = row.get(&column) else {
@@ -3228,7 +3333,7 @@ fn eval_introspection_predicate(
             list,
             negated,
         } => {
-            let Some(column) = sql_identifier(expr) else {
+            let Some(column) = sql_unqualified_identifier(expr) else {
                 return unsupported_introspection_predicate(expr);
             };
             let Some(cell) = row.get(&column) else {
@@ -3311,6 +3416,8 @@ fn compare_json_scalars(left: &Value, right: &Value) -> Option<CmpOrdering> {
 
 fn sort_introspection_rows(
     rows: &mut [IntrospectionRow],
+    schema: &IntrospectionRow,
+    projection: &[NativeProjectionColumn],
     order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
 ) -> Result<(), SqlQueryError> {
     let Some(order_by) = order_by else {
@@ -3322,11 +3429,28 @@ fn sort_introspection_rows(
         )));
     };
     for expression in expressions.iter().rev() {
-        let Some(column) = sql_identifier(&expression.expr) else {
+        let Some(order_column) = sql_unqualified_identifier(&expression.expr) else {
             return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
                 "information_schema ORDER BY supports column names only".to_owned(),
             )));
         };
+        let mut matching = projection
+            .iter()
+            .filter(|column| column.output == order_column);
+        let column = match (matching.next(), matching.next()) {
+            (Some(column), None) => column.source.clone(),
+            (None, None) => order_column,
+            _ => {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+                    "information_schema ORDER BY alias is ambiguous".to_owned(),
+                )));
+            }
+        };
+        if schema.get(&column).is_none() {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "unsupported information_schema column: {column}",
+            ))));
+        }
         let descending = !expression.options.asc.unwrap_or(true);
         if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
             return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
@@ -3353,28 +3477,29 @@ fn introspection_projection_columns(
 ) -> Result<Vec<NativeProjectionColumn>, SqlQueryError> {
     let mut columns = Vec::new();
     for item in projection {
-        let (expr, alias) =
-            match item {
-                SelectItem::Wildcard(options) if options == &Default::default() => {
-                    columns.extend(
-                        schema
-                            .values
-                            .iter()
-                            .map(|(name, _)| NativeProjectionColumn {
-                                source: (*name).to_owned(),
-                                output: (*name).to_owned(),
-                            }),
-                    );
-                    continue;
-                }
-                SelectItem::UnnamedExpr(expr) => (expr, None),
-                SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias.value.clone())),
-                _ => return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+        let (expr, alias) = match item {
+            SelectItem::Wildcard(options) if options == &Default::default() => {
+                columns.extend(
+                    schema
+                        .values
+                        .iter()
+                        .map(|(name, _)| NativeProjectionColumn {
+                            source: (*name).to_owned(),
+                            output: (*name).to_owned(),
+                        }),
+                );
+                continue;
+            }
+            SelectItem::UnnamedExpr(expr) => (expr, None),
+            SelectItem::ExprWithAlias { expr, alias } => (expr, Some(normalize_sql_ident(alias))),
+            _ => {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
                     "information_schema does not support wildcard modifiers or qualified wildcards"
                         .to_owned(),
-                ))),
-            };
-        let column = sql_identifier(expr).ok_or_else(|| {
+                )));
+            }
+        };
+        let column = sql_unqualified_identifier(expr).ok_or_else(|| {
             DataFusionError::Plan("information_schema projections must be column names".to_owned())
         })?;
         if schema.get(&column).is_none() {
@@ -3505,15 +3630,19 @@ fn validate_supported_table_factor(table: &TableFactor) -> Result<(), SqlQueryEr
     let TableFactor::Table { name, .. } = table else {
         return Ok(());
     };
-    let table_name = name.to_string().to_ascii_lowercase();
-    if matches!(
-        table_name.as_str(),
-        "logs" | "information_schema.tables" | "information_schema.columns"
-    ) {
+    let Some(table_name) = normalize_sql_object_name(name) else {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+            "unsupported computed SQL table name".to_owned(),
+        )));
+    };
+    if matches!(table_name.as_slice(), [table] if table == "logs")
+        || matches!(table_name.as_slice(), [schema, table]
+            if schema == "information_schema" && matches!(table.as_str(), "tables" | "columns"))
+    {
         return Ok(());
     }
     Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-        "unsupported table '{table_name}'; LogEx exposes logs, information_schema.tables, and information_schema.columns"
+        "unsupported table '{name}'; LogEx exposes logs, information_schema.tables, and information_schema.columns"
     ))))
 }
 
