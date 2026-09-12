@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    ArrayRef, ListBuilder, StringArray, StringBuilder, UInt64Array, new_empty_array,
+    Array, ArrayRef, BooleanArray, Int64Array, ListBuilder, StringArray, StringBuilder,
+    UInt64Array, new_empty_array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::catalog::Session;
-use datafusion::common::ScalarValue;
+use datafusion::common::{DFSchema, ScalarValue};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::SQLOptions;
@@ -21,14 +22,16 @@ use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
     Between, BinaryExpr, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
 };
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, DFParserBuilder, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
-    BinaryOperator as SqlBinaryOperator, DuplicateTreatment, Expr as SqlAstExpr, FunctionArg,
-    FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr,
-    Statement as SqlStatement, TableFactor, Value as SqlValue, Visit, Visitor,
+    BinaryOperator as SqlBinaryOperator, CastKind, DataType as SqlDataType, DuplicateTreatment,
+    ExactNumberInfo, Expr as SqlAstExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, LimitClause, OrderByKind, SelectItem, SetExpr, Statement as SqlStatement,
+    TableFactor, Value as SqlValue, Visit, Visitor,
 };
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
@@ -781,13 +784,41 @@ enum NativeRowValueExpr {
     Data,
     Literal(BigInt),
     Case {
-        branches: Vec<(SqlAstExpr, NativeRowValueExpr)>,
-        else_expr: Option<Box<NativeRowValueExpr>>,
+        sql: String,
+        leaves: Vec<NativeRowLeaf>,
     },
 }
 
+#[derive(Clone)]
+enum NativeRowLeaf {
+    Data,
+    Literal(BigInt),
+}
+
+#[derive(Clone)]
+enum PreparedRowValueExpr {
+    Data,
+    Literal(BigInt),
+    Case {
+        expression: usize,
+        leaves: Vec<NativeRowLeaf>,
+    },
+}
+
+struct PreparedSqlExpressions {
+    schema: SchemaRef,
+    columns: Vec<String>,
+    expressions: Vec<Arc<dyn PhysicalExpr>>,
+}
+
+struct PreparedSumInputs {
+    sums: Vec<PreparedRowValueExpr>,
+    selection: Option<Arc<PreparedSqlExpressions>>,
+    cases: Arc<PreparedSqlExpressions>,
+}
+
 struct NativeSumState {
-    expr: NativeRowValueExpr,
+    expr: PreparedRowValueExpr,
     sum: BigInt,
     count: u64,
 }
@@ -802,11 +833,11 @@ enum NativeGroupKey {
 #[derive(Clone)]
 struct NativeDataSumPartitionScan {
     visible_rows: u64,
-    filter: NativeLogFilter,
     candidate_filters: Vec<NativeLogFilter>,
-    selection: Option<SqlAstExpr>,
+    selection: Option<Arc<PreparedSqlExpressions>>,
+    cases: Arc<PreparedSqlExpressions>,
     group_by: NativeDataSumGroupBy,
-    sum_inputs: Vec<NativeRowValueExpr>,
+    sum_inputs: Vec<PreparedRowValueExpr>,
     data_only: bool,
     cancel_check: Option<QueryCancelCheck>,
 }
@@ -1303,6 +1334,8 @@ fn try_execute_native_data_sum(
     )
     .map_err(DataFusionError::from)?;
 
+    let prepared = prepare_sum_inputs(&native_query.sums, native_query.selection.as_ref())?;
+
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
             rows: Vec::new(),
@@ -1314,9 +1347,8 @@ fn try_execute_native_data_sum(
         snapshot,
         &native_query.filter,
         &native_query.candidate_filters,
-        native_query.selection.as_ref(),
+        &prepared,
         native_query.group_by,
-        &native_query.sums,
         cancel_check.as_ref(),
     )?;
     let mut rows = native_data_sum_rows(&native_query, groups);
@@ -1380,6 +1412,12 @@ fn parse_native_data_sum_query(sql: &str) -> Result<Option<NativeDataSumQuery>, 
     else {
         return Ok(None);
     };
+    // The native path exists to preserve exact integer aggregation for the
+    // hexadecimal data column. Ordinary numeric SUM expressions retain
+    // DataFusion's input coercion and result types.
+    if !sums.iter().any(native_row_value_uses_data) {
+        return Ok(None);
+    }
     let Some(having) = native_data_sum_having(select.having.as_ref(), &projections) else {
         return Ok(None);
     };
@@ -1662,52 +1700,120 @@ fn is_plain_sum_data_expr(expr: &SqlAstExpr) -> bool {
 }
 
 fn parse_native_row_value_expr(expr: &SqlAstExpr) -> Option<NativeRowValueExpr> {
+    if is_native_data_expr(expr) {
+        return Some(NativeRowValueExpr::Data);
+    }
+    if let Some(value) = sql_numeric_bigint_expr(expr) {
+        return Some(NativeRowValueExpr::Literal(value));
+    }
+    if let Some(expr) = unbounded_exact_cast_operand(expr) {
+        return parse_native_row_value_expr(expr);
+    }
+    if !matches!(expr, SqlAstExpr::Case { .. }) {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    let sql = rewrite_native_case(expr, &mut leaves)?;
+    Some(NativeRowValueExpr::Case { sql, leaves })
+}
+
+fn native_row_value_uses_data(expr: &NativeRowValueExpr) -> bool {
     match expr {
-        SqlAstExpr::Identifier(_) | SqlAstExpr::CompoundIdentifier(_) => sql_identifier(expr)
-            .is_some_and(|column| column == "data")
-            .then_some(NativeRowValueExpr::Data),
-        SqlAstExpr::Nested(expr) => parse_native_row_value_expr(expr),
-        SqlAstExpr::Cast {
-            expr, data_type, ..
-        } => {
-            if is_integer_cast_target(data_type) {
-                parse_native_row_value_expr(expr)
-            } else {
-                None
-            }
-        }
-        SqlAstExpr::Value(value) => sql_bigint_value(value).map(NativeRowValueExpr::Literal),
-        SqlAstExpr::Case {
-            operand,
-            conditions,
-            else_result,
-            ..
-        } => {
-            if operand.is_some() {
-                return None;
-            }
-            let mut branches = Vec::with_capacity(conditions.len());
-            for condition in conditions {
-                branches.push((
-                    condition.condition.clone(),
-                    parse_native_row_value_expr(&condition.result)?,
-                ));
-            }
-            Some(NativeRowValueExpr::Case {
-                branches,
-                else_expr: match else_result.as_deref() {
-                    Some(expr) => Some(Box::new(parse_native_row_value_expr(expr)?)),
-                    None => None,
-                },
-            })
-        }
-        _ => None,
+        NativeRowValueExpr::Data => true,
+        NativeRowValueExpr::Literal(_) => false,
+        NativeRowValueExpr::Case { leaves, .. } => leaves
+            .iter()
+            .any(|leaf| matches!(leaf, NativeRowLeaf::Data)),
     }
 }
 
-fn is_integer_cast_target(data_type: &datafusion::sql::sqlparser::ast::DataType) -> bool {
-    let name = data_type.to_string().to_ascii_lowercase();
-    name.contains("int") || name.contains("numeric") || name.contains("decimal")
+fn is_native_data_expr(expr: &SqlAstExpr) -> bool {
+    if matches!(
+        expr,
+        SqlAstExpr::Identifier(_) | SqlAstExpr::CompoundIdentifier(_)
+    ) {
+        return sql_identifier(expr).is_some_and(|column| column == "data");
+    }
+    match expr {
+        SqlAstExpr::Nested(expr) => is_native_data_expr(expr),
+        _ if unbounded_exact_cast_operand(expr).is_some() => {
+            is_native_data_expr(unbounded_exact_cast_operand(expr).unwrap())
+        }
+        _ => false,
+    }
+}
+
+fn unbounded_exact_cast_operand(expr: &SqlAstExpr) -> Option<&SqlAstExpr> {
+    let SqlAstExpr::Cast {
+        kind,
+        expr,
+        data_type,
+        format: None,
+    } = expr
+    else {
+        return None;
+    };
+    if !matches!(kind, CastKind::Cast | CastKind::DoubleColon)
+        || !matches!(
+            data_type,
+            SqlDataType::Numeric(ExactNumberInfo::None)
+                | SqlDataType::Decimal(ExactNumberInfo::None)
+                | SqlDataType::Dec(ExactNumberInfo::None)
+        )
+    {
+        return None;
+    }
+    Some(expr)
+}
+
+fn rewrite_native_case(expr: &SqlAstExpr, leaves: &mut Vec<NativeRowLeaf>) -> Option<String> {
+    if is_native_data_expr(expr) {
+        return Some(native_case_leaf_sql(leaves, NativeRowLeaf::Data));
+    }
+    if let Some(value) = sql_numeric_bigint_expr(expr) {
+        return Some(native_case_leaf_sql(leaves, NativeRowLeaf::Literal(value)));
+    }
+    if matches!(expr, SqlAstExpr::Value(value) if matches!(&value.value, SqlValue::Null)) {
+        return Some("CAST(NULL AS BIGINT)".to_owned());
+    }
+    if let SqlAstExpr::Nested(expr) = expr {
+        return Some(format!("({})", rewrite_native_case(expr, leaves)?));
+    }
+    if let Some(expr) = unbounded_exact_cast_operand(expr) {
+        return rewrite_native_case(expr, leaves);
+    }
+    let SqlAstExpr::Case {
+        operand,
+        conditions,
+        else_result,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let mut sql = String::from("CASE");
+    if let Some(operand) = operand {
+        sql.push(' ');
+        sql.push_str(&operand.to_string());
+    }
+    for condition in conditions {
+        sql.push_str(" WHEN ");
+        sql.push_str(&condition.condition.to_string());
+        sql.push_str(" THEN ");
+        sql.push_str(&rewrite_native_case(&condition.result, leaves)?);
+    }
+    if let Some(else_result) = else_result {
+        sql.push_str(" ELSE ");
+        sql.push_str(&rewrite_native_case(else_result, leaves)?);
+    }
+    sql.push_str(" END");
+    Some(sql)
+}
+
+fn native_case_leaf_sql(leaves: &mut Vec<NativeRowLeaf>, leaf: NativeRowLeaf) -> String {
+    let index = leaves.len();
+    leaves.push(leaf);
+    format!("CAST({index} AS BIGINT)")
 }
 
 fn topic_or_candidate_filters(
@@ -1766,7 +1872,7 @@ fn parse_topic_eq_term(expr: &SqlAstExpr) -> Option<(usize, B256)> {
         return None;
     }
     let index = topic_column_index(&column)?;
-    let topic = sql_string(literal).and_then(parse_b256)?;
+    let topic = sql_string(literal).and_then(parse_sql_b256)?;
     Some((index, topic))
 }
 
@@ -1774,18 +1880,18 @@ fn execute_native_data_sum(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
     candidate_filters: &[NativeLogFilter],
-    selection: Option<&SqlAstExpr>,
+    prepared: &PreparedSumInputs,
     group_by: NativeDataSumGroupBy,
-    sum_inputs: &[NativeRowValueExpr],
     cancel_check: Option<&QueryCancelCheck>,
 ) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
     let mut groups = BTreeMap::new();
-    let data_only = selection.is_none()
+    let sum_inputs = &prepared.sums;
+    let data_only = prepared.selection.is_none()
         && group_by == NativeDataSumGroupBy::None
         && sum_inputs
             .iter()
-            .all(|expr| matches!(expr, NativeRowValueExpr::Data));
+            .all(|expr| matches!(expr, PreparedRowValueExpr::Data));
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
         .into_iter()
@@ -1806,9 +1912,9 @@ fn execute_native_data_sum(
                 let path = partition.path.clone();
                 let scan = NativeDataSumPartitionScan {
                     visible_rows: partition.row_count,
-                    filter: filter.clone(),
                     candidate_filters: candidate_filters.to_vec(),
-                    selection: selection.cloned(),
+                    selection: prepared.selection.as_ref().map(Arc::clone),
+                    cases: Arc::clone(&prepared.cases),
                     group_by,
                     sum_inputs: sum_inputs.to_vec(),
                     data_only,
@@ -1819,16 +1925,17 @@ fn execute_native_data_sum(
             handles
                 .into_iter()
                 .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
+                    handle.join().unwrap_or_else(|_| {
+                        Err(SqlQueryError::Storage(std::io::Error::other(
+                            "query worker panicked",
+                        )))
+                    })
                 })
                 .collect::<Vec<_>>()
         });
 
         for result in chunk_results {
-            let (partition_groups, partition_scanned) =
-                result.map_err(map_native_query_io_error)?;
+            let (partition_groups, partition_scanned) = result?;
             merge_native_sum_groups(&mut groups, partition_groups);
             total_scanned += partition_scanned;
         }
@@ -1841,7 +1948,7 @@ fn execute_native_data_sum(
     Ok((groups, total_scanned))
 }
 
-fn initial_native_sum_states(sum_inputs: &[NativeRowValueExpr]) -> Vec<NativeSumState> {
+fn initial_native_sum_states(sum_inputs: &[PreparedRowValueExpr]) -> Vec<NativeSumState> {
     sum_inputs
         .iter()
         .cloned()
@@ -1874,17 +1981,8 @@ fn merge_native_sum_groups(groups: &mut NativeDataSumGroups, partial_groups: Nat
 fn scan_native_data_sum_partition(
     path: &std::path::Path,
     scan: NativeDataSumPartitionScan,
-) -> std::io::Result<(NativeDataSumGroups, u64)> {
-    if scan
-        .cancel_check
-        .as_ref()
-        .is_some_and(|is_canceled| is_canceled())
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "query canceled",
-        ));
-    }
+) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
+    check_query_canceled(scan.cancel_check.as_ref())?;
     let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
     let mut row_bitmap = RoaringBitmap::new();
     let reader = SegmentReader::open(path)?;
@@ -1933,44 +2031,77 @@ fn scan_native_data_sum_partition(
         return Ok((groups, row_ids.len() as u64));
     }
 
-    let rows = reader.read_log_rows(Some(&row_ids))?;
-    for row in rows {
-        if let Some(selection) = scan.selection.as_ref()
-            && !eval_sql_predicate(&row, selection)
-        {
+    for row_ids in row_ids.chunks(DATAFUSION_BATCH_SIZE) {
+        check_query_canceled(scan.cancel_check.as_ref())?;
+        // Candidate selection refines every native constraint against stored
+        // columns, with or without indexes. Each candidate filter contains the
+        // common filter, so their union already satisfies it. Residual WHERE
+        // evaluation happens before CASE preparation so excluded rows cannot
+        // trigger errors in aggregate inputs.
+        let selected_row_ids = if let Some(selection) = &scan.selection {
+            let selection = selection.evaluate(&reader, row_ids)?;
+            let selection = selection[0]
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "prepared SUM selection did not return boolean values".to_owned(),
+                    )
+                })?;
+            row_ids
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(index, row_id)| predicate_matches(selection, index).then_some(row_id))
+                .collect::<Vec<_>>()
+        } else {
+            row_ids.to_vec()
+        };
+        if selected_row_ids.is_empty() {
             continue;
         }
-        if !matches_native_filter(&row, &scan.filter) {
-            continue;
-        }
-        let key = native_group_key(&row, scan.group_by);
-        let states = groups
-            .entry(key)
-            .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
-        for state in states.iter_mut() {
-            if let Some(value) = eval_native_row_value(&row, &state.expr) {
-                state.sum += value;
-                state.count += 1;
+        check_query_canceled(scan.cancel_check.as_ref())?;
+        let cases = scan.cases.evaluate(&reader, &selected_row_ids)?;
+        let cases = cases
+            .iter()
+            .map(|case| {
+                case.as_any()
+                    .downcast_ref::<Int64Array>()
+                    .cloned()
+                    .ok_or_else(|| {
+                        SqlQueryError::DataFusion(DataFusionError::Internal(
+                            "prepared SUM CASE did not return BIGINT values".to_owned(),
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let values = reader.read_var_bytes("data", Some(&selected_row_ids))?;
+        let addresses = match scan.group_by {
+            NativeDataSumGroupBy::None => None,
+            NativeDataSumGroupBy::Address => Some(reader.read_address(Some(&selected_row_ids))?),
+        };
+        for (row_index, data) in values.into_iter().enumerate() {
+            let key = addresses.as_ref().map(|addresses| {
+                let mut bytes = [0u8; 20];
+                bytes.copy_from_slice(addresses[row_index].as_slice());
+                NativeGroupKey::Address(bytes)
+            });
+            let states = groups
+                .entry(key)
+                .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
+            for state in states.iter_mut() {
+                if let Some(value) =
+                    eval_native_row_value(data.as_ref(), &state.expr, &cases, row_index)
+                {
+                    state.sum += value;
+                    state.count += 1;
+                }
             }
+            total_scanned += 1;
         }
-        total_scanned += 1;
     }
 
     Ok((groups, total_scanned))
-}
-
-fn native_group_key(
-    row: &logex_types::LogRow,
-    group_by: NativeDataSumGroupBy,
-) -> Option<NativeGroupKey> {
-    match group_by {
-        NativeDataSumGroupBy::None => None,
-        NativeDataSumGroupBy::Address => {
-            let mut bytes = [0u8; 20];
-            bytes.copy_from_slice(row.address.as_slice());
-            Some(NativeGroupKey::Address(bytes))
-        }
-    }
 }
 
 fn native_data_sum_rows(
@@ -2085,8 +2216,10 @@ fn native_group_key_json(
 fn compare_optional_bigint(left: Option<&BigInt>, right: Option<&BigInt>) -> CmpOrdering {
     match (left, right) {
         (Some(left), Some(right)) => left.cmp(right),
-        (Some(_), None) => CmpOrdering::Greater,
-        (None, Some(_)) => CmpOrdering::Less,
+        // DataFusion's default null ordering treats NULL as the maximum value:
+        // ASC puts it last, and reversing this comparison for DESC puts it first.
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
         (None, None) => CmpOrdering::Equal,
     }
 }
@@ -2129,196 +2262,153 @@ fn eval_native_aggregate_expr(
     }
 }
 
-fn eval_native_row_value(row: &logex_types::LogRow, expr: &NativeRowValueExpr) -> Option<BigInt> {
+fn eval_native_row_value(
+    data: &[u8],
+    expr: &PreparedRowValueExpr,
+    cases: &[Int64Array],
+    row_index: usize,
+) -> Option<BigInt> {
     match expr {
-        NativeRowValueExpr::Data => Some(BigInt::from(BigUint::from_bytes_be(row.data.as_ref()))),
-        NativeRowValueExpr::Literal(value) => Some(value.clone()),
-        NativeRowValueExpr::Case {
-            branches,
-            else_expr,
-        } => {
-            for (condition, result) in branches {
-                if eval_sql_predicate(row, condition) {
-                    return eval_native_row_value(row, result);
-                }
+        PreparedRowValueExpr::Data => Some(BigInt::from(BigUint::from_bytes_be(data))),
+        PreparedRowValueExpr::Literal(value) => Some(value.clone()),
+        PreparedRowValueExpr::Case { expression, leaves } => {
+            let result = &cases[*expression];
+            if !result.is_valid(row_index) {
+                return None;
             }
-            else_expr
-                .as_deref()
-                .and_then(|expr| eval_native_row_value(row, expr))
+            let leaf = usize::try_from(result.value(row_index)).ok()?;
+            match leaves.get(leaf)? {
+                NativeRowLeaf::Data => Some(BigInt::from(BigUint::from_bytes_be(data))),
+                NativeRowLeaf::Literal(value) => Some(value.clone()),
+            }
         }
     }
 }
 
-fn eval_sql_predicate(row: &logex_types::LogRow, expr: &SqlAstExpr) -> bool {
+fn predicate_matches(predicate: &BooleanArray, row: usize) -> bool {
+    predicate.is_valid(row) && predicate.value(row)
+}
+
+fn prepare_sum_inputs(
+    sums: &[NativeRowValueExpr],
+    selection: Option<&SqlAstExpr>,
+) -> Result<PreparedSumInputs, SqlQueryError> {
+    let selection = selection
+        .map(|expr| {
+            PreparedSqlExpressions::new(&[expr.to_string()], DataType::Boolean).map(Arc::new)
+        })
+        .transpose()?;
+    let mut case_sql = Vec::new();
+    let sums = sums
+        .iter()
+        .map(|expr| prepare_sum_value(expr, &mut case_sql))
+        .collect();
+    Ok(PreparedSumInputs {
+        sums,
+        selection,
+        cases: Arc::new(PreparedSqlExpressions::new(&case_sql, DataType::Int64)?),
+    })
+}
+
+fn prepare_sum_value(expr: &NativeRowValueExpr, cases: &mut Vec<String>) -> PreparedRowValueExpr {
     match expr {
-        SqlAstExpr::Nested(expr) => eval_sql_predicate(row, expr),
-        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
-            eval_sql_predicate(row, left) && eval_sql_predicate(row, right)
+        NativeRowValueExpr::Data => PreparedRowValueExpr::Data,
+        NativeRowValueExpr::Literal(value) => PreparedRowValueExpr::Literal(value.clone()),
+        NativeRowValueExpr::Case { sql, leaves } => {
+            let expression = cases.len();
+            cases.push(sql.clone());
+            PreparedRowValueExpr::Case {
+                expression,
+                leaves: leaves.clone(),
+            }
         }
-        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
-            eval_sql_predicate(row, left) || eval_sql_predicate(row, right)
+    }
+}
+
+impl PreparedSqlExpressions {
+    fn new(sql: &[String], expected_type: DataType) -> DataFusionResult<Self> {
+        if sql.is_empty() {
+            return Ok(Self {
+                schema: Arc::new(Schema::empty()),
+                columns: Vec::new(),
+                expressions: Vec::new(),
+            });
         }
-        SqlAstExpr::BinaryOp { left, op, right } => {
-            eval_sql_comparison(row, left, op.clone(), right)
-        }
-        SqlAstExpr::Between {
-            expr,
-            negated,
-            low,
-            high,
-        } => {
-            let Some(column) = sql_identifier(expr) else {
-                return false;
-            };
-            let Some(value) = row_numeric_value(row, &column) else {
-                return false;
-            };
-            let Some(low) = sql_u64(low) else {
-                return false;
-            };
-            let Some(high) = sql_u64(high) else {
-                return false;
-            };
-            let matches = value >= low && value <= high;
-            if *negated { !matches } else { matches }
-        }
-        SqlAstExpr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let Some(column) = sql_identifier(expr) else {
-                return false;
-            };
-            let matches = list
+        let state = SessionContext::new().state();
+        let full_schema = log_rows_schema();
+        let full_df_schema = DFSchema::try_from_qualified_schema("logs", &full_schema)?;
+        let logical = sql
+            .iter()
+            .map(|sql| state.create_logical_expr(sql, &full_df_schema))
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        let referenced = logical
+            .iter()
+            .flat_map(|expr| expr.column_refs())
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let schema = Arc::new(Schema::new(
+            full_schema
+                .fields()
                 .iter()
-                .any(|literal| eval_column_literal_eq(row, &column, literal));
-            if *negated { !matches } else { matches }
+                .filter(|field| referenced.contains(field.name().as_str()))
+                .cloned()
+                .collect::<Vec<_>>(),
+        ));
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        let df_schema = DFSchema::try_from_qualified_schema("logs", &schema)?;
+        let expressions = logical
+            .into_iter()
+            .map(|logical| {
+                let mut physical = state.create_physical_expr(logical.clone(), &df_schema)?;
+                if physical.data_type(&schema)? == DataType::Null {
+                    physical = state.create_physical_expr(
+                        DataFusionExpr::Cast(datafusion::logical_expr::expr::Cast::new(
+                            Box::new(logical),
+                            expected_type.clone(),
+                        )),
+                        &df_schema,
+                    )?;
+                }
+                if physical.data_type(&schema)? != expected_type {
+                    return Err(DataFusionError::Plan(format!(
+                        "native SUM expression must return {expected_type}, got {}",
+                        physical.data_type(&schema)?
+                    )));
+                }
+                Ok(physical)
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        Ok(Self {
+            schema,
+            columns,
+            expressions,
+        })
+    }
+
+    fn evaluate(
+        &self,
+        reader: &SegmentReader,
+        row_ids: &[u32],
+    ) -> Result<Vec<ArrayRef>, SqlQueryError> {
+        if self.expressions.is_empty() {
+            return Ok(Vec::new());
         }
-        _ => false,
-    }
-}
-
-fn eval_sql_comparison(
-    row: &logex_types::LogRow,
-    left: &SqlAstExpr,
-    operator: SqlBinaryOperator,
-    right: &SqlAstExpr,
-) -> bool {
-    if let Some(column) = sql_identifier(left) {
-        return eval_column_literal_comparison(row, &column, operator, right, false);
-    }
-    if let Some(column) = sql_identifier(right) {
-        return eval_column_literal_comparison(row, &column, operator, left, true);
-    }
-    false
-}
-
-fn eval_column_literal_comparison(
-    row: &logex_types::LogRow,
-    column: &str,
-    operator: SqlBinaryOperator,
-    literal: &SqlAstExpr,
-    reversed: bool,
-) -> bool {
-    match column {
-        "block_number" | "timestamp" | "data_len" | "source" => {
-            let Some(row_value) = row_numeric_value(row, column) else {
-                return false;
-            };
-            let Some(literal_value) = sql_u64(literal) else {
-                return false;
-            };
-            compare_u64(row_value, operator, literal_value, reversed)
-        }
-        "block_hash" => {
-            let Some(value) = sql_string(literal).and_then(parse_b256) else {
-                return false;
-            };
-            compare_eq(row.block_hash == value, operator, reversed)
-        }
-        "address" => {
-            let Some(value) = sql_string(literal).and_then(parse_address) else {
-                return false;
-            };
-            compare_eq(row.address == value, operator, reversed)
-        }
-        column if topic_column_index(column).is_some() => {
-            let Some(value) = sql_string(literal).and_then(parse_b256) else {
-                return false;
-            };
-            let topic = row_topic(row, topic_column_index(column).unwrap());
-            compare_eq(topic == Some(value), operator, reversed)
-        }
-        "data" => {
-            let Some(value) = sql_string(literal).and_then(parse_hex_bytes) else {
-                return false;
-            };
-            compare_bytes(row.data.as_ref(), operator, value.as_slice(), reversed)
-        }
-        _ => false,
-    }
-}
-
-fn eval_column_literal_eq(row: &logex_types::LogRow, column: &str, literal: &SqlAstExpr) -> bool {
-    eval_column_literal_comparison(row, column, SqlBinaryOperator::Eq, literal, false)
-}
-
-fn row_numeric_value(row: &logex_types::LogRow, column: &str) -> Option<u64> {
-    match column {
-        "block_number" => Some(row.block_number),
-        "timestamp" => Some(row.timestamp),
-        "data_len" => Some(row.data_len as u64),
-        "source" => Some(row.source as u8 as u64),
-        _ => None,
-    }
-}
-
-fn row_topic(row: &logex_types::LogRow, index: usize) -> Option<B256> {
-    match index {
-        0 => row.topic0,
-        1 => row.topic1,
-        2 => row.topic2,
-        3 => row.topic3,
-        _ => None,
-    }
-}
-
-fn compare_eq(matches: bool, operator: SqlBinaryOperator, _reversed: bool) -> bool {
-    match operator {
-        SqlBinaryOperator::Eq => matches,
-        SqlBinaryOperator::NotEq => !matches,
-        _ => false,
-    }
-}
-
-fn compare_u64(left: u64, operator: SqlBinaryOperator, right: u64, reversed: bool) -> bool {
-    if reversed {
-        return compare_u64(right, operator, left, false);
-    }
-    match operator {
-        SqlBinaryOperator::Eq => left == right,
-        SqlBinaryOperator::NotEq => left != right,
-        SqlBinaryOperator::Gt => left > right,
-        SqlBinaryOperator::GtEq => left >= right,
-        SqlBinaryOperator::Lt => left < right,
-        SqlBinaryOperator::LtEq => left <= right,
-        _ => false,
-    }
-}
-
-fn compare_bytes(left: &[u8], operator: SqlBinaryOperator, right: &[u8], reversed: bool) -> bool {
-    if reversed {
-        return compare_bytes(right, operator, left, false);
-    }
-    match operator {
-        SqlBinaryOperator::Eq => left == right,
-        SqlBinaryOperator::NotEq => left != right,
-        SqlBinaryOperator::Gt => left > right,
-        SqlBinaryOperator::GtEq => left >= right,
-        SqlBinaryOperator::Lt => left < right,
-        SqlBinaryOperator::LtEq => left <= right,
-        _ => false,
+        let arrays = self
+            .columns
+            .iter()
+            .map(|column| read_column_as_array(reader, row_ids, column))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let options = RecordBatchOptions::new().with_row_count(Some(row_ids.len()));
+        let batch = RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
+            .map_err(DataFusionError::from)?;
+        self.expressions
+            .iter()
+            .map(|expr| Ok(expr.evaluate(&batch)?.into_array(row_ids.len())?))
+            .collect()
     }
 }
 
@@ -2341,7 +2431,33 @@ fn sql_bigint_expr(expr: &SqlAstExpr) -> Option<BigInt> {
         {
             sql_bigint_expr(expr).map(|value| -value)
         }
+        SqlAstExpr::UnaryOp { op, expr }
+            if *op == datafusion::sql::sqlparser::ast::UnaryOperator::Plus =>
+        {
+            sql_bigint_expr(expr)
+        }
         SqlAstExpr::Nested(expr) => sql_bigint_expr(expr),
+        _ => None,
+    }
+}
+
+fn sql_numeric_bigint_expr(expr: &SqlAstExpr) -> Option<BigInt> {
+    match expr {
+        SqlAstExpr::Value(value) => match &value.value {
+            SqlValue::Number(value, _) => value.parse().ok(),
+            _ => None,
+        },
+        SqlAstExpr::UnaryOp { op, expr }
+            if *op == datafusion::sql::sqlparser::ast::UnaryOperator::Minus =>
+        {
+            sql_numeric_bigint_expr(expr).map(|value| -value)
+        }
+        SqlAstExpr::UnaryOp { op, expr }
+            if *op == datafusion::sql::sqlparser::ast::UnaryOperator::Plus =>
+        {
+            sql_numeric_bigint_expr(expr)
+        }
+        SqlAstExpr::Nested(expr) => sql_numeric_bigint_expr(expr),
         _ => None,
     }
 }
@@ -4330,18 +4446,6 @@ fn parse_address(value: &str) -> Option<Address> {
     let hex = value.strip_prefix("0x").unwrap_or(value);
     let bytes = hex::decode(hex).ok()?;
     (bytes.len() == 20).then(|| Address::from_slice(&bytes))
-}
-
-fn parse_b256(value: &str) -> Option<B256> {
-    let hex = value.strip_prefix("0x").unwrap_or(value);
-    let bytes = hex::decode(hex).ok()?;
-    (bytes.len() == 32).then(|| B256::from_slice(&bytes))
-}
-
-fn parse_hex_bytes(value: &str) -> Option<Vec<u8>> {
-    let hex = value.strip_prefix("0x").unwrap_or(value);
-    hex.len().is_multiple_of(2).then_some(())?;
-    hex::decode(hex).ok()
 }
 
 fn rewrite_legacy_sql(sql: &str, head_block: u64) -> Result<String, SqlQueryError> {
