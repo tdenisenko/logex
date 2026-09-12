@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use roaring::RoaringBitmap;
@@ -92,6 +92,10 @@ impl BTreeIndex {
                 .ok_or_else(|| invalid_index("index file too large"))?;
         }
         write_index_file(path, logical_len, |writer| {
+            // Roaring serializes individual integers. A concrete, bounded
+            // buffer combines those writes before the checked file writer,
+            // without retaining every serialized bitmap in memory.
+            let mut writer = BufWriter::with_capacity(64 * 1024, writer);
             writer.write_all(INDEX_MAGIC)?;
             writer.write_all(&INDEX_VERSION.to_le_bytes())?;
             writer.write_all(&key_size.to_le_bytes())?;
@@ -105,9 +109,9 @@ impl BTreeIndex {
                 bitmap_offset += u64::from(size);
             }
             for bitmap in self.entries.values() {
-                bitmap.serialize_into(&mut *writer)?;
+                bitmap.serialize_into(&mut writer)?;
             }
-            Ok(())
+            writer.flush()
         })
     }
 }
