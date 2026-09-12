@@ -71,5 +71,9 @@ cargo test -p logex-server --test query_latency --release --locked \
 
 All six local workspace gates pass: formatting, check, Clippy, 987 tests
 (13 ignored), documentation tests and the release node build. Release-mode
-regressions, performance acceptance and PR/CI/merge remain. The wider offline audit and subsequent live-sync/staging acceptance are
+regressions also pass (89 server tests). [Performance acceptance](baselines/2026-09-12-query-cancellation.md)
+retains all 250 samples per shape/revision: median latency −1.15% to +0.02%,
+p95 −4.89% to −1.47%; peak RSS median +0.15%, p95 −1.35%. The
+per-request token allocation is included; no material regression was measured.
+Implementation `d08c69e8` awaits PR/CI/merge. The wider offline audit and subsequent live-sync/staging acceptance are
 not complete. No production data, external volumes or services are accessed.
