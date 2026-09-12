@@ -62,17 +62,20 @@ dictionaries, map key errors, invalid dates, multiple batches and empty schemas.
 A seeded 512-row nullable-list fixture is checked against an independent JSON
 oracle, including sliced offsets. Tests use temporary storage only.
 
-The initial candidate passed all six gates (976 tests, 11 intentionally ignored)
-and the complete dense DataFusion comparison. Subsequent review reproduced false
-errors from hidden temporal values. The correction also covers unused duplicate
-map keys. All six gates now pass with 978 tests (11 intentionally ignored).
-Final-source performance measurements remain; initial samples are retained and
-will not substitute for that acceptance. The
-tracked `benchmark_datafusion_result_values` fixture forces the general SQL
-engine with arithmetic ordering and checks narrow/wide projections and aggregate
-results against independently constructed values. Only queries with correct
-baseline results are eligible for before/after performance claims. Previously
-broken values are correctness tests, not favorable benchmark baselines.
+All six local workspace gates pass with 978 tests (11 intentionally ignored),
+documentation tests and the release node build. [Performance acceptance](baselines/2026-09-12-sql-result-values.md)
+retains 500 DataFusion samples per shape/profile/revision, 45 standard control
+samples, and the isolated 150-group/open investigation. DataFusion medians are
+−0.16% to +0.03%; generic ingestion medians −1.73% to +0.97%. Mixed sparse concurrent
+queries retain a +6.04% median observation, versus +0.87% in the repeated-query
+investigation. Mixed reopen/ingestion tail differences are also explicit.
+
+The initial candidate's measurements and interrupted sparse run are retained
+separately: review caught and fixed the hidden-temporal-value error before final
+acceptance. The tracked `benchmark_datafusion_result_values` fixture forces the
+general SQL engine through arithmetic ordering and checks narrow/wide projections
+and aggregates against independent expected values. Only baseline-correct queries
+are used for speed comparisons. Linux/macOS CI remains before merge.
 
 The remaining offline audit, actual live sync and staging soak remain separate
 acceptance gates. No production files, external volume contents or services have
