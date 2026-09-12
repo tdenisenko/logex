@@ -8,7 +8,7 @@ use crate::column_artifact::ColumnArtifacts;
 use crate::native::{ColumnDescriptor, SegmentManifest};
 use crate::page::{
     PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
-    decode_var_bytes_page, read_page_index,
+    decode_var_bytes_page_bounded, read_page_index,
 };
 use crate::reader::{RawBytesColumn, RawFixedColumn};
 use crate::{ColumnFileHeader, NullBitmap};
@@ -219,10 +219,23 @@ impl SegmentReader {
     }
 
     pub fn read_var_bytes(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<Bytes>> {
+        self.read_var_bytes_with_lengths(column, row_ids)
+            .map(|(values, _)| values)
+    }
+
+    fn read_var_bytes_with_lengths(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<(Vec<Bytes>, Vec<u32>)> {
         if self.compacted_column(column).is_none() {
             let path = raw_column_path(column);
-            return RawBytesColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?)?
-                .materialize(row_ids, self.manifest.as_ref().map(|m| m.row_count));
+            let values =
+                RawBytesColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?)?
+                    .materialize(row_ids, self.manifest.as_ref().map(|m| m.row_count))?;
+            let lengths = self.read_u32("data_len", row_ids)?;
+            validate_data_lengths(&values, &lengths)?;
+            return Ok((values, lengths));
         }
         self.read_var_bytes_values(column, row_ids)
     }
@@ -307,58 +320,67 @@ impl SegmentReader {
 
     /// Materialize a small maintenance candidate without trusting compressed
     /// frame sizes or allocating its complete data stream up front.
-    pub(crate) fn read_log_rows_bounded(&self, budget: usize) -> io::Result<Vec<LogRow>> {
+    /// `lengths` is the complete data_len column already read from this reader
+    /// while screening the candidate's payload budget.
+    pub(crate) fn read_log_rows_bounded(
+        &self,
+        budget: usize,
+        lengths: Vec<u32>,
+    ) -> io::Result<Vec<LogRow>> {
         let descriptor = self.compacted_column("data").ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bounded read requires paged data",
             )
         })?;
-        let lengths = self.read_u32("data_len", None)?;
+        let expected_rows = self
+            .manifest
+            .as_ref()
+            .and_then(|manifest| usize::try_from(manifest.row_count).ok())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "bounded row count is invalid")
+            })?;
+        if lengths.len() != expected_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "data length rows differ from the segment",
+            ));
+        }
+        lengths
+            .iter()
+            .try_fold(0usize, |sum, &len| sum.checked_add(len as usize))
+            .filter(|&sum| sum <= budget)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "data exceeds maintenance budget",
+                )
+            })?;
         let mut data = Vec::new();
-        let mut remaining = budget;
         for entry in self.read_compacted_page_index(descriptor, None)? {
             let start = usize::try_from(entry.first_row).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "data row offset overflow")
             })?;
-            let lengths = lengths
-                .get(start..start + entry.row_count as usize)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
-                })?;
-            let bytes = lengths
-                .iter()
-                .try_fold(0usize, |sum, &len| sum.checked_add(len as usize))
-                .filter(|&sum| sum <= remaining)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "data page exceeds maintenance budget",
-                    )
-                })?;
-            let page = crate::page::decode_var_bytes_page_bounded(
+            let end = start.checked_add(entry.row_count as usize).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+            })?;
+            let lengths = lengths.get(start..end).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
+            })?;
+            let page = decode_var_bytes_page_bounded(
                 &self.read_page_payload(descriptor, &entry)?,
                 descriptor.codec,
-                entry.row_count as usize,
-                bytes,
+                lengths,
             )?;
-            for value in &page {
-                remaining = remaining.checked_sub(value.len()).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "maintenance payload budget exceeded",
-                    )
-                })?;
-            }
             data.extend(page);
         }
-        self.materialize_log_rows(None, Some(data))
+        self.materialize_log_rows(None, Some((data, lengths)))
     }
 
     fn materialize_log_rows(
         &self,
         row_ids: Option<&[u32]>,
-        data: Option<Vec<Bytes>>,
+        data: Option<(Vec<Bytes>, Vec<u32>)>,
     ) -> io::Result<Vec<LogRow>> {
         let addresses = self.read_address(row_ids)?;
         let block_numbers = self.read_u64("block_number", row_ids)?;
@@ -371,11 +393,10 @@ impl SegmentReader {
         let topic1s = self.read_nullable_b256("topic1", row_ids)?;
         let topic2s = self.read_nullable_b256("topic2", row_ids)?;
         let topic3s = self.read_nullable_b256("topic3", row_ids)?;
-        let data = match data {
+        let (data, data_lens) = match data {
             Some(data) => data,
-            None => self.read_var_bytes("data", row_ids)?,
+            None => self.read_var_bytes_with_lengths("data", row_ids)?,
         };
-        let data_lens = self.read_u32("data_len", row_ids)?;
         let sources = self.read_u8("source", row_ids)?;
 
         if [
@@ -584,26 +605,111 @@ impl SegmentReader {
         &self,
         column: &str,
         row_ids: Option<&[u32]>,
-    ) -> io::Result<Vec<Bytes>> {
+    ) -> io::Result<(Vec<Bytes>, Vec<u32>)> {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
         let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
 
         match row_ids {
-            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
-                decode_var_bytes_page(
-                    &self.read_page_payload(descriptor, entry)?,
-                    descriptor.codec,
-                )
-            }),
+            Some(ids) => self.read_selected_var_bytes_pages(descriptor, ids, &page_index),
             None => {
+                let lengths = self.read_u32("data_len", None)?;
                 let data = self.artifacts.read(&descriptor.data_path)?;
-                read_selected_pages(None, &page_index, |entry| {
-                    decode_var_bytes_page(self.slice_page(&data, entry)?, descriptor.codec)
-                })
+                let mut values = Vec::with_capacity(lengths.len());
+                for entry in &page_index {
+                    let start = usize::try_from(entry.first_row).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data row offset overflow")
+                    })?;
+                    let end = start.checked_add(entry.row_count as usize).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                    })?;
+                    let expected = lengths.get(start..end).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
+                    })?;
+                    values.extend(decode_var_bytes_page_bounded(
+                        self.slice_page(&data, entry)?,
+                        descriptor.codec,
+                        expected,
+                    )?);
+                }
+                if values.len() != lengths.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "decoded data rows differ from data lengths",
+                    ));
+                }
+                Ok((values, lengths))
             }
         }
+    }
+
+    fn read_selected_var_bytes_pages(
+        &self,
+        descriptor: &ColumnDescriptor,
+        row_ids: &[u32],
+        page_index: &[PageIndexEntry],
+    ) -> io::Result<(Vec<Bytes>, Vec<u32>)> {
+        if row_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let selections = build_selections(row_ids, page_index)?;
+        let coverage_len = selections.iter().try_fold(0usize, |sum, selection| {
+            sum.checked_add(selection.entry.row_count as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })
+        })?;
+        let mut coverage = Vec::with_capacity(coverage_len);
+        for selection in &selections {
+            let end = selection
+                .entry
+                .first_row
+                .checked_add(u64::from(selection.entry.row_count))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })?;
+            for row in selection.entry.first_row..end {
+                coverage.push(u32::try_from(row).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row exceeds addressing")
+                })?);
+            }
+        }
+        let covered_lengths = self.read_u32("data_len", Some(&coverage))?;
+        if covered_lengths.len() != coverage.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "data length rows differ",
+            ));
+        }
+
+        let mut values = vec![None; row_ids.len()];
+        let mut lengths = vec![None; row_ids.len()];
+        let mut cursor = 0usize;
+        for selection in selections {
+            let end = cursor
+                .checked_add(selection.entry.row_count as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })?;
+            let expected = &covered_lengths[cursor..end];
+            let page = decode_var_bytes_page_bounded(
+                &self.read_page_payload(descriptor, &selection.entry)?,
+                descriptor.codec,
+                expected,
+            )?;
+            for (&local_row, &output_position) in
+                selection.local_rows.iter().zip(&selection.output_positions)
+            {
+                values[output_position] = Some(page[local_row].clone());
+                lengths[output_position] = Some(expected[local_row]);
+            }
+            cursor = end;
+        }
+        Ok((
+            materialize_selected(values)?,
+            materialize_selected(lengths)?,
+        ))
     }
 
     fn read_null_bitmap(&self, column: &str) -> io::Result<NullBitmap> {
@@ -860,6 +966,21 @@ fn materialize_selected<T>(values: Vec<Option<T>>) -> io::Result<Vec<T>> {
         .collect()
 }
 
+fn validate_data_lengths(values: &[Bytes], lengths: &[u32]) -> io::Result<()> {
+    if values.len() != lengths.len()
+        || values
+            .iter()
+            .zip(lengths)
+            .any(|(value, &length)| value.len() != length as usize)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "data bytes differ from their row-length metadata",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +1039,47 @@ mod tests {
             reader.read_log_rows(Some(&[0])).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn direct_raw_variable_reads_validate_and_retain_length_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+
+        let reader = SegmentReader::open_projected(tmp.path(), &["data"]).unwrap();
+        assert_eq!(
+            reader.read_var_bytes("data", None).unwrap(),
+            vec![bytes!("deadbeef"); 20]
+        );
+        assert_eq!(
+            reader.read_var_bytes("data", Some(&[19, 0, 7, 7])).unwrap(),
+            vec![bytes!("deadbeef"); 4]
+        );
+
+        let length_path = tmp.path().join("data_len.col");
+        let retired_path = tmp.path().join("data_len.col.retired");
+        fs::rename(&length_path, &retired_path).unwrap();
+        assert_eq!(
+            reader.read_var_bytes("data", Some(&[3])).unwrap(),
+            vec![bytes!("deadbeef")]
+        );
+
+        fs::rename(&retired_path, &length_path).unwrap();
+        let mut lengths = fs::read(&length_path).unwrap();
+        lengths[ColumnFileHeader::SIZE..ColumnFileHeader::SIZE + 4]
+            .copy_from_slice(&3u32.to_le_bytes());
+        lengths[ColumnFileHeader::SIZE + 4..ColumnFileHeader::SIZE + 8]
+            .copy_from_slice(&5u32.to_le_bytes());
+        fs::write(&length_path, lengths).unwrap();
+
+        let corrupt = SegmentReader::open_projected(tmp.path(), &["data"]).unwrap();
+        for row_ids in [None, Some(&[1, 0, 1][..])] {
+            assert_eq!(
+                corrupt.read_var_bytes("data", row_ids).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
     }
 
     #[test]
@@ -1155,6 +1317,158 @@ mod tests {
         assert_variable_page_row_count_is_checked(Some(&[19, 0, 19]));
         // An extra row must also fail when selecting an otherwise valid prefix.
         assert_variable_page_row_count_is_checked(Some(&[0]));
+    }
+
+    #[test]
+    fn direct_variable_reads_reject_inconsistent_per_row_lengths() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let data = manifest.columns.iter().find(|c| c.name == "data").unwrap();
+        let mut values = vec![bytes!("deadbeef"); 20];
+        values[0] = bytes!("aabbcc");
+        values[1] = bytes!("aabbccddee");
+        let encoded = crate::page::encode_var_bytes_page(&values, data.codec).unwrap();
+        fs::write(dir.join(&data.data_path), &encoded).unwrap();
+        fs::write(
+            dir.join(data.page_index_path.as_ref().unwrap()),
+            crate::page::write_page_index(&[PageIndexEntry {
+                first_row: 0,
+                row_count: 20,
+                offset: 0,
+                encoded_len: encoded.len() as u32,
+            }]),
+        )
+        .unwrap();
+
+        for row_ids in [None, Some(&[1, 0, 1][..]), Some(&[19][..])] {
+            let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+            let Err(error) = reader.read_var_bytes("data", row_ids) else {
+                panic!("inconsistent lengths must be rejected");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn direct_variable_reads_bound_compressed_expansion_to_stored_lengths() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let data = manifest.columns.iter().find(|c| c.name == "data").unwrap();
+        let mut values = vec![bytes!("deadbeef"); 20];
+        values[0] = Bytes::from(vec![0x5a; 64 * 1024]);
+        let encoded = crate::page::encode_var_bytes_page(&values, data.codec).unwrap();
+        fs::write(dir.join(&data.data_path), &encoded).unwrap();
+        fs::write(
+            dir.join(data.page_index_path.as_ref().unwrap()),
+            crate::page::write_page_index(&[PageIndexEntry {
+                first_row: 0,
+                row_count: 20,
+                offset: 0,
+                encoded_len: encoded.len() as u32,
+            }]),
+        )
+        .unwrap();
+
+        let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        let Err(error) = reader.read_var_bytes("data", Some(&[0])) else {
+            panic!("inconsistent page size must be rejected");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn variable_reads_correlate_different_data_and_length_page_layouts() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let values: Vec<_> = (0..20)
+            .map(|row| Bytes::from(vec![row as u8; row % 7]))
+            .collect();
+        let lengths: Vec<_> = values.iter().map(|value| value.len() as u32).collect();
+        for (name, ranges) in [
+            ("data", vec![0..11, 11..20]),
+            ("data_len", vec![0..7, 7..13, 13..20]),
+        ] {
+            let descriptor = manifest
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .unwrap();
+            let mut encoded = Vec::new();
+            let mut index = Vec::new();
+            for range in ranges {
+                let page = if name == "data" {
+                    crate::page::encode_var_bytes_page(&values[range.clone()], descriptor.codec)
+                } else {
+                    crate::page::encode_u32_page(&lengths[range.clone()], descriptor.codec)
+                }
+                .unwrap();
+                index.push(PageIndexEntry {
+                    first_row: range.start as u64,
+                    row_count: (range.end - range.start) as u32,
+                    offset: encoded.len() as u64,
+                    encoded_len: page.len() as u32,
+                });
+                encoded.extend(page);
+            }
+            fs::write(dir.join(&descriptor.data_path), encoded).unwrap();
+            fs::write(
+                dir.join(descriptor.page_index_path.as_ref().unwrap()),
+                crate::page::write_page_index(&index),
+            )
+            .unwrap();
+        }
+
+        let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        assert_eq!(reader.read_var_bytes("data", None).unwrap(), values);
+        let ids = [19, 0, 8, 11, 8];
+        assert_eq!(
+            reader.read_var_bytes("data", Some(&ids)).unwrap(),
+            ids.map(|row| values[row as usize].clone())
+        );
+    }
+
+    #[test]
+    fn projected_data_reader_retains_only_its_required_artifacts_after_rename() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        assert!(manifest.column_bundle.is_none());
+        let data_reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        let length_reader = SegmentReader::open_projected(&dir, &["data_len"]).unwrap();
+
+        for descriptor in manifest
+            .columns
+            .iter()
+            .filter(|column| matches!(column.name.as_str(), "data" | "data_len"))
+        {
+            for path in
+                std::iter::once(&descriptor.data_path).chain(descriptor.page_index_path.iter())
+            {
+                fs::rename(dir.join(path), dir.join(format!("{path}.retired"))).unwrap();
+            }
+        }
+
+        assert_eq!(
+            data_reader
+                .read_var_bytes("data", Some(&[19, 0, 7, 7]))
+                .unwrap(),
+            vec![bytes!("deadbeef"); 4]
+        );
+        assert_eq!(
+            length_reader
+                .read_u32("data_len", Some(&[19, 0, 7, 7]))
+                .unwrap(),
+            vec![4; 4]
+        );
+        assert!(
+            length_reader.read_var_bytes("data", Some(&[0])).is_err(),
+            "data_len-only projection unexpectedly retained the payload"
+        );
+        assert_eq!(
+            SegmentReader::open_projected(&dir, &["data"])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

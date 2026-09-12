@@ -91,6 +91,31 @@ concurrent ingestion with queries, HTTP/WS backpressure, or the production API's
 query admission policy. Those require the later subsystem and integrated
 batches. No speedup is claimed by adding this harness.
 
+### Dependency feature parity
+
+For node-representative acceptance, build each integration target with
+`cargo test --workspace --test TARGET --release --locked --no-run --message-format=json`
+and run the resulting executable directly. Record its resolved dependency
+features as well as the source and binary hashes. Package-only commands above
+remain useful for focused diagnostics, but their dependency feature union can
+differ from the node: Reth enables Zstd's experimental decoded-size estimate in
+workspace builds. The [storage decoding comparison](storage-decode-bounds.md)
+records that distinction and uses workspace-selected final artifacts. Compare
+both revisions under the same feature configuration; retain earlier diagnostic
+results with their original configuration labels.
+
+### Projected storage page reads
+
+The ignored `benchmark_projected_page_decoding` test in the `logex-storage`
+integration target `page_decode_performance` measures a captured bundled reader
+over 49,157 deterministic rows. It covers one selected payload, shuffled and
+duplicate selections spanning pages, all payloads, and the dictionary-compressed
+source column. Every path is warmed once; exact values are checked outside the
+timer. Set `LOGEX_PAGE_DECODE_REPEATS` to 1–10,000 (default 50). The emitted
+configuration includes the full fixture digest and individual observations.
+This isolates decoder/read costs; it excludes reader creation, index selection,
+query planning and ingestion. Use the broader fixtures for those costs.
+
 Checked extraction fixtures and release comparisons are documented in the
 [extraction audit](extraction-boundaries.md) and its
 [baseline report](baselines/2026-09-09-extraction.md).

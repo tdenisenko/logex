@@ -558,7 +558,7 @@ pub(crate) fn repack_sparse_bundle(
     {
         return Ok(None);
     }
-    let rows = reader.read_log_rows_bounded(MAX_PAYLOAD)?;
+    let rows = reader.read_log_rows_bounded(MAX_PAYLOAD, sizes)?;
     let canonical = reader.read_canonical()?;
     if rows.len() as u64 != descriptor.row_count || canonical.len() != descriptor.row_count {
         return Err(std::io::Error::new(

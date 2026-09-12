@@ -149,6 +149,19 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     let packed_start = dict_end + 1;
 
     let indices = bitunpack_u32(&data[packed_start..], row_count, bits_needed)?;
+    // Validate once before allocating/copying the output. The maximum check can
+    // scan index values efficiently without an extra branch per copied value.
+    if indices
+        .iter()
+        .copied()
+        .max()
+        .is_some_and(|index| index as usize >= dict_size)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dictionary index is out of bounds",
+        ));
+    }
 
     let output_len = row_count.checked_mul(item_size).ok_or_else(|| {
         io::Error::new(
@@ -438,11 +451,19 @@ pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
 pub(crate) fn zstd_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
     let mut decoder = zstd::bulk::Decompressor::new()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let capacity = zstd::bulk::Decompressor::upper_bound(data)
+        .unwrap_or(limit)
+        .min(limit);
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(io::Error::other)?;
     // Decompression writes directly into a bounded output allocation. In
     // contrast to streaming, its history uses that same output buffer.
     decoder
-        .decompress(data, limit)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .decompress_to_buffer(data, &mut output)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(output)
 }
 
 pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
@@ -630,6 +651,31 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_decoder_rejects_out_of_range_indices_without_panicking() {
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&1u32.to_le_bytes()); // One dictionary entry.
+        malformed.extend_from_slice(&1u32.to_le_bytes()); // One-byte items.
+        malformed.push(0x2a); // Dictionary entry zero.
+        malformed.push(1); // One-bit indices.
+        malformed.push(1); // Row zero selects missing dictionary entry one.
+        let result = std::panic::catch_unwind(|| dict_decode(&malformed, 1, 1));
+        assert!(result.is_ok(), "malformed dictionary index panicked");
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let valid_empty = dict_encode_raw(&[], 1);
+        assert_eq!(dict_decode(&valid_empty, 0, 1).unwrap(), Vec::<u8>::new());
+        let mut empty_with_row = valid_empty;
+        empty_with_row.push(0);
+        assert_eq!(
+            dict_decode(&empty_with_row, 1, 1).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
     fn integer_codecs_round_trip_full_domain_and_reject_truncation() {
         let mut seed = 53u64;
         for len in [0, 1, 2, 3, 7, 8, 63, 64, 129] {
@@ -753,6 +799,27 @@ mod tests {
         let encoded = delta_of_delta_encode(&values);
         let decoded = delta_of_delta_decode(&encoded, values.len()).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn bounded_zstd_reports_impossible_buffer_capacity_without_panicking() {
+        // This exceeds Vec's address-space limit, so reservation must fail
+        // immediately; the test never attempts to fill a large allocation. The
+        // incomplete frame has no smaller bound even when another workspace
+        // dependency enables Zstd's experimental size estimation feature.
+        let result = std::panic::catch_unwind(|| zstd_decompress_bounded(&[0], usize::MAX));
+        assert!(result.is_ok(), "buffer capacity error panicked");
+        assert!(result.unwrap().is_err());
+        let encoded = zstd_compress(b"record data").unwrap();
+        assert_eq!(
+            zstd_decompress_bounded(&encoded, 11).unwrap(),
+            b"record data"
+        );
+        assert!(
+            zstd_decompress_bounded(&zstd_compress(&[]).unwrap(), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
