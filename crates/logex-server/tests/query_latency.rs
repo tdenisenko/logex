@@ -87,6 +87,14 @@ async fn benchmark_query_latency(rest: bool) {
         "topic1":null,"topic2":null,"topic3":null,"topics":[r.topic0.unwrap().to_string()],
         "data":format!("0x{}",hex::encode(&r.data)),"data_len":32,"source":0,
     })).collect();
+    let literal_list_sql = format!(
+        "SELECT 1 IN ({}) AS matches",
+        (0..10_000)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let expression_sql = format!("SELECT {} AS value", vec!["1"; 126].join(" + "));
     let queries = [
         (
             "native_count",
@@ -103,10 +111,20 @@ async fn benchmark_query_latency(rest: bool) {
             "SELECT MAX(block_number) AS maximum, COUNT(*) AS total FROM logs",
             vec![json!({"maximum":rows.last().unwrap().block_number,"total":rows.len()})],
         ),
+        (
+            "literal_in_list",
+            literal_list_sql.as_str(),
+            vec![json!({"matches":true})],
+        ),
+        (
+            "expression_chain",
+            expression_sql.as_str(),
+            vec![json!({"value":126})],
+        ),
     ];
     println!(
         "{}",
-        json!({"kind":"config","rows":rows.len(),"repeats":50,"segment_rows":8192,"batch_rows":4096,
+        json!({"kind":"config","rows":rows.len(),"repeats":50,"shapes":queries.len(),"segment_rows":8192,"batch_rows":4096,
         "fixture_digest":keccak256(serde_json::to_vec(&rows).unwrap()).to_string(),
         "protocol":if rest { "rest" } else { "grpc" }})
     );

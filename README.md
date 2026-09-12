@@ -130,6 +130,13 @@ The query engine exposes:
 - Dashboard and metrics: `GET /status`
 - Health check: `GET /health`
 
+SQL requests are limited to 256 KiB of text, 128 syntax tokens (identifiers,
+keywords, operators and opening delimiters) and a parser recursion budget of 16.
+Literal values, comments, whitespace and list separators do not consume the
+syntax budget, so large flat `IN` lists remain usable. Excessive complexity
+returns an explicit query error; simplify deeply nested expressions or long
+operator chains. See the [input-limit audit](docs/audit/sql-expression-limits.md).
+
 The SQL endpoint has no hidden server-side row cap. Dashboard-generated queries
 default to `LIMIT 500`; remove or change the SQL `LIMIT` deliberately for
 larger exports. HTTP query requests can also use `limit` and `offset` for
