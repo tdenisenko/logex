@@ -65,7 +65,9 @@ both raw and bundled storage. These tests use isolated temporary directories.
 
 All six workspace gates pass, including 955 tests (ten intentional ignored
 tests), documentation tests and the release node build. The release performance
-comparison remains before this task is merged. The remaining audit, actual live sync and staging soak stay
+[comparison](baselines/2026-09-12-query-snapshots.md) also passes: combined live
+ingestion −1.74%, historical +0.18%; all 45 query samples and the warm-tail
+investigation are retained. Required Linux/macOS CI remains before merge. The remaining audit, actual live sync and staging soak stay
 separate completion gates.
 
 ## Further findings
