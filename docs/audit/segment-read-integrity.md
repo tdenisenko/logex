@@ -49,7 +49,8 @@ query samples per revision/profile and 15 combined-sync samples per workload.
 Live ingestion is +0.39%, cached history −1.70%; query medians range −0.83% to
 +3.39%. Initial first-reopen costs and the isolated 500-open investigation are
 reported explicitly. Preliminary measurements are kept separately from final
-source `85950b57`. Required CI must pass before merge.
+source `85950b57`. All six CI jobs passed on evidence tip `eb8d0983`;
+[PR #132](https://github.com/tdenisenko/logex/pull/132) merged as `7ebc3795`.
 
 Removed the five duplicated manifest read/parse implementations and unified the
 page-row constant used by writers and bundled/unbundled readers. The manifest

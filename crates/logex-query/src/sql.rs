@@ -39,7 +39,8 @@ use logex_storage::{PartitionManager, SegmentReader};
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader, erc20_event_bloom_exclusions,
-    matches_native_filter, partition_matches_filter,
+    matches_native_filter, ordered_page_is_complete, partition_matches_filter,
+    retain_ordered_prefix, sort_native_rows,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -461,8 +462,12 @@ fn try_execute_native_select(
         return Ok(None);
     };
 
-    let page_limit = page.limit.map(|limit| limit.saturating_add(page.offset));
-    native_query.filter.limit = match (native_query.sql_limit, page_limit) {
+    // API pagination applies to the SQL result, so its offset consumes rows
+    // within SQL LIMIT. The scan adds that offset exactly once below.
+    let remaining_sql_limit = native_query
+        .sql_limit
+        .map(|limit| limit.saturating_sub(page.offset));
+    native_query.filter.limit = match (remaining_sql_limit, page.limit) {
         (Some(sql_limit), Some(page_limit)) => Some(sql_limit.min(page_limit)),
         (Some(sql_limit), None) => Some(sql_limit),
         (None, Some(page_limit)) => Some(page_limit),
@@ -489,6 +494,9 @@ fn execute_native_sql_filter(
     cancel_check: Option<&QueryCancelCheck>,
 ) -> Result<(Vec<logex_types::LogRow>, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+    if filter.limit == Some(0) {
+        return Ok((Vec::new(), 0));
+    }
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
         .into_iter()
@@ -505,8 +513,11 @@ fn execute_native_sql_filter(
     let mut rows = Vec::new();
     let mut total_scanned = 0u64;
 
-    'outer: for chunk in partitions.chunks(window_size) {
+    for chunk in partitions.chunks(window_size) {
         check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        if ordered_page_is_complete(&chunk[0], &rows, filter.order, scan_limit) {
+            break;
+        }
         let chunk_results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
@@ -540,13 +551,10 @@ fn execute_native_sql_filter(
             })?;
             total_scanned += partition_rows.len() as u64;
             rows.append(&mut partition_rows);
-            if let Some(limit) = scan_limit
-                && rows.len() >= limit
-            {
-                rows.truncate(limit);
-                break 'outer;
-            }
         }
+        // Every scanned partition in the window can contribute earlier rows.
+        // Merge them before deciding whether later range bounds permit stopping.
+        retain_ordered_prefix(&mut rows, filter.order, scan_limit);
     }
 
     sort_native_rows(&mut rows, filter.order);
@@ -587,7 +595,6 @@ fn scan_native_sql_partition(
     let reader = SegmentReader::open(path)?;
     let mut rows = reader.read_log_rows(Some(&row_ids))?;
     rows.retain(|row| matches_native_filter(row, filter));
-    sort_native_rows(&mut rows, filter.order);
     Ok(rows)
 }
 
@@ -622,14 +629,6 @@ fn order_and_truncate_row_ids(
     }
     *row_ids = keyed.into_iter().map(|(row_id, _, _, _)| row_id).collect();
     Ok(())
-}
-
-fn sort_native_rows(rows: &mut [logex_types::LogRow], order: logex_storage::native::LogOrder) {
-    if matches!(order, logex_storage::native::LogOrder::Descending) {
-        rows.sort_by_key(|row| std::cmp::Reverse((row.block_number, row.tx_index, row.log_index)));
-    } else {
-        rows.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index));
-    }
 }
 
 struct NativeSqlQuery {
