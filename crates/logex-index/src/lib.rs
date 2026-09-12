@@ -2,6 +2,7 @@ pub mod bitmap;
 mod btree;
 mod builder;
 mod composite;
+mod index_file;
 mod transfer_bloom;
 
 pub use btree::{BTreeIndex, BTreeIndexReader};

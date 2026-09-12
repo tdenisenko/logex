@@ -436,7 +436,7 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
         None
     };
     let mut previous = None;
-    for (index, description) in descriptions.chunks_exact(4).enumerate() {
+    for (index, description) in descriptions.as_chunks::<4>().0.iter().enumerate() {
         let key = u16::from_le_bytes(description[..2].try_into().unwrap());
         if previous.is_some_and(|previous| previous >= key) {
             return Err(invalid_index(
@@ -459,7 +459,7 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
             let runs = take_bytes(data, &mut position, run_count * 4)?;
             let mut previous_end = None;
             let mut actual_cardinality = 0;
-            for run in runs.chunks_exact(4) {
+            for run in runs.as_chunks::<4>().0 {
                 let start = u16::from_le_bytes(run[..2].try_into().unwrap());
                 let length_minus_one = u16::from_le_bytes(run[2..].try_into().unwrap());
                 let end = start
@@ -642,7 +642,9 @@ mod tests {
         assert!(decode_bitmap(&payload).is_err());
     }
 
-    fn run_bitmap_fixture(containers: &[(u16, u16, &[(u16, u16)])]) -> Vec<u8> {
+    type RunFixtureContainer<'a> = (u16, u16, &'a [(u16, u16)]);
+
+    fn run_bitmap_fixture(containers: &[RunFixtureContainer<'_>]) -> Vec<u8> {
         // Fewer than four run containers have no offset table in this encoding.
         assert!(!containers.is_empty() && containers.len() <= 4);
         let cookie = 12347 | (((containers.len() - 1) as u32) << 16);

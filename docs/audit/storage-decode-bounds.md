@@ -3,8 +3,10 @@
 Review branch: `audit/storage-decode-bounds`, based on PR #146 merge
 `afc7c7dce261981ff17a26bd4d24e5b9c28ca17e`. Local correctness and measured
 performance acceptance are complete on
-`8a23555a6decbf462ac7ae9c03ceb5a5c0258f66`. Exact-head CI and PR merge remain
-pending; this milestone does not complete the offline audit.
+`8a23555a6decbf462ac7ae9c03ceb5a5c0258f66`. Evidence head `debb8c54b4bc12603af7a385c9940eb40e55f644` passed all six CI jobs
+in run `34721820102`, attempt 1, including Linux/macOS. [PR #147](https://github.com/tdenisenko/logex/pull/147)
+merged as `ae4c01c913f89e8448a2c98d5905733525c51047`; the merge tree matches
+the reviewed head. This milestone does not complete the offline audit.
 
 ## Findings and scope
 
@@ -242,6 +244,7 @@ not device write amplification. Combined full-row validation medians improve
 
 ## Evidence and reproduction
 
+- [Final exact-head CI and merge](baselines/2026-09-13-storage-decode-ci-final.json).
 - [Final local validation](baselines/2026-09-13-storage-decode-validation.json):
   exact source inventory, all nine logs and independently checked test totals.
 - [Initial complete release report](baselines/2026-09-13-storage-decode-release.json)

@@ -9,6 +9,7 @@ logex-types = { workspace = true }
 logex-storage = { workspace = true }
 alloy-primitives = { workspace = true }
 roaring = "0.10"
+crc32fast = "1"
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -1,9 +1,11 @@
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use crate::builder::validate_source_rows;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, keccak256};
 use logex_storage::SegmentReader;
+
+use crate::index_file::{IndexFile, write_index_file};
 
 const TRANSFER_MAGIC: &[u8; 8] = b"LXTRBF1\0";
 const ERC20_EVENTS_MAGIC: &[u8; 8] = b"LXE2BF1\0";
@@ -36,9 +38,7 @@ pub struct Erc20EventBloom {
 }
 
 pub struct Erc20EventBloomReader {
-    reader: BufReader<File>,
-    bit_len: u64,
-    rounds: u64,
+    reader: IndexFile,
 }
 
 impl Erc20EventBloom {
@@ -51,6 +51,15 @@ impl Erc20EventBloom {
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
         let topic2s = reader.read_nullable_b256("topic2", None)?;
+        validate_source_rows(
+            &reader,
+            &[
+                ("address", addresses.len()),
+                ("topic0", topic0s.len()),
+                ("topic1", topic1s.len()),
+                ("topic2", topic2s.len()),
+            ],
+        )?;
         let transfer_topic0 = transfer_topic0();
         let approval_topic0 = approval_topic0();
         let mut bloom = Self::new();
@@ -104,44 +113,19 @@ impl Erc20EventBloom {
     }
 
     fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(ERC20_EVENTS_MAGIC)?;
-        writer.write_all(&FILTER_BITS.to_le_bytes())?;
-        writer.write_all(&(HASH_ROUNDS as u32).to_le_bytes())?;
-        writer.write_all(&self.bits)?;
-        writer.flush()
+        write_index_file(path, HEADER_LEN + FILTER_BYTES as u64, |writer| {
+            writer.write_all(ERC20_EVENTS_MAGIC)?;
+            writer.write_all(&FILTER_BITS.to_le_bytes())?;
+            writer.write_all(&(HASH_ROUNDS as u32).to_le_bytes())?;
+            writer.write_all(&self.bits)
+        })
     }
 }
 
 impl Erc20EventBloomReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut reader = BufReader::new(File::open(path)?);
-        let mut magic = [0u8; 8];
-        reader.read_exact(&mut magic)?;
-        if &magic != ERC20_EVENTS_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid ERC20 event bloom magic",
-            ));
-        }
-        let mut bit_len_buf = [0u8; 8];
-        reader.read_exact(&mut bit_len_buf)?;
-        let bit_len = u64::from_le_bytes(bit_len_buf);
-        let mut rounds_buf = [0u8; 4];
-        reader.read_exact(&mut rounds_buf)?;
-        let rounds = u32::from_le_bytes(rounds_buf) as u64;
-        if bit_len == 0 || !bit_len.is_multiple_of(8) || rounds == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid ERC20 event bloom header",
-            ));
-        }
-
         Ok(Self {
-            reader,
-            bit_len,
-            rounds,
+            reader: open_bloom(path, ERC20_EVENTS_MAGIC)?,
         })
     }
 
@@ -157,8 +141,8 @@ impl Erc20EventBloomReader {
         })?;
 
         let (h1, h2) = erc20_event_key_hashes(topic0, address, topic_index, topic);
-        for round in 0..self.rounds {
-            let bit = h1.wrapping_add(round.wrapping_mul(h2)) % self.bit_len;
+        for round in 0..HASH_ROUNDS {
+            let bit = h1.wrapping_add(round.wrapping_mul(h2)) % FILTER_BITS;
             let byte_offset = HEADER_LEN + bit / 8;
             self.reader.seek(SeekFrom::Start(byte_offset))?;
             let mut byte = [0u8; 1];
@@ -173,17 +157,15 @@ impl Erc20EventBloomReader {
 
 /// Legacy fixed-size per-segment presence filter for ERC20 Transfer
 /// sender/receiver keys. New syncs build `erc20_events.bloom`; this reader is
-/// kept so older synced directories still get Transfer skip-index pruning until
-/// the common event bloom is backfilled.
+/// kept for integrity-protected Transfer indexes. Raw legacy bloom files must be
+/// rebuilt because they cannot detect changes to presence bits.
 #[derive(Debug, Clone)]
 pub struct TransferBloom {
     bits: Vec<u8>,
 }
 
 pub struct TransferBloomReader {
-    reader: BufReader<File>,
-    bit_len: u64,
-    rounds: u64,
+    reader: IndexFile,
 }
 
 impl TransferBloom {
@@ -196,6 +178,15 @@ impl TransferBloom {
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
         let topic2s = reader.read_nullable_b256("topic2", None)?;
+        validate_source_rows(
+            &reader,
+            &[
+                ("address", addresses.len()),
+                ("topic0", topic0s.len()),
+                ("topic1", topic1s.len()),
+                ("topic2", topic2s.len()),
+            ],
+        )?;
         let transfer_topic0 = transfer_topic0();
         let mut bloom = Self::new();
 
@@ -244,44 +235,19 @@ impl TransferBloom {
     }
 
     fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(TRANSFER_MAGIC)?;
-        writer.write_all(&FILTER_BITS.to_le_bytes())?;
-        writer.write_all(&(HASH_ROUNDS as u32).to_le_bytes())?;
-        writer.write_all(&self.bits)?;
-        writer.flush()
+        write_index_file(path, HEADER_LEN + FILTER_BYTES as u64, |writer| {
+            writer.write_all(TRANSFER_MAGIC)?;
+            writer.write_all(&FILTER_BITS.to_le_bytes())?;
+            writer.write_all(&(HASH_ROUNDS as u32).to_le_bytes())?;
+            writer.write_all(&self.bits)
+        })
     }
 }
 
 impl TransferBloomReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut reader = BufReader::new(File::open(path)?);
-        let mut magic = [0u8; 8];
-        reader.read_exact(&mut magic)?;
-        if &magic != TRANSFER_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid ERC20 Transfer bloom magic",
-            ));
-        }
-        let mut bit_len_buf = [0u8; 8];
-        reader.read_exact(&mut bit_len_buf)?;
-        let bit_len = u64::from_le_bytes(bit_len_buf);
-        let mut rounds_buf = [0u8; 4];
-        reader.read_exact(&mut rounds_buf)?;
-        let rounds = u32::from_le_bytes(rounds_buf) as u64;
-        if bit_len == 0 || !bit_len.is_multiple_of(8) || rounds == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid ERC20 Transfer bloom header",
-            ));
-        }
-
         Ok(Self {
-            reader,
-            bit_len,
-            rounds,
+            reader: open_bloom(path, TRANSFER_MAGIC)?,
         })
     }
 
@@ -296,8 +262,8 @@ impl TransferBloomReader {
         })?;
 
         let (h1, h2) = transfer_key_hashes(address, topic_index, topic);
-        for round in 0..self.rounds {
-            let bit = h1.wrapping_add(round.wrapping_mul(h2)) % self.bit_len;
+        for round in 0..HASH_ROUNDS {
+            let bit = h1.wrapping_add(round.wrapping_mul(h2)) % FILTER_BITS;
             let byte_offset = HEADER_LEN + bit / 8;
             self.reader.seek(SeekFrom::Start(byte_offset))?;
             let mut byte = [0u8; 1];
@@ -308,6 +274,29 @@ impl TransferBloomReader {
         }
         Ok(true)
     }
+}
+
+fn open_bloom(path: &Path, expected_magic: &[u8; 8]) -> io::Result<IndexFile> {
+    let mut reader = IndexFile::open(path)?;
+    if !reader.is_protected() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy bloom has no integrity checks; rebuild derived indexes",
+        ));
+    }
+    let mut header = [0; HEADER_LEN as usize];
+    reader.read_exact(&mut header)?;
+    if &header[..8] != expected_magic
+        || header[8..16] != FILTER_BITS.to_le_bytes()
+        || header[16..20] != (HASH_ROUNDS as u32).to_le_bytes()
+        || reader.logical_len() != HEADER_LEN + FILTER_BYTES as u64
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid bloom file geometry",
+        ));
+    }
+    Ok(reader)
 }
 
 fn transfer_key_hashes(address: &Address, topic_index: u8, topic: &B256) -> (u64, u64) {
@@ -353,6 +342,161 @@ mod tests {
         let mut topic = [0u8; 32];
         topic[12..].copy_from_slice(Address::repeat_byte(byte).as_slice());
         B256::from(topic)
+    }
+
+    #[test]
+    fn protected_blooms_preserve_all_inserted_keys_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let common_path = dir.path().join("events.bloom");
+        let transfer_path = dir.path().join("transfer.bloom");
+        let mut common = Erc20EventBloom::new();
+        let mut transfer = TransferBloom::new();
+        let mut expected = Vec::new();
+        let mut seed = 0x32c7_97db_1205_68a1u64;
+        for i in 0..256 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let address = Address::from_word(keccak256(seed.to_le_bytes()));
+            let topic = keccak256(seed.to_be_bytes());
+            let event = if i % 2 == 0 {
+                transfer_topic0()
+            } else {
+                approval_topic0()
+            };
+            let position = if i % 3 == 0 { 1 } else { 2 };
+            common.insert(&event, &address, position, &topic);
+            if event == transfer_topic0() {
+                transfer.insert(&address, position, &topic);
+            }
+            expected.push((event, address, position, topic));
+        }
+        common.write_to_file(&common_path).unwrap();
+        transfer.write_to_file(&transfer_path).unwrap();
+        for _ in 0..2 {
+            let mut common = Erc20EventBloomReader::open(&common_path).unwrap();
+            let mut transfer = TransferBloomReader::open(&transfer_path).unwrap();
+            for &(event, address, position, topic) in &expected {
+                assert!(
+                    common
+                        .may_contain(&event, &address, usize::from(position), &topic)
+                        .unwrap()
+                );
+                if event == transfer_topic0() {
+                    assert!(
+                        transfer
+                            .may_contain(&address, usize::from(position), &topic)
+                            .unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bloom_readers_reject_inconsistent_file_geometry() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("presence.bloom");
+        let mut accepted = Vec::new();
+        for common in [false, true] {
+            let magic = if common {
+                ERC20_EVENTS_MAGIC
+            } else {
+                TRANSFER_MAGIC
+            };
+            let open = |path: &Path| {
+                if common {
+                    Erc20EventBloomReader::open(path).map(|_| ())
+                } else {
+                    TransferBloomReader::open(path).map(|_| ())
+                }
+            };
+            for (bits, rounds, payload_bytes) in [
+                (8, HASH_ROUNDS, FILTER_BYTES),
+                (FILTER_BITS, HASH_ROUNDS + 1, FILTER_BYTES),
+                (FILTER_BITS, HASH_ROUNDS, FILTER_BYTES - 1),
+                (FILTER_BITS, HASH_ROUNDS, FILTER_BYTES + 1),
+            ] {
+                let mut bytes = magic.to_vec();
+                bytes.extend_from_slice(&bits.to_le_bytes());
+                bytes.extend_from_slice(&(rounds as u32).to_le_bytes());
+                bytes.resize(HEADER_LEN as usize + payload_bytes, 0);
+                for protected in [false, true] {
+                    if protected {
+                        write_index_file(&path, bytes.len() as u64, |writer| {
+                            writer.write_all(&bytes)
+                        })
+                        .unwrap();
+                    } else {
+                        std::fs::write(&path, &bytes).unwrap();
+                    }
+                    if open(&path).is_ok() {
+                        accepted.push((common, protected, bits, rounds, payload_bytes));
+                    }
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "inconsistent bloom geometry: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn changed_bloom_payload_is_an_error_instead_of_a_missing_match() {
+        // A known present value must not disappear silently if its persisted
+        // presence bit changes. Both formats use small, disposable local files.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("presence.bloom");
+        let address = Address::repeat_byte(0x31);
+        let topic = topic_address(0x72);
+        let event = transfer_topic0();
+        let mut missing_errors = Vec::new();
+        for common in [false, true] {
+            let (magic, hash) = if common {
+                let mut bloom = Erc20EventBloom::new();
+                bloom.insert(&event, &address, 1, &topic);
+                bloom.write_to_file(&path).unwrap();
+                (
+                    ERC20_EVENTS_MAGIC,
+                    erc20_event_key_hashes(&event, &address, 1, &topic).0,
+                )
+            } else {
+                let mut bloom = TransferBloom::new();
+                bloom.insert(&address, 1, &topic);
+                bloom.write_to_file(&path).unwrap();
+                (TRANSFER_MAGIC, transfer_key_hashes(&address, 1, &topic).0)
+            };
+            let lookup = |path: &Path| {
+                if common {
+                    Erc20EventBloom::may_contain_from_file(path, &event, &address, 1, &topic)
+                } else {
+                    TransferBloom::may_contain_from_file(path, &address, 1, &topic)
+                }
+            };
+            assert!(lookup(&path).unwrap());
+
+            let mut bytes = std::fs::read(&path).unwrap();
+            let starts: Vec<_> = bytes
+                .windows(magic.len())
+                .enumerate()
+                .filter_map(|(offset, window)| (window == magic).then_some(offset))
+                .collect();
+            assert_eq!(starts.len(), 1, "fixture has one logical bloom header");
+            let bit = hash % FILTER_BITS;
+            let byte = starts[0] + HEADER_LEN as usize + (bit / 8) as usize;
+            let mask = 1u8 << (bit % 8);
+            assert_ne!(bytes[byte] & mask, 0);
+            bytes[byte] &= !mask;
+            std::fs::write(&path, bytes).unwrap();
+            if lookup(&path).is_ok() {
+                missing_errors.push(common);
+            }
+        }
+        assert!(
+            missing_errors.is_empty(),
+            "changed presence data silently reported a missing value: {missing_errors:?}"
+        );
     }
 
     #[test]

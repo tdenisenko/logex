@@ -1,3 +1,4 @@
+use crate::builder::validate_source_rows;
 use std::fs;
 use std::path::Path;
 
@@ -64,6 +65,10 @@ impl CompositeIndexBuilder {
         let reader = SegmentReader::open_projected(partition_dir, &["address", "topic0"])?;
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
+        validate_source_rows(
+            &reader,
+            &[("address", addresses.len()), ("topic0", topic0s.len())],
+        )?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_KEY_SIZE];
@@ -94,6 +99,14 @@ impl CompositeIndexBuilder {
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let blocks = reader.read_u64("block_number", None)?;
+        validate_source_rows(
+            &reader,
+            &[
+                ("address", addresses.len()),
+                ("topic0", topic0s.len()),
+                ("block_number", blocks.len()),
+            ],
+        )?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_BLOCK_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_BLOCK_KEY_SIZE];
@@ -130,6 +143,14 @@ impl CompositeIndexBuilder {
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
+        validate_source_rows(
+            &reader,
+            &[
+                ("address", addresses.len()),
+                ("topic0", topic0s.len()),
+                ("topic1", topic1s.len()),
+            ],
+        )?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_TOPIC1_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
@@ -166,6 +187,14 @@ impl CompositeIndexBuilder {
         let addresses = reader.read_address(None)?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic2s = reader.read_nullable_b256("topic2", None)?;
+        validate_source_rows(
+            &reader,
+            &[
+                ("address", addresses.len()),
+                ("topic0", topic0s.len()),
+                ("topic2", topic2s.len()),
+            ],
+        )?;
         let mut index = BTreeIndex::new(ADDR_TOPIC0_TOPIC2_KEY_SIZE);
 
         let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
@@ -200,6 +229,10 @@ impl CompositeIndexBuilder {
         let reader = SegmentReader::open_projected(partition_dir, &["topic0", "topic1"])?;
         let topic0s = reader.read_nullable_b256("topic0", None)?;
         let topic1s = reader.read_nullable_b256("topic1", None)?;
+        validate_source_rows(
+            &reader,
+            &[("topic0", topic0s.len()), ("topic1", topic1s.len())],
+        )?;
         let mut index = BTreeIndex::new(TOPIC0_TOPIC1_KEY_SIZE);
 
         let mut key = [0u8; TOPIC0_TOPIC1_KEY_SIZE];

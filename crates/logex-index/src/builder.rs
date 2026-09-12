@@ -238,6 +238,7 @@ impl IndexBuilder {
     fn build_address_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
         let reader = SegmentReader::open_projected(partition_dir, &["address"])?;
         let addresses = reader.read_address(None)?;
+        validate_source_rows(&reader, &[("address", addresses.len())])?;
         let mut index = BTreeIndex::new(20);
 
         for (row_id, addr) in addresses.iter().enumerate() {
@@ -254,6 +255,7 @@ impl IndexBuilder {
     fn build_topic0_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
         let reader = SegmentReader::open_projected(partition_dir, &["topic0"])?;
         let topics = reader.read_nullable_b256("topic0", None)?;
+        validate_source_rows(&reader, &[("topic0", topics.len())])?;
         let mut index = BTreeIndex::new(32);
 
         for (row_id, topic) in topics.iter().enumerate() {
@@ -272,6 +274,7 @@ impl IndexBuilder {
     fn build_block_number_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
         let reader = SegmentReader::open_projected(partition_dir, &["block_number"])?;
         let blocks = reader.read_u64("block_number", None)?;
+        validate_source_rows(&reader, &[("block_number", blocks.len())])?;
         let mut index = BTreeIndex::new(8);
 
         for (row_id, &block) in blocks.iter().enumerate() {
@@ -288,6 +291,7 @@ impl IndexBuilder {
     fn build_timestamp_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
         let reader = SegmentReader::open_projected(partition_dir, &["timestamp"])?;
         let timestamps = reader.read_u64("timestamp", None)?;
+        validate_source_rows(&reader, &[("timestamp", timestamps.len())])?;
         let mut index = BTreeIndex::new(8);
 
         for (row_id, &timestamp) in timestamps.iter().enumerate() {
@@ -303,6 +307,7 @@ impl IndexBuilder {
     fn build_block_hash_index(partition_dir: &Path, index_dir: &Path) -> std::io::Result<()> {
         let reader = SegmentReader::open_projected(partition_dir, &["block_hash"])?;
         let hashes = reader.read_b256("block_hash", None)?;
+        validate_source_rows(&reader, &[("block_hash", hashes.len())])?;
         let mut index = BTreeIndex::new(32);
 
         for (row_id, hash) in hashes.iter().enumerate() {
@@ -313,6 +318,30 @@ impl IndexBuilder {
         tracing::debug!(keys = index.key_count(), "built block_hash index");
         Ok(())
     }
+}
+
+/// Each builder must cover the same captured row boundary before zipping
+/// columns or converting ordinal row positions into the bitmap's u32 IDs.
+pub(crate) fn validate_source_rows(
+    reader: &SegmentReader,
+    columns: &[(&str, usize)],
+) -> std::io::Result<()> {
+    let rows = reader.read_row_count()?;
+    if rows > u64::from(u32::MAX) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "index source exceeds row ID limit",
+        ));
+    }
+    for &(column, length) in columns {
+        if length as u64 != rows {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("index source column {column} has {length} rows, expected {rows}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -407,6 +436,44 @@ mod tests {
             let matches = reader.get(rows[0].address.as_slice()).unwrap();
             assert_eq!(matches.len(), 2);
         }
+    }
+
+    #[test]
+    fn index_publication_rejects_different_complete_source_column_lengths() {
+        let mut accepted = Vec::new();
+        for profile in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ] {
+            for different_rows in [2, 4] {
+                let dir = TempDir::new().unwrap();
+                let replacement = TempDir::new().unwrap();
+                let mut rows = make_test_rows();
+                ColumnFile::write_batch(dir.path(), &rows).unwrap();
+                rows.push(rows[0].clone());
+                ColumnFile::write_batch(replacement.path(), &rows[..different_rows]).unwrap();
+                // Each replacement file is internally complete. Only its row
+                // boundary differs from the address column for this segment.
+                for name in ["topic0.col", "topic0.null"] {
+                    fs::copy(replacement.path().join(name), dir.path().join(name)).unwrap();
+                }
+                if IndexBuilder::build_indexes(dir.path(), profile).is_ok() {
+                    accepted.push((profile, different_rows));
+                } else {
+                    let reader = SegmentReader::open_projected(dir.path(), &[]).unwrap();
+                    assert!(
+                        IndexReadCheckpoint::open(dir.path(), &reader)
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "inconsistent source rows were published: {accepted:?}"
+        );
     }
 
     #[test]
