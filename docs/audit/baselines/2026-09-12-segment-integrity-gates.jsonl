@@ -1,0 +1,8 @@
+{"gate": 0, "command": ["cargo", "fmt", "--all", "--", "--check"], "exit": 0, "seconds": 0.64, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-0.log"}
+{"gate": 1, "command": ["cargo", "check", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 9.17, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-1.log"}
+{"gate": 2, "command": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], "exit": 0, "seconds": 8.45, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-2.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 156.07, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-3.log"}
+{"gate": 4, "command": ["cargo", "test", "--workspace", "--doc", "--locked"], "exit": 0, "seconds": 14.22, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-4.log"}
+{"gate": 5, "command": ["cargo", "build", "-p", "logex-node", "--release", "--locked"], "exit": 0, "seconds": 42.41, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-5.log"}
+{"gate": 6, "command": ["cargo", "test", "-p", "logex-query", "--test", "audit_harness", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 23.36, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-6.log"}
+{"gate": 7, "command": ["cargo", "test", "-p", "logex-storage", "--test", "ingestion_publication", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 5.28, "log": "/private/tmp/logex-audit-segment-integrity-final-gate-7.log"}

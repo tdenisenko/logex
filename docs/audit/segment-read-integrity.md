@@ -42,13 +42,14 @@ planned external-volume supervisor or verified corrupt-segment repair feature.
 ## Validation and remaining scope
 
 Fifteen reader tests, the native-query omission regression, append preservation,
-and raw/bundled alias and oversized-metadata recovery tests pass. The six full
-gates initially passed 933 tests (10 intentionally ignored). Preliminary release
-query/combined-sync comparisons passed their exact oracles; live ingestion was
-−1.32% and cached history +0.11%. Final review added explicit metadata/I/O error
-classification; all six final-source gates pass with 934 tests (10 intentionally ignored); the
-final-source release comparison is running. Preliminary
-measurements must not be represented as acceptance of the final source.
+and raw/bundled alias and oversized-metadata recovery tests pass. All six
+final-source local gates pass with 934 tests (ten intentionally ignored).
+[Release acceptance](baselines/2026-09-12-segment-integrity.md) retains all 45
+query samples per revision/profile and 15 combined-sync samples per workload.
+Live ingestion is +0.39%, cached history −1.70%; query medians range −0.83% to
++3.39%. Initial first-reopen costs and the isolated 500-open investigation are
+reported explicitly. Preliminary measurements are kept separately from final
+source `85950b57`. Required CI must pass before merge.
 
 Removed the five duplicated manifest read/parse implementations and unified the
 page-row constant used by writers and bundled/unbundled readers. The manifest
