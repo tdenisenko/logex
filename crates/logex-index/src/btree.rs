@@ -596,6 +596,63 @@ mod tests {
         assert!(decode_bitmap(&payload).is_err());
     }
 
+    fn run_bitmap_fixture(containers: &[(u16, u16, &[(u16, u16)])]) -> Vec<u8> {
+        // Fewer than four run containers have no offset table in this encoding.
+        assert!(!containers.is_empty() && containers.len() < 4);
+        let cookie = 12347 | (((containers.len() - 1) as u32) << 16);
+        let mut payload = cookie.to_le_bytes().to_vec();
+        payload.push((1 << containers.len()) - 1);
+        for &(key, cardinality, _) in containers {
+            assert!(cardinality > 0);
+            payload.extend_from_slice(&key.to_le_bytes());
+            payload.extend_from_slice(&(cardinality - 1).to_le_bytes());
+        }
+        for &(_, _, runs) in containers {
+            payload.extend_from_slice(&(runs.len() as u16).to_le_bytes());
+            for &(start, length_minus_one) in runs {
+                payload.extend_from_slice(&start.to_le_bytes());
+                payload.extend_from_slice(&length_minus_one.to_le_bytes());
+            }
+        }
+        payload
+    }
+
+    #[test]
+    fn bitmap_decode_rejects_run_container_cardinality_mismatch() {
+        let valid = run_bitmap_fixture(&[(0, 1, &[(7, 0)])]);
+        assert_eq!(decode_bitmap(&valid).unwrap(), [7].into_iter().collect());
+
+        let empty_run = run_bitmap_fixture(&[(0, 1, &[])]);
+        assert_eq!(empty_run.len(), 11);
+        assert!(decode_bitmap(&empty_run).is_err());
+    }
+
+    #[test]
+    fn bitmap_decode_checks_each_run_container_cardinality() {
+        let valid = run_bitmap_fixture(&[(0, 1, &[(7, 0)]), (1, 2, &[(9, 1)])]);
+        assert_eq!(
+            decode_bitmap(&valid).unwrap(),
+            [7, 65545, 65546].into_iter().collect()
+        );
+        // The overall cardinality remains three: a total-only comparison would
+        // miss the disagreement in both individual container descriptions.
+        let mismatch = run_bitmap_fixture(&[(0, 2, &[(7, 0)]), (1, 1, &[(9, 1)])]);
+        assert!(decode_bitmap(&mismatch).is_err());
+    }
+
+    #[test]
+    fn bitmap_decode_rejects_misdirected_container_offsets() {
+        let bitmap: RoaringBitmap = [7].into_iter().collect();
+        let mut payload = Vec::new();
+        bitmap.serialize_into(&mut payload).unwrap();
+        assert_eq!(payload.len(), 18);
+        assert_eq!(&payload[12..16], &16u32.to_le_bytes());
+        assert_eq!(decode_bitmap(&payload).unwrap(), bitmap);
+        // Point the container back into the cookie instead of its two-byte data.
+        payload[12..16].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_bitmap(&payload).is_err());
+    }
+
     #[test]
     fn explicit_legacy_index_fixtures_support_point_and_range_lookups() {
         let tmp = TempDir::new().unwrap();
