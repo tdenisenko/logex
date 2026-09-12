@@ -1,0 +1,29 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "predicates") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.32s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/predicates.rs (target/debug/build/logex-query/7809664fdf64f12d/out/predicates-7809664fdf64f12d)
+
+running 1 test
+
+thread '<unnamed>' (56869588) panicked at crates/logex-index/src/btree.rs:346:41:
+slice index starts at 4 but ends at 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'predicates_match_independent_reference_with_indexes' (56869565) panicked at crates/logex-index/src/btree.rs:346:41:
+slice index starts at 4 but ends at 2
+test predicates_match_independent_reference_with_indexes ... FAILED
+
+failures:
+
+failures:
+    predicates_match_independent_reference_with_indexes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p logex-query --test predicates`

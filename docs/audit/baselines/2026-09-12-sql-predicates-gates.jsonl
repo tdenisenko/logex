@@ -1,0 +1,10 @@
+{"gate": 0, "command": ["cargo", "fmt", "--all", "--", "--check"], "exit": 0, "seconds": 0.68, "log": "/private/tmp/logex-sql-predicates-gate-0.log"}
+{"gate": 1, "command": ["cargo", "check", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 5.05, "log": "/private/tmp/logex-sql-predicates-gate-1.log"}
+{"gate": 2, "command": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], "exit": 0, "seconds": 4.86, "log": "/private/tmp/logex-sql-predicates-gate-2.log"}
+{"gate": 3, "command": ["cargo", "test", "--workspace", "--all-targets", "--locked"], "exit": 0, "seconds": 191.3, "log": "/private/tmp/logex-sql-predicates-gate-3.log"}
+{"gate": 4, "command": ["cargo", "test", "--workspace", "--doc", "--locked"], "exit": 0, "seconds": 8.43, "log": "/private/tmp/logex-sql-predicates-gate-4.log"}
+{"gate": 5, "command": ["cargo", "build", "-p", "logex-node", "--release", "--locked"], "exit": 0, "seconds": 51.34, "log": "/private/tmp/logex-sql-predicates-gate-5.log"}
+{"gate": 6, "command": ["cargo", "test", "-p", "logex-query", "--test", "audit_harness", "--release", "--locked", "--no-run", "--message-format=json"], "exit": 0, "seconds": 24.33, "log": "/private/tmp/logex-sql-predicates-gate-6.log"}
+{"gate": 7, "command": ["cargo", "test", "-p", "logex-query", "--lib", "--test", "predicates", "--release", "--locked"], "exit": 0, "seconds": 31.44, "log": "/private/tmp/logex-sql-predicates-gate-7.log"}
+{"gate": 8, "command": ["cargo", "test", "-p", "logex-index", "--lib", "--release", "--locked"], "exit": 0, "seconds": 6.39, "log": "/private/tmp/logex-sql-predicates-gate-8.log"}
+{"gate": 9, "command": ["node", "docs/audit/baselines/2026-09-12-sql-predicates-builder.mjs"], "exit": 0, "seconds": 0.18, "log": "/private/tmp/logex-sql-predicates-gate-9.log"}

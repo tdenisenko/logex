@@ -514,6 +514,9 @@ strings for exact decimals (including arithmetic promoted to a decimal type).
 Arrays and objects retain their nested values and explicit nulls. SQL temporal
 values use Arrow's textual format; SQL binary values use hexadecimal without a
 prefix. The existing log hash, address and data columns keep their `0x` prefix.
+Ordinary string literals compare exactly, including case, prefix and whitespace;
+use lowercase `0x`-prefixed literals to match these columns. Explicit
+`event'…'` and `address'…'` literals retain their existing rewriting semantics.
 Non-finite floating-point results remain JSON null. Use unique output names or
 aliases: duplicate fields, unsupported result types and invalid temporal values
 return an error instead of a partial or misleading result.

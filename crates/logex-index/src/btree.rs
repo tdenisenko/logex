@@ -56,6 +56,9 @@ impl BTreeIndex {
 
     /// Range scan: returns all bitmaps for keys in [start, end).
     pub fn range(&self, start: &[u8], end: &[u8]) -> RoaringBitmap {
+        if start >= end {
+            return RoaringBitmap::new();
+        }
         let mut result = RoaringBitmap::new();
         for (_key, bitmap) in self.entries.range(start.to_vec()..end.to_vec()) {
             result |= bitmap;
@@ -338,10 +341,28 @@ impl BTreeIndexReader {
 
     /// Range scan: return union of all bitmaps for keys in [start, end).
     pub fn range(&self, start: &[u8], end: &[u8]) -> RoaringBitmap {
+        if start >= end {
+            return RoaringBitmap::new();
+        }
         // Find the first key >= start
         let lo = self.entries.partition_point(|(k, _)| k.as_slice() < start);
         let hi = self.entries.partition_point(|(k, _)| k.as_slice() < end);
 
+        let mut result = RoaringBitmap::new();
+        for (_, bitmap) in &self.entries[lo..hi] {
+            result |= bitmap;
+        }
+        result
+    }
+
+    /// Range scan including both endpoints. The upper bound need not have a
+    /// representable successor, including an all-0xff numeric/composite key.
+    pub fn range_inclusive(&self, start: &[u8], end: &[u8]) -> RoaringBitmap {
+        if start > end {
+            return RoaringBitmap::new();
+        }
+        let lo = self.entries.partition_point(|(k, _)| k.as_slice() < start);
+        let hi = self.entries.partition_point(|(k, _)| k.as_slice() <= end);
         let mut result = RoaringBitmap::new();
         for (_, bitmap) in &self.entries[lo..hi] {
             result |= bitmap;
@@ -364,6 +385,54 @@ impl BTreeIndexReader {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn index_ranges_match_independent_oracle_including_reversed_bounds() {
+        let mut values = vec![0, 1, 2, u64::MAX - 1, u64::MAX];
+        let mut seed = 0xa76d_221f_d830_c941_u64;
+        for _ in 0..128 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            values.push(seed);
+        }
+        let mut index = BTreeIndex::new(8);
+        for (row, value) in values.iter().enumerate() {
+            index.insert(&value.to_be_bytes(), row as u32);
+        }
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ranges.bptree");
+        index.write_to_file(&path).unwrap();
+        let reader = BTreeIndexReader::open(&path).unwrap();
+        for (i, &start) in values.iter().enumerate() {
+            for end in [start, 0, u64::MAX, values[(i + 17) % values.len()]] {
+                let exclusive: RoaringBitmap = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| start <= **value && **value < end)
+                    .map(|(row, _)| row as u32)
+                    .collect();
+                let inclusive: RoaringBitmap = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| start <= **value && **value <= end)
+                    .map(|(row, _)| row as u32)
+                    .collect();
+                assert_eq!(
+                    index.range(&start.to_be_bytes(), &end.to_be_bytes()),
+                    exclusive
+                );
+                assert_eq!(
+                    reader.range(&start.to_be_bytes(), &end.to_be_bytes()),
+                    exclusive
+                );
+                assert_eq!(
+                    reader.range_inclusive(&start.to_be_bytes(), &end.to_be_bytes()),
+                    inclusive
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_btree_index_insert_and_get() {

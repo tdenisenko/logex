@@ -1,0 +1,20 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "audit_harness") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.84s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/audit_harness.rs (target/debug/build/logex-query/4b4d5936523f25a9/out/audit_harness-4b4d5936523f25a9)
+
+running 1 test
+test benchmark_datafusion_result_values ... {"fixture_digest":"0x58d66d1167f762102b1d02695211bff9141c976d9e18d0e8dd7850826df79f25","kind":"config","profile":"dense","repeats":1,"rows":2000}
+{"elapsed_ms":18.775792,"iteration":0,"kind":"sample","metric":"datafusion_narrow"}
+{"elapsed_ms":32.779333,"iteration":0,"kind":"sample","metric":"datafusion_wide"}
+{"elapsed_ms":15.354084,"iteration":0,"kind":"sample","metric":"datafusion_aggregate"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.58s
+

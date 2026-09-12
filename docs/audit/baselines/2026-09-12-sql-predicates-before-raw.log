@@ -1,0 +1,200 @@
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: unused import: `DataType`
+ --> crates/logex-query/tests/predicates.rs:5:36
+  |
+5 | use datafusion::arrow::datatypes::{DataType, Field, Schema};
+  |                                    ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "predicates") generated 2 warnings (run `cargo fix --test "predicates" -p logex-query` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.53s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/predicates.rs (target/debug/build/logex-query/7809664fdf64f12d/out/predicates-7809664fdf64f12d)
+
+running 1 test
+
+thread 'predicates_match_independent_reference_without_indexes' (56866014) panicked at crates/logex-query/tests/predicates.rs:225:5:
+indexed=false
+SELECT block_number FROM logs WHERE block_number != 2 ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE block_number != 2 ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(6)}], total_scanned: 6 })
+
+SELECT COUNT(*) AS total FROM logs WHERE block_number != 2
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE timestamp <> 10 ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE timestamp <> 10 ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(6)}], total_scanned: 6 })
+
+SELECT COUNT(*) AS total FROM logs WHERE timestamp <> 10
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE 2 != block_number ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE 2 != block_number ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(6)}], total_scanned: 6 })
+
+SELECT COUNT(*) AS total FROM logs WHERE 2 != block_number
+expected blocks: Ok([1, 3, 4, 5, 6])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE block_number + 1 ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Err(Plan("Cannot create filter with non-boolean predicate 'logs.block_number + Int64(1)' returning Decimal128(20, 0)"))
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE timestamp < 0 ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE timestamp < 0 ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}], total_scanned: 1 })
+
+SELECT COUNT(*) AS total FROM logs WHERE timestamp < 0
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE 0 > timestamp ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE 0 > timestamp ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}], total_scanned: 1 })
+
+SELECT COUNT(*) AS total FROM logs WHERE 0 > timestamp
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE data_len = 0 AND data_len = 1 ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}, Object {"block_number": Number(5)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE data_len = 0 AND data_len = 1
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE block_hash = '0x30f692b256e24009bcb34d0ee84da73c298afacc0924e01105e2eb0f01a87fe2' AND block_hash = '0x675c1f4e4248fc4018c281a280014d93c8e5bdf26fc6ec8b108f13f571e98ad2' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}], total_scanned: 1 })
+
+SELECT COUNT(*) AS total FROM logs WHERE block_hash = '0x30f692b256e24009bcb34d0ee84da73c298afacc0924e01105e2eb0f01a87fe2' AND block_hash = '0x675c1f4e4248fc4018c281a280014d93c8e5bdf26fc6ec8b108f13f571e98ad2'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(1)}], total_scanned: 1 })
+
+SELECT block_number FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND address = '0xabababababababababababababababababababab' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(6)}], total_scanned: 6 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND address = '0xabababababababababababababababababababab'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(6)}], total_scanned: 6 })
+
+SELECT block_number FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND address = '0xabababababababababababababababababababab' AND address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND address = '0xabababababababababababababababababababab' AND address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') AND address IN ('0xabababababababababababababababababababab') ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(6)}], total_scanned: 6 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') AND address IN ('0xabababababababababababababababababababab')
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(6)}], total_scanned: 6 })
+
+SELECT block_number FROM logs WHERE address = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address = ' 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE address = ' 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(1)}, Object {"block_number": Number(4)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE address = ' 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa '
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE data = '0xAB' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}, Object {"block_number": Number(5)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE data = '0xAB' ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}, Object {"block_number": Number(5)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE data = '0xAB'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE data = 'ab' ORDER BY block_number ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}, Object {"block_number": Number(5)}], total_scanned: 2 })
+
+SELECT block_number FROM logs WHERE data = 'ab' ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"block_number": Number(2)}, Object {"block_number": Number(5)}], total_scanned: 2 })
+
+SELECT COUNT(*) AS total FROM logs WHERE data = 'ab'
+expected blocks: Ok([])
+actual: Ok(SqlQueryResult { rows: [Object {"total": Number(2)}], total_scanned: 2 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test predicates_match_independent_reference_without_indexes ... FAILED
+
+failures:
+
+failures:
+    predicates_match_independent_reference_without_indexes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p logex-query --test predicates`
