@@ -8,8 +8,9 @@ use std::path::Path;
 const MAGIC: &[u8; 8] = b"LXIDX001";
 const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 48;
-const PAGE_BYTES: usize = 4096;
+const PAGE_BYTES: usize = 1024;
 const CHECKSUM_BYTES: u64 = 4;
+const CHECKSUM_CACHE_BYTES: usize = 16 * 1024;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
 fn invalid(message: &'static str) -> io::Error {
@@ -65,7 +66,7 @@ pub(crate) struct IndexFile {
     page_len: usize,
     // Page zero was read with the header but has not passed its checksum yet.
     prefetched_page: bool,
-    checksums: Box<[u8; PAGE_BYTES]>,
+    checksums: Box<[u8]>,
     checksum_start: Option<u64>,
     checksum_len: usize,
 }
@@ -105,6 +106,19 @@ impl IndexFile {
         };
         let mut file_id = [0; 16];
         file_id.copy_from_slice(&header[24..40]);
+        // Keep a typical bloom's footer in one cache window without allocating
+        // the full window for small indexes or unprotected legacy files.
+        let checksum_capacity = if protected {
+            (logical_len.div_ceil(PAGE_BYTES as u64) * CHECKSUM_BYTES)
+                .min(CHECKSUM_CACHE_BYTES as u64) as usize
+        } else {
+            0
+        };
+        let mut checksums = Vec::new();
+        checksums
+            .try_reserve_exact(checksum_capacity)
+            .map_err(io::Error::other)?;
+        checksums.resize(checksum_capacity, 0);
         let mut reader = Self {
             file,
             file_id,
@@ -115,7 +129,7 @@ impl IndexFile {
             page_index: None,
             page_len: 0,
             prefetched_page: false,
-            checksums: Box::new([0; PAGE_BYTES]),
+            checksums: checksums.into_boxed_slice(),
             checksum_start: None,
             checksum_len: 0,
         };
@@ -177,11 +191,13 @@ impl IndexFile {
 
     fn page_checksum(&mut self, index: u64) -> io::Result<[u8; 4]> {
         let checksum_offset = index * CHECKSUM_BYTES;
-        let checksum_start = checksum_offset / PAGE_BYTES as u64 * PAGE_BYTES as u64;
+        let checksum_start =
+            checksum_offset / CHECKSUM_CACHE_BYTES as u64 * CHECKSUM_CACHE_BYTES as u64;
         if self.checksum_start != Some(checksum_start) {
             self.checksum_start = None;
             let checksum_bytes = self.logical_len.div_ceil(PAGE_BYTES as u64) * CHECKSUM_BYTES;
-            self.checksum_len = (checksum_bytes - checksum_start).min(PAGE_BYTES as u64) as usize;
+            self.checksum_len =
+                (checksum_bytes - checksum_start).min(CHECKSUM_CACHE_BYTES as u64) as usize;
             read_at(
                 &self.file,
                 &mut self.checksums[..self.checksum_len],
@@ -545,6 +561,33 @@ mod tests {
                 .read_exact(&mut [0])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn reads_preserve_bytes_across_checksum_cache_windows() {
+        let boundary = CHECKSUM_CACHE_BYTES / CHECKSUM_BYTES as usize * PAGE_BYTES;
+        let expected: Vec<u8> = (0..boundary + PAGE_BYTES + 7)
+            .map(|position| (position ^ (position >> 16)) as u8)
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache-windows");
+        write_index_file(&path, expected.len() as u64, |writer| {
+            writer.write_all(&expected)
+        })
+        .unwrap();
+        let mut reader = IndexFile::open(&path).unwrap();
+        // Cross the footer-cache boundary in both directions, with a data-page
+        // crossing too. Each probe must preserve the exact original bytes.
+        for start in [boundary - 1, boundary, boundary + 1, PAGE_BYTES - 1, 0] {
+            reader.seek(SeekFrom::Start(start as u64)).unwrap();
+            let mut actual = [0; 31];
+            reader.read_exact(&mut actual).unwrap();
+            assert_eq!(actual, expected[start..start + actual.len()]);
+        }
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut all = vec![0; expected.len()];
+        reader.read_exact(&mut all).unwrap();
+        assert_eq!(all, expected);
     }
 
     #[test]
