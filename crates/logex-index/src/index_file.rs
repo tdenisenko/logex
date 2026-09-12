@@ -26,26 +26,33 @@ fn physical_len(logical_len: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("index file length overflow"))
 }
 
-fn page_hasher(logical_len: u64, file_id: &[u8; 16], index: u64) -> crc32fast::Hasher {
+fn page_context(logical_len: u64, file_id: &[u8; 16]) -> crc32fast::Hasher {
     let mut hash = crc32fast::Hasher::new();
     hash.update(b"LogEx index page");
     hash.update(&VERSION.to_le_bytes());
     hash.update(&logical_len.to_le_bytes());
     hash.update(file_id);
-    hash.update(&index.to_le_bytes());
+    hash
+}
+
+fn page_hasher(logical_len: u64, context: &crc32fast::Hasher, index: u64) -> crc32fast::Hasher {
+    let mut hash = context.clone();
     let length = (logical_len - index * PAGE_BYTES as u64).min(PAGE_BYTES as u64);
-    hash.update(&length.to_le_bytes());
+    let mut extent = [0; 16];
+    extent[..8].copy_from_slice(&index.to_le_bytes());
+    extent[8..].copy_from_slice(&length.to_le_bytes());
+    hash.update(&extent);
     hash
 }
 
 fn verify_page(
     logical_len: u64,
-    file_id: &[u8; 16],
+    context: &crc32fast::Hasher,
     index: u64,
     page: &[u8],
     expected: [u8; 4],
 ) -> io::Result<()> {
-    let mut hash = page_hasher(logical_len, file_id, index);
+    let mut hash = page_hasher(logical_len, context, index);
     hash.update(page);
     if hash.finalize().to_le_bytes() != expected {
         return Err(invalid(
@@ -76,7 +83,7 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
-    file_id: [u8; 16],
+    page_context: crc32fast::Hasher,
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
     page_index: Option<u64>,
@@ -138,7 +145,7 @@ impl IndexFile {
         checksums.resize(checksum_capacity, 0);
         let mut reader = Self {
             file,
-            file_id,
+            page_context: page_context(logical_len, &file_id),
             logical_len,
             protected,
             position: 0,
@@ -204,7 +211,7 @@ impl IndexFile {
                 let expected = checksums[offset..offset + 4].try_into().unwrap();
                 verify_page(
                     self.logical_len,
-                    &self.file_id,
+                    &self.page_context,
                     index as u64,
                     page,
                     expected,
@@ -236,7 +243,7 @@ impl IndexFile {
         let expected = self.page_checksum(index)?;
         verify_page(
             self.logical_len,
-            &self.file_id,
+            &self.page_context,
             index,
             &self.page[..self.page_len],
             expected,
@@ -310,7 +317,7 @@ impl Read for IndexFile {
             for (offset, page) in output[..count].chunks(PAGE_BYTES).enumerate() {
                 let index = first + offset as u64;
                 let expected = self.page_checksum(index)?;
-                verify_page(self.logical_len, &self.file_id, index, page, expected)?;
+                verify_page(self.logical_len, &self.page_context, index, page, expected)?;
             }
             self.position += count as u64;
             return Ok(count);
@@ -390,7 +397,7 @@ pub(crate) fn write_index_file(
         page: [0; PAGE_BYTES],
         flushed: 0,
         failed: false,
-        file_id,
+        page_context: page_context(logical_len, &file_id),
         checksums,
     };
     write(&mut writer)?;
@@ -420,14 +427,14 @@ struct IndexWriter {
     // Bytes from the current page already emitted by an explicit flush.
     flushed: usize,
     failed: bool,
-    file_id: [u8; 16],
+    page_context: crc32fast::Hasher,
     checksums: Vec<[u8; 4]>,
 }
 
 impl IndexWriter {
     fn finish_buffered_page(&mut self, length: usize, index: u64) -> io::Result<()> {
         self.output.write_all(&self.page[self.flushed..length])?;
-        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
+        let mut hash = page_hasher(self.logical_len, &self.page_context, index);
         hash.update(&self.page[..length]);
         self.checksums.push(hash.finalize().to_le_bytes());
         self.flushed = 0;
@@ -455,8 +462,11 @@ impl IndexWriter {
                     .iter()
                     .enumerate()
                 {
-                    let mut hash =
-                        page_hasher(self.logical_len, &self.file_id, first + page_index as u64);
+                    let mut hash = page_hasher(
+                        self.logical_len,
+                        &self.page_context,
+                        first + page_index as u64,
+                    );
                     hash.update(page);
                     self.checksums.push(hash.finalize().to_le_bytes());
                 }
@@ -765,7 +775,7 @@ mod tests {
             page: [0; PAGE_BYTES],
             flushed: 0,
             failed: false,
-            file_id: [0; 16],
+            page_context: page_context(PAGE_BYTES as u64, &[0; 16]),
             checksums: Vec::new(),
         };
         writer.write_all(&[1; 19]).unwrap();
