@@ -74,7 +74,9 @@ binds 100 source/configuration hashes to committed source `9cff21c5`. All six
 required gates pass: 1,012 workspace tests, 17 intentionally ignored,
 documentation tests, formatting, workspace checking, strict Clippy and the
 release node build. Additional release checks pass 117 query tests with six
-ignored benchmarks, and both protocol-consistency tests.
+ignored entries, and both protocol-consistency tests. These six query exclusions
+are five explicit benchmarks and a child-process entry invoked by its normal
+parent test.
 
 The [final release record](baselines/2026-09-12-sql-metadata-release.json)
 contains the complete final fixtures, runner, correctness logs, binary and

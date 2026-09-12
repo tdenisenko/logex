@@ -44,8 +44,8 @@ duplicate names; SQL-standard shadowing support is not assumed.
 One explicit compatibility boundary is retained: the engine can stringify a
 qualified relation like a quoted one-component alias containing a dot. LogEx
 continues to reject that qualified relation at this immediate structural table
-check. Deeper references remain subject to the existing engine planning rules. This case records an intentional existing difference, not engine
-error equivalence. Ordinary log reads, metadata reads, read-only enforcement
+check. Deeper references remain subject to the existing engine planning rules.
+This case records an intentional existing difference, not engine error equivalence. Ordinary log reads, metadata reads, read-only enforcement
 and unknown physical-table errors remain covered by controls.
 
 ## Validation and measurements
@@ -64,14 +64,16 @@ before execution; that output is a test-build failure, not a runtime defect.
 All intermediate attempt logs and their provenance are retained. Complete source
 and fixture snapshots exist for the initial behavioral baseline and committed
 final fixture; intermediate fixture stages are described without claiming that
-every stage has a complete saved snapshot. The final focused
-fixture passes all three groups; focused checking, strict Clippy and formatting
+every stage has a complete saved snapshot. The final focused fixture passes all three groups; focused checking, strict Clippy and formatting
 also pass. The [full local validation record](baselines/2026-09-12-sql-query-scope-validation.json)
-binds 101 source/configuration hashes to committed
-source `b4522da9`. All six required gates pass: formatting, checking, strict
+binds 101 source/configuration hashes to committed source `b4522da9`. All six required gates pass: formatting, checking, strict
 Clippy, 1,015 workspace tests with 17 intentionally ignored, documentation tests
 and the release node build. Additional release checks pass 120 query tests
-with six ignored benchmarks and both protocol-consistency tests.
+with six ignored entries and both protocol-consistency tests. The workspace
+exclusions comprise explicit benchmarks, four isolated-mount checks and a child
+process entry that its ordinary parent test invokes. The release query exclusions
+comprise five benchmarks and that child entry. This query-only change does not
+repeat the separately recorded cross-mount storage acceptance.
 
 The [release acceptance record](baselines/2026-09-12-sql-query-scope-release.json)
 contains the complete runner, final fixtures, correctness logs, source/binary
