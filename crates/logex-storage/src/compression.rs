@@ -803,12 +803,14 @@ mod tests {
 
     #[test]
     fn bounded_zstd_reports_impossible_buffer_capacity_without_panicking() {
-        let encoded = zstd_compress(b"record data").unwrap();
         // This exceeds Vec's address-space limit, so reservation must fail
-        // immediately; the test never attempts to fill a large allocation.
-        let result = std::panic::catch_unwind(|| zstd_decompress_bounded(&encoded, usize::MAX));
+        // immediately; the test never attempts to fill a large allocation. The
+        // incomplete frame has no smaller bound even when another workspace
+        // dependency enables Zstd's experimental size estimation feature.
+        let result = std::panic::catch_unwind(|| zstd_decompress_bounded(&[0], usize::MAX));
         assert!(result.is_ok(), "buffer capacity error panicked");
         assert!(result.unwrap().is_err());
+        let encoded = zstd_compress(b"record data").unwrap();
         assert_eq!(
             zstd_decompress_bounded(&encoded, 11).unwrap(),
             b"record data"
