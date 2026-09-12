@@ -1342,14 +1342,10 @@ mod tests {
 
         for row_ids in [None, Some(&[1, 0, 1][..]), Some(&[19][..])] {
             let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
-            assert_eq!(
-                reader
-                    .read_var_bytes("data", row_ids)
-                    .err()
-                    .expect("inconsistent lengths must be rejected")
-                    .kind(),
-                io::ErrorKind::InvalidData
-            );
+            let Err(error) = reader.read_var_bytes("data", row_ids) else {
+                panic!("inconsistent lengths must be rejected");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
     }
 
@@ -1374,14 +1370,10 @@ mod tests {
         .unwrap();
 
         let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
-        assert_eq!(
-            reader
-                .read_var_bytes("data", Some(&[0]))
-                .err()
-                .expect("inconsistent page size must be rejected")
-                .kind(),
-            io::ErrorKind::InvalidData
-        );
+        let Err(error) = reader.read_var_bytes("data", Some(&[0])) else {
+            panic!("inconsistent page size must be rejected");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
