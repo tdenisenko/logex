@@ -2,8 +2,8 @@ use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
@@ -17,11 +17,13 @@ use datafusion::catalog::Session;
 use datafusion::common::{DFSchema, ScalarValue};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::context::SQLOptions;
+use datafusion::execution::context::{SQLOptions, SessionState};
 use datafusion::logical_expr::expr::InList;
+use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::{
     Between, BinaryExpr, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
 };
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
@@ -51,6 +53,9 @@ use crate::native::{
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
+// No query tables or user functions are registered in this built-in planner
+// template. Each aggregate query receives a marked execution snapshot via state().
+static NATIVE_SUM_EXPRESSION_CONTEXT: LazyLock<SessionContext> = LazyLock::new(SessionContext::new);
 // Bound text before legacy rewriting/tokenization, and syntax before creating
 // any recursive AST. The parser's recursion limit alone does not bound a
 // left-associative chain, nor its later traversal, cloning or destruction.
@@ -2312,21 +2317,38 @@ fn prepare_sum_inputs(
     sums: &[NativeRowValueExpr],
     selection: Option<&SqlAstExpr>,
 ) -> Result<PreparedSumInputs, SqlQueryError> {
-    let selection = selection
-        .map(|expr| {
-            PreparedSqlExpressions::new(&[expr.to_string()], DataType::Boolean).map(Arc::new)
-        })
-        .transpose()?;
     let mut case_sql = Vec::new();
     let sums = sums
         .iter()
         .map(|expr| prepare_sum_value(expr, &mut case_sql))
         .collect();
+    if selection.is_none() && case_sql.is_empty() {
+        return Ok(PreparedSumInputs {
+            sums,
+            selection: None,
+            cases: Arc::new(PreparedSqlExpressions::empty()),
+        });
+    }
+    let state = native_sum_expression_state();
+    let selection = selection
+        .map(|expr| {
+            PreparedSqlExpressions::new(&state, &[expr.to_string()], DataType::Boolean)
+                .map(Arc::new)
+        })
+        .transpose()?;
     Ok(PreparedSumInputs {
         sums,
         selection,
-        cases: Arc::new(PreparedSqlExpressions::new(&case_sql, DataType::Int64)?),
+        cases: Arc::new(PreparedSqlExpressions::new(
+            &state,
+            &case_sql,
+            DataType::Int64,
+        )?),
     })
+}
+
+fn native_sum_expression_state() -> SessionState {
+    NATIVE_SUM_EXPRESSION_CONTEXT.state()
 }
 
 fn prepare_sum_value(expr: &NativeRowValueExpr, cases: &mut Vec<String>) -> PreparedRowValueExpr {
@@ -2345,20 +2367,35 @@ fn prepare_sum_value(expr: &NativeRowValueExpr, cases: &mut Vec<String>) -> Prep
 }
 
 impl PreparedSqlExpressions {
-    fn new(sql: &[String], expected_type: DataType) -> DataFusionResult<Self> {
-        if sql.is_empty() {
-            return Ok(Self {
-                schema: Arc::new(Schema::empty()),
-                columns: Vec::new(),
-                expressions: Vec::new(),
-            });
+    fn empty() -> Self {
+        Self {
+            schema: Arc::new(Schema::empty()),
+            columns: Vec::new(),
+            expressions: Vec::new(),
         }
-        let state = SessionContext::new().state();
+    }
+
+    fn new(
+        state: &SessionState,
+        sql: &[String],
+        expected_type: DataType,
+    ) -> DataFusionResult<Self> {
+        if sql.is_empty() {
+            return Ok(Self::empty());
+        }
         let full_schema = log_rows_schema();
-        let full_df_schema = DFSchema::try_from_qualified_schema("logs", &full_schema)?;
+        let full_df_schema = Arc::new(DFSchema::try_from_qualified_schema("logs", &full_schema)?);
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::new(state.execution_props()).with_schema(Arc::clone(&full_df_schema)),
+        );
         let logical = sql
             .iter()
-            .map(|sql| state.create_logical_expr(sql, &full_df_schema))
+            .map(|sql| {
+                state
+                    .create_logical_expr(sql, &full_df_schema)
+                    .and_then(|logical| simplifier.coerce(logical, &full_df_schema))
+                    .and_then(|logical| simplifier.simplify(logical))
+            })
             .collect::<DataFusionResult<Vec<_>>>()?;
         let referenced = logical
             .iter()
@@ -5107,6 +5144,145 @@ mod tests {
             SqlQueryError::DataFusion(DataFusionError::Internal(message))
                 if message.contains("leaf selector 1 is out of range")
         ));
+    }
+
+    #[test]
+    fn stable_aggregate_expressions_share_query_timestamp() {
+        let mut state = native_sum_expression_state();
+        state.execution_props_mut().query_execution_start_time =
+            datafusion::logical_expr::execution_props::ExecutionProps::new()
+                .query_execution_start_time;
+        let query_start = state
+            .execution_props()
+            .query_execution_start_time
+            .timestamp_nanos_opt()
+            .unwrap();
+        let sql = ["now()".to_owned()];
+        let selection = PreparedSqlExpressions::new(
+            &state,
+            &sql,
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None),
+        )
+        .unwrap();
+        let case = PreparedSqlExpressions::new(
+            &state,
+            &sql,
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None),
+        )
+        .unwrap();
+        assert_eq!(prepared_timestamp(&selection), query_start);
+        assert_eq!(prepared_timestamp(&case), query_start);
+    }
+
+    fn prepared_timestamp(prepared: &PreparedSqlExpressions) -> i64 {
+        let batch = RecordBatch::try_new_with_options(
+            prepared.schema.clone(),
+            Vec::new(),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        match prepared.expressions[0].evaluate(&batch).unwrap() {
+            datafusion::logical_expr::ColumnarValue::Scalar(ScalarValue::TimestampNanosecond(
+                Some(value),
+                _,
+            )) => value,
+            value => panic!("expected scalar nanosecond timestamp, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_expression_states_are_query_scoped() {
+        let mut state = native_sum_expression_state();
+        let query_start = state.execution_props().query_execution_start_time;
+        let selection = PreparedSqlExpressions::new(
+            &state,
+            &["block_number > 0".to_owned()],
+            DataType::Boolean,
+        )
+        .unwrap();
+        let case = PreparedSqlExpressions::new(
+            &state,
+            &[
+                "CASE WHEN block_number > 0 THEN CAST(0 AS BIGINT) ELSE CAST(1 AS BIGINT) END"
+                    .to_owned(),
+            ],
+            DataType::Int64,
+        )
+        .unwrap();
+        assert_eq!(
+            state.execution_props().query_execution_start_time,
+            query_start,
+            "selection and CASE planning must share one unchanged query snapshot"
+        );
+        assert_eq!(selection.expressions.len(), 1);
+        assert_eq!(case.expressions.len(), 1);
+        let volatile = PreparedSqlExpressions::new(
+            &state,
+            &["random()".to_owned(), "random()".to_owned()],
+            DataType::Float64,
+        )
+        .unwrap();
+        assert!(
+            !Arc::ptr_eq(&volatile.expressions[0], &volatile.expressions[1]),
+            "identical volatile occurrences must remain separate physical expressions"
+        );
+
+        let sibling = native_sum_expression_state();
+        let sibling_start = sibling.execution_props().query_execution_start_time;
+        let sentinel = datafusion::logical_expr::execution_props::ExecutionProps::new()
+            .query_execution_start_time;
+        state.execution_props_mut().query_execution_start_time = sentinel;
+        assert_eq!(
+            sibling.execution_props().query_execution_start_time,
+            sibling_start,
+            "query states must not share mutable execution properties"
+        );
+        assert_ne!(
+            native_sum_expression_state()
+                .execution_props()
+                .query_execution_start_time,
+            sentinel,
+            "mutating one query state must not affect the planning template"
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit bounded SQL aggregate preparation benchmark"]
+    fn aggregate_expression_preparation_latency() {
+        const REPEATS: u32 = 1_000;
+        let selection = ["block_number > 0".to_owned()];
+        let case = [
+            "CASE WHEN block_number > 0 THEN CAST(0 AS BIGINT) ELSE CAST(1 AS BIGINT) END"
+                .to_owned(),
+        ];
+
+        let context_start = std::time::Instant::now();
+        for _ in 0..REPEATS {
+            std::hint::black_box(SessionContext::new());
+        }
+        let context_ns = context_start.elapsed().as_nanos() / u128::from(REPEATS);
+
+        std::hint::black_box(native_sum_expression_state());
+        let state_start = std::time::Instant::now();
+        for _ in 0..REPEATS {
+            std::hint::black_box(native_sum_expression_state());
+        }
+        let state_ns = state_start.elapsed().as_nanos() / u128::from(REPEATS);
+
+        let pair_start = std::time::Instant::now();
+        for _ in 0..REPEATS {
+            let state = native_sum_expression_state();
+            std::hint::black_box(
+                PreparedSqlExpressions::new(&state, &selection, DataType::Boolean).unwrap(),
+            );
+            std::hint::black_box(
+                PreparedSqlExpressions::new(&state, &case, DataType::Int64).unwrap(),
+            );
+        }
+        let pair_ns = pair_start.elapsed().as_nanos() / u128::from(REPEATS);
+        println!(
+            "context_new_ns={context_ns} template_state_ns={state_ns} selection_case_prepare_ns={pair_ns}"
+        );
     }
 
     #[tokio::test]

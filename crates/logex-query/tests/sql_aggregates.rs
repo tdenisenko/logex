@@ -252,6 +252,7 @@ async fn aggregate_predicates_match_independent_sql_results() {
         "tx_index = 0".to_owned(),
         "block_number < timestamp".to_owned(),
         "block_number % 2 = 0".to_owned(),
+        "block_number + 1 = '3'".to_owned(),
         "address LIKE '0xaa%'".to_owned(),
         format!(
             "address = '{}'",
@@ -303,6 +304,10 @@ async fn aggregate_case_uses_only_selected_branches_and_rows() {
         (
             "CASE WHEN 10 / (block_number - 1) > 0 THEN data END",
             "block_number % 2 = 0",
+        ),
+        (
+            "CASE WHEN now() = current_timestamp THEN data ELSE 0 END",
+            "now() = current_timestamp",
         ),
         ("CASE WHEN TRUE THEN data ELSE NULL END", "TRUE"),
         ("CASE WHEN FALSE THEN data ELSE NULL END", "TRUE"),
