@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, DictionaryArray, Float64Array, Int32Array, Int64Array, LargeStringArray,
-    ListArray, MapArray, PrimitiveArray, RecordBatch, StringArray, StringViewArray, UInt32Array,
-    UInt64Array,
+    Array, BooleanArray, DictionaryArray, FixedSizeListArray, Float64Array, Int32Array, Int64Array,
+    LargeListArray, LargeStringArray, ListArray, MapArray, PrimitiveArray, RecordBatch,
+    StringArray, StringViewArray, StructArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{
     ArrowDictionaryKeyType, ArrowNativeType, DataType, Decimal32Type, Decimal64Type,
@@ -54,6 +54,7 @@ pub(crate) fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Vec<Valu
 struct JsonColumn<'a> {
     array: &'a dyn Array,
     encoding: ValueEncoding<'a>,
+    check_values: bool,
 }
 
 enum ValueEncoding<'a> {
@@ -95,7 +96,11 @@ impl<'a> JsonColumn<'a> {
             }
             _ => ValueEncoding::Encoded(make_encoder(field, array, options)?),
         };
-        Ok(Self { array, encoding })
+        Ok(Self {
+            array,
+            encoding,
+            check_values: needs_value_validation(array.data_type()),
+        })
     }
 
     fn value(&mut self, row: usize, scratch: &mut Vec<u8>) -> Result<Value> {
@@ -130,6 +135,9 @@ impl<'a> JsonColumn<'a> {
             ValueEncoding::Encoded(encoder) => {
                 if encoder.is_null(row) {
                     return Ok(Value::Null);
+                }
+                if self.check_values {
+                    validate_json_value(self.array, row)?;
                 }
                 scratch.clear();
                 encoder.encode(row, scratch);
@@ -213,10 +221,6 @@ impl EncoderFactory for SqlEncoderFactory {
                 unique_fields(fields)?;
                 None
             }
-            DataType::Map(_, _) => {
-                unique_map_keys(downcast(array)?)?;
-                None
-            }
             DataType::Dictionary(key, _) => match key.as_ref() {
                 DataType::Int8 => dictionary!(Int8Type),
                 DataType::Int16 => dictionary!(Int16Type),
@@ -232,18 +236,6 @@ impl EncoderFactory for SqlEncoderFactory {
                     ));
                 }
             },
-            kind if kind.is_temporal() => {
-                // Arrow's nested JSON formatter otherwise turns formatting
-                // failures into successful "ERROR: ..." strings. Validate with
-                // its fallible API before using that infallible encoder.
-                let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
-                for row in 0..array.len() {
-                    if !array.is_null(row) {
-                        formatter.value(row).write(&mut FormatSink)?;
-                    }
-                }
-                None
-            }
             _ => None,
         })
     }
@@ -284,26 +276,93 @@ impl<K: ArrowDictionaryKeyType> Encoder for DictionaryEncoder<'_, K> {
     }
 }
 
-fn unique_map_keys(array: &MapArray) -> std::result::Result<(), ArrowError> {
-    // Arrow's JSON map encoder accepts UTF8 keys; other key types remain errors.
-    if array.keys().data_type() != &DataType::Utf8 {
+fn needs_value_validation(kind: &DataType) -> bool {
+    match kind {
+        DataType::List(field) | DataType::LargeList(field) | DataType::FixedSizeList(field, _) => {
+            needs_value_validation(field.data_type())
+        }
+        DataType::Struct(fields) => fields.iter().any(|f| needs_value_validation(f.data_type())),
+        DataType::Dictionary(_, values) => needs_value_validation(values),
+        DataType::Map(_, _) => true,
+        kind => kind.is_temporal(),
+    }
+}
+
+// Arrow's infallible JSON encoders cannot report duplicate map keys or temporal
+// formatting errors. Check only values the encoder will actually visit: null
+// parents, unused dictionary entries and values outside a slice are not results.
+// Common scalar/string/list columns skip this traversal entirely.
+fn validate_json_value(array: &dyn Array, row: usize) -> std::result::Result<(), ArrowError> {
+    if array.is_null(row) {
         return Ok(());
     }
-    let keys: &StringArray = downcast(array.keys().as_ref())?;
-    for row in 0..array.len() {
-        if array.is_null(row) {
-            continue;
+    macro_rules! list {
+        ($type:ty) => {{
+            let array: &$type = downcast(array)?;
+            let values = array.value(row);
+            for i in 0..values.len() {
+                validate_json_value(values.as_ref(), i)?;
+            }
+        }};
+    }
+    macro_rules! dictionary {
+        ($type:ty) => {{
+            let array: &DictionaryArray<$type> = downcast(array)?;
+            validate_json_value(array.values().as_ref(), array.keys().value(row).as_usize())?;
+        }};
+    }
+    match array.data_type() {
+        kind if kind.is_temporal() => {
+            ArrayFormatter::try_new(array, &FormatOptions::default())?
+                .value(row)
+                .write(&mut FormatSink)?;
         }
-        let mut seen = HashSet::new();
-        let start = array.value_offsets()[row] as usize;
-        let end = array.value_offsets()[row + 1] as usize;
-        for key in start..end {
-            if !keys.is_null(key) && !seen.insert(keys.value(key)) {
-                return Err(ArrowError::JsonError(
-                    "duplicate SQL map key cannot be represented as a JSON object".to_owned(),
-                ));
+        DataType::Struct(_) => {
+            let array: &StructArray = downcast(array)?;
+            for column in array.columns() {
+                if needs_value_validation(column.data_type()) {
+                    validate_json_value(column.as_ref(), row)?;
+                }
             }
         }
+        DataType::List(_) => list!(ListArray),
+        DataType::LargeList(_) => list!(LargeListArray),
+        DataType::FixedSizeList(_, _) => list!(FixedSizeListArray),
+        DataType::Map(_, _) => {
+            let array: &MapArray = downcast(array)?;
+            // Arrow rejects non-UTF8 and null map keys when building its encoder.
+            let keys: &StringArray = downcast(array.keys().as_ref())?;
+            let mut seen = HashSet::new();
+            let check_values = needs_value_validation(array.values().data_type());
+            let start = array.value_offsets()[row] as usize;
+            let end = array.value_offsets()[row + 1] as usize;
+            for key in start..end {
+                if !seen.insert(keys.value(key)) {
+                    return Err(ArrowError::JsonError(
+                        "duplicate SQL map key cannot be represented as a JSON object".to_owned(),
+                    ));
+                }
+                if check_values {
+                    validate_json_value(array.values().as_ref(), key)?;
+                }
+            }
+        }
+        DataType::Dictionary(key, _) => match key.as_ref() {
+            DataType::Int8 => dictionary!(Int8Type),
+            DataType::Int16 => dictionary!(Int16Type),
+            DataType::Int32 => dictionary!(Int32Type),
+            DataType::Int64 => dictionary!(Int64Type),
+            DataType::UInt8 => dictionary!(UInt8Type),
+            DataType::UInt16 => dictionary!(UInt16Type),
+            DataType::UInt32 => dictionary!(UInt32Type),
+            DataType::UInt64 => dictionary!(UInt64Type),
+            _ => {
+                return Err(ArrowError::JsonError(
+                    "unsupported SQL dictionary key type".to_owned(),
+                ));
+            }
+        },
+        _ => {}
     }
     Ok(())
 }
@@ -317,7 +376,7 @@ mod tests {
         NullArray, RecordBatchOptions, StringBuilder, StructArray,
     };
     use datafusion::arrow::buffer::{NullBuffer, ScalarBuffer};
-    use datafusion::arrow::datatypes::{Field, Schema, i256};
+    use datafusion::arrow::datatypes::{Date32Type, Field, Schema, i256};
     use serde_json::json;
 
     fn values(array: ArrayRef) -> Result<Vec<Value>> {
@@ -360,6 +419,59 @@ mod tests {
             Some(NullBuffer::new_null(1)),
         );
         assert_eq!(values(Arc::new(null)).unwrap(), vec![Value::Null]);
+    }
+
+    #[test]
+    fn hidden_temporal_values_do_not_invalidate_logical_nulls() {
+        let dates: ArrayRef = Arc::new(Date32Array::from(vec![0, i32::MAX]));
+        let hidden = StructArray::new(
+            vec![Field::new("date", DataType::Date32, false)].into(),
+            vec![dates.slice(1, 1)],
+            Some(NullBuffer::new_null(1)),
+        );
+        assert_eq!(values(Arc::new(hidden)).unwrap(), vec![Value::Null]);
+        let dictionary =
+            DictionaryArray::<Int8Type>::try_new(Int8Array::from(vec![Some(0), None]), dates)
+                .unwrap();
+        assert_eq!(
+            values(Arc::new(dictionary)).unwrap(),
+            vec![json!("1970-01-01"), Value::Null]
+        );
+        let dates: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Date32Type, _, _>(vec![
+            None,
+            Some(vec![Some(0)]),
+            Some(vec![Some(i32::MAX)]),
+        ]));
+        assert_eq!(
+            values(dates.slice(0, 2)).unwrap(),
+            vec![Value::Null, json!(["1970-01-01"])]
+        );
+        assert!(values(dates).is_err());
+    }
+
+    #[test]
+    fn map_key_checks_follow_slices_and_dictionary_references() {
+        let mut builder = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+        builder.keys().append_value("valid");
+        builder.values().append_value(1);
+        builder.append(true).unwrap();
+        for value in [1, 2] {
+            builder.keys().append_value("duplicate");
+            builder.values().append_value(value);
+        }
+        builder.append(true).unwrap();
+        let maps: ArrayRef = Arc::new(builder.finish());
+        assert_eq!(values(maps.slice(0, 1)).unwrap(), vec![json!({"valid":1})]);
+        assert!(values(maps.slice(1, 1)).is_err());
+        let dictionary =
+            DictionaryArray::<Int8Type>::try_new(Int8Array::from(vec![0]), maps.clone()).unwrap();
+        assert_eq!(
+            values(Arc::new(dictionary)).unwrap(),
+            vec![json!({"valid":1})]
+        );
+        let dictionary =
+            DictionaryArray::<Int8Type>::try_new(Int8Array::from(vec![1]), maps).unwrap();
+        assert!(values(Arc::new(dictionary)).is_err());
     }
 
     #[test]

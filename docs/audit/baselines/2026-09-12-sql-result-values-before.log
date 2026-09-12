@@ -261,3 +261,37 @@ failures:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.04s
 
 error: test failed, to rerun pass `-p logex-query --test result_values`
+
+FOLLOW-UP REPRODUCER: hidden temporal values in candidate 9e9aefd3
+   Compiling logex-types v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-types)
+   Compiling logex-storage v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-storage)
+   Compiling logex-index v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-index)
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.11s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running unittests src/lib.rs (target/debug/build/logex-query/f4c4b9971a98faa6/out/logex_query-f4c4b9971a98faa6)
+
+running 1 test
+test json::tests::hidden_temporal_values_do_not_invalidate_logical_nulls ... FAILED
+
+failures:
+
+---- json::tests::hidden_temporal_values_do_not_invalidate_logical_nulls stdout ----
+
+thread 'json::tests::hidden_temporal_values_do_not_invalidate_logical_nulls' (55843472) panicked at crates/logex-query/src/json.rs:373:45:
+called `Result::unwrap()` on an `Err` value: ArrowError(CastError("Failed to convert 2147483647 to temporal for Date32"), Some(""))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    json::tests::hidden_temporal_values_do_not_invalidate_logical_nulls
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p logex-query --lib`

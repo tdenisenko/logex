@@ -36,8 +36,10 @@ Arrow's default dictionary encoder does not test whether a non-null key points
 to a null value. The custom dictionary encoder preserves that logical null,
 including NullArray and nested decimal values. Arrow's infallible JSON temporal
 encoder can produce successful `ERROR: ...` text. Top-level temporal values use
-the fallible formatter; nested temporal arrays are checked with a nonallocating
-format sink before encoding. Invalid dates fail the query. These safeguards were
+the fallible formatter; nested temporal values are checked with a nonallocating
+format sink before encoding. Validation follows the actual output values, so null
+parents, unused dictionary entries and values outside slices do not cause false
+errors. The same rule applies to duplicate map keys. Invalid dates fail the query. These safeguards were
 verified against the pinned dependency source and dedicated regression fixtures.
 
 JSON object field names must be unique: duplicate output fields, nested struct
@@ -60,9 +62,12 @@ dictionaries, map key errors, invalid dates, multiple batches and empty schemas.
 A seeded 512-row nullable-list fixture is checked against an independent JSON
 oracle, including sliced offsets. Tests use temporary storage only.
 
-All six workspace gates pass, including 976 tests (11 intentionally ignored),
-documentation tests and the release node build. Repeated release performance
-measurements are next. The
+The initial candidate passed all six gates (976 tests, 11 intentionally ignored)
+and the complete dense DataFusion comparison. Subsequent review reproduced false
+errors from hidden temporal values. The correction also covers unused duplicate
+map keys. All six gates now pass with 978 tests (11 intentionally ignored).
+Final-source performance measurements remain; initial samples are retained and
+will not substitute for that acceptance. The
 tracked `benchmark_datafusion_result_values` fixture forces the general SQL
 engine with arithmetic ordering and checks narrow/wide projections and aggregate
 results against independently constructed values. Only queries with correct
