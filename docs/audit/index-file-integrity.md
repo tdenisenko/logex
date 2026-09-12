@@ -50,10 +50,10 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 32-byte header fixes magic, version, 4096-byte page size,
-logical length and reserved fields, protected by CRC32. The original logical
+integrity container. Its 48-byte header fixes magic, version, 4096-byte page size,
+logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
 bytes remain contiguous, followed by one CRC32 per page. Each page checksum
-includes a domain tag, format version, logical length, page position and actual
+includes a domain tag, format version, logical length, file identity, page position and actual
 page length. Exact physical extent is checked using the opened handle.
 
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
@@ -62,7 +62,7 @@ readers retain contiguous whole-file reads and validate every page. A reader
 holds bounded page/checksum caches of bytes; no global validation cache or
 per-query full-file scrub is introduced. Writer checksum storage costs four
 bytes per logical page, and B-tree payloads stream once instead of retaining all
-serialized payload buffers. Integrity overhead on disk is 32 bytes plus four
+serialized payload buffers. Integrity overhead on disk is 48 bytes plus four
 bytes per page; actual runtime cost still needs measurement.
 
 Every primary/composite/bloom builder checks the length of every participating
@@ -102,3 +102,26 @@ release gate, measure equivalent release index construction/point/range/bloom
 workloads and the existing mixed ingestion/query fixtures, retain all samples
 and investigated regressions, document exact source/CI evidence, then merge.
 No source-induced repeatable regression over 10% will be accepted.
+
+## First performance screening (not accepted)
+
+Exact candidate `9f14ceb4` versus baseline `ae4c01c9`, with identical copied
+release fixture and workspace feature union, retained 5,952 timings and 32 RSS
+observations in `/private/tmp/logex-index-integrity-release-1`. Four balanced
+pairs covered 16/8,192/65,536 keys and a one-key large-bitmap case. Each process
+checks 30 point/range/bloom samples per metric and three write/build samples.
+
+The candidate exceeds the budget: typical/many-key full-open range medians are
++16.25%/+16.37%, bloom medians generally +13–17%, and B-tree writes +12–54%.
+Small-workload tails also vary substantially. These are index microbenchmarks,
+not live-sync measurements. No result is discarded or accepted as node throughput.
+
+The next candidate removes redundant first-page reads and general-loop overhead
+for the common single-container bitmap while retaining every validation check.
+Independent review also identified a prototype gap: copying a page together with
+its checksum from another same-sized file passed the original framing. A retained
+finite fixture reproduces it; per-file random checksum context corrects it. The
+new header is 48 bytes. A complete valid-file substitution remains outside this
+check and still needs source binding. All 57 focused index tests pass after these
+changes; their equivalent release measurements are pending. Writer buffering and
+page-granularity costs will be investigated separately if they remain excessive.

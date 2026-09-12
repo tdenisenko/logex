@@ -5152,6 +5152,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "crc32fast",
+ "getrandom 0.3.4",
  "logex-storage",
  "logex-types",
  "roaring",

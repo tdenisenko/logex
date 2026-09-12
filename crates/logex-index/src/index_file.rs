@@ -7,7 +7,7 @@ use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"LXIDX001";
 const VERSION: u32 = 1;
-const HEADER_BYTES: usize = 32;
+const HEADER_BYTES: usize = 48;
 const PAGE_BYTES: usize = 4096;
 const CHECKSUM_BYTES: u64 = 4;
 
@@ -24,11 +24,12 @@ fn physical_len(logical_len: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("index file length overflow"))
 }
 
-fn page_hasher(logical_len: u64, index: u64) -> crc32fast::Hasher {
+fn page_hasher(logical_len: u64, file_id: &[u8; 16], index: u64) -> crc32fast::Hasher {
     let mut hash = crc32fast::Hasher::new();
     hash.update(b"LogEx index page");
     hash.update(&VERSION.to_le_bytes());
     hash.update(&logical_len.to_le_bytes());
+    hash.update(file_id);
     hash.update(&index.to_le_bytes());
     let length = (logical_len - index * PAGE_BYTES as u64).min(PAGE_BYTES as u64);
     hash.update(&length.to_le_bytes());
@@ -56,6 +57,7 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
+    file_id: [u8; 16],
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
     page_index: Option<u64>,
@@ -75,10 +77,10 @@ impl IndexFile {
         let protected = &header[..8] == MAGIC;
         let logical_len = if protected {
             if header_len != HEADER_BYTES
-                || crc32fast::hash(&header[..28]).to_le_bytes() != header[28..]
+                || crc32fast::hash(&header[..44]).to_le_bytes() != header[44..]
                 || header[8..12] != VERSION.to_le_bytes()
                 || header[12..16] != (PAGE_BYTES as u32).to_le_bytes()
-                || header[24..28] != [0; 4]
+                || header[40..44] != [0; 4]
             {
                 return Err(invalid("invalid index integrity header"));
             }
@@ -94,8 +96,11 @@ impl IndexFile {
             // their old encoding. They have no persisted integrity guarantee.
             length
         };
+        let mut file_id = [0; 16];
+        file_id.copy_from_slice(&header[24..40]);
         Ok(Self {
             file,
+            file_id,
             logical_len,
             protected,
             position: 0,
@@ -131,7 +136,7 @@ impl IndexFile {
             HEADER_BYTES as u64 + start,
         )?;
         let expected = self.page_checksum(index)?;
-        let mut hash = page_hasher(self.logical_len, index);
+        let mut hash = page_hasher(self.logical_len, &self.file_id, index);
         hash.update(&self.page[..self.page_len]);
         if hash.finalize().to_le_bytes() != expected {
             return Err(invalid(
@@ -193,7 +198,7 @@ impl Read for IndexFile {
             let first = self.position / PAGE_BYTES as u64;
             for (offset, page) in output[..count].chunks(PAGE_BYTES).enumerate() {
                 let index = first + offset as u64;
-                let mut hash = page_hasher(self.logical_len, index);
+                let mut hash = page_hasher(self.logical_len, &self.file_id, index);
                 hash.update(page);
                 if hash.finalize().to_le_bytes() != self.page_checksum(index)? {
                     return Err(invalid(
@@ -258,20 +263,24 @@ pub(crate) fn write_index_file(
     checksums
         .try_reserve_exact(count)
         .map_err(io::Error::other)?;
+    let mut file_id = [0; 16];
+    getrandom::fill(&mut file_id).map_err(|error| io::Error::other(error.to_string()))?;
     let mut output = BufWriter::new(File::create(path)?);
     let mut header = [0; HEADER_BYTES];
     header[..8].copy_from_slice(MAGIC);
     header[8..12].copy_from_slice(&VERSION.to_le_bytes());
     header[12..16].copy_from_slice(&(PAGE_BYTES as u32).to_le_bytes());
     header[16..24].copy_from_slice(&logical_len.to_le_bytes());
-    let checksum = crc32fast::hash(&header[..28]);
-    header[28..].copy_from_slice(&checksum.to_le_bytes());
+    header[24..40].copy_from_slice(&file_id);
+    let checksum = crc32fast::hash(&header[..44]);
+    header[44..].copy_from_slice(&checksum.to_le_bytes());
     output.write_all(&header)?;
     let mut writer = IndexWriter {
         output,
         logical_len,
         written: 0,
-        hash: page_hasher(logical_len, 0),
+        hash: page_hasher(logical_len, &file_id, 0),
+        file_id,
         checksums,
     };
     write(&mut writer)?;
@@ -292,6 +301,7 @@ struct IndexWriter {
     logical_len: u64,
     written: u64,
     hash: crc32fast::Hasher,
+    file_id: [u8; 16],
     checksums: Vec<[u8; 4]>,
 }
 
@@ -309,7 +319,11 @@ impl Write for IndexWriter {
             self.written += count as u64;
             remaining = &remaining[count..];
             if self.written.is_multiple_of(PAGE_BYTES as u64) {
-                let next = page_hasher(self.logical_len, self.written / PAGE_BYTES as u64);
+                let next = page_hasher(
+                    self.logical_len,
+                    &self.file_id,
+                    self.written / PAGE_BYTES as u64,
+                );
                 let hash = std::mem::replace(&mut self.hash, next);
                 self.checksums.push(hash.finalize().to_le_bytes());
             }
@@ -455,13 +469,38 @@ mod tests {
             );
         }
         // A self-consistent header with an impossible length is rejected before
-        // allocating from it. The fixture remains exactly 32 bytes.
+        // allocating from it. The fixture remains exactly 48 bytes.
         let mut header = complete[..HEADER_BYTES].to_vec();
         header[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
-        let checksum = crc32fast::hash(&header[..28]);
-        header[28..32].copy_from_slice(&checksum.to_le_bytes());
+        let checksum = crc32fast::hash(&header[..44]);
+        header[44..48].copy_from_slice(&checksum.to_le_bytes());
         fs::write(&path, header).unwrap();
         assert!(IndexFile::open(&path).is_err());
+    }
+
+    #[test]
+    fn copied_page_and_checksum_from_another_file_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("first");
+        let other = dir.path().join("second");
+        let original = data();
+        write(&path, &original);
+        let mut replacement = original.clone();
+        replacement[0] ^= 1;
+        write(&other, &replacement);
+        let mut first = fs::read(&path).unwrap();
+        let second = fs::read(&other).unwrap();
+        first[HEADER_BYTES..HEADER_BYTES + PAGE_BYTES]
+            .copy_from_slice(&second[HEADER_BYTES..HEADER_BYTES + PAGE_BYTES]);
+        let footer = HEADER_BYTES + original.len();
+        first[footer..footer + 4].copy_from_slice(&second[footer..footer + 4]);
+        fs::write(&path, first).unwrap();
+        assert!(
+            IndexFile::open(&path)
+                .unwrap()
+                .read_exact(&mut [0])
+                .is_err()
+        );
     }
 
     #[test]
