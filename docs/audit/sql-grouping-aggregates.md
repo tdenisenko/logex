@@ -372,7 +372,12 @@ Actual live-peer throughput remains unmeasured here.
 
 No timing sample was removed. Every compressed artifact was decoded and checked
 against its original data. The unchanged root source passes the required local
-gates; the final PR head must also pass all six Linux/macOS CI jobs before merge.
+gates. Evidence head `58de2844` passed all six Linux/macOS CI jobs in
+[run 34717126961](https://github.com/tdenisenko/logex/actions/runs/34717126961),
+attempt 1. [PR #146](https://github.com/tdenisenko/logex/pull/146) merged on
+2026-09-12 as `afc7c7dc`; its tree matches the reviewed head. The
+[final CI record](baselines/2026-09-13-sql-grouping-aggregates-ci-final.json)
+retains all job results and exact head/merge identities.
 
 ## Review boundaries
 
