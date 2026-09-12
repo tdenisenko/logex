@@ -1,0 +1,549 @@
+{
+  "environment": {
+    "kind": "environment",
+    "base_commit": "c78e519cabca8be3eb78822677ef86d3b3a774f9",
+    "candidate_commit": "fe400c7f041e76556d1e7343c76e9edd4c2269fd",
+    "sql_source_sha256": {
+      "base": "54ec11401f431a0a260d386c5ebbf5678b514bebdf70b900ab8c81811914c2b3",
+      "candidate": "84c7fd4c8ba1329520f1f444bac6616cf38cf2a6021b03c955eb45d4406b0941"
+    },
+    "fixture_sha256": {
+      "crates/logex-query/tests/sql_syntax_eligibility.rs": "a8d4d3b34980db705659aa6580c297f1ba4748e9dc5b4f947650c025dc795f8d",
+      "crates/logex-query/tests/sql_identifiers.rs": "fb62fd353b4e03c3f6af4afc36b3a248d8ff60913d6b03a4491d16c600501c9a",
+      "crates/logex-server/tests/query_latency.rs": "a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3"
+    },
+    "hardware": "Mac14,15\n17179869184\n8",
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+    "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   813Gi    83Gi    91%    6.0M  875M    1%   /System/Volumes/Data",
+    "conditions": "Fresh local git archives compare base c78e519 with committed candidate fe400c7. Both revisions receive the identical final sql_syntax_eligibility, sql_identifiers, and query_latency fixtures. Sequential fresh release builds use the shared repository target after refreshing every Rust source and Cargo.toml mtime; each compiler artifact must report fresh:false and is copied immediately. Base and candidate binary hashes must differ. Correctness runs finish before timing and retain exact per-test outcomes. Five alternating process pairs retain every one of 1,000 rotating samples for each of three unchanged metadata shapes and 50 samples for each of five unchanged REST shapes: 32,500 latency samples and 20 RSS records total. Each process uses small disposable local fixtures. Full logs and /usr/bin/time -l counters are preserved. Cache eviction is not forced. No concurrent builds or tests, production data, external targets, network services, volumes, or live peers.",
+    "runner": "\"\"\"Validate SQL syntax eligibility and compare unchanged metadata/REST latency.\"\"\"\nfrom pathlib import Path\nimport hashlib\nimport io\nimport json\nimport math\nimport os\nimport re\nimport shutil\nimport statistics\nimport subprocess\nimport sys\nimport tarfile\n\n\nREPO = Path('/Users/tdenisenko/code/logex')\nBASE = 'c78e519cabca8be3eb78822677ef86d3b3a774f9'\nEXPECTED_CANDIDATE = 'fe400c7f041e76556d1e7343c76e9edd4c2269fd'\nSQL_SOURCE = Path('crates/logex-query/src/sql.rs')\nSYNTAX_FIXTURE = Path('crates/logex-query/tests/sql_syntax_eligibility.rs')\nIDENTIFIER_FIXTURE = Path('crates/logex-query/tests/sql_identifiers.rs')\nREST_FIXTURE = Path('crates/logex-server/tests/query_latency.rs')\nTARGET_DIR = REPO / 'target'\nROOT = Path(sys.argv[1])\nROOT.mkdir(exist_ok=False)\n\nSYNTAX_TESTS = {\n    'order_by_interpolate_is_never_silently_ignored',\n    'metadata_table_alias_columns_are_not_silently_ignored',\n    'equivalent_syntax_markers_remain_supported',\n    'semantic_query_and_select_clauses_are_rejected_recursively',\n    'semantic_table_group_and_function_modifiers_are_not_ignored',\n    'planner_supported_grouping_forms_remain_available',\n}\nBASE_SYNTAX_FAILURES = {\n    'order_by_interpolate_is_never_silently_ignored',\n    'metadata_table_alias_columns_are_not_silently_ignored',\n    'semantic_query_and_select_clauses_are_rejected_recursively',\n    'semantic_table_group_and_function_modifiers_are_not_ignored',\n}\nSUPPORTED_SYNTAX_CONTROLS = SYNTAX_TESTS - BASE_SYNTAX_FAILURES\nIDENTIFIER_REGRESSIONS = {\n    'native_identifiers_and_aliases_follow_datafusion_normalization',\n    'quoted_identifier_case_is_validated_before_empty_or_limit_zero_results',\n    'normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive',\n    'aggregate_having_and_order_bind_distinct_quoted_aliases_exactly',\n    'aggregate_alias_binding_respects_qualification_and_source_name_precedence',\n    'introspection_uses_the_same_identifier_and_alias_rules',\n}\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef executable(log, target):\n    artifacts = []\n    for line in log.read_text().splitlines():\n        try:\n            record = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n        if (record.get('reason') == 'compiler-artifact'\n                and record.get('executable')\n                and record['target']['name'] == target):\n            artifacts.append(record)\n    assert len(artifacts) == 1 and not artifacts[0]['fresh'], log\n    return Path(artifacts[0]['executable'])\n\n\ndef time_record(log, kind, revision, pair=None):\n    lines = log.read_text().splitlines()\n    start = next(\n        index for index, line in enumerate(lines)\n        if re.match(r'^\\s*[0-9.]+ real\\s+[0-9.]+ user\\s+[0-9.]+ sys\\s*$', line)\n    )\n    time_lines = lines[start:]\n    timing = re.match(\n        r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$',\n        time_lines[0],\n    )\n    assert timing is not None, log\n    counters = {\n        'real_seconds': float(timing.group(1)),\n        'user_seconds': float(timing.group(2)),\n        'sys_seconds': float(timing.group(3)),\n    }\n    for line in time_lines[1:]:\n        match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n        assert match is not None, (log, line)\n        counters[match.group(2).replace(' ', '_')] = int(match.group(1))\n    return {\n        'kind': kind,\n        'revision': revision,\n        'pair': pair,\n        'log': str(log),\n        'counters': counters,\n        'raw_time_output': '\\n'.join(time_lines),\n    }\n\n\ndef test_outcomes(log):\n    outcomes = {}\n    for line in log.read_text().splitlines():\n        match = re.match(r'^test (.+) \\.\\.\\. (ok|FAILED|ignored)$', line)\n        if match:\n            assert match.group(1) not in outcomes, (log, match.group(1))\n            outcomes[match.group(1)] = match.group(2)\n    return outcomes\n\n\ncandidate = output(['git', 'rev-parse', 'HEAD'])\nassert candidate == EXPECTED_CANDIDATE, candidate\nfixtures = [SYNTAX_FIXTURE, IDENTIFIER_FIXTURE, REST_FIXTURE]\nfor path in [SQL_SOURCE, *fixtures]:\n    assert (REPO / path).read_bytes() == subprocess.check_output(\n        ['git', 'show', f'{candidate}:{path}'], cwd=REPO,\n    ), path\nfor path in [IDENTIFIER_FIXTURE, REST_FIXTURE]:\n    assert (REPO / path).read_bytes() == subprocess.check_output(\n        ['git', 'show', f'{BASE}:{path}'], cwd=REPO,\n    ), f'{path} changed since baseline'\n\nfixture_hashes = {str(path): sha(REPO / path) for path in fixtures}\nmetadata = {\n    'kind': 'environment',\n    'base_commit': BASE,\n    'candidate_commit': candidate,\n    'sql_source_sha256': {\n        'base': hashlib.sha256(subprocess.check_output(\n            ['git', 'show', f'{BASE}:{SQL_SOURCE}'], cwd=REPO,\n        )).hexdigest(),\n        'candidate': sha(REPO / SQL_SOURCE),\n    },\n    'fixture_sha256': fixture_hashes,\n    'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']),\n    'rustc': output(['rustc', '-Vv']),\n    'cargo': output(['cargo', '-V']),\n    'filesystem': output(['df', '-h', '/private/tmp']),\n    'conditions': 'Fresh local git archives compare base c78e519 with committed candidate '\n        'fe400c7. Both revisions receive the identical final sql_syntax_eligibility, '\n        'sql_identifiers, and query_latency fixtures. Sequential fresh release builds use the '\n        'shared repository target after refreshing every Rust source and Cargo.toml mtime; each '\n        'compiler artifact must report fresh:false and is copied immediately. Base and candidate '\n        'binary hashes must differ. Correctness runs finish before timing and retain exact per-test '\n        'outcomes. Five alternating process pairs retain every one of 1,000 rotating samples for '\n        'each of three unchanged metadata shapes and 50 samples for each of five unchanged REST '\n        'shapes: 32,500 latency samples and 20 RSS records total. Each process uses small disposable '\n        'local fixtures. Full logs and /usr/bin/time -l counters are preserved. Cache eviction is '\n        'not forced. No concurrent builds or tests, production data, external targets, network '\n        'services, volumes, or live peers.',\n    'runner': Path(__file__).read_text(),\n    'builds': {},\n}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\n\ntry:\n    for label, commit in [('base', BASE), ('candidate', candidate)]:\n        source = ROOT / f'{label}-source'\n        source.mkdir()\n        archive = subprocess.check_output(['git', 'archive', commit], cwd=REPO)\n        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:\n            tar.extractall(source, filter='data')\n\n        for fixture in fixtures:\n            destination = source / fixture\n            destination.parent.mkdir(parents=True, exist_ok=True)\n            shutil.copy2(REPO / fixture, destination)\n        for path in source.rglob('*'):\n            if path.is_file() and (path.suffix == '.rs' or path.name == 'Cargo.toml'):\n                path.touch()\n\n        builds = {}\n        for package, target in [\n            ('logex-query', 'sql_syntax_eligibility'),\n            ('logex-query', 'sql_identifiers'),\n            ('logex-server', 'query_latency'),\n        ]:\n            command = [\n                'cargo', 'test', '-p', package, '--test', target,\n                '--release', '--locked', '--no-run', '--message-format=json',\n            ]\n            log = ROOT / f'{label}-{target}-build.log'\n            with log.open('w') as stream:\n                result = subprocess.run(\n                    command,\n                    cwd=source,\n                    stdout=stream,\n                    stderr=subprocess.STDOUT,\n                    env=os.environ | {'CARGO_TARGET_DIR': str(TARGET_DIR)},\n                )\n            assert result.returncode == 0, log\n            binary = ROOT / f'{label}-{target}'\n            shutil.copy2(executable(log, target), binary)\n            builds[target] = {\n                'command': command,\n                'binary_sha256': sha(binary),\n                'build_log': str(log),\n                'build_log_sha256': sha(log),\n                'artifact_fresh': False,\n            }\n        builds['fixture_sha256'] = {\n            str(fixture): sha(source / fixture) for fixture in fixtures\n        }\n        assert builds['fixture_sha256'] == fixture_hashes\n        metadata['builds'][label] = builds\n        (ROOT / 'environment.json').write_text(json.dumps(metadata))\n        print(label, 'three fresh release test binaries copied', flush=True)\nfinally:\n    # Keep the working checkout newer than archived sources in the shared target.\n    for path in REPO.joinpath('crates').rglob('*'):\n        if path.is_file() and (path.suffix == '.rs' or path.name == 'Cargo.toml'):\n            path.touch()\n    (REPO / 'Cargo.toml').touch()\n\nfor target in ['sql_syntax_eligibility', 'sql_identifiers', 'query_latency']:\n    hashes = {\n        metadata['builds'][label][target]['binary_sha256']\n        for label in ['base', 'candidate']\n    }\n    assert len(hashes) == 2, target\nfor label in ['base', 'candidate']:\n    assert metadata['builds'][label]['fixture_sha256'] == fixture_hashes\n\ncorrectness_records = []\n(ROOT / 'correctness.jsonl').write_text('')\nfor label in ['base', 'candidate']:\n    syntax_log = ROOT / f'{label}-syntax-results.log'\n    syntax_command = [\n        '/usr/bin/time', '-l', str(ROOT / f'{label}-sql_syntax_eligibility'),\n        '--test-threads=1',\n    ]\n    with syntax_log.open('w') as stream:\n        result = subprocess.run(\n            syntax_command,\n            stdout=stream,\n            stderr=subprocess.STDOUT,\n            env=os.environ | {'TMPDIR': '/private/tmp'},\n        )\n    outcomes = test_outcomes(syntax_log)\n    passed = {name for name, outcome in outcomes.items() if outcome == 'ok'}\n    failed = {name for name, outcome in outcomes.items() if outcome == 'FAILED'}\n    ignored = {name for name, outcome in outcomes.items() if outcome == 'ignored'}\n    record = {\n        'kind': 'syntax_correctness',\n        'revision': label,\n        'command': syntax_command,\n        'exit': result.returncode,\n        'log': str(syntax_log),\n        'log_sha256': sha(syntax_log),\n        'per_test_outcomes': outcomes,\n    }\n    correctness_records.extend([\n        record,\n        time_record(syntax_log, 'syntax_correctness_time', label),\n    ])\n    with (ROOT / 'correctness.jsonl').open('a') as stream:\n        for retained in correctness_records[-2:]:\n            stream.write(json.dumps(retained) + '\\n')\n        stream.flush()\n    assert set(outcomes) == SYNTAX_TESTS and not ignored, syntax_log\n    if label == 'base':\n        assert result.returncode != 0, syntax_log\n        assert failed == BASE_SYNTAX_FAILURES, (syntax_log, outcomes)\n        assert passed == SUPPORTED_SYNTAX_CONTROLS, (syntax_log, outcomes)\n    else:\n        assert result.returncode == 0, syntax_log\n        assert passed == SYNTAX_TESTS and not failed, (syntax_log, outcomes)\n    print(label, 'expected six-group syntax outcome retained', flush=True)\n\n    identifiers_log = ROOT / f'{label}-identifier-results.log'\n    identifiers_command = [\n        '/usr/bin/time', '-l', str(ROOT / f'{label}-sql_identifiers'),\n        '--test-threads=1',\n    ]\n    with identifiers_log.open('w') as stream:\n        result = subprocess.run(\n            identifiers_command,\n            stdout=stream,\n            stderr=subprocess.STDOUT,\n            env=os.environ | {'TMPDIR': '/private/tmp'},\n        )\n    outcomes = test_outcomes(identifiers_log)\n    passed = {name for name, outcome in outcomes.items() if outcome == 'ok'}\n    record = {\n        'kind': 'identifier_correctness',\n        'revision': label,\n        'command': identifiers_command,\n        'exit': result.returncode,\n        'log': str(identifiers_log),\n        'log_sha256': sha(identifiers_log),\n        'per_test_outcomes': outcomes,\n    }\n    correctness_records.extend([\n        record,\n        time_record(identifiers_log, 'identifier_correctness_time', label),\n    ])\n    with (ROOT / 'correctness.jsonl').open('a') as stream:\n        for retained in correctness_records[-2:]:\n            stream.write(json.dumps(retained) + '\\n')\n        stream.flush()\n    assert result.returncode == 0, identifiers_log\n    assert IDENTIFIER_REGRESSIONS <= passed, (identifiers_log, passed)\n    print(label, 'six identifier regressions pass', flush=True)\n\nmetadata['correctness_jsonl'] = {\n    'path': str(ROOT / 'correctness.jsonl'),\n    'sha256': sha(ROOT / 'correctness.jsonl'),\n}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\n\n\ndef retain_timed_run(stream, records, suite, pair, label, command, log):\n    with log.open('w') as logs:\n        result = subprocess.run(\n            command,\n            stdout=logs,\n            stderr=subprocess.STDOUT,\n            env=os.environ | {'TMPDIR': '/private/tmp'},\n        )\n    run = {\n        'kind': f'{suite}_run',\n        'pair': pair,\n        'revision': label,\n        'command': command,\n        'exit': result.returncode,\n        'log': str(log),\n        'log_sha256': sha(log),\n    }\n    stream.write(json.dumps(run) + '\\n')\n    assert result.returncode == 0, log\n    stream.write(json.dumps(\n        time_record(log, f'{suite}_time_counters', label, pair)\n    ) + '\\n')\n\n    samples = []\n    configs = []\n    rss = []\n    for line in log.read_text().splitlines():\n        record = None\n        if '{' in line:\n            try:\n                record = json.loads(line[line.index('{'):])\n            except json.JSONDecodeError:\n                continue\n        elif 'maximum resident set size' in line:\n            record = {'kind': 'rss', 'bytes': int(line.split()[0])}\n        if record is not None:\n            record |= {'suite': suite, 'pair': pair, 'revision': label}\n            records.append(record)\n            stream.write(json.dumps(record) + '\\n')\n            if record['kind'] == 'sample':\n                samples.append(record)\n            elif record['kind'] == 'config':\n                configs.append(record)\n            elif record['kind'] == 'rss':\n                rss.append(record)\n    assert len(configs) == 1 and len(rss) == 1, log\n    if suite == 'metadata':\n        metrics = ['canonical_tables', 'filtered_columns', 'aliased_columns']\n        assert configs[0]['shapes'] == 3\n        assert configs[0]['samples_per_shape'] == 1_000\n        assert len(samples) == 3_000\n        assert all(sum(sample['metric'] == metric for sample in samples) == 1_000\n                   for metric in metrics)\n    else:\n        metrics = sorted({sample['metric'] for sample in samples})\n        assert len(metrics) == 5 and len(samples) == 250\n        assert all(sum(sample['metric'] == metric for sample in samples) == 50\n                   for metric in metrics)\n    for metric in metrics + ['peak_rss']:\n        values = ([record['bytes'] for record in rss] if metric == 'peak_rss' else\n                  [record['elapsed_ms'] for record in samples if record['metric'] == metric])\n        summary = {\n            'kind': f'{suite}_process_summary',\n            'pair': pair,\n            'revision': label,\n            'metric': metric,\n            'samples': len(values),\n            'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1],\n        }\n        stream.write(json.dumps(summary) + '\\n')\n    stream.flush()\n    return len(samples)\n\n\nrecords = []\nwith (ROOT / 'results.jsonl').open('w') as stream:\n    stream.write(json.dumps(metadata) + '\\n')\n    stream.flush()\n    for suite in ['metadata', 'rest']:\n        for pair in range(5):\n            order = ['base', 'candidate'] if pair % 2 == 0 else ['candidate', 'base']\n            for label in order:\n                if suite == 'metadata':\n                    command = [\n                        '/usr/bin/time', '-l', str(ROOT / f'{label}-sql_identifiers'),\n                        'metadata_latency', '--exact', '--ignored', '--nocapture',\n                        '--test-threads=1',\n                    ]\n                else:\n                    command = [\n                        '/usr/bin/time', '-l', str(ROOT / f'{label}-query_latency'),\n                        'benchmark_rest_query_latency', '--exact', '--ignored', '--nocapture',\n                        '--test-threads=1',\n                    ]\n                log = ROOT / f'{suite}-{pair}-{label}.log'\n                sample_count = retain_timed_run(\n                    stream, records, suite, pair, label, command, log,\n                )\n                print(pair, label, suite, sample_count, 'samples retained', flush=True)\n\n        configs = [\n            record for record in records\n            if record['suite'] == suite and record['kind'] == 'config'\n        ]\n        assert len(configs) == 10\n        assert len({record['fixture_digest'] for record in configs}) == 1\n        metrics = sorted({\n            record['metric'] for record in records\n            if record['suite'] == suite and record['kind'] == 'sample'\n        })\n        assert len(metrics) == (3 if suite == 'metadata' else 5)\n        for metric in metrics + ['peak_rss']:\n            values = {\n                label: [\n                    record['bytes'] if metric == 'peak_rss' else record['elapsed_ms']\n                    for record in records\n                    if record['suite'] == suite\n                    and record['revision'] == label\n                    and (record['kind'] == 'rss' if metric == 'peak_rss'\n                         else record['kind'] == 'sample' and record['metric'] == metric)\n                ]\n                for label in ['base', 'candidate']\n            }\n            expected = 5 if metric == 'peak_rss' else (5_000 if suite == 'metadata' else 250)\n            assert all(len(value) == expected for value in values.values()), (suite, metric)\n            medians = {label: statistics.median(value) for label, value in values.items()}\n            tails = {\n                label: sorted(value)[math.ceil(len(value) * .95) - 1]\n                for label, value in values.items()\n            }\n            summary = {\n                'kind': f'{suite}_summary',\n                'metric': metric,\n                'samples_per_revision': expected,\n                'median': medians,\n                'p95': tails,\n                'median_change_percent': 100 * (medians['candidate'] / medians['base'] - 1),\n                'p95_change_percent': 100 * (tails['candidate'] / tails['base'] - 1),\n            }\n            stream.write(json.dumps(summary) + '\\n')\n            print(summary, flush=True)\n        stream.flush()\n\n    assert sum(record['kind'] == 'sample' for record in records) == 32_500\n    assert sum(record['kind'] == 'rss' for record in records) == 20\n    assert sum(record['kind'] == 'config' for record in records) == 20\n    stream.write(json.dumps({\n        'kind': 'retained_record_counts',\n        'samples': 32_500,\n        'rss': 20,\n        'configs': 20,\n    }) + '\\n')\n    stream.flush()\n\nmetadata['results_jsonl'] = {\n    'path': str(ROOT / 'results.jsonl'),\n    'sha256': sha(ROOT / 'results.jsonl'),\n}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\n",
+    "builds": {
+      "base": {
+        "sql_syntax_eligibility": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-query",
+            "--test",
+            "sql_syntax_eligibility",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "4998a2e54edda03896c0def7316b3b7096a1a8b548b8074fed24ef55cf2f19b0",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-sql_syntax_eligibility-build.log",
+          "build_log_sha256": "943d5b6dd52fd59c08f107425cebcb4422f942323ee32684d18e479252989a13",
+          "artifact_fresh": false
+        },
+        "sql_identifiers": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-query",
+            "--test",
+            "sql_identifiers",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "91174b5f1c88ec71f09a3d0b0896927ce79ef706878ad8bbfddffbc2e2717d4c",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-sql_identifiers-build.log",
+          "build_log_sha256": "5ace98645656946d92dfa145312239a6c75dcef8d6001ae0ecba1657a8dc11a4",
+          "artifact_fresh": false
+        },
+        "query_latency": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-server",
+            "--test",
+            "query_latency",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "c011a0cf1e24a7a5502652a47c7e8dc8d842a522a7b6ab36c5e99bf589ad569d",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-query_latency-build.log",
+          "build_log_sha256": "8173c7889bea83de6b821e534bd493818669578986271df196400af430c7f714",
+          "artifact_fresh": false
+        },
+        "fixture_sha256": {
+          "crates/logex-query/tests/sql_syntax_eligibility.rs": "a8d4d3b34980db705659aa6580c297f1ba4748e9dc5b4f947650c025dc795f8d",
+          "crates/logex-query/tests/sql_identifiers.rs": "fb62fd353b4e03c3f6af4afc36b3a248d8ff60913d6b03a4491d16c600501c9a",
+          "crates/logex-server/tests/query_latency.rs": "a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3"
+        }
+      },
+      "candidate": {
+        "sql_syntax_eligibility": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-query",
+            "--test",
+            "sql_syntax_eligibility",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "924ae7dc6cd3cb20070edf4f7a69ff22d5fde52bc56b0752d4e5b8c1450d8a15",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-sql_syntax_eligibility-build.log",
+          "build_log_sha256": "64c67074239d87404c969bf3030c6caf167fe988026689d315ba639f8848ca94",
+          "artifact_fresh": false
+        },
+        "sql_identifiers": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-query",
+            "--test",
+            "sql_identifiers",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "946570fc7c60f8e1ec31d781f9ec4223b087fcd048ceeb62a0c91b994acc6c79",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-sql_identifiers-build.log",
+          "build_log_sha256": "0ba3c19c4691e88a18200c81e89f7c1f1b6a652c3a7f73de247ce85a67f77318",
+          "artifact_fresh": false
+        },
+        "query_latency": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-server",
+            "--test",
+            "query_latency",
+            "--release",
+            "--locked",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "binary_sha256": "4b92ee7b1ccdab647f362c9dd812a20fcf4ffae7e4a188898f8ac6e91a90d9a5",
+          "build_log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-query_latency-build.log",
+          "build_log_sha256": "8c0f9d14cd679ca00635764d5ab90266d7d7b76daf57f43d5759eb4703beb998",
+          "artifact_fresh": false
+        },
+        "fixture_sha256": {
+          "crates/logex-query/tests/sql_syntax_eligibility.rs": "a8d4d3b34980db705659aa6580c297f1ba4748e9dc5b4f947650c025dc795f8d",
+          "crates/logex-query/tests/sql_identifiers.rs": "fb62fd353b4e03c3f6af4afc36b3a248d8ff60913d6b03a4491d16c600501c9a",
+          "crates/logex-server/tests/query_latency.rs": "a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3"
+        }
+      }
+    },
+    "correctness_jsonl": {
+      "path": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/correctness.jsonl",
+      "sha256": "68fe1d119f61216d5309bf1bb1bdc1ed0d2650215aa1eea618dd25d66af635c0"
+    },
+    "results_jsonl": {
+      "path": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/results.jsonl",
+      "sha256": "c54e2acfc54717459df9287bd74c8f652dc8097a30d88b5efe57152808c4b556"
+    }
+  },
+  "correctness": [
+    {
+      "kind": "syntax_correctness",
+      "revision": "base",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-sql_syntax_eligibility",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-syntax-results.log",
+      "log_sha256": "41c74a27b4a58ed80bde78bc6dcf0b7cdb506838877e10b530cdaaee9cf2d3cf",
+      "per_test_outcomes": {
+        "equivalent_syntax_markers_remain_supported": "ok",
+        "metadata_table_alias_columns_are_not_silently_ignored": "FAILED",
+        "order_by_interpolate_is_never_silently_ignored": "FAILED",
+        "planner_supported_grouping_forms_remain_available": "ok",
+        "semantic_query_and_select_clauses_are_rejected_recursively": "FAILED",
+        "semantic_table_group_and_function_modifiers_are_not_ignored": "FAILED"
+      },
+      "output": "\nrunning 6 tests\ntest equivalent_syntax_markers_remain_supported ... ok\ntest metadata_table_alias_columns_are_not_silently_ignored ... FAILED\ntest order_by_interpolate_is_never_silently_ignored ... FAILED\ntest planner_supported_grouping_forms_remain_available ... ok\ntest semantic_query_and_select_clauses_are_rejected_recursively ... FAILED\ntest semantic_table_group_and_function_modifiers_are_not_ignored ... FAILED\n\nfailures:\n\n---- metadata_table_alias_columns_are_not_silently_ignored stdout ----\n\nthread 'metadata_table_alias_columns_are_not_silently_ignored' (60935320) panicked at crates/logex-query/tests/sql_syntax_eligibility.rs:250:6:\nLogEx must not silently ignore metadata table alias columns: SqlQueryResult { rows: [Object {\"table_name\": String(\"logs\")}], total_scanned: 1 }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n---- order_by_interpolate_is_never_silently_ignored stdout ----\n\nthread 'order_by_interpolate_is_never_silently_ignored' (60935330) panicked at crates/logex-query/tests/sql_syntax_eligibility.rs:184:14:\nLogEx must not silently ignore ORDER BY INTERPOLATE: SqlQueryResult { rows: [Object {\"block_number\": Number(1)}, Object {\"block_number\": Number(2)}], total_scanned: 2 }\n\n---- semantic_query_and_select_clauses_are_rejected_recursively stdout ----\n\nthread 'semantic_query_and_select_clauses_are_rejected_recursively' (60935391) panicked at crates/logex-query/tests/sql_syntax_eligibility.rs:452:5:\nsemantic clauses were silently ignored:\nFETCH returned 2 rows, but applying the clause requires 1: SELECT block_number FROM logs ORDER BY block_number FETCH FIRST 1 ROW ONLY\nFETCH returned 2 rows, but applying the clause requires 1: SELECT block_number FROM (SELECT block_number FROM logs FETCH FIRST 1 ROW ONLY) AS nested ORDER BY block_number\nPREWHERE returned 2 rows, but applying the clause requires 1: SELECT block_number FROM logs PREWHERE block_number = 2 ORDER BY block_number\nFETCH returned 2 rows, but applying the clause requires 1: WITH limited AS (SELECT block_number FROM logs ORDER BY block_number FETCH FIRST 1 ROW ONLY) SELECT block_number FROM limited\nPREWHERE returned 3 rows, but applying the clause requires 2: SELECT block_number FROM logs WHERE block_number = 1 UNION ALL SELECT block_number FROM logs PREWHERE block_number = 2\nPREWHERE returned 2 rows, but applying the clause requires 1: SELECT block_number FROM (SELECT block_number FROM logs PREWHERE block_number = 2) AS nested ORDER BY block_number\nFOR UPDATE returned 2 rows: SELECT block_number FROM logs FOR UPDATE\nSETTINGS returned 2 rows: SELECT block_number FROM logs SETTINGS max_threads = 1\nFORMAT returned 2 rows: SELECT block_number FROM logs FORMAT JSON\nFOR JSON returned 2 rows: SELECT block_number FROM logs FOR JSON AUTO\nCONNECT BY returned 2 rows: SELECT block_number FROM logs START WITH block_number = 1 CONNECT BY block_number = PRIOR block_number + 1\n\n---- semantic_table_group_and_function_modifiers_are_not_ignored stdout ----\n\nthread 'semantic_table_group_and_function_modifiers_are_not_ignored' (60935396) panicked at crates/logex-query/tests/sql_syntax_eligibility.rs:534:5:\nsemantic modifiers were silently ignored:\nTABLESAMPLE returned 2 rows, but applying the clause requires 0: SELECT block_number FROM logs TABLESAMPLE SYSTEM (0)\nTABLESAMPLE returned 2 rows, but applying the clause requires 0: SELECT block_number FROM (SELECT block_number FROM logs TABLESAMPLE SYSTEM (0)) AS sampled\nPARTITION returned 2 rows: SELECT block_number FROM logs PARTITION (recent)\nWITH ORDINALITY returned 2 rows: SELECT block_number FROM logs WITH ORDINALITY\nTABLE HINTS returned 2 rows: SELECT block_number FROM logs WITH (NOLOCK)\nTABLE FUNCTION SETTINGS returned 2 rows: WITH generated AS (SELECT value FROM generate_series(1, 2, SETTINGS ignored = 1)) SELECT value AS block_number FROM generated ORDER BY value\nTABLE FUNCTION SETTINGS returned 2 rows: SELECT value AS block_number FROM (SELECT value FROM generate_series(1, 2, SETTINGS ignored = 1)) AS generated ORDER BY value\nPARAMETRIC FUNCTION returned 1 rows: SELECT COUNT(1)(*) AS total FROM logs\nGROUP BY WITH MODIFIERS returned 2 rows, but applying the clause requires 3: SELECT source, COUNT(*) AS total FROM logs GROUP BY source WITH ROLLUP ORDER BY source\n\n\nfailures:\n    metadata_table_alias_columns_are_not_silently_ignored\n    order_by_interpolate_is_never_silently_ignored\n    semantic_query_and_select_clauses_are_rejected_recursively\n    semantic_table_group_and_function_modifiers_are_not_ignored\n\ntest result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s\n\n        3.03 real         0.03 user         0.12 sys\n            36372480  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2718  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 595  voluntary context switches\n                 635  involuntary context switches\n           694555529  instructions retired\n           287395898  cycles elapsed\n             7700936  peak memory footprint\n"
+    },
+    {
+      "kind": "syntax_correctness_time",
+      "revision": "base",
+      "pair": null,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-syntax-results.log",
+      "counters": {
+        "real_seconds": 3.03,
+        "user_seconds": 0.03,
+        "sys_seconds": 0.12,
+        "maximum_resident_set_size": 36372480,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 2718,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 595,
+        "involuntary_context_switches": 635,
+        "instructions_retired": 694555529,
+        "cycles_elapsed": 287395898,
+        "peak_memory_footprint": 7700936
+      },
+      "raw_time_output": "        3.03 real         0.03 user         0.12 sys\n            36372480  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2718  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 595  voluntary context switches\n                 635  involuntary context switches\n           694555529  instructions retired\n           287395898  cycles elapsed\n             7700936  peak memory footprint"
+    },
+    {
+      "kind": "identifier_correctness",
+      "revision": "base",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-sql_identifiers",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-identifier-results.log",
+      "log_sha256": "593ca7f5cc9277a59a2db3a6eb3956b5332f70e5223dda1b695b6c725478422b",
+      "per_test_outcomes": {
+        "aggregate_alias_binding_respects_qualification_and_source_name_precedence": "ok",
+        "aggregate_having_and_order_bind_distinct_quoted_aliases_exactly": "ok",
+        "introspection_uses_the_same_identifier_and_alias_rules": "ok",
+        "native_identifiers_and_aliases_follow_datafusion_normalization": "ok",
+        "normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive": "ok",
+        "quoted_identifier_case_is_validated_before_empty_or_limit_zero_results": "ok"
+      },
+      "output": "\nrunning 7 tests\ntest aggregate_alias_binding_respects_qualification_and_source_name_precedence ... ok\ntest aggregate_having_and_order_bind_distinct_quoted_aliases_exactly ... ok\ntest introspection_uses_the_same_identifier_and_alias_rules ... ok\ntest metadata_latency ... ignored, explicit release metadata benchmark with a disposable empty fixture\ntest native_identifiers_and_aliases_follow_datafusion_normalization ... ok\ntest normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive ... ok\ntest quoted_identifier_case_is_validated_before_empty_or_limit_zero_results ... ok\n\ntest result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.30s\n\n        5.46 real         0.08 user         0.84 sys\n            41451520  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                3336  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                4233  voluntary context switches\n                3178  involuntary context switches\n          4208300722  instructions retired\n          1470094161  cycles elapsed\n            11862472  peak memory footprint\n"
+    },
+    {
+      "kind": "identifier_correctness_time",
+      "revision": "base",
+      "pair": null,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/base-identifier-results.log",
+      "counters": {
+        "real_seconds": 5.46,
+        "user_seconds": 0.08,
+        "sys_seconds": 0.84,
+        "maximum_resident_set_size": 41451520,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 3336,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 4233,
+        "involuntary_context_switches": 3178,
+        "instructions_retired": 4208300722,
+        "cycles_elapsed": 1470094161,
+        "peak_memory_footprint": 11862472
+      },
+      "raw_time_output": "        5.46 real         0.08 user         0.84 sys\n            41451520  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                3336  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                4233  voluntary context switches\n                3178  involuntary context switches\n          4208300722  instructions retired\n          1470094161  cycles elapsed\n            11862472  peak memory footprint"
+    },
+    {
+      "kind": "syntax_correctness",
+      "revision": "candidate",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-sql_syntax_eligibility",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-syntax-results.log",
+      "log_sha256": "0c1d908e2379345206f9365666b845ea152a87b3daa90eb7edd8763dc67de3d3",
+      "per_test_outcomes": {
+        "equivalent_syntax_markers_remain_supported": "ok",
+        "metadata_table_alias_columns_are_not_silently_ignored": "ok",
+        "order_by_interpolate_is_never_silently_ignored": "ok",
+        "planner_supported_grouping_forms_remain_available": "ok",
+        "semantic_query_and_select_clauses_are_rejected_recursively": "ok",
+        "semantic_table_group_and_function_modifiers_are_not_ignored": "ok"
+      },
+      "output": "\nrunning 6 tests\ntest equivalent_syntax_markers_remain_supported ... ok\ntest metadata_table_alias_columns_are_not_silently_ignored ... ok\ntest order_by_interpolate_is_never_silently_ignored ... ok\ntest planner_supported_grouping_forms_remain_available ... ok\ntest semantic_query_and_select_clauses_are_rejected_recursively ... ok\ntest semantic_table_group_and_function_modifiers_are_not_ignored ... ok\n\ntest result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s\n\n        2.33 real         0.02 user         0.12 sys\n            35176448  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2640  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 504  voluntary context switches\n                 399  involuntary context switches\n           628978985  instructions retired\n           248693090  cycles elapsed\n             7913928  peak memory footprint\n"
+    },
+    {
+      "kind": "syntax_correctness_time",
+      "revision": "candidate",
+      "pair": null,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-syntax-results.log",
+      "counters": {
+        "real_seconds": 2.33,
+        "user_seconds": 0.02,
+        "sys_seconds": 0.12,
+        "maximum_resident_set_size": 35176448,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 2640,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 504,
+        "involuntary_context_switches": 399,
+        "instructions_retired": 628978985,
+        "cycles_elapsed": 248693090,
+        "peak_memory_footprint": 7913928
+      },
+      "raw_time_output": "        2.33 real         0.02 user         0.12 sys\n            35176448  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2640  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 504  voluntary context switches\n                 399  involuntary context switches\n           628978985  instructions retired\n           248693090  cycles elapsed\n             7913928  peak memory footprint"
+    },
+    {
+      "kind": "identifier_correctness",
+      "revision": "candidate",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-sql_identifiers",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-identifier-results.log",
+      "log_sha256": "4a2563624605631961431878c69a9b1a884a3ad7929160b75f84dfb344f6ea9d",
+      "per_test_outcomes": {
+        "aggregate_alias_binding_respects_qualification_and_source_name_precedence": "ok",
+        "aggregate_having_and_order_bind_distinct_quoted_aliases_exactly": "ok",
+        "introspection_uses_the_same_identifier_and_alias_rules": "ok",
+        "native_identifiers_and_aliases_follow_datafusion_normalization": "ok",
+        "normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive": "ok",
+        "quoted_identifier_case_is_validated_before_empty_or_limit_zero_results": "ok"
+      },
+      "output": "\nrunning 7 tests\ntest aggregate_alias_binding_respects_qualification_and_source_name_precedence ... ok\ntest aggregate_having_and_order_bind_distinct_quoted_aliases_exactly ... ok\ntest introspection_uses_the_same_identifier_and_alias_rules ... ok\ntest metadata_latency ... ignored, explicit release metadata benchmark with a disposable empty fixture\ntest native_identifiers_and_aliases_follow_datafusion_normalization ... ok\ntest normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive ... ok\ntest quoted_identifier_case_is_validated_before_empty_or_limit_zero_results ... ok\n\ntest result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.26s\n\n        5.24 real         0.08 user         0.77 sys\n            39288832  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                3206  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                4246  voluntary context switches\n                3025  involuntary context switches\n          4207339111  instructions retired\n          1496733635  cycles elapsed\n             9945544  peak memory footprint\n"
+    },
+    {
+      "kind": "identifier_correctness_time",
+      "revision": "candidate",
+      "pair": null,
+      "log": "/private/tmp/logex-sql-syntax-eligibility-acceptance-1/candidate-identifier-results.log",
+      "counters": {
+        "real_seconds": 5.24,
+        "user_seconds": 0.08,
+        "sys_seconds": 0.77,
+        "maximum_resident_set_size": 39288832,
+        "average_shared_memory_size": 0,
+        "average_unshared_data_size": 0,
+        "average_unshared_stack_size": 0,
+        "page_reclaims": 3206,
+        "page_faults": 0,
+        "swaps": 0,
+        "block_input_operations": 0,
+        "block_output_operations": 0,
+        "messages_sent": 0,
+        "messages_received": 0,
+        "signals_received": 0,
+        "voluntary_context_switches": 4246,
+        "involuntary_context_switches": 3025,
+        "instructions_retired": 4207339111,
+        "cycles_elapsed": 1496733635,
+        "peak_memory_footprint": 9945544
+      },
+      "raw_time_output": "        5.24 real         0.08 user         0.77 sys\n            39288832  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                3206  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                4246  voluntary context switches\n                3025  involuntary context switches\n          4207339111  instructions retired\n          1496733635  cycles elapsed\n             9945544  peak memory footprint"
+    }
+  ],
+  "fixture_source": {
+    "crates/logex-query/tests/sql_syntax_eligibility.rs": "//! Parsed SQL modifiers must not be silently dropped by LogEx execution paths.\n\nuse std::sync::Arc;\n\nuse alloy_primitives::{Address, Bytes, keccak256};\nuse datafusion::arrow::array::{Array, ArrayRef, StringArray, UInt64Array};\nuse datafusion::arrow::datatypes::{DataType, Field, Schema};\nuse datafusion::arrow::record_batch::RecordBatch;\nuse datafusion::datasource::MemTable;\nuse datafusion::prelude::SessionContext;\nuse logex_query::execute_sql;\nuse logex_storage::{PartitionManager, PartitionManagerConfig};\nuse logex_types::{LogRow, Source};\nuse serde_json::json;\n\nfn fixture() -> (tempfile::TempDir, PartitionManager) {\n    let mut one = vec![0; 32];\n    one[31] = 1;\n    let mut two = vec![0; 32];\n    two[31] = 2;\n    let rows = [\n        LogRow {\n            block_number: 1,\n            block_hash: keccak256([1]),\n            timestamp: 100,\n            tx_hash: keccak256([11]),\n            tx_index: 0,\n            log_index: 0,\n            address: Address::repeat_byte(0x11),\n            topic0: None,\n            topic1: None,\n            topic2: None,\n            topic3: None,\n            data: Bytes::from(one),\n            data_len: 32,\n            source: Source::Receipt,\n        },\n        LogRow {\n            block_number: 2,\n            block_hash: keccak256([2]),\n            timestamp: 200,\n            tx_hash: keccak256([22]),\n            tx_index: 0,\n            log_index: 0,\n            address: Address::repeat_byte(0x22),\n            topic0: None,\n            topic1: None,\n            topic2: None,\n            topic3: None,\n            data: Bytes::from(two),\n            data_len: 32,\n            source: Source::Trace,\n        },\n    ];\n    let tmp = tempfile::tempdir().unwrap();\n    let mut storage = PartitionManager::open(PartitionManagerConfig {\n        data_dir: tmp.path().to_owned(),\n        partition_target_rows: 100,\n        compaction_safety_margin_blocks: 0,\n    })\n    .unwrap();\n    storage.write_batch(&rows).unwrap();\n    storage.checkpoint().unwrap();\n    (tmp, storage)\n}\n\nfn reference() -> SessionContext {\n    let numeric = |values: Vec<u64>| Arc::new(UInt64Array::from(values)) as ArrayRef;\n    let text = |values: Vec<&str>| Arc::new(StringArray::from(values)) as ArrayRef;\n    let register = |ctx: &SessionContext, name: &str, fields, columns| {\n        let schema = Arc::new(Schema::new(fields));\n        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();\n        ctx.register_table(\n            name,\n            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),\n        )\n        .unwrap();\n    };\n\n    let ctx = SessionContext::new();\n    register(\n        &ctx,\n        \"logs\",\n        vec![\n            Field::new(\"block_number\", DataType::UInt64, false),\n            Field::new(\"tx_index\", DataType::UInt64, false),\n            Field::new(\"log_index\", DataType::UInt64, false),\n            Field::new(\"source\", DataType::UInt64, false),\n            Field::new(\"address\", DataType::Utf8, false),\n            Field::new(\"amount\", DataType::UInt64, false),\n        ],\n        vec![\n            numeric(vec![1, 2]),\n            numeric(vec![0, 0]),\n            numeric(vec![0, 0]),\n            numeric(vec![0, 1]),\n            text(vec![\n                \"0x1111111111111111111111111111111111111111\",\n                \"0x2222222222222222222222222222222222222222\",\n            ]),\n            numeric(vec![1, 2]),\n        ],\n    );\n    register(\n        &ctx,\n        \"metadata_columns\",\n        vec![Field::new(\"ordinal_position\", DataType::UInt64, false)],\n        vec![numeric(vec![1, 2])],\n    );\n    register(\n        &ctx,\n        \"metadata_tables\",\n        vec![\n            Field::new(\"table_catalog\", DataType::Utf8, false),\n            Field::new(\"table_schema\", DataType::Utf8, false),\n            Field::new(\"table_name\", DataType::Utf8, false),\n            Field::new(\"table_type\", DataType::Utf8, false),\n        ],\n        vec![\n            text(vec![\"logex\"]),\n            text(vec![\"public\"]),\n            text(vec![\"logs\"]),\n            text(vec![\"BASE TABLE\"]),\n        ],\n    );\n    ctx\n}\n\n#[tokio::test]\nasync fn order_by_interpolate_is_never_silently_ignored() {\n    let (_tmp, storage) = fixture();\n    let reference = reference();\n    let cases = [\n        (\n            \"native select\",\n            \"SELECT block_number FROM logs ORDER BY block_number, tx_index, log_index\",\n            \"SELECT block_number FROM logs ORDER BY block_number, tx_index, log_index INTERPOLATE\",\n        ),\n        (\n            \"native count\",\n            \"SELECT source, COUNT(*) AS total FROM logs GROUP BY source ORDER BY source\",\n            \"SELECT source, COUNT(*) AS total FROM logs GROUP BY source ORDER BY source INTERPOLATE\",\n        ),\n        (\n            \"native exact sum\",\n            \"SELECT address, SUM(amount) AS total FROM logs GROUP BY address ORDER BY total\",\n            \"SELECT address, SUM(CAST(data AS NUMERIC)) AS total \\\n             FROM logs GROUP BY address ORDER BY total INTERPOLATE\",\n        ),\n        (\n            \"fixed metadata\",\n            \"SELECT ordinal_position FROM metadata_columns ORDER BY ordinal_position\",\n            \"SELECT ordinal_position FROM information_schema.columns ORDER BY ordinal_position INTERPOLATE\",\n        ),\n    ];\n\n    for (case, reference_sql, logex_sql) in cases {\n        let baseline = reference\n            .sql(reference_sql)\n            .await\n            .unwrap_or_else(|error| panic!(\"reference failed to plan {case}: {error}\"));\n        let batches = baseline\n            .collect()\n            .await\n            .unwrap_or_else(|error| panic!(\"reference failed to collect {case}: {error}\"));\n        assert!(\n            batches.iter().any(|batch| batch.num_rows() > 0),\n            \"reference baseline for {case} must exercise collection\"\n        );\n\n        let reference_interpolate = format!(\"{reference_sql} INTERPOLATE\");\n        let reference_error = reference\n            .sql(&reference_interpolate)\n            .await\n            .expect_err(\"DataFusion must reject ORDER BY INTERPOLATE during planning\")\n            .to_string();\n        assert!(\n            reference_error.contains(\"ORDER BY INTERPOLATE is not supported\"),\n            \"unexpected reference error for {case}: {reference_error}\"\n        );\n\n        let logex_error = execute_sql(logex_sql, &storage, storage.head_block())\n            .await\n            .expect_err(\"LogEx must not silently ignore ORDER BY INTERPOLATE\")\n            .to_string();\n        assert!(\n            logex_error.contains(\"INTERPOLATE\"),\n            \"unexpected LogEx error for {case}: {logex_error}\"\n        );\n    }\n}\n\n#[tokio::test]\nasync fn metadata_table_alias_columns_are_not_silently_ignored() {\n    let (_tmp, storage) = fixture();\n    let reference = reference();\n\n    let plain_alias = reference\n        .sql(\"SELECT table_name FROM metadata_tables AS tables_alias\")\n        .await\n        .expect(\"reference must plan a plain table alias\");\n    let batches = plain_alias\n        .collect()\n        .await\n        .expect(\"reference must collect a plain table alias\");\n    let reference_table_name = batches[0]\n        .column(0)\n        .as_any()\n        .downcast_ref::<StringArray>()\n        .unwrap();\n    assert_eq!(reference_table_name.value(0), \"logs\");\n    let logex_plain_alias = execute_sql(\n        \"SELECT table_name FROM information_schema.tables AS tables_alias\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"LogEx must preserve plain metadata table aliases\");\n    assert_eq!(logex_plain_alias.rows, vec![json!({\"table_name\": \"logs\"})]);\n\n    let renamed = reference\n        .sql(\n            \"SELECT table_name FROM metadata_tables AS tables_alias(\\\n             table_type, table_name, table_schema, table_catalog)\",\n        )\n        .await\n        .expect(\"the full-width table alias column list must plan\");\n    let renamed = renamed\n        .collect()\n        .await\n        .expect(\"the full-width table alias column list must collect\");\n    let renamed_value = renamed[0]\n        .column(0)\n        .as_any()\n        .downcast_ref::<StringArray>()\n        .unwrap();\n    assert_eq!(\n        renamed_value.value(0),\n        \"public\",\n        \"table alias columns must rename fields by position\"\n    );\n\n    let logex_error = execute_sql(\n        \"SELECT table_name FROM information_schema.tables AS tables_alias(\\\n         table_type, table_name, table_schema, table_catalog)\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect_err(\"LogEx must not silently ignore metadata table alias columns\")\n    .to_string();\n    assert!(\n        logex_error.contains(\"column aliases\"),\n        \"unexpected LogEx error: {logex_error}\"\n    );\n}\n\n#[tokio::test]\nasync fn equivalent_syntax_markers_remain_supported() {\n    let (_tmp, storage) = fixture();\n    let reference = reference();\n\n    let explicit_from_first = reference\n        .sql(\"FROM logs SELECT block_number\")\n        .await\n        .expect(\"reference must plan an explicit FROM-first projection\")\n        .collect()\n        .await\n        .expect(\"reference must collect an explicit FROM-first projection\");\n    let values = explicit_from_first[0]\n        .column(0)\n        .as_any()\n        .downcast_ref::<UInt64Array>()\n        .unwrap();\n    assert_eq!(\n        (0..values.len())\n            .map(|i| values.value(i))\n            .collect::<Vec<_>>(),\n        vec![1, 2]\n    );\n    let logex_from_first = execute_sql(\n        \"FROM logs SELECT block_number\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"LogEx must preserve an explicit FROM-first projection\");\n    assert_eq!(\n        logex_from_first.rows,\n        vec![json!({\"block_number\": 1}), json!({\"block_number\": 2})]\n    );\n\n    let empty_projection = reference\n        .sql(\"FROM logs\")\n        .await\n        .expect(\"reference must plan a FROM-first empty projection\")\n        .collect()\n        .await\n        .expect(\"reference must collect a FROM-first empty projection\");\n    assert_eq!(\n        empty_projection\n            .iter()\n            .map(RecordBatch::num_rows)\n            .sum::<usize>(),\n        2\n    );\n    assert!(\n        empty_projection\n            .iter()\n            .all(|batch| batch.num_columns() == 0)\n    );\n    let logex_empty_projection = execute_sql(\"FROM logs\", &storage, storage.head_block())\n        .await\n        .expect(\"LogEx must preserve a FROM-first empty projection\");\n    assert_eq!(logex_empty_projection.rows, vec![json!({}), json!({})]);\n\n    let wildcard_exclude = execute_sql(\n        \"SELECT * EXCLUDE (data) FROM logs ORDER BY block_number\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"wildcard EXCLUDE options must remain planner-supported\");\n    assert_eq!(wildcard_exclude.rows.len(), 2);\n    assert!(\n        wildcard_exclude\n            .rows\n            .iter()\n            .all(|row| { row.get(\"block_number\").is_some() && row.get(\"data\").is_none() })\n    );\n\n    let generated = execute_sql(\n        \"WITH generated AS (SELECT value FROM generate_series(1, 2)) \\\n         SELECT value AS block_number FROM generated ORDER BY value\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"a bounded default table function must remain planner-supported\");\n    assert_eq!(\n        generated.rows,\n        vec![json!({\"block_number\": 1}), json!({\"block_number\": 2})]\n    );\n\n    reference\n        .sql(\"SELECT {fn COUNT(*)} AS total, {fn SUM(amount)} AS amount FROM logs\")\n        .await\n        .expect(\"reference must plan ODBC function escapes\")\n        .collect()\n        .await\n        .expect(\"reference must collect ODBC function escapes\");\n    let count = execute_sql(\n        \"SELECT {fn COUNT(*)} AS total FROM logs\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"LogEx must preserve an ODBC COUNT escape\");\n    assert_eq!(count.rows, vec![json!({\"total\": 2})]);\n    let sum = execute_sql(\n        \"SELECT {fn SUM(data)} AS total FROM logs\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"LogEx must preserve an ODBC exact SUM escape\");\n    assert_eq!(sum.rows, vec![json!({\"total\": \"3\"})]);\n}\n\n#[tokio::test]\nasync fn semantic_query_and_select_clauses_are_rejected_recursively() {\n    let (_tmp, storage) = fixture();\n    let cases = [\n        (\n            \"FETCH\",\n            \"SELECT block_number FROM logs ORDER BY block_number FETCH FIRST 1 ROW ONLY\",\n            Some(1),\n        ),\n        (\n            \"FETCH\",\n            \"SELECT block_number FROM (SELECT block_number FROM logs FETCH FIRST 1 ROW ONLY) \\\n             AS nested ORDER BY block_number\",\n            Some(1),\n        ),\n        (\n            \"PREWHERE\",\n            \"SELECT block_number FROM logs PREWHERE block_number = 2 ORDER BY block_number\",\n            Some(1),\n        ),\n        (\n            \"FETCH\",\n            \"WITH limited AS (\\\n                 SELECT block_number FROM logs ORDER BY block_number FETCH FIRST 1 ROW ONLY\\\n             ) SELECT block_number FROM limited\",\n            Some(1),\n        ),\n        (\n            \"PREWHERE\",\n            \"SELECT block_number FROM logs WHERE block_number = 1 \\\n             UNION ALL \\\n             SELECT block_number FROM logs PREWHERE block_number = 2\",\n            Some(2),\n        ),\n        (\n            \"PREWHERE\",\n            \"SELECT block_number FROM (\\\n                 SELECT block_number FROM logs PREWHERE block_number = 2\\\n             ) AS nested ORDER BY block_number\",\n            Some(1),\n        ),\n        (\n            \"FOR UPDATE\",\n            \"SELECT block_number FROM logs FOR UPDATE\",\n            None,\n        ),\n        (\n            \"SETTINGS\",\n            \"SELECT block_number FROM logs SETTINGS max_threads = 1\",\n            None,\n        ),\n        (\"FORMAT\", \"SELECT block_number FROM logs FORMAT JSON\", None),\n        (\n            \"FOR JSON\",\n            \"SELECT block_number FROM logs FOR JSON AUTO\",\n            None,\n        ),\n        (\n            \"CONNECT BY\",\n            \"SELECT block_number FROM logs START WITH block_number = 1 \\\n             CONNECT BY block_number = PRIOR block_number + 1\",\n            None,\n        ),\n    ];\n    let mut accepted = Vec::new();\n\n    for (clause, sql, semantic_row_count) in cases {\n        match execute_sql(sql, &storage, storage.head_block()).await {\n            Ok(result) => accepted.push(format!(\n                \"{clause} returned {} rows{}: {sql}\",\n                result.rows.len(),\n                semantic_row_count\n                    .map(|count| format!(\", but applying the clause requires {count}\"))\n                    .unwrap_or_default()\n            )),\n            Err(error) => assert!(\n                error.to_string().to_ascii_uppercase().contains(clause),\n                \"unexpected rejection for {clause}: {error}\"\n            ),\n        }\n    }\n\n    assert!(\n        accepted.is_empty(),\n        \"semantic clauses were silently ignored:\\n{}\",\n        accepted.join(\"\\n\")\n    );\n}\n\n#[tokio::test]\nasync fn semantic_table_group_and_function_modifiers_are_not_ignored() {\n    let (_tmp, storage) = fixture();\n    let cases = [\n        (\n            \"TABLESAMPLE\",\n            \"SELECT block_number FROM logs TABLESAMPLE SYSTEM (0)\",\n            Some(0),\n        ),\n        (\n            \"TABLESAMPLE\",\n            \"SELECT block_number FROM (\\\n                 SELECT block_number FROM logs TABLESAMPLE SYSTEM (0)\\\n             ) AS sampled\",\n            Some(0),\n        ),\n        (\n            \"PARTITION\",\n            \"SELECT block_number FROM logs PARTITION (recent)\",\n            None,\n        ),\n        (\n            \"WITH ORDINALITY\",\n            \"SELECT block_number FROM logs WITH ORDINALITY\",\n            None,\n        ),\n        (\n            \"TABLE HINTS\",\n            \"SELECT block_number FROM logs WITH (NOLOCK)\",\n            None,\n        ),\n        (\n            \"TABLE FUNCTION SETTINGS\",\n            \"WITH generated AS (\\\n                 SELECT value FROM generate_series(1, 2, SETTINGS ignored = 1)\\\n             ) SELECT value AS block_number FROM generated ORDER BY value\",\n            None,\n        ),\n        (\n            \"TABLE FUNCTION SETTINGS\",\n            \"SELECT value AS block_number FROM (\\\n                 SELECT value FROM generate_series(1, 2, SETTINGS ignored = 1)\\\n             ) AS generated ORDER BY value\",\n            None,\n        ),\n        (\n            \"PARAMETRIC FUNCTION\",\n            \"SELECT COUNT(1)(*) AS total FROM logs\",\n            None,\n        ),\n        (\n            \"GROUP BY WITH MODIFIERS\",\n            \"SELECT source, COUNT(*) AS total FROM logs \\\n             GROUP BY source WITH ROLLUP ORDER BY source\",\n            Some(3),\n        ),\n    ];\n    let mut accepted = Vec::new();\n\n    for (clause, sql, semantic_row_count) in cases {\n        match execute_sql(sql, &storage, storage.head_block()).await {\n            Ok(result) => accepted.push(format!(\n                \"{clause} returned {} rows{}: {sql}\",\n                result.rows.len(),\n                semantic_row_count\n                    .map(|count| format!(\", but applying the clause requires {count}\"))\n                    .unwrap_or_default()\n            )),\n            Err(error) => assert!(\n                error.to_string().to_ascii_uppercase().contains(clause),\n                \"unexpected rejection for {clause}: {error}\"\n            ),\n        }\n    }\n\n    assert!(\n        accepted.is_empty(),\n        \"semantic modifiers were silently ignored:\\n{}\",\n        accepted.join(\"\\n\")\n    );\n}\n\n#[tokio::test]\nasync fn planner_supported_grouping_forms_remain_available() {\n    let (_tmp, storage) = fixture();\n\n    let rollup = execute_sql(\n        \"SELECT source, COUNT(*) AS total FROM logs \\\n         GROUP BY ROLLUP(source) ORDER BY source\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"ordinary ROLLUP expressions must remain planner-supported\");\n    assert_eq!(\n        rollup.rows,\n        vec![\n            json!({\"source\": Source::Receipt as u8 as u64, \"total\": 1}),\n            json!({\"source\": Source::Trace as u8 as u64, \"total\": 1}),\n            json!({\"source\": null, \"total\": 2}),\n        ]\n    );\n\n    let group_by_all = execute_sql(\n        \"SELECT source FROM logs GROUP BY ALL ORDER BY source\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .expect(\"GROUP BY ALL without ignored modifiers must remain planner-supported\");\n    assert_eq!(\n        group_by_all.rows,\n        vec![\n            json!({\"source\": Source::Receipt as u8 as u64}),\n            json!({\"source\": Source::Trace as u8 as u64}),\n        ]\n    );\n}\n",
+    "crates/logex-query/tests/sql_identifiers.rs": "//! SQL identifier normalization compared with an independent in-memory table.\nuse std::sync::Arc;\nuse std::time::Instant;\n\nuse alloy_primitives::{Address, Bytes, keccak256};\nuse datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array};\nuse datafusion::arrow::datatypes::{Field, Schema};\nuse datafusion::arrow::record_batch::RecordBatch;\nuse datafusion::datasource::MemTable;\nuse datafusion::prelude::SessionContext;\nuse logex_index::IndexBuilder;\nuse logex_query::execute_sql;\nuse logex_storage::{PartitionManager, PartitionManagerConfig};\nuse logex_types::{LogRow, Source};\nuse serde_json::json;\n\n#[derive(Clone, Copy, Debug)]\nenum Layout {\n    Raw,\n    Indexed,\n}\n\nfn rows() -> Vec<LogRow> {\n    [(1_u64, 1_u64, 0xbb_u8), (2, 9, 0xaa)]\n        .into_iter()\n        .map(|(block_number, amount, address)| {\n            let mut data = [0_u8; 32];\n            data[24..].copy_from_slice(&amount.to_be_bytes());\n            LogRow {\n                block_number,\n                block_hash: keccak256(block_number.to_le_bytes()),\n                timestamp: block_number * 100,\n                tx_hash: keccak256([block_number as u8; 32]),\n                tx_index: 0,\n                log_index: 0,\n                address: Address::repeat_byte(address),\n                topic0: None,\n                topic1: None,\n                topic2: None,\n                topic3: None,\n                data: Bytes::copy_from_slice(&data),\n                data_len: 32,\n                source: Source::Receipt,\n            }\n        })\n        .collect()\n}\n\nfn fixture(layout: Layout, populated: bool) -> (tempfile::TempDir, PartitionManager) {\n    let fixture_rows = populated.then(rows).unwrap_or_default();\n    fixture_with_rows(layout, &fixture_rows)\n}\n\nfn fixture_with_rows(\n    layout: Layout,\n    fixture_rows: &[LogRow],\n) -> (tempfile::TempDir, PartitionManager) {\n    let tmp = tempfile::tempdir().unwrap();\n    let mut storage = PartitionManager::open(PartitionManagerConfig {\n        data_dir: tmp.path().to_owned(),\n        partition_target_rows: 100,\n        compaction_safety_margin_blocks: 0,\n    })\n    .unwrap();\n    if !fixture_rows.is_empty() {\n        storage.write_batch(fixture_rows).unwrap();\n        storage.checkpoint().unwrap();\n        if matches!(layout, Layout::Indexed) {\n            for partition in storage\n                .sealed_partitions()\n                .iter()\n                .chain(std::iter::once(storage.hot_partition()))\n            {\n                if partition.meta.row_count > 0 {\n                    IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();\n                }\n            }\n        }\n    }\n    (tmp, storage)\n}\n\nfn reference() -> SessionContext {\n    let fixture_rows = rows();\n    let columns = vec![\n        (\n            \"block_number\",\n            Arc::new(UInt64Array::from(vec![1, 2])) as ArrayRef,\n        ),\n        (\n            \"timestamp\",\n            Arc::new(UInt64Array::from(vec![100, 200])) as ArrayRef,\n        ),\n        (\n            \"tx_index\",\n            Arc::new(UInt64Array::from(vec![0, 0])) as ArrayRef,\n        ),\n        (\n            \"log_index\",\n            Arc::new(UInt64Array::from(vec![0, 0])) as ArrayRef,\n        ),\n        (\n            \"address\",\n            Arc::new(StringArray::from(\n                fixture_rows\n                    .iter()\n                    .map(|row| format!(\"0x{}\", hex::encode(row.address)))\n                    .collect::<Vec<_>>(),\n            )) as ArrayRef,\n        ),\n        (\n            \"source\",\n            Arc::new(UInt64Array::from(vec![0, 0])) as ArrayRef,\n        ),\n        (\"amount\", Arc::new(Int64Array::from(vec![1, 9])) as ArrayRef),\n    ];\n    let schema = Arc::new(Schema::new(\n        columns\n            .iter()\n            .map(|(name, values)| Field::new(*name, values.data_type().clone(), false))\n            .collect::<Vec<_>>(),\n    ));\n    let batch = RecordBatch::try_new(\n        schema.clone(),\n        columns.into_iter().map(|(_, values)| values).collect(),\n    )\n    .unwrap();\n    let reference = SessionContext::new();\n    reference\n        .register_table(\n            \"logs\",\n            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),\n        )\n        .unwrap();\n    reference\n}\n\nfn source_reference(sources: Vec<u64>) -> SessionContext {\n    let values = Arc::new(UInt64Array::from(sources)) as ArrayRef;\n    let schema = Arc::new(Schema::new(vec![Field::new(\n        \"source\",\n        values.data_type().clone(),\n        false,\n    )]));\n    let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();\n    let reference = SessionContext::new();\n    reference\n        .register_table(\n            \"logs\",\n            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),\n        )\n        .unwrap();\n    reference\n}\n\nasync fn reference_schema(reference: &SessionContext, sql: &str) -> Vec<String> {\n    let batches = reference.sql(sql).await.unwrap().collect().await.unwrap();\n    batches[0]\n        .schema()\n        .fields()\n        .iter()\n        .map(|field| field.name().clone())\n        .collect()\n}\n\nasync fn reference_rejects(reference: &SessionContext, sql: &str) -> bool {\n    match reference.sql(sql).await {\n        Err(_) => true,\n        Ok(dataframe) => dataframe.collect().await.is_err(),\n    }\n}\n\n#[tokio::test]\nasync fn native_identifiers_and_aliases_follow_datafusion_normalization() {\n    let reference = reference();\n    let cases = [\n        (\n            \"SELECT LoGs.BLoCk_NuMbEr AS MiXeD FROM LoGs LIMIT 1\",\n            \"mixed\",\n        ),\n        (\n            \"SELECT \\\"logs\\\".\\\"block_number\\\" AS \\\"MiXeD\\\" FROM \\\"logs\\\" LIMIT 1\",\n            \"MiXeD\",\n        ),\n    ];\n    for (sql, output_name) in cases {\n        assert_eq!(reference_schema(&reference, sql).await, [output_name]);\n        for layout in [Layout::Raw, Layout::Indexed] {\n            let (_tmp, storage) = fixture(layout, true);\n            let actual = execute_sql(sql, &storage, storage.head_block())\n                .await\n                .unwrap();\n            assert_eq!(\n                actual.rows,\n                vec![json!({output_name: 1})],\n                \"{layout:?}: {sql}\"\n            );\n        }\n    }\n\n    let order_alias_collision = \"SELECT address AS block_number, tx_index, log_index FROM logs \\\n         ORDER BY block_number, tx_index, log_index LIMIT 1\";\n    let reference_batches = reference\n        .sql(order_alias_collision)\n        .await\n        .unwrap()\n        .collect()\n        .await\n        .unwrap();\n    assert_eq!(\n        reference_batches[0]\n            .column(0)\n            .as_any()\n            .downcast_ref::<StringArray>()\n            .unwrap()\n            .value(0),\n        \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n    );\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture(layout, true);\n        let actual = execute_sql(order_alias_collision, &storage, storage.head_block())\n            .await\n            .unwrap();\n        assert_eq!(\n            actual.rows[0][\"block_number\"], \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n            \"{layout:?}\"\n        );\n    }\n\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture(layout, true);\n        let count = execute_sql(\n            \"SELECT COUNT(*) AS ToTaL FROM logs\",\n            &storage,\n            storage.head_block(),\n        )\n        .await\n        .unwrap();\n        assert_eq!(count.rows, vec![json!({\"total\": 2})]);\n\n        let sum = execute_sql(\n            \"SELECT SUM(data) AS ToTaL FROM logs\",\n            &storage,\n            storage.head_block(),\n        )\n        .await\n        .unwrap();\n        assert_eq!(sum.rows, vec![json!({\"total\": \"10\"})]);\n    }\n}\n\n#[tokio::test]\nasync fn quoted_identifier_case_is_validated_before_empty_or_limit_zero_results() {\n    let reference = reference();\n    let invalid = [\n        (\n            \"SELECT \\\"BLOCK_NUMBER\\\" FROM logs\",\n            \"SELECT \\\"BLOCK_NUMBER\\\" FROM logs\",\n        ),\n        (\n            \"SELECT logs.\\\"BLOCK_NUMBER\\\" FROM logs LIMIT 0\",\n            \"SELECT logs.\\\"BLOCK_NUMBER\\\" FROM logs LIMIT 0\",\n        ),\n        (\n            \"SELECT \\\"LOGS\\\".block_number FROM logs\",\n            \"SELECT \\\"LOGS\\\".block_number FROM logs\",\n        ),\n        (\n            \"SELECT block_number FROM \\\"LOGS\\\" LIMIT 0\",\n            \"SELECT block_number FROM \\\"LOGS\\\" LIMIT 0\",\n        ),\n        (\n            \"SELECT COUNT(*) FROM logs WHERE \\\"BLOCK_NUMBER\\\" = 1 LIMIT 0\",\n            \"SELECT COUNT(*) FROM logs WHERE \\\"BLOCK_NUMBER\\\" = 1 LIMIT 0\",\n        ),\n        (\n            \"SELECT SUM(amount) FROM logs WHERE \\\"BLOCK_NUMBER\\\" = 1 LIMIT 0\",\n            \"SELECT SUM(data) FROM logs WHERE \\\"BLOCK_NUMBER\\\" = 1 LIMIT 0\",\n        ),\n        (\n            \"SELECT SUM(\\\"AMOUNT\\\") FROM logs LIMIT 0\",\n            \"SELECT SUM(\\\"DATA\\\") FROM logs LIMIT 0\",\n        ),\n        (\n            \"SELECT \\\"ADDRESS\\\", SUM(amount) FROM logs GROUP BY \\\"ADDRESS\\\" LIMIT 0\",\n            \"SELECT \\\"ADDRESS\\\", SUM(data) FROM logs GROUP BY \\\"ADDRESS\\\" LIMIT 0\",\n        ),\n    ];\n    for (reference_sql, logex_sql) in invalid {\n        assert!(\n            reference_rejects(&reference, reference_sql).await,\n            \"reference accepted {reference_sql}\"\n        );\n        for populated in [false, true] {\n            for layout in [Layout::Raw, Layout::Indexed] {\n                let (_tmp, storage) = fixture(layout, populated);\n                assert!(\n                    execute_sql(logex_sql, &storage, storage.head_block())\n                        .await\n                        .is_err(),\n                    \"{layout:?}, populated={populated} accepted {logex_sql}\"\n                );\n            }\n        }\n    }\n\n    assert!(\n        reference\n            .sql(\"SELECT SUM(amount) FROM logs WHERE block_number = 1 LIMIT 0\")\n            .await\n            .is_ok()\n    );\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture(layout, false);\n        assert!(\n            execute_sql(\n                \"SELECT SUM(data) FROM logs WHERE block_number = 1 LIMIT 0\",\n                &storage,\n                storage.head_block(),\n            )\n            .await\n            .is_ok()\n        );\n    }\n}\n\n#[tokio::test]\nasync fn normalized_duplicate_aliases_are_rejected_but_distinct_quoted_aliases_survive() {\n    let reference = reference();\n    let duplicate = \"SELECT block_number AS Dup, block_number AS dUP FROM logs LIMIT 1\";\n    assert!(\n        reference_rejects(&reference, duplicate).await,\n        \"DataFusion must reject aliases that normalize to one output name\"\n    );\n\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture(layout, true);\n        assert!(\n            execute_sql(duplicate, &storage, storage.head_block())\n                .await\n                .is_err(),\n            \"{layout:?} accepted aliases that normalize to the same JSON field\"\n        );\n\n        let distinct = execute_sql(\n            \"SELECT block_number AS \\\"x\\\", block_number AS \\\"X\\\" FROM logs LIMIT 1\",\n            &storage,\n            storage.head_block(),\n        )\n        .await\n        .unwrap();\n        assert_eq!(distinct.rows, vec![json!({\"x\": 1, \"X\": 1})]);\n\n        for duplicate_aggregate in [\n            \"SELECT SUM(data) AS Dup, SUM(data) AS dUP FROM logs\",\n            \"SELECT source AS Dup, COUNT(*) AS dUP FROM logs GROUP BY source\",\n        ] {\n            assert!(\n                execute_sql(duplicate_aggregate, &storage, storage.head_block())\n                    .await\n                    .is_err(),\n                \"{layout:?} accepted aggregate aliases that normalize to one JSON field\"\n            );\n        }\n    }\n}\n\n#[tokio::test]\nasync fn aggregate_having_and_order_bind_distinct_quoted_aliases_exactly() {\n    let reference = reference();\n    let logex_projection = \"address, SUM(data) AS \\\"x\\\", SUM(CASE WHEN block_number = 1 THEN data ELSE 0 END) AS \\\"X\\\"\";\n    let reference_projection = \"address, SUM(amount) AS \\\"x\\\", SUM(CASE WHEN block_number = 1 THEN amount ELSE 0 END) AS \\\"X\\\"\";\n    let suffixes = [\n        \"GROUP BY address HAVING \\\"X\\\" > 0 ORDER BY \\\"X\\\" DESC\",\n        \"GROUP BY address ORDER BY \\\"X\\\" DESC\",\n    ];\n\n    for suffix in suffixes {\n        let reference_sql = format!(\"SELECT {reference_projection} FROM logs {suffix}\");\n        let reference_batches = reference\n            .sql(&reference_sql)\n            .await\n            .unwrap()\n            .collect()\n            .await\n            .unwrap();\n        let expected_addresses = reference_batches\n            .iter()\n            .flat_map(|batch| {\n                batch\n                    .column(0)\n                    .as_any()\n                    .downcast_ref::<StringArray>()\n                    .unwrap()\n                    .iter()\n                    .map(|value| value.unwrap().to_owned())\n                    .collect::<Vec<_>>()\n            })\n            .collect::<Vec<_>>();\n        assert_eq!(reference_batches[0].schema().field(1).name(), \"x\");\n        assert_eq!(reference_batches[0].schema().field(2).name(), \"X\");\n\n        let logex_sql = format!(\"SELECT {logex_projection} FROM logs {suffix}\");\n        for layout in [Layout::Raw, Layout::Indexed] {\n            let (_tmp, storage) = fixture(layout, true);\n            let actual = execute_sql(&logex_sql, &storage, storage.head_block())\n                .await\n                .unwrap();\n            let actual_addresses = actual\n                .rows\n                .iter()\n                .map(|row| row[\"address\"].as_str().unwrap().to_owned())\n                .collect::<Vec<_>>();\n            assert_eq!(actual_addresses, expected_addresses, \"{layout:?}: {suffix}\");\n            assert!(actual.rows.iter().all(|row| row.get(\"x\").is_some()));\n            assert!(actual.rows.iter().all(|row| row.get(\"X\").is_some()));\n        }\n    }\n}\n\n#[tokio::test]\nasync fn aggregate_alias_binding_respects_qualification_and_source_name_precedence() {\n    let reference = reference();\n    let invalid = [\n        (\n            \"SELECT address, SUM(amount) AS total FROM logs GROUP BY address HAVING logs.total > 0\",\n            \"SELECT address, SUM(data) AS total FROM logs GROUP BY address HAVING logs.total > 0\",\n        ),\n        (\n            \"SELECT address, SUM(amount) AS total FROM logs GROUP BY address ORDER BY logs.total\",\n            \"SELECT address, SUM(data) AS total FROM logs GROUP BY address ORDER BY logs.total\",\n        ),\n        (\n            \"SELECT address, SUM(amount) AS block_number FROM logs GROUP BY address HAVING block_number > 1\",\n            \"SELECT address, SUM(data) AS block_number FROM logs GROUP BY address HAVING block_number > 1\",\n        ),\n    ];\n    for (reference_sql, logex_sql) in invalid {\n        assert!(\n            reference_rejects(&reference, reference_sql).await,\n            \"reference accepted {reference_sql}\"\n        );\n        for layout in [Layout::Raw, Layout::Indexed] {\n            let (_tmp, storage) = fixture(layout, true);\n            assert!(\n                execute_sql(logex_sql, &storage, storage.head_block())\n                    .await\n                    .is_err(),\n                \"{layout:?} accepted {logex_sql}\"\n            );\n        }\n    }\n\n    let valid = [(\n        \"SELECT address, SUM(amount) AS block_number FROM logs GROUP BY address ORDER BY block_number DESC\",\n        \"SELECT address, SUM(data) AS block_number FROM logs GROUP BY address ORDER BY block_number DESC\",\n    )];\n    for (reference_sql, logex_sql) in valid {\n        let reference_batches = reference\n            .sql(reference_sql)\n            .await\n            .unwrap()\n            .collect()\n            .await\n            .unwrap();\n        let expected_addresses = reference_batches\n            .iter()\n            .flat_map(|batch| {\n                batch\n                    .column(0)\n                    .as_any()\n                    .downcast_ref::<StringArray>()\n                    .unwrap()\n                    .iter()\n                    .map(|value| value.unwrap().to_owned())\n                    .collect::<Vec<_>>()\n            })\n            .collect::<Vec<_>>();\n        for layout in [Layout::Raw, Layout::Indexed] {\n            let (_tmp, storage) = fixture(layout, true);\n            let actual = execute_sql(logex_sql, &storage, storage.head_block())\n                .await\n                .unwrap();\n            let actual_addresses = actual\n                .rows\n                .iter()\n                .map(|row| row[\"address\"].as_str().unwrap().to_owned())\n                .collect::<Vec<_>>();\n            assert_eq!(\n                actual_addresses, expected_addresses,\n                \"{layout:?}: {logex_sql}\"\n            );\n        }\n    }\n\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture(layout, true);\n        let qualified_source = execute_sql(\n            \"SELECT source AS src, COUNT(*) AS n FROM logs GROUP BY source ORDER BY logs.source\",\n            &storage,\n            storage.head_block(),\n        )\n        .await\n        .unwrap();\n        assert_eq!(qualified_source.rows, vec![json!({\"src\": 0, \"n\": 2})]);\n        assert!(\n            execute_sql(\n                \"SELECT source AS src, COUNT(*) AS n FROM logs GROUP BY source ORDER BY logs.src\",\n                &storage,\n                storage.head_block(),\n            )\n            .await\n            .is_err()\n        );\n    }\n\n    let mut count_rows = rows();\n    count_rows[1].source = Source::Trace;\n    let mut third = count_rows[0].clone();\n    third.block_number = 3;\n    third.block_hash = keccak256(3_u64.to_le_bytes());\n    third.timestamp = 300;\n    third.tx_hash = keccak256([3_u8; 32]);\n    third.address = Address::repeat_byte(0xcc);\n    count_rows.push(third);\n    let count_order =\n        \"SELECT source AS src, COUNT(*) AS source FROM logs GROUP BY source ORDER BY source DESC\";\n    let count_reference = source_reference(vec![0, 1, 0]);\n    let reference_batches = count_reference\n        .sql(count_order)\n        .await\n        .unwrap()\n        .collect()\n        .await\n        .unwrap();\n    assert_eq!(\n        reference_batches[0]\n            .column(0)\n            .as_any()\n            .downcast_ref::<UInt64Array>()\n            .unwrap()\n            .value(0),\n        0\n    );\n    for layout in [Layout::Raw, Layout::Indexed] {\n        let (_tmp, storage) = fixture_with_rows(layout, &count_rows);\n        let actual = execute_sql(count_order, &storage, storage.head_block())\n            .await\n            .unwrap();\n        assert_eq!(actual.rows[0][\"src\"], 0, \"{layout:?}\");\n        assert_eq!(actual.rows[0][\"source\"], 2, \"{layout:?}\");\n    }\n}\n\n#[tokio::test]\nasync fn introspection_uses_the_same_identifier_and_alias_rules() {\n    let (_tmp, storage) = fixture(Layout::Raw, false);\n    let unquoted = execute_sql(\n        \"SELECT CoLuMn_NaMe AS MiXeD FROM InFoRmAtIoN_ScHeMa.CoLuMnS \\\n         WHERE OrDiNaL_PoSiTiOn = 1\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .unwrap();\n    assert_eq!(unquoted.rows, vec![json!({\"mixed\": \"block_number\"})]);\n\n    let quoted = execute_sql(\n        \"SELECT \\\"column_name\\\" AS \\\"MiXeD\\\" FROM \\\"information_schema\\\".\\\"columns\\\" \\\n         WHERE \\\"ordinal_position\\\" = 1\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .unwrap();\n    assert_eq!(quoted.rows, vec![json!({\"MiXeD\": \"block_number\"})]);\n\n    let alias_order = execute_sql(\n        \"SELECT ordinal_position AS column_name FROM information_schema.columns \\\n         ORDER BY column_name LIMIT 1\",\n        &storage,\n        storage.head_block(),\n    )\n    .await\n    .unwrap();\n    assert_eq!(alias_order.rows, vec![json!({\"column_name\": 1})]);\n\n    for sql in [\n        \"SELECT \\\"COLUMN_NAME\\\" FROM information_schema.columns LIMIT 0\",\n        \"SELECT column_name FROM \\\"INFORMATION_SCHEMA\\\".columns LIMIT 0\",\n        \"SELECT column_name FROM \\\"information_schema.columns\\\" LIMIT 0\",\n        \"SELECT logs.column_name FROM information_schema.columns LIMIT 0\",\n        \"SELECT column_name FROM information_schema.columns ORDER BY \\\"ORDINAL_POSITION\\\"\",\n        \"SELECT column_name FROM information_schema.columns \\\n         WHERE ordinal_position = 0 AND \\\"TABLE_NAME\\\" = 'logs' LIMIT 0\",\n        \"SELECT column_name FROM information_schema.columns \\\n         WHERE ordinal_position = 0 AND 1 = \\\"TABLE_NAME\\\" LIMIT 0\",\n    ] {\n        assert!(\n            execute_sql(sql, &storage, storage.head_block())\n                .await\n                .is_err(),\n            \"introspection accepted {sql}\"\n        );\n    }\n}\n\n#[tokio::test]\n#[ignore = \"explicit release metadata benchmark with a disposable empty fixture\"]\nasync fn metadata_latency() {\n    let (_tmp, storage) = fixture(Layout::Raw, false);\n    let cases = vec![\n        (\n            \"canonical_tables\",\n            \"SELECT table_name, table_type \\\n             FROM information_schema.tables \\\n             WHERE table_schema = 'public' \\\n             ORDER BY table_name\",\n            vec![json!({\"table_name\": \"logs\", \"table_type\": \"BASE TABLE\"})],\n            1,\n        ),\n        (\n            \"filtered_columns\",\n            \"SELECT column_name, data_type, is_nullable, ordinal_position \\\n             FROM information_schema.columns \\\n             WHERE table_name = 'logs' \\\n               AND column_name IN ('block_number', 'topic2', 'data') \\\n             ORDER BY ordinal_position\",\n            vec![\n                json!({\n                    \"column_name\": \"block_number\",\n                    \"data_type\": \"bigint\",\n                    \"is_nullable\": \"NO\",\n                    \"ordinal_position\": 1,\n                }),\n                json!({\n                    \"column_name\": \"topic2\",\n                    \"data_type\": \"text\",\n                    \"is_nullable\": \"YES\",\n                    \"ordinal_position\": 10,\n                }),\n                json!({\n                    \"column_name\": \"data\",\n                    \"data_type\": \"text\",\n                    \"is_nullable\": \"NO\",\n                    \"ordinal_position\": 13,\n                }),\n            ],\n            3,\n        ),\n        (\n            \"aliased_columns\",\n            \"SELECT column_name AS name, ordinal_position AS position \\\n             FROM information_schema.columns \\\n             WHERE table_name = 'logs' \\\n               AND column_name IN ('block_number', 'topic2', 'data') \\\n             ORDER BY ordinal_position DESC\",\n            vec![\n                json!({\"name\": \"data\", \"position\": 13}),\n                json!({\"name\": \"topic2\", \"position\": 10}),\n                json!({\"name\": \"block_number\", \"position\": 1}),\n            ],\n            3,\n        ),\n    ];\n\n    for (_, sql, expected, total_scanned) in &cases {\n        let result = execute_sql(sql, &storage, storage.head_block())\n            .await\n            .unwrap();\n        assert_eq!(&result.rows, expected);\n        assert_eq!(result.total_scanned, *total_scanned);\n    }\n\n    let fixture_digest = keccak256(\n        serde_json::to_vec(\n            &cases\n                .iter()\n                .map(|(metric, sql, expected, total_scanned)| {\n                    json!({\n                        \"metric\": metric,\n                        \"sql\": sql,\n                        \"expected\": expected,\n                        \"total_scanned\": total_scanned,\n                    })\n                })\n                .collect::<Vec<_>>(),\n        )\n        .unwrap(),\n    );\n    println!(\n        \"{}\",\n        json!({\n            \"kind\": \"config\",\n            \"fixture_digest\": fixture_digest.to_string(),\n            \"shapes\": cases.len(),\n            \"samples_per_shape\": 1_000,\n        })\n    );\n\n    for iteration in 0..1_000 {\n        for offset in 0..cases.len() {\n            let (metric, sql, expected, total_scanned) = &cases[(iteration + offset) % cases.len()];\n            let start = Instant::now();\n            let result = execute_sql(sql, &storage, storage.head_block())\n                .await\n                .unwrap();\n            let elapsed_ms = start.elapsed().as_secs_f64() * 1_000.0;\n            assert_eq!(&result.rows, expected);\n            assert_eq!(result.total_scanned, *total_scanned);\n            println!(\n                \"{}\",\n                json!({\n                    \"kind\": \"sample\",\n                    \"metric\": metric,\n                    \"iteration\": iteration,\n                    \"elapsed_ms\": elapsed_ms,\n                })\n            );\n        }\n    }\n}\n",
+    "crates/logex-server/tests/query_latency.rs": "//! Direct query handler latency, independent of network transport and live peers.\nuse std::sync::Arc;\nuse std::time::Instant;\n\nuse alloy_primitives::{Address, Bytes, keccak256};\nuse axum::{Json, extract::State, http::StatusCode};\nuse logex_index::IndexBuilder;\nuse logex_server::grpc::LogExGrpcService;\nuse logex_server::grpc::pb::QueryRequest;\nuse logex_server::grpc::pb::log_ex_service_server::LogExService;\nuse logex_server::handler::AppState;\nuse logex_storage::{PartitionManager, PartitionManagerConfig};\nuse logex_types::{LogRow, Source, SyncStatus};\nuse serde_json::{Value, json};\nuse tonic::Request;\n\n#[tokio::test]\n#[ignore = \"explicit release gRPC benchmark; see docs/audit/grpc-query-locks.md\"]\nasync fn benchmark_grpc_query_latency() {\n    benchmark_query_latency(false).await;\n}\n\n#[tokio::test]\n#[ignore = \"explicit release REST benchmark; see docs/audit/query-cancellation.md\"]\nasync fn benchmark_rest_query_latency() {\n    benchmark_query_latency(true).await;\n}\n\nasync fn benchmark_query_latency(rest: bool) {\n    let rows: Vec<_> = (0..20_000_u32)\n        .map(|index| {\n            let block = 15_000_000 + u64::from(index / 128);\n            let log_index = index % 128;\n            let block_hash = keccak256(block.to_le_bytes());\n            let mut tx_key = block_hash.to_vec();\n            tx_key.extend_from_slice(&(log_index / 2).to_le_bytes());\n            LogRow {\n                block_number: block,\n                block_hash,\n                timestamp: 1_700_000_000 + (block - 15_000_000) * 12,\n                tx_hash: keccak256(tx_key),\n                tx_index: log_index / 2,\n                log_index,\n                address: Address::repeat_byte(0xaa),\n                topic0: Some(keccak256(\"event\")),\n                topic1: None,\n                topic2: None,\n                topic3: None,\n                data: Bytes::from(vec![(index % 256) as u8; 32]),\n                data_len: 32,\n                source: Source::Receipt,\n            }\n        })\n        .collect();\n    let tmp = tempfile::tempdir().unwrap();\n    let config = PartitionManagerConfig {\n        data_dir: tmp.path().to_path_buf(),\n        partition_target_rows: 8192,\n        compaction_safety_margin_blocks: 0,\n    };\n    let mut storage = PartitionManager::open(config.clone()).unwrap();\n    for batch in rows.chunks(4096) {\n        storage.write_batch(batch).unwrap();\n    }\n    storage.checkpoint().unwrap();\n    for partition in storage\n        .sealed_partitions()\n        .iter()\n        .chain(std::iter::once(storage.hot_partition()))\n    {\n        if partition.meta.row_count > 0 {\n            IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();\n        }\n    }\n    storage.compact_eligible_segments().unwrap();\n    drop(storage);\n    let state = Arc::new(AppState::new(\n        PartitionManager::open(config).unwrap(),\n        None,\n        SyncStatus::default(),\n    ));\n    let service = LogExGrpcService::new(state.clone());\n    let expected_page: Vec<_> = rows.iter().rev().take(1000).map(|r| json!({\n        \"block_number\":r.block_number,\"block_hash\":r.block_hash.to_string(),\"timestamp\":r.timestamp,\n        \"tx_hash\":r.tx_hash.to_string(),\"tx_index\":r.tx_index,\"log_index\":r.log_index,\n        \"address\":r.address.to_string().to_ascii_lowercase(),\"topic0\":r.topic0.unwrap().to_string(),\n        \"topic1\":null,\"topic2\":null,\"topic3\":null,\"topics\":[r.topic0.unwrap().to_string()],\n        \"data\":format!(\"0x{}\",hex::encode(&r.data)),\"data_len\":32,\"source\":0,\n    })).collect();\n    let literal_list_sql = format!(\n        \"SELECT 1 IN ({}) AS matches\",\n        (0..10_000)\n            .map(|n| n.to_string())\n            .collect::<Vec<_>>()\n            .join(\",\")\n    );\n    let expression_sql = format!(\"SELECT {} AS value\", vec![\"1\"; 126].join(\" + \"));\n    let queries = [\n        (\n            \"native_count\",\n            \"SELECT COUNT(*) AS total FROM logs WHERE block_number <= latest\",\n            vec![json!({\"total\":rows.len()})],\n        ),\n        (\n            \"native_wide_page\",\n            \"SELECT * FROM logs ORDER BY block_number DESC, tx_index DESC, log_index DESC LIMIT 1000\",\n            expected_page,\n        ),\n        (\n            \"datafusion_aggregate\",\n            \"SELECT MAX(block_number) AS maximum, COUNT(*) AS total FROM logs\",\n            vec![json!({\"maximum\":rows.last().unwrap().block_number,\"total\":rows.len()})],\n        ),\n        (\n            \"literal_in_list\",\n            literal_list_sql.as_str(),\n            vec![json!({\"matches\":true})],\n        ),\n        (\n            \"expression_chain\",\n            expression_sql.as_str(),\n            vec![json!({\"value\":126})],\n        ),\n    ];\n    println!(\n        \"{}\",\n        json!({\"kind\":\"config\",\"rows\":rows.len(),\"repeats\":50,\"shapes\":queries.len(),\"segment_rows\":8192,\"batch_rows\":4096,\n        \"fixture_digest\":keccak256(serde_json::to_vec(&rows).unwrap()).to_string(),\n        \"protocol\":if rest { \"rest\" } else { \"grpc\" }})\n    );\n    for iteration in 0..=50 {\n        for offset in 0..queries.len() {\n            let (metric, sql, expected) = &queries[(iteration + offset) % queries.len()];\n            let start = Instant::now();\n            let (values, row_count, elapsed_ms) = if rest {\n                let response = logex_server::rest::handle_query(\n                    State(state.clone()),\n                    Json(logex_server::rest::QueryRequest {\n                        sql: (*sql).to_owned(),\n                        limit: None,\n                        offset: 0,\n                    }),\n                )\n                .await;\n                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;\n                assert_eq!(response.status(), StatusCode::OK);\n                let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)\n                    .await\n                    .unwrap();\n                let result: logex_server::rest::QueryResponse =\n                    serde_json::from_slice(&body).unwrap();\n                (result.rows, result.row_count, elapsed_ms)\n            } else {\n                let result = service\n                    .query(Request::new(QueryRequest {\n                        sql: (*sql).to_owned(),\n                        ..Default::default()\n                    }))\n                    .await\n                    .unwrap()\n                    .into_inner();\n                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;\n                let values: Vec<Value> = result\n                    .rows\n                    .iter()\n                    .map(|row| serde_json::from_str(&row.json).unwrap())\n                    .collect();\n                (values, result.row_count as usize, elapsed_ms)\n            };\n            assert_eq!(row_count, expected.len());\n            assert_eq!(values, *expected);\n            if iteration > 0 {\n                println!(\n                    \"{}\",\n                    json!({\"kind\":\"sample\",\"metric\":metric,\"iteration\":iteration,\"elapsed_ms\":elapsed_ms})\n                );\n            }\n        }\n    }\n}\n"
+  },
+  "files": [
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-before.json.gz",
+      "bytes": 1270209,
+      "sha256": "897acc35a35268e41c300aabb9cbc1564ef55b3148c46c2c0660f5e70553665a",
+      "decoded_bytes": 7472940,
+      "decoded_sha256": "1fc426d7808e9b16eb9eb2e2ab7d5e05c311e09b718e9965f696891ad7890680"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-build-logs.json.gz",
+      "bytes": 161678,
+      "sha256": "538607a2ccc5f58bcb86e3c7f6ff03f84e90f14644e4dd718d741aabdc4a832e",
+      "decoded_bytes": 2363856,
+      "decoded_sha256": "ed1afc5679db6601c87bb0729dc73b3e16c7d5b58663cc5279771ee0c3894e7f"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-final.jsonl.gz",
+      "bytes": 209169,
+      "sha256": "8a4f4c369453b6925c57ce75fbf95bf6b80e83641b8313dae6edc83677537e14",
+      "decoded_bytes": 4909289,
+      "decoded_sha256": "c54e2acfc54717459df9287bd74c8f652dc8097a30d88b5efe57152808c4b556"
+    },
+    {
+      "file": "2026-09-12-sql-syntax-eligibility-run-logs.json.gz",
+      "bytes": 183291,
+      "sha256": "dcacde763638205524e194f5ef6831f1a2002e4d433aee7199be6f65e223f98f",
+      "decoded_bytes": 3286386,
+      "decoded_sha256": "324913fcb072f19c72a5fcb8274714672273e501a0f0c6590b47f3ebb3f4c54b"
+    }
+  ],
+  "summaries": [
+    {
+      "kind": "metadata_summary",
+      "metric": "aliased_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.051709000000000005,
+        "candidate": 0.051875
+      },
+      "p95": {
+        "base": 0.066375,
+        "candidate": 0.061208
+      },
+      "median_change_percent": 0.32102728731939756,
+      "p95_change_percent": -7.784557438794737
+    },
+    {
+      "kind": "metadata_summary",
+      "metric": "canonical_tables",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.029416,
+        "candidate": 0.0295
+      },
+      "p95": {
+        "base": 0.038333,
+        "candidate": 0.033708999999999996
+      },
+      "median_change_percent": 0.2855588795213304,
+      "p95_change_percent": -12.062713588813823
+    },
+    {
+      "kind": "metadata_summary",
+      "metric": "filtered_columns",
+      "samples_per_revision": 5000,
+      "median": {
+        "base": 0.053084,
+        "candidate": 0.053167
+      },
+      "p95": {
+        "base": 0.06849999999999999,
+        "candidate": 0.063292
+      },
+      "median_change_percent": 0.15635596413232644,
+      "p95_change_percent": -7.602919708029187
+    },
+    {
+      "kind": "metadata_summary",
+      "metric": "peak_rss",
+      "samples_per_revision": 5,
+      "median": {
+        "base": 14565376,
+        "candidate": 14532608
+      },
+      "p95": {
+        "base": 14614528,
+        "candidate": 14565376
+      },
+      "median_change_percent": -0.22497187851518996,
+      "p95_change_percent": -0.33632286995515237
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "datafusion_aggregate",
+      "samples_per_revision": 250,
+      "median": {
+        "base": 1.757917,
+        "candidate": 1.773667
+      },
+      "p95": {
+        "base": 2.020708,
+        "candidate": 2.0462919999999998
+      },
+      "median_change_percent": 0.8959467369619833,
+      "p95_change_percent": 1.266090894874461
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "expression_chain",
+      "samples_per_revision": 250,
+      "median": {
+        "base": 12.958604000000001,
+        "candidate": 12.944792
+      },
+      "p95": {
+        "base": 13.383541000000001,
+        "candidate": 13.370125
+      },
+      "median_change_percent": -0.10658555504899914,
+      "p95_change_percent": -0.1002425292379705
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "literal_in_list",
+      "samples_per_revision": 250,
+      "median": {
+        "base": 51.304437500000006,
+        "candidate": 51.2750205
+      },
+      "p95": {
+        "base": 53.054292000000004,
+        "candidate": 52.589833000000006
+      },
+      "median_change_percent": -0.057338120118766156,
+      "p95_change_percent": -0.8754409539571184
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "native_count",
+      "samples_per_revision": 250,
+      "median": {
+        "base": 0.6757915000000001,
+        "candidate": 0.6839795
+      },
+      "p95": {
+        "base": 0.786042,
+        "candidate": 0.828375
+      },
+      "median_change_percent": 1.211616304733032,
+      "p95_change_percent": 5.385590082972658
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "native_wide_page",
+      "samples_per_revision": 250,
+      "median": {
+        "base": 5.5865415,
+        "candidate": 5.6014165
+      },
+      "p95": {
+        "base": 5.9855,
+        "candidate": 6.0055000000000005
+      },
+      "median_change_percent": 0.26626491542218744,
+      "p95_change_percent": 0.33414084036422764
+    },
+    {
+      "kind": "rest_summary",
+      "metric": "peak_rss",
+      "samples_per_revision": 5,
+      "median": {
+        "base": 282886144,
+        "candidate": 284966912
+      },
+      "p95": {
+        "base": 284229632,
+        "candidate": 286097408
+      },
+      "median_change_percent": 0.7355496351210578,
+      "p95_change_percent": 0.6571362693105876
+    }
+  ],
+  "interpretation": "Every timing observation is retained and summaries are independently recalculated. Exact before/after correctness precedes timing. Offline metadata and REST handler measurements exclude live peers and network transport. Performance disposition and limitations are in the companion audit document."
+}

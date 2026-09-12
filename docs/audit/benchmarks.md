@@ -298,3 +298,19 @@ and timing observation.
 Newly accepted queries are validated against the independent reference, not
 benchmarked against the preceding rejection. The unchanged metadata path's
 prior measurements remain retained separately.
+
+The [parsed-syntax eligibility pass](sql-syntax-eligibility.md) changes the first
+validation walk, which also precedes metadata execution. Its acceptance therefore
+repeats both unchanged metadata and REST fixtures. The exact final syntax fixture
+runs against both archived revisions before timing; supported controls must pass
+on both, while the recorded baseline rejection/result defects must fail only on
+the preceding revision. Preserve fresh-artifact checks, separately copied
+binaries, all five alternating pairs and every original log. Query measurements
+do not establish whole-node ingestion throughput.
+
+Its native-count tail investigation reuses the same binaries for five additional
+REST pairs, starting candidate-first. Initial, confirmation and combined records
+remain separate and complete. The initial +5.39% p95 is retained; confirmation
+changes it by -1.11%, and pooling all observations gives +2.39%. The linked
+confirmation record embeds the exact runner, environment checks, binary hashes
+and every output hash. This is the complete investigation, with no exclusions.

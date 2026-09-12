@@ -460,7 +460,7 @@ async fn execute_sql_page_on_snapshot_inner(
         return Err(SqlQueryError::DataFusion(DataFusionError::Plan(message)));
     }
     let sql = rewrite_legacy_sql(sql, head_block)?;
-    enforce_read_only_sql(&sql)?;
+    validate_sql_statement(&sql)?;
     if let Some(result) = try_execute_introspection(&sql, page)? {
         return Ok(result);
     }
@@ -3149,6 +3149,18 @@ fn try_execute_introspection(
         return Ok(None);
     }
 
+    if matches!(
+        &select.from[0].relation,
+        TableFactor::Table {
+            alias: Some(alias),
+            ..
+        } if !alias.columns.is_empty()
+    ) {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Plan(
+            "information_schema table column aliases are not supported".to_owned(),
+        )));
+    }
+
     if query.with.is_some()
         || query.fetch.is_some()
         || !query.locks.is_empty()
@@ -3940,7 +3952,7 @@ fn validate_sql_text_size(sql: &str) -> Result<(), SqlQueryError> {
     Ok(())
 }
 
-fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
+fn validate_sql_statement(sql: &str) -> Result<(), SqlQueryError> {
     // Legacy literals may expand during rewriting. Check the resulting text
     // too, before building the same token stream used for the first parse.
     validate_sql_text_size(sql)?;
@@ -3986,8 +3998,8 @@ fn enforce_read_only_sql(sql: &str) -> Result<(), SqlQueryError> {
             "only SELECT and WITH queries are allowed",
         ));
     };
-    if let ControlFlow::Break(reason) = statement.visit(&mut ReadOnlySqlVisitor) {
-        return Err(read_only_sql_error(reason));
+    if let ControlFlow::Break(violation) = statement.visit(&mut SqlEligibilityVisitor) {
+        return Err(violation.into_error());
     }
     Ok(())
 }
@@ -4040,16 +4052,79 @@ fn read_only_sql_error(reason: &str) -> SqlQueryError {
     )))
 }
 
-struct ReadOnlySqlVisitor;
+// Keep this payload-free: sqlparser propagates the break type through every
+// recursive visitor frame, including valid expressions at the complexity limit.
+enum SqlEligibilityViolation {
+    OnlySelect,
+    SelectInto,
+    Fetch,
+    Locks,
+    ForClause,
+    QuerySettings,
+    Format,
+    Interpolate,
+    Prewhere,
+    ConnectBy,
+    ValueTableMode,
+    SelectExclude,
+    GroupModifiers,
+    TableFunctionSettings,
+    TableHints,
+    TableVersion,
+    WithOrdinality,
+    Partitions,
+    JsonPath,
+    TableSample,
+    IndexHints,
+    FunctionParameters,
+}
 
-impl Visitor for ReadOnlySqlVisitor {
-    type Break = &'static str;
+impl SqlEligibilityViolation {
+    fn into_error(self) -> SqlQueryError {
+        let (read_only, message) = match self {
+            Self::OnlySelect => (true, "only SELECT and WITH queries are allowed"),
+            Self::SelectInto => (true, "SELECT INTO is not allowed"),
+            Self::Fetch => (false, "FETCH"),
+            Self::Locks => (false, "FOR UPDATE/SHARE"),
+            Self::ForClause => (false, "FOR JSON/XML"),
+            Self::QuerySettings => (false, "SETTINGS"),
+            Self::Format => (false, "FORMAT"),
+            Self::Interpolate => (false, "ORDER BY INTERPOLATE"),
+            Self::Prewhere => (false, "PREWHERE"),
+            Self::ConnectBy => (false, "CONNECT BY"),
+            Self::ValueTableMode => (false, "SELECT AS VALUE/STRUCT"),
+            Self::SelectExclude => (false, "SELECT EXCLUDE"),
+            Self::GroupModifiers => (false, "GROUP BY WITH modifiers"),
+            Self::TableFunctionSettings => (false, "table function SETTINGS"),
+            Self::TableHints => (false, "table hints"),
+            Self::TableVersion => (false, "table version qualifiers"),
+            Self::WithOrdinality => (false, "WITH ORDINALITY"),
+            Self::Partitions => (false, "PARTITION selection"),
+            Self::JsonPath => (false, "table JSON paths"),
+            Self::TableSample => (false, "TABLESAMPLE/SAMPLE"),
+            Self::IndexHints => (false, "index hints"),
+            Self::FunctionParameters => (false, "parametric function arguments"),
+        };
+        if read_only {
+            read_only_sql_error(message)
+        } else {
+            SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                "LogEx does not support {message}"
+            )))
+        }
+    }
+}
+
+struct SqlEligibilityVisitor;
+
+impl Visitor for SqlEligibilityVisitor {
+    type Break = SqlEligibilityViolation;
 
     fn pre_visit_statement(&mut self, statement: &SqlStatement) -> ControlFlow<Self::Break> {
         if matches!(statement, SqlStatement::Query(_)) {
             ControlFlow::Continue(())
         } else {
-            ControlFlow::Break("only SELECT and WITH queries are allowed")
+            ControlFlow::Break(SqlEligibilityViolation::OnlySelect)
         }
     }
 
@@ -4057,15 +4132,61 @@ impl Visitor for ReadOnlySqlVisitor {
         &mut self,
         query: &datafusion::sql::sqlparser::ast::Query,
     ) -> ControlFlow<Self::Break> {
-        // INTO can occur in any set-operation arm. DataFusion may discard it
-        // while planning UNION, so plan restrictions alone are insufficient.
-        // Nested queries/CTEs/subqueries are visited by the AST visitor itself.
+        let violation = if query.fetch.is_some() {
+            Some(SqlEligibilityViolation::Fetch)
+        } else if !query.locks.is_empty() {
+            Some(SqlEligibilityViolation::Locks)
+        } else if query.for_clause.is_some() {
+            Some(SqlEligibilityViolation::ForClause)
+        } else if query.settings.is_some() {
+            Some(SqlEligibilityViolation::QuerySettings)
+        } else if query.format_clause.is_some() {
+            Some(SqlEligibilityViolation::Format)
+        } else if query
+            .order_by
+            .as_ref()
+            .is_some_and(|order_by| order_by.interpolate.is_some())
+        {
+            Some(SqlEligibilityViolation::Interpolate)
+        } else {
+            None
+        };
+        if let Some(violation) = violation {
+            return ControlFlow::Break(violation);
+        }
+
+        // SELECT-level controls can occur in any set-operation arm. DataFusion
+        // may discard some while planning UNION, so plan restrictions alone
+        // are insufficient. Nested queries/CTEs/subqueries are visited by the
+        // AST visitor itself.
         let mut pending = Vec::new();
         let mut body = query.body.as_ref();
         loop {
             match body {
                 SetExpr::Select(select) if select.into.is_some() => {
-                    return ControlFlow::Break("SELECT INTO is not allowed");
+                    return ControlFlow::Break(SqlEligibilityViolation::SelectInto);
+                }
+                SetExpr::Select(select) => {
+                    let violation = if select.prewhere.is_some() {
+                        Some(SqlEligibilityViolation::Prewhere)
+                    } else if select.connect_by.is_some() {
+                        Some(SqlEligibilityViolation::ConnectBy)
+                    } else if select.value_table_mode.is_some() {
+                        Some(SqlEligibilityViolation::ValueTableMode)
+                    } else if select.exclude.is_some() {
+                        Some(SqlEligibilityViolation::SelectExclude)
+                    } else if matches!(
+                        &select.group_by,
+                        GroupByExpr::All(modifiers) | GroupByExpr::Expressions(_, modifiers)
+                            if !modifiers.is_empty()
+                    ) {
+                        Some(SqlEligibilityViolation::GroupModifiers)
+                    } else {
+                        None
+                    };
+                    if let Some(violation) = violation {
+                        return ControlFlow::Break(violation);
+                    }
                 }
                 SetExpr::SetOperation { left, right, .. } => {
                     pending.push(right.as_ref());
@@ -4078,6 +4199,58 @@ impl Visitor for ReadOnlySqlVisitor {
                 Some(next) => body = next,
                 None => return ControlFlow::Continue(()),
             }
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<Self::Break> {
+        let TableFactor::Table {
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+            ..
+        } = table
+        else {
+            return ControlFlow::Continue(());
+        };
+        let violation = if args.as_ref().is_some_and(|args| args.settings.is_some()) {
+            Some(SqlEligibilityViolation::TableFunctionSettings)
+        } else if !with_hints.is_empty() {
+            Some(SqlEligibilityViolation::TableHints)
+        } else if version.is_some() {
+            Some(SqlEligibilityViolation::TableVersion)
+        } else if *with_ordinality {
+            Some(SqlEligibilityViolation::WithOrdinality)
+        } else if !partitions.is_empty() {
+            Some(SqlEligibilityViolation::Partitions)
+        } else if json_path.is_some() {
+            Some(SqlEligibilityViolation::JsonPath)
+        } else if sample.is_some() {
+            Some(SqlEligibilityViolation::TableSample)
+        } else if !index_hints.is_empty() {
+            Some(SqlEligibilityViolation::IndexHints)
+        } else {
+            None
+        };
+        match violation {
+            Some(violation) => ControlFlow::Break(violation),
+            None => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &SqlAstExpr) -> ControlFlow<Self::Break> {
+        if matches!(
+            expr,
+            SqlAstExpr::Function(function)
+                if !matches!(&function.parameters, FunctionArguments::None)
+        ) {
+            ControlFlow::Break(SqlEligibilityViolation::FunctionParameters)
+        } else {
+            ControlFlow::Continue(())
         }
     }
 }
