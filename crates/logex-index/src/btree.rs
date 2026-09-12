@@ -1148,6 +1148,33 @@ mod tests {
     }
 
     #[test]
+    fn buffered_file_roundtrip_preserves_multiple_dense_containers() {
+        let key = 7u32.to_be_bytes();
+        let expected: Vec<u32> = (0..9)
+            .flat_map(|container| (0..5000).map(move |offset| (container << 16) + offset))
+            .collect();
+        let mut index = BTreeIndex::new(key.len());
+        for &row in &expected {
+            index.insert(&key, row);
+        }
+        // Nine dense containers cross the serializer's 64 KiB buffer and leave
+        // a partial final write. Compare complete row IDs, not just cardinality.
+        assert!(index.get(&key).unwrap().serialized_size() > 64 * 1024);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("buffered.bptree");
+        index.write_to_file(&path).unwrap();
+        let reader = BTreeIndexReader::open(&path).unwrap();
+        assert_eq!(
+            reader.get(&key).unwrap().iter().collect::<Vec<_>>(),
+            expected
+        );
+        let point = BTreeIndexReader::get_from_file(&path, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(point.iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
     fn test_btree_large_bitmap() {
         let mut idx = BTreeIndex::new(4);
         let key = [0u8; 4];
