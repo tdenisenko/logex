@@ -126,11 +126,8 @@ impl BTreeIndexReader {
     }
 
     fn open_file(mut file: IndexFile) -> io::Result<Self> {
-        file.seek(SeekFrom::Start(0))?;
-        let mut bytes = [0u8; INDEX_HEADER_LEN];
-        file.read_exact(&mut bytes)?;
-        let header = IndexHeader::parse(&bytes)?;
-        header.validate_geometry(file.logical_len())?;
+        // IndexFile has already bounded logical_len by the opened file's extent.
+        // Read it contiguously, then validate counts before allocating entries.
         let len = usize::try_from(file.logical_len())
             .map_err(|_| invalid_index("index file too large for this platform"))?;
         let mut data = Vec::new();
@@ -139,6 +136,8 @@ impl BTreeIndexReader {
         data.resize(len, 0);
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut data)?;
+        let header = IndexHeader::parse(&data)?;
+        header.validate_geometry(file.logical_len())?;
         let count = usize::try_from(header.entry_count)
             .map_err(|_| invalid_index("too many index entries"))?;
         let mut entries = Vec::new();
@@ -408,6 +407,24 @@ fn take_bytes<'a>(data: &'a [u8], position: &mut usize, len: usize) -> io::Resul
 }
 
 fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
+    // Most index values have one ordinary array/bitmap container. Its fixed
+    // header proves the container count and makes key ordering vacuous; retain
+    // the canonical offset, exact extent, and dependency content validation.
+    const SINGLE_CONTAINER_COOKIE_AND_COUNT: u64 = 12346 | (1 << 32);
+    if let Some(header) = data.get(..16)
+        && u64::from_le_bytes(header[..8].try_into().unwrap()) == SINGLE_CONTAINER_COOKIE_AND_COUNT
+    {
+        let cardinality = usize::from(u16::from_le_bytes(header[10..12].try_into().unwrap())) + 1;
+        let payload_len = if cardinality <= 4096 {
+            cardinality * 2
+        } else {
+            8192
+        };
+        if header[12..16] != 16u32.to_le_bytes() || data.len() != 16 + payload_len {
+            return Err(invalid_index("invalid single Roaring container extent"));
+        }
+        return deserialize_bitmap(data);
+    }
     // Inspect borrowed descriptors and run ranges before the dependency allocates.
     // Its decoder checks array/bitmap contents but ignores serialized offsets and
     // run cardinality, and normalizes unordered/overlapping runs into a set.
@@ -487,6 +504,10 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
     if position != data.len() {
         return Err(invalid_index("trailing bitmap payload bytes"));
     }
+    deserialize_bitmap(data)
+}
+
+fn deserialize_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
     let mut remaining = data;
     let bitmap = RoaringBitmap::deserialize_from(&mut remaining)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -706,6 +727,26 @@ mod tests {
         // Point the container back into the cookie instead of its two-byte data.
         payload[12..16].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_bitmap(&payload).is_err());
+    }
+
+    #[test]
+    fn single_container_fast_path_preserves_array_and_bitmap_content_checks() {
+        let array: RoaringBitmap = [7, 9].into_iter().collect();
+        let mut payload = Vec::new();
+        array.serialize_into(&mut payload).unwrap();
+        assert_eq!(decode_bitmap(&payload).unwrap(), array);
+        payload.copy_within(16..18, 18);
+        assert!(decode_bitmap(&payload).is_err(), "duplicate array values");
+
+        let dense: RoaringBitmap = (0..5000).collect();
+        let mut payload = Vec::new();
+        dense.serialize_into(&mut payload).unwrap();
+        assert_eq!(decode_bitmap(&payload).unwrap(), dense);
+        payload[16] ^= 1;
+        assert!(
+            decode_bitmap(&payload).is_err(),
+            "dense cardinality mismatch"
+        );
     }
 
     #[test]
