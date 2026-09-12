@@ -508,13 +508,12 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
 }
 
 fn deserialize_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
-    let mut remaining = data;
-    let bitmap = RoaringBitmap::deserialize_from(&mut remaining)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if !remaining.is_empty() {
-        return Err(invalid_index("trailing bitmap payload bytes"));
-    }
-    Ok(bitmap)
+    // Both decode_bitmap paths prove exact serialized extent first. Their
+    // cookie/description/offset and run/array/dense byte counts correspond to
+    // roaring 0.10.12's decoder; recheck that correspondence on dependency updates.
+    // Pass the slice by value to preserve the dependency's direct-slice read path.
+    RoaringBitmap::deserialize_from(data)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 #[cfg(test)]
