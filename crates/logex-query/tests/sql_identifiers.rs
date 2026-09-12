@@ -1,5 +1,6 @@
 //! SQL identifier normalization compared with an independent in-memory table.
 use std::sync::Arc;
+use std::time::Instant;
 
 use alloy_primitives::{Address, Bytes, keccak256};
 use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array};
@@ -601,5 +602,121 @@ async fn introspection_uses_the_same_identifier_and_alias_rules() {
                 .is_err(),
             "introspection accepted {sql}"
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "explicit release metadata benchmark with a disposable empty fixture"]
+async fn metadata_latency() {
+    let (_tmp, storage) = fixture(Layout::Raw, false);
+    let cases = vec![
+        (
+            "canonical_tables",
+            "SELECT table_name, table_type \
+             FROM information_schema.tables \
+             WHERE table_schema = 'public' \
+             ORDER BY table_name",
+            vec![json!({"table_name": "logs", "table_type": "BASE TABLE"})],
+            1,
+        ),
+        (
+            "filtered_columns",
+            "SELECT column_name, data_type, is_nullable, ordinal_position \
+             FROM information_schema.columns \
+             WHERE table_name = 'logs' \
+               AND column_name IN ('block_number', 'topic2', 'data') \
+             ORDER BY ordinal_position",
+            vec![
+                json!({
+                    "column_name": "block_number",
+                    "data_type": "bigint",
+                    "is_nullable": "NO",
+                    "ordinal_position": 1,
+                }),
+                json!({
+                    "column_name": "topic2",
+                    "data_type": "text",
+                    "is_nullable": "YES",
+                    "ordinal_position": 10,
+                }),
+                json!({
+                    "column_name": "data",
+                    "data_type": "text",
+                    "is_nullable": "NO",
+                    "ordinal_position": 13,
+                }),
+            ],
+            3,
+        ),
+        (
+            "aliased_columns",
+            "SELECT column_name AS name, ordinal_position AS position \
+             FROM information_schema.columns \
+             WHERE table_name = 'logs' \
+               AND column_name IN ('block_number', 'topic2', 'data') \
+             ORDER BY ordinal_position DESC",
+            vec![
+                json!({"name": "data", "position": 13}),
+                json!({"name": "topic2", "position": 10}),
+                json!({"name": "block_number", "position": 1}),
+            ],
+            3,
+        ),
+    ];
+
+    for (_, sql, expected, total_scanned) in &cases {
+        let result = execute_sql(sql, &storage, storage.head_block())
+            .await
+            .unwrap();
+        assert_eq!(&result.rows, expected);
+        assert_eq!(result.total_scanned, *total_scanned);
+    }
+
+    let fixture_digest = keccak256(
+        serde_json::to_vec(
+            &cases
+                .iter()
+                .map(|(metric, sql, expected, total_scanned)| {
+                    json!({
+                        "metric": metric,
+                        "sql": sql,
+                        "expected": expected,
+                        "total_scanned": total_scanned,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    );
+    println!(
+        "{}",
+        json!({
+            "kind": "config",
+            "fixture_digest": fixture_digest.to_string(),
+            "shapes": cases.len(),
+            "samples_per_shape": 1_000,
+        })
+    );
+
+    for iteration in 0..1_000 {
+        for offset in 0..cases.len() {
+            let (metric, sql, expected, total_scanned) = &cases[(iteration + offset) % cases.len()];
+            let start = Instant::now();
+            let result = execute_sql(sql, &storage, storage.head_block())
+                .await
+                .unwrap();
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1_000.0;
+            assert_eq!(&result.rows, expected);
+            assert_eq!(result.total_scanned, *total_scanned);
+            println!(
+                "{}",
+                json!({
+                    "kind": "sample",
+                    "metric": metric,
+                    "iteration": iteration,
+                    "elapsed_ms": elapsed_ms,
+                })
+            );
+        }
     }
 }
