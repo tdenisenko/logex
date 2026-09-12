@@ -10,6 +10,7 @@ const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 48;
 const PAGE_BYTES: usize = 4096;
 const CHECKSUM_BYTES: u64 = 4;
+const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -265,7 +266,9 @@ pub(crate) fn write_index_file(
         .map_err(io::Error::other)?;
     let mut file_id = [0; 16];
     getrandom::fill(&mut file_id).map_err(|error| io::Error::other(error.to_string()))?;
-    let mut output = BufWriter::new(File::create(path)?);
+    // Keep the format header, table fragments and several bitmap pages in the
+    // same bounded write buffer; tiny metadata writes must not split every page.
+    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, File::create(path)?);
     let mut header = [0; HEADER_BYTES];
     header[..8].copy_from_slice(MAGIC);
     header[8..12].copy_from_slice(&VERSION.to_le_bytes());

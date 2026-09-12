@@ -137,5 +137,26 @@ parser helpers and checksum work on the candidate range path.
 The third candidate changes only writer buffering: accumulate small serialized
 writes per page, retain contiguous bulk writes, handle explicit flush prefixes,
 and make a failed writer unusable. Finite mixed/flush/write-error fixtures bring
-the focused total to 60 passing tests; focused Clippy passes. Its separate fixed
-comparison is pending.
+the focused total to 60 passing tests; focused Clippy passes. Its fixed comparison
+(`bed0ee6e`, `logex-index-integrity-release-3`) retains 5,952 timings and 32 RSS
+observations. Typical B-tree write median falls from +59.14% to +22.30% relative
+to baseline; the many-key write median is -6.77%. Small and large-payload writes
+remain +30.70%/+43.79%, typical/many-key ranges +17.25%/+15.89%, and several bloom
+paths still exceed 10%. This candidate is not accepted.
+
+The fourth candidate (`854a68c7`, `logex-index-integrity-release-4`) passes the
+same 60 focused tests. Complete bitmap preflight already establishes exact
+consumption, so the dependency now decodes the borrowed slice directly, avoiding
+the redundant mutable-slice remainder path. Review checked preflight and decoder
+extent agreement for empty, array, dense and run containers. Another 5,952
+timings/32 RSS show typical/many-key range medians +9.84%/+7.26%, while small
+ranges remain +14.95%. Typical/large-payload writes remain +27.66%/+37.02%; bloom
+lookup medians remain +11.78–23.67%. All observations, including variable small
+workload tails, are retained. This candidate is also not accepted.
+
+The next isolated experiment increases the physical output buffer from 8 KiB to
+64 KiB. Inspection of pinned Roaring serialization shows that dense containers
+emit 1,024 scalar eight-byte writes; the page writer combines those into 4 KiB
+writes. The larger sink can reduce physical flushes. It does not remove scalar
+dispatch costs, which will require a separate measured change if still relevant.
+All ten file-container tests pass with the larger sink.
