@@ -451,11 +451,19 @@ pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
 pub(crate) fn zstd_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
     let mut decoder = zstd::bulk::Decompressor::new()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let capacity = zstd::bulk::Decompressor::upper_bound(data)
+        .unwrap_or(limit)
+        .min(limit);
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(io::Error::other)?;
     // Decompression writes directly into a bounded output allocation. In
     // contrast to streaming, its history uses that same output buffer.
     decoder
-        .decompress(data, limit)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .decompress_to_buffer(data, &mut output)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(output)
 }
 
 pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
@@ -791,6 +799,25 @@ mod tests {
         let encoded = delta_of_delta_encode(&values);
         let decoded = delta_of_delta_decode(&encoded, values.len()).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn bounded_zstd_reports_impossible_buffer_capacity_without_panicking() {
+        let encoded = zstd_compress(b"record data").unwrap();
+        // This exceeds Vec's address-space limit, so reservation must fail
+        // immediately; the test never attempts to fill a large allocation.
+        let result = std::panic::catch_unwind(|| zstd_decompress_bounded(&encoded, usize::MAX));
+        assert!(result.is_ok(), "buffer capacity error panicked");
+        assert!(result.unwrap().is_err());
+        assert_eq!(
+            zstd_decompress_bounded(&encoded, 11).unwrap(),
+            b"record data"
+        );
+        assert!(
+            zstd_decompress_bounded(&zstd_compress(&[]).unwrap(), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
