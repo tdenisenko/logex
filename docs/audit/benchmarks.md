@@ -265,3 +265,15 @@ revision. Every successful response matches exact expected values. This measures
 handler/query/serialization work, excluding network transport and live peers;
 it does not establish production ingestion throughput. All six workspace gates,
 the release query suite and protocol-consistency checks pass separately.
+
+The separate metadata coverage uses `metadata_latency` in the same identifier
+fixture: three exact-result shapes, 1,000 rotating samples each and five
+alternating process pairs. The metadata investigation record links the complete
+gzip-compressed JSONL streams and their original hashes. Decompress with a
+standard gzip reader before reading their embedded fixture/runner or samples;
+the bytes match the original logs exactly. Its confirmation runner verifies and
+reuses the same two binaries, begins candidate-first and pools every original
+sample with five additional pairs. Initial, confirmation and pooled results
+remain separate, including the initial candidate tail outlier and retained
++6.30% pooled table-metadata p95. The observation was investigated and remains
+below the 10% ceiling; it is not silently removed or described as a speedup.

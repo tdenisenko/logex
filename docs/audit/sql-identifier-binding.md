@@ -3,7 +3,9 @@
 Base: `f45f2640` (merged PR #141). Implementation `b81a9bb2` corrects native
 query and introspection name resolution against the pinned DataFusion 51
 planner. All six local gates, focused validation, direct review and paired performance
-acceptance pass. PR, exact-head CI and merge remain in progress.
+acceptance pass. PR #142 is open. The main REST comparison and additional metadata investigation
+pass acceptance. Final validation of the added fixture also passes; exact-head
+CI and merge remain.
 
 ## Confirmed findings
 
@@ -122,6 +124,64 @@ All fixtures are disposable local data. No production ingestion write, storage
 format, dependency or toolchain changes are included. Synthetic warm handler
 latency does not establish live-peer or whole-node ingestion throughput.
 
+## Additional metadata performance coverage
+
+Direct review identified a measurement gap before merge: the ordinary REST
+fixture does not exercise the metadata path changed here. Commit `46d068ea`
+adds an ignored, bounded metadata benchmark with three ordinary shapes and
+hardcoded independent expected rows. It does not change production code or the
+six existing regressions. Each process creates one disposable empty directory,
+performs one warmup per shape, and rotates 1,000 calls per shape. Expected values
+are checked outside the timing interval after every call.
+
+The [metadata investigation record](baselines/2026-09-12-sql-identifiers-metadata.json)
+links the full compressed initial and confirmation streams, exact decompressed
+hashes, all process counters and the debug smoke log. The gzip files round-trip
+to the original bytes; compression excludes no observation. Environments,
+complete fixture/runner source, exact commits, fresh build provenance and binary
+hashes are embedded in the streams.
+
+The initial five alternating pairs have improved medians (-1.41%/-1.64%/-1.84%)
+but p95 increases of +11.56%/+10.45%/+9.59%. That run was not accepted alone.
+Per-process review isolates most of the increase to the first candidate process,
+whose three p95 increases are +61.43%/+43.65%/+43.66%. The other four pairs range
+from -6.21% to +5.45%. All samples remain retained. Initial baseline/candidate
+wall times are 2.80/1.49 seconds, versus about 0.18 seconds subsequently; CPU
+user time stays around 0.14–0.16 seconds, with similar instruction/cycle counts.
+Those observations do not establish a specific operating-system cause.
+
+A confirmation uses the same immutable binaries after verifying their hashes,
+with five further alternating pairs beginning candidate-first. Commands, warmup,
+fixture and sampling remain identical. There is no concurrent local build or
+test during either measurement. The large increase is not reproduced:
+confirmation query medians increase at most 0.43% and p95 at most 1.00%.
+The pooled result includes every original and confirmation observation, including
+the initial outlier: 60,000 latency samples and 20 process-memory measurements.
+
+| Shape | Confirmation median | Confirmation p95 | Pooled median | Pooled p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Table metadata | +0.43% | +0.12% | +0.00% | +6.30% |
+| Filtered column metadata | +0.15% | +0.91% | -0.08% | +4.67% |
+| Aliased column metadata | +0.00% | +1.00% | -0.31% | +4.40% |
+| Peak process RSS | -0.23% | -0.23% | -0.23% | -0.22% |
+
+The retained pooled table-metadata p95 increase is +6.30%, or 2.167 microseconds.
+It exceeds the 5% investigation threshold and remains explicit after the
+per-process and confirmation investigation. All pooled changes remain below
+the 10% ceiling. No samples are discarded and no speedup is claimed. Larger
+integrated workloads remain required; these short warm metadata calls are not
+an ingestion benchmark. [Final workspace validation](baselines/2026-09-12-sql-identifiers-validation-final.json)
+on `46d068ea` passes all six required gates: 1,011 workspace tests, 17 ignored,
+documentation tests, formatting, strict Clippy, workspace check and release node
+build. The additional release query suite passes 116 tests with six ignored,
+and both release protocol-consistency tests pass. The only added ignore is this
+explicitly executed metadata benchmark. All 99 source/config hashes are verified;
+production source is unchanged from the main REST measurements.
+
+The [initial CI record](baselines/2026-09-12-sql-identifiers-ci-initial.json)
+confirms all six jobs passed on evidence head `e36d2147`, run `34700622826`.
+Updated exact-head CI is required after the benchmark/evidence addition.
+
 ## Cleanup and remaining work
 
 Removed raw alias output, case-insensitive field/alias lookup, flattened name
@@ -133,5 +193,4 @@ unused dependency was added.
 Explicit group-key ordering for exact aggregates was already unsupported and
 remains a separate capability question. Mixed aggregate output types, broader
 query resource handling, metadata NULL semantics and legacy text rewriting
-remain open offline audit items. PR, exact-head CI and merge remain for this
-milestone. Actual live sync and staging follow offline completion.
+remain open offline audit items. Exact-head CI and merge remain for PR #142. Actual live sync and staging follow offline completion.
