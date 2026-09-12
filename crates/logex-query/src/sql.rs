@@ -3030,10 +3030,95 @@ struct IntrospectionRow {
 }
 
 impl IntrospectionRow {
+    fn column_index(&self, column: &str) -> Option<usize> {
+        self.values.iter().position(|(name, _)| *name == column)
+    }
+
     fn get(&self, column: &str) -> Option<&Value> {
-        self.values
-            .iter()
-            .find_map(|(name, value)| (*name == column).then_some(value))
+        self.column_index(column)
+            .and_then(|index| self.value(index))
+    }
+
+    fn value(&self, column_index: usize) -> Option<&Value> {
+        self.values.get(column_index).map(|(_, value)| value)
+    }
+
+    fn scalar_type(&self, column_index: usize) -> Option<IntrospectionScalarType> {
+        let (column, value) = self.values.get(column_index)?;
+        match value {
+            Value::String(_) => Some(IntrospectionScalarType::String),
+            Value::Number(value) if value.as_u64().is_some() => {
+                Some(IntrospectionScalarType::UInt64)
+            }
+            // column_default is public nullable text and currently has no
+            // non-NULL values from which to recover its logical type.
+            Value::Null if *column == "column_default" => Some(IntrospectionScalarType::String),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntrospectionScalarType {
+    String,
+    UInt64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntrospectionTruth {
+    False,
+    True,
+    Unknown,
+}
+
+enum IntrospectionPredicate {
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+    Comparison {
+        column_index: usize,
+        literal: Value,
+        scalar_type: IntrospectionScalarType,
+        operator: SqlBinaryOperator,
+        reversed: bool,
+    },
+    Between {
+        column_index: usize,
+        low: Value,
+        high: Value,
+        scalar_type: IntrospectionScalarType,
+        negated: bool,
+    },
+    InList {
+        column_index: usize,
+        literals: Vec<Value>,
+        scalar_type: IntrospectionScalarType,
+        negated: bool,
+    },
+}
+
+impl IntrospectionTruth {
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn not(self) -> Self {
+        match self {
+            Self::False => Self::True,
+            Self::True => Self::False,
+            Self::Unknown => Self::Unknown,
+        }
     }
 }
 
@@ -3107,9 +3192,10 @@ fn try_execute_introspection(
     let projection = introspection_projection_columns(&schema, &select.projection)?;
     if let Some(selection) = &select.selection {
         validate_introspection_predicate_columns(&schema, selection)?;
+        let predicate = prepare_introspection_predicate(&schema, selection)?;
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows {
-            if eval_introspection_predicate(&row, selection)? {
+            if eval_introspection_predicate(&row, &predicate)? == IntrospectionTruth::True {
                 filtered.push(row);
             }
         }
@@ -3272,89 +3358,207 @@ impl Visitor for IntrospectionIdentifierVisitor<'_> {
     }
 }
 
-fn eval_introspection_predicate(
-    row: &IntrospectionRow,
+fn prepare_introspection_predicate(
+    schema: &IntrospectionRow,
     expr: &SqlAstExpr,
-) -> Result<bool, SqlQueryError> {
+) -> Result<IntrospectionPredicate, SqlQueryError> {
     match expr {
-        SqlAstExpr::Nested(expr) => eval_introspection_predicate(row, expr),
-        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::And => {
-            Ok(eval_introspection_predicate(row, left)?
-                && eval_introspection_predicate(row, right)?)
+        SqlAstExpr::Nested(expr) => prepare_introspection_predicate(schema, expr),
+        SqlAstExpr::BinaryOp { left, op, right }
+            if matches!(op, SqlBinaryOperator::And | SqlBinaryOperator::Or) =>
+        {
+            let left = Box::new(prepare_introspection_predicate(schema, left)?);
+            let right = Box::new(prepare_introspection_predicate(schema, right)?);
+            Ok(if *op == SqlBinaryOperator::And {
+                IntrospectionPredicate::And(left, right)
+            } else {
+                IntrospectionPredicate::Or(left, right)
+            })
         }
-        SqlAstExpr::BinaryOp { left, op, right } if *op == SqlBinaryOperator::Or => {
-            Ok(eval_introspection_predicate(row, left)?
-                || eval_introspection_predicate(row, right)?)
-        }
-        SqlAstExpr::BinaryOp { left, op, right } => {
+        SqlAstExpr::BinaryOp { left, op, right } if is_introspection_comparison_operator(op) => {
             let Some((column, literal, reversed)) = normalize_unqualified_sql_binary(left, right)
             else {
                 return unsupported_introspection_predicate(expr);
             };
-            let Some(cell) = row.get(&column) else {
-                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                    "unsupported information_schema column: {column}"
-                ))));
-            };
+            let column_index = introspection_column_index(schema, &column)?;
             let Some(literal) = introspection_literal(literal) else {
                 return unsupported_introspection_predicate(expr);
             };
-            Ok(compare_introspection_values(
-                cell,
-                &literal,
-                op.clone(),
+            let scalar_type = introspection_comparison_type(schema, column_index, [&literal])?;
+            Ok(IntrospectionPredicate::Comparison {
+                column_index,
+                literal,
+                scalar_type,
+                operator: op.clone(),
                 reversed,
-            ))
+            })
         }
         SqlAstExpr::Between {
-            expr,
+            expr: value,
             negated,
             low,
             high,
         } => {
-            let Some(column) = sql_unqualified_identifier(expr) else {
+            let Some(column) = sql_unqualified_identifier(value) else {
                 return unsupported_introspection_predicate(expr);
             };
-            let Some(cell) = row.get(&column) else {
-                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                    "unsupported information_schema column: {column}"
-                ))));
-            };
+            let column_index = introspection_column_index(schema, &column)?;
             let (Some(low), Some(high)) = (introspection_literal(low), introspection_literal(high))
             else {
                 return unsupported_introspection_predicate(expr);
             };
-            let matches = compare_introspection_values(cell, &low, SqlBinaryOperator::GtEq, false)
-                && compare_introspection_values(cell, &high, SqlBinaryOperator::LtEq, false);
-            Ok(if *negated { !matches } else { matches })
+            let scalar_type = introspection_comparison_type(schema, column_index, [&low, &high])?;
+            Ok(IntrospectionPredicate::Between {
+                column_index,
+                low,
+                high,
+                scalar_type,
+                negated: *negated,
+            })
         }
         SqlAstExpr::InList {
-            expr,
+            expr: value,
             list,
             negated,
         } => {
-            let Some(column) = sql_unqualified_identifier(expr) else {
+            let Some(column) = sql_unqualified_identifier(value) else {
                 return unsupported_introspection_predicate(expr);
             };
-            let Some(cell) = row.get(&column) else {
-                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
-                    "unsupported information_schema column: {column}"
-                ))));
+            let column_index = introspection_column_index(schema, &column)?;
+            let Some(literals) = list
+                .iter()
+                .map(introspection_literal)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return unsupported_introspection_predicate(expr);
             };
-            let mut matches = false;
-            for item in list {
-                let Some(literal) = introspection_literal(item) else {
-                    return unsupported_introspection_predicate(expr);
-                };
-                if compare_introspection_values(cell, &literal, SqlBinaryOperator::Eq, false) {
-                    matches = true;
-                    break;
-                }
-            }
-            Ok(if *negated { !matches } else { matches })
+            let scalar_type = introspection_comparison_type(schema, column_index, literals.iter())?;
+            Ok(IntrospectionPredicate::InList {
+                column_index,
+                literals,
+                scalar_type,
+                negated: *negated,
+            })
         }
         _ => unsupported_introspection_predicate(expr),
     }
+}
+
+fn introspection_column_index(
+    schema: &IntrospectionRow,
+    column: &str,
+) -> Result<usize, SqlQueryError> {
+    schema.column_index(column).ok_or_else(|| {
+        SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+            "unsupported information_schema column: {column}"
+        )))
+    })
+}
+
+fn is_introspection_comparison_operator(operator: &SqlBinaryOperator) -> bool {
+    matches!(
+        operator,
+        SqlBinaryOperator::Eq
+            | SqlBinaryOperator::NotEq
+            | SqlBinaryOperator::Gt
+            | SqlBinaryOperator::GtEq
+            | SqlBinaryOperator::Lt
+            | SqlBinaryOperator::LtEq
+    )
+}
+
+fn eval_introspection_predicate(
+    row: &IntrospectionRow,
+    predicate: &IntrospectionPredicate,
+) -> Result<IntrospectionTruth, SqlQueryError> {
+    match predicate {
+        IntrospectionPredicate::And(left, right) => {
+            let left = eval_introspection_predicate(row, left)?;
+            if left == IntrospectionTruth::False {
+                Ok(IntrospectionTruth::False)
+            } else {
+                Ok(left.and(eval_introspection_predicate(row, right)?))
+            }
+        }
+        IntrospectionPredicate::Or(left, right) => {
+            let left = eval_introspection_predicate(row, left)?;
+            if left == IntrospectionTruth::True {
+                Ok(IntrospectionTruth::True)
+            } else {
+                Ok(left.or(eval_introspection_predicate(row, right)?))
+            }
+        }
+        IntrospectionPredicate::Comparison {
+            column_index,
+            literal,
+            scalar_type,
+            operator,
+            reversed,
+        } => compare_introspection_values(
+            introspection_prepared_value(row, *column_index)?,
+            literal,
+            *scalar_type,
+            operator,
+            *reversed,
+        ),
+        IntrospectionPredicate::Between {
+            column_index,
+            low,
+            high,
+            scalar_type,
+            negated,
+        } => {
+            let cell = introspection_prepared_value(row, *column_index)?;
+            let matches = compare_introspection_values(
+                cell,
+                low,
+                *scalar_type,
+                &SqlBinaryOperator::GtEq,
+                false,
+            )?
+            .and(compare_introspection_values(
+                cell,
+                high,
+                *scalar_type,
+                &SqlBinaryOperator::LtEq,
+                false,
+            )?);
+            Ok(if *negated { matches.not() } else { matches })
+        }
+        IntrospectionPredicate::InList {
+            column_index,
+            literals,
+            scalar_type,
+            negated,
+        } => {
+            let cell = introspection_prepared_value(row, *column_index)?;
+            let mut matches = IntrospectionTruth::False;
+            for literal in literals {
+                matches = matches.or(compare_introspection_values(
+                    cell,
+                    literal,
+                    *scalar_type,
+                    &SqlBinaryOperator::Eq,
+                    false,
+                )?);
+                if matches == IntrospectionTruth::True {
+                    break;
+                }
+            }
+            Ok(if *negated { matches.not() } else { matches })
+        }
+    }
+}
+
+fn introspection_prepared_value(
+    row: &IntrospectionRow,
+    column_index: usize,
+) -> Result<&Value, SqlQueryError> {
+    row.value(column_index).ok_or_else(|| {
+        SqlQueryError::DataFusion(DataFusionError::Internal(format!(
+            "information_schema row lacks prepared column index {column_index}"
+        )))
+    })
 }
 
 fn unsupported_introspection_predicate<T>(expr: &SqlAstExpr) -> Result<T, SqlQueryError> {
@@ -3379,28 +3583,98 @@ fn introspection_literal(expr: &SqlAstExpr) -> Option<Value> {
     }
 }
 
+fn introspection_comparison_type<'a>(
+    schema: &IntrospectionRow,
+    column_index: usize,
+    literals: impl IntoIterator<Item = &'a Value>,
+) -> Result<IntrospectionScalarType, SqlQueryError> {
+    let mut scalar_type = schema.scalar_type(column_index).ok_or_else(|| {
+        SqlQueryError::DataFusion(DataFusionError::Internal(format!(
+            "information_schema column index {column_index} lacks a scalar type"
+        )))
+    })?;
+    for literal in literals {
+        match literal {
+            Value::String(_) => scalar_type = IntrospectionScalarType::String,
+            Value::Number(value) if value.as_u64().is_some() => {}
+            Value::Null => {}
+            _ => {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                    "incompatible information_schema comparison value: {literal}"
+                ))));
+            }
+        }
+    }
+    Ok(scalar_type)
+}
+
 fn compare_introspection_values(
     left: &Value,
     right: &Value,
-    operator: SqlBinaryOperator,
+    scalar_type: IntrospectionScalarType,
+    operator: &SqlBinaryOperator,
     reversed: bool,
-) -> bool {
+) -> Result<IntrospectionTruth, SqlQueryError> {
     if reversed {
-        return compare_introspection_values(right, left, operator, false);
+        return compare_introspection_values(right, left, scalar_type, operator, false);
     }
-    let ordering = compare_json_scalars(left, right);
-    match operator {
-        SqlBinaryOperator::Eq => ordering == Some(CmpOrdering::Equal),
-        SqlBinaryOperator::NotEq => ordering != Some(CmpOrdering::Equal),
-        SqlBinaryOperator::Gt => ordering == Some(CmpOrdering::Greater),
+    if left.is_null() || right.is_null() {
+        return Ok(IntrospectionTruth::Unknown);
+    }
+    let ordering = compare_introspection_scalars(left, right, scalar_type).ok_or_else(|| {
+        SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+            "incompatible information_schema comparison: {left} {operator} {right}"
+        )))
+    })?;
+    let value = match operator {
+        SqlBinaryOperator::Eq => ordering == CmpOrdering::Equal,
+        SqlBinaryOperator::NotEq => ordering != CmpOrdering::Equal,
+        SqlBinaryOperator::Gt => ordering == CmpOrdering::Greater,
         SqlBinaryOperator::GtEq => {
-            matches!(ordering, Some(CmpOrdering::Greater | CmpOrdering::Equal))
+            matches!(ordering, CmpOrdering::Greater | CmpOrdering::Equal)
         }
-        SqlBinaryOperator::Lt => ordering == Some(CmpOrdering::Less),
+        SqlBinaryOperator::Lt => ordering == CmpOrdering::Less,
         SqlBinaryOperator::LtEq => {
-            matches!(ordering, Some(CmpOrdering::Less | CmpOrdering::Equal))
+            matches!(ordering, CmpOrdering::Less | CmpOrdering::Equal)
         }
-        _ => false,
+        _ => return unsupported_introspection_predicate_comparison(operator),
+    };
+    Ok(if value {
+        IntrospectionTruth::True
+    } else {
+        IntrospectionTruth::False
+    })
+}
+
+fn unsupported_introspection_predicate_comparison<T>(
+    operator: &SqlBinaryOperator,
+) -> Result<T, SqlQueryError> {
+    Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+        "unsupported information_schema comparison operator: {operator}"
+    ))))
+}
+
+fn compare_introspection_scalars(
+    left: &Value,
+    right: &Value,
+    scalar_type: IntrospectionScalarType,
+) -> Option<CmpOrdering> {
+    match scalar_type {
+        IntrospectionScalarType::String => match (left, right) {
+            (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+            (Value::Number(left), Value::String(right)) => Some(left.to_string().cmp(right)),
+            (Value::String(left), Value::Number(right)) => Some(left.cmp(&right.to_string())),
+            (Value::Number(left), Value::Number(right)) => {
+                Some(left.to_string().cmp(&right.to_string()))
+            }
+            _ => None,
+        },
+        IntrospectionScalarType::UInt64 => match (left, right) {
+            (Value::Number(left), Value::Number(right)) => {
+                left.as_u64()?.partial_cmp(&right.as_u64()?)
+            }
+            _ => None,
+        },
     }
 }
 
