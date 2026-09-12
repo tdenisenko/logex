@@ -2544,7 +2544,7 @@ fn apply_sql_ast_filter(
                 "address" => {
                     let mut addresses = Vec::with_capacity(list.len());
                     for item in list {
-                        let Some(address) = sql_string(item).and_then(parse_address) else {
+                        let Some(address) = sql_string(item).and_then(parse_sql_address) else {
                             return Ok(false);
                         };
                         addresses.push(address);
@@ -2556,7 +2556,7 @@ fn apply_sql_ast_filter(
                     let index = topic_column_index(column).unwrap();
                     let mut topics = Vec::with_capacity(list.len());
                     for item in list {
-                        let Some(topic) = sql_string(item).and_then(parse_b256) else {
+                        let Some(topic) = sql_string(item).and_then(parse_sql_b256) else {
                             return Ok(false);
                         };
                         topics.push(topic);
@@ -2589,25 +2589,31 @@ fn apply_sql_binary_filter(
             let Some(value) = sql_u64(literal) else {
                 return Ok(false);
             };
-            apply_block_number_constraint(filter, sql_binary_operator(operator), value, reversed);
+            let Some(operator) = sql_binary_operator(operator) else {
+                return Ok(false);
+            };
+            apply_block_number_constraint(filter, operator, value, reversed);
             Ok(true)
         }
         "timestamp" => {
             let Some(value) = sql_u64(literal) else {
                 return Ok(false);
             };
-            apply_timestamp_constraint(filter, sql_binary_operator(operator), value, reversed);
+            let Some(operator) = sql_binary_operator(operator) else {
+                return Ok(false);
+            };
+            apply_timestamp_constraint(filter, operator, value, reversed);
             Ok(true)
         }
         "data_len" if !reversed && operator == SqlBinaryOperator::Eq => {
             let Some(value) = sql_u64(literal) else {
                 return Ok(false);
             };
-            filter.data_len = Some(value.min(u32::MAX as u64) as u32);
+            apply_data_len_constraint(filter, value);
             Ok(true)
         }
         "data" if !reversed => {
-            let Some(value) = sql_string(literal).and_then(parse_hex_bytes) else {
+            let Some(value) = sql_string(literal).and_then(parse_sql_hex_bytes) else {
                 return Ok(false);
             };
             match operator {
@@ -2620,14 +2626,14 @@ fn apply_sql_binary_filter(
             Ok(true)
         }
         "block_hash" if !reversed && operator == SqlBinaryOperator::Eq => {
-            let Some(block_hash) = sql_string(literal).and_then(parse_b256) else {
+            let Some(block_hash) = sql_string(literal).and_then(parse_sql_b256) else {
                 return Ok(false);
             };
-            filter.block_hash = Some(block_hash);
+            apply_block_hash_constraint(filter, block_hash);
             Ok(true)
         }
         "address" if !reversed && operator == SqlBinaryOperator::Eq => {
-            let Some(address) = sql_string(literal).and_then(parse_address) else {
+            let Some(address) = sql_string(literal).and_then(parse_sql_address) else {
                 return Ok(false);
             };
             merge_addresses(filter, vec![address]);
@@ -2638,7 +2644,7 @@ fn apply_sql_binary_filter(
                 && operator == SqlBinaryOperator::Eq
                 && topic_column_index(column).is_some() =>
         {
-            let Some(topic) = sql_string(literal).and_then(parse_b256) else {
+            let Some(topic) = sql_string(literal).and_then(parse_sql_b256) else {
                 return Ok(false);
             };
             let index = topic_column_index(column).unwrap();
@@ -2662,15 +2668,22 @@ fn normalize_sql_binary<'a>(
     None
 }
 
-fn sql_binary_operator(operator: SqlBinaryOperator) -> Operator {
-    match operator {
+fn sql_binary_operator(operator: SqlBinaryOperator) -> Option<Operator> {
+    Some(match operator {
         SqlBinaryOperator::Eq => Operator::Eq,
         SqlBinaryOperator::Gt => Operator::Gt,
         SqlBinaryOperator::GtEq => Operator::GtEq,
         SqlBinaryOperator::Lt => Operator::Lt,
         SqlBinaryOperator::LtEq => Operator::LtEq,
-        _ => Operator::Eq,
-    }
+        _ => return None,
+    })
+}
+
+fn supports_numeric_operator(operator: Operator) -> bool {
+    matches!(
+        operator,
+        Operator::Eq | Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq
+    )
 }
 
 fn sql_identifier(expr: &SqlAstExpr) -> Option<String> {
@@ -3592,8 +3605,9 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
     };
 
     match column.as_str() {
-        "block_number" => numeric_scalar(literal).is_some(),
-        "timestamp" => numeric_scalar(literal).is_some(),
+        "block_number" | "timestamp" => {
+            supports_numeric_operator(binary.op) && numeric_scalar(literal).is_some()
+        }
         "data_len" if !reversed => {
             matches!(binary.op, Operator::Eq) && numeric_scalar(literal).is_some()
         }
@@ -3699,7 +3713,7 @@ fn apply_binary_pushdown(
         "data_len" if !reversed && binary.op == Operator::Eq => {
             let value = numeric_scalar(literal)
                 .ok_or_else(|| DataFusionError::Plan("invalid data_len literal".to_owned()))?;
-            filter.data_len = Some(value.min(u32::MAX as u64) as u32);
+            apply_data_len_constraint(filter, value);
         }
         "data" if !reversed => {
             let value = parse_bytes_scalar(literal)
@@ -3707,10 +3721,9 @@ fn apply_binary_pushdown(
             apply_data_constraint(filter, binary.op, value);
         }
         "block_hash" if !reversed && binary.op == Operator::Eq => {
-            filter.block_hash =
-                Some(parse_b256_scalar(literal).ok_or_else(|| {
-                    DataFusionError::Plan("invalid block_hash literal".to_owned())
-                })?);
+            let block_hash = parse_b256_scalar(literal)
+                .ok_or_else(|| DataFusionError::Plan("invalid block_hash literal".to_owned()))?;
+            apply_block_hash_constraint(filter, block_hash);
         }
         "address" if !reversed && binary.op == Operator::Eq => {
             merge_addresses(
@@ -3860,7 +3873,10 @@ fn apply_block_number_constraint(
             );
         }
         (Operator::Gt, false) | (Operator::Lt, true) => {
-            let bound = value.saturating_add(1);
+            let Some(bound) = value.checked_add(1) else {
+                mark_filter_empty(filter);
+                return;
+            };
             filter.from_block = Some(
                 filter
                     .from_block
@@ -3877,7 +3893,10 @@ fn apply_block_number_constraint(
             );
         }
         (Operator::Lt, false) | (Operator::Gt, true) => {
-            let bound = value.saturating_sub(1);
+            let Some(bound) = value.checked_sub(1) else {
+                mark_filter_empty(filter);
+                return;
+            };
             filter.to_block = Some(
                 filter
                     .to_block
@@ -3919,7 +3938,10 @@ fn apply_timestamp_constraint(
             );
         }
         (Operator::Gt, false) | (Operator::Lt, true) => {
-            let bound = value.saturating_add(1);
+            let Some(bound) = value.checked_add(1) else {
+                mark_filter_empty(filter);
+                return;
+            };
             filter.from_timestamp = Some(
                 filter
                     .from_timestamp
@@ -3936,7 +3958,10 @@ fn apply_timestamp_constraint(
             );
         }
         (Operator::Lt, false) | (Operator::Gt, true) => {
-            let bound = value.saturating_sub(1);
+            let Some(bound) = value.checked_sub(1) else {
+                mark_filter_empty(filter);
+                return;
+            };
             filter.to_timestamp = Some(
                 filter
                     .to_timestamp
@@ -3987,11 +4012,42 @@ fn apply_data_constraint(filter: &mut NativeLogFilter, operator: Operator, value
     }
 }
 
+// An inverted inclusive interval represents the empty intersection without
+// conflating it with an absent address constraint. Later intersections cannot
+// make it nonempty again.
+fn mark_filter_empty(filter: &mut NativeLogFilter) {
+    filter.from_block = Some(1);
+    filter.to_block = Some(0);
+}
+
+fn apply_data_len_constraint(filter: &mut NativeLogFilter, value: u64) {
+    let Ok(value) = u32::try_from(value) else {
+        mark_filter_empty(filter);
+        return;
+    };
+    if filter.data_len.is_some_and(|current| current != value) {
+        mark_filter_empty(filter);
+    } else {
+        filter.data_len = Some(value);
+    }
+}
+
+fn apply_block_hash_constraint(filter: &mut NativeLogFilter, value: B256) {
+    if filter.block_hash.is_some_and(|current| current != value) {
+        mark_filter_empty(filter);
+    } else {
+        filter.block_hash = Some(value);
+    }
+}
+
 fn merge_addresses(filter: &mut NativeLogFilter, next: Vec<Address>) {
     if filter.addresses.is_empty() {
         filter.addresses = next;
     } else {
         filter.addresses.retain(|address| next.contains(address));
+    }
+    if filter.addresses.is_empty() {
+        mark_filter_empty(filter);
     }
 }
 
@@ -4080,7 +4136,7 @@ fn parse_address_scalar(value: &ScalarValue) -> Option<Address> {
     match value {
         ScalarValue::Utf8(Some(value))
         | ScalarValue::Utf8View(Some(value))
-        | ScalarValue::LargeUtf8(Some(value)) => parse_address(value.trim()),
+        | ScalarValue::LargeUtf8(Some(value)) => parse_sql_address(value),
         _ => None,
     }
 }
@@ -4089,7 +4145,7 @@ fn parse_b256_scalar(value: &ScalarValue) -> Option<B256> {
     match value {
         ScalarValue::Utf8(Some(value))
         | ScalarValue::Utf8View(Some(value))
-        | ScalarValue::LargeUtf8(Some(value)) => parse_b256(value.trim()),
+        | ScalarValue::LargeUtf8(Some(value)) => parse_sql_b256(value),
         _ => None,
     }
 }
@@ -4098,9 +4154,30 @@ fn parse_bytes_scalar(value: &ScalarValue) -> Option<Vec<u8>> {
     match value {
         ScalarValue::Utf8(Some(value))
         | ScalarValue::Utf8View(Some(value))
-        | ScalarValue::LargeUtf8(Some(value)) => parse_hex_bytes(value.trim()),
+        | ScalarValue::LargeUtf8(Some(value)) => parse_sql_hex_bytes(value),
         _ => None,
     }
+}
+
+// The log columns are canonical lowercase, 0x-prefixed SQL strings. Byte
+// comparisons are exact only for literals with that same representation.
+// Other strings must keep their SQL comparison in the general engine.
+fn parse_sql_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    let hex = value.strip_prefix("0x")?;
+    if hex.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    hex::decode(hex).ok()
+}
+
+fn parse_sql_address(value: &str) -> Option<Address> {
+    let bytes = parse_sql_hex_bytes(value)?;
+    (bytes.len() == 20).then(|| Address::from_slice(&bytes))
+}
+
+fn parse_sql_b256(value: &str) -> Option<B256> {
+    let bytes = parse_sql_hex_bytes(value)?;
+    (bytes.len() == 32).then(|| B256::from_slice(&bytes))
 }
 
 fn parse_address(value: &str) -> Option<Address> {

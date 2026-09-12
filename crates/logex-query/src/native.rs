@@ -167,6 +167,17 @@ pub(crate) fn ordered_page_is_complete(
 }
 
 pub fn partition_matches_filter(meta: &PartitionMeta, filter: &NativeLogFilter) -> bool {
+    if filter
+        .from_block
+        .zip(filter.to_block)
+        .is_some_and(|(from, to)| from > to)
+        || filter
+            .from_timestamp
+            .zip(filter.to_timestamp)
+            .is_some_and(|(from, to)| from > to)
+    {
+        return false;
+    }
     if let Some(block_hash) = filter.block_hash {
         return meta.row_count > 0
             && (meta.min_block <= meta.max_block || block_hash != B256::ZERO);
@@ -474,14 +485,8 @@ fn build_candidate_bitmap(
             let composite_path = index_dir.join("address_topic0_block.bptree");
             if composite_path.exists() {
                 let reader = BTreeIndexReader::open(&composite_path)?;
-                let from_inclusive = from;
-                let to_exclusive = to.saturating_add(1);
-                let bitmap = CompositeQuery::range_address_topic0_blocks(
-                    &reader,
-                    &address,
-                    &topic0,
-                    from_inclusive,
-                    to_exclusive,
+                let bitmap = CompositeQuery::range_address_topic0_blocks_inclusive(
+                    &reader, &address, &topic0, from, to,
                 );
                 result = Some(intersect_optional(result, bitmap));
                 covered_addresses = true;
@@ -563,8 +568,8 @@ fn build_candidate_bitmap(
         if block_path.exists() {
             let reader = BTreeIndexReader::open(&block_path)?;
             let from = filter.from_block.unwrap_or(0);
-            let to_exclusive = filter.to_block.unwrap_or(u64::MAX - 1).saturating_add(1);
-            let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
+            let to = filter.to_block.unwrap_or(u64::MAX);
+            let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
             result = Some(intersect_optional(result, bitmap));
             if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
                 return Ok(RoaringBitmap::new());
@@ -577,11 +582,8 @@ fn build_candidate_bitmap(
         if timestamp_path.exists() {
             let reader = BTreeIndexReader::open(&timestamp_path)?;
             let from = filter.from_timestamp.unwrap_or(0);
-            let to_exclusive = filter
-                .to_timestamp
-                .unwrap_or(u64::MAX - 1)
-                .saturating_add(1);
-            let bitmap = reader.range(&from.to_be_bytes(), &to_exclusive.to_be_bytes());
+            let to = filter.to_timestamp.unwrap_or(u64::MAX);
+            let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
             result = Some(intersect_optional(result, bitmap));
             if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
                 return Ok(RoaringBitmap::new());

@@ -75,5 +75,6 @@ regressions also pass (89 server tests). [Performance acceptance](baselines/2026
 retains all 250 samples per shape/revision: median latency −1.15% to +0.02%,
 p95 −4.89% to −1.47%; peak RSS median +0.15%, p95 −1.35%. The
 per-request token allocation is included; no material regression was measured.
-Implementation `d08c69e8` awaits PR/CI/merge. The wider offline audit and subsequent live-sync/staging acceptance are
+Implementation `d08c69e8` and evidence `02432896` merged in PR #137 as
+`f19f47c4` after all six CI jobs passed (run `34673325705`). The wider offline audit and subsequent live-sync/staging acceptance are
 not complete. No production data, external volumes or services are accessed.

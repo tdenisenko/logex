@@ -172,7 +172,7 @@ async fn pagination_matches_reference_across_storage_layouts_and_equal_block_bou
                     }
                     let sql = format!(
                         "SELECT block_number, tx_index, log_index FROM logs WHERE address = '{}' ORDER BY block_number {direction}, tx_index {direction}, log_index {direction}",
-                        Address::repeat_byte(0xaa)
+                        Address::repeat_byte(0xaa).to_string().to_ascii_lowercase()
                     );
                     for limit in [None, Some(0), Some(1), Some(2), Some(5), Some(100)] {
                         for offset in [0, 1, 4, 9, usize::MAX] {

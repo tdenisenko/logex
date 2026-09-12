@@ -341,17 +341,38 @@ impl CompositeQuery {
         from_block: u64,
         to_block: u64,
     ) -> roaring::RoaringBitmap {
+        let (start, end) = Self::address_topic0_block_bounds(address, topic0, from_block, to_block);
+        reader.range(&start, &end)
+    }
+
+    /// Range scan on (address, topic0) with both block endpoints included.
+    pub fn range_address_topic0_blocks_inclusive(
+        reader: &BTreeIndexReader,
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        from_block: u64,
+        to_block: u64,
+    ) -> roaring::RoaringBitmap {
+        let (start, end) = Self::address_topic0_block_bounds(address, topic0, from_block, to_block);
+        reader.range_inclusive(&start, &end)
+    }
+
+    fn address_topic0_block_bounds(
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        from_block: u64,
+        to_block: u64,
+    ) -> (
+        [u8; ADDR_TOPIC0_BLOCK_KEY_SIZE],
+        [u8; ADDR_TOPIC0_BLOCK_KEY_SIZE],
+    ) {
         let mut start = [0u8; ADDR_TOPIC0_BLOCK_KEY_SIZE];
         start[..20].copy_from_slice(address);
         start[20..52].copy_from_slice(topic0);
         start[52..].copy_from_slice(&from_block.to_be_bytes());
-
-        let mut end = [0u8; ADDR_TOPIC0_BLOCK_KEY_SIZE];
-        end[..20].copy_from_slice(address);
-        end[20..52].copy_from_slice(topic0);
+        let mut end = start;
         end[52..].copy_from_slice(&to_block.to_be_bytes());
-
-        reader.range(&start, &end)
+        (start, end)
     }
 
     /// Look up (topic0, topic1) in the composite index.

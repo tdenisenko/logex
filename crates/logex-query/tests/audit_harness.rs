@@ -44,7 +44,8 @@ async fn benchmark_datafusion_result_values() {
     drop(storage);
     let storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
     let predicate = format!(
-        "address = '{HOT_ADDRESS}' AND topic0 = '{}'",
+        "address = '0x{}' AND topic0 = '{}'",
+        hex::encode(HOT_ADDRESS),
         transfer_topic()
     );
     let order = "ORDER BY block_number + 0 DESC, tx_index DESC, log_index DESC LIMIT 1000";
@@ -343,7 +344,8 @@ async fn query_cases(
     samples.record("native_filter", iteration, elapsed, expected.len());
 
     let predicate = format!(
-        "address = '{HOT_ADDRESS}' AND topic0 = '{}'",
+        "address = '0x{}' AND topic0 = '{}'",
+        hex::encode(HOT_ADDRESS),
         transfer_topic()
     );
     let sql = format!("SELECT COUNT(*) AS total FROM logs WHERE {predicate}");

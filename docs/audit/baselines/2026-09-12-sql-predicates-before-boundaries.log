@@ -1,0 +1,35 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "predicates") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.79s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/predicates.rs (target/debug/build/logex-query/7809664fdf64f12d/out/predicates-7809664fdf64f12d)
+
+running 1 test
+
+thread 'numeric_filters_preserve_zero_and_maximum_boundaries' (56879161) panicked at crates/logex-query/tests/predicates.rs:297:5:
+indexed=true: SELECT block_number FROM logs WHERE block_number = 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(18446744073709551615)}], actual []
+indexed=true: SELECT block_number FROM logs WHERE block_number >= 0 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+indexed=true: SELECT block_number FROM logs WHERE block_number >= 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(18446744073709551615)}], actual []
+indexed=true: SELECT block_number FROM logs WHERE block_number > 0 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+indexed=true: SELECT block_number FROM logs WHERE block_number <= 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+indexed=true: SELECT block_number FROM logs WHERE timestamp = 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(18446744073709551615)}], actual []
+indexed=true: SELECT block_number FROM logs WHERE timestamp >= 0 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+indexed=true: SELECT block_number FROM logs WHERE timestamp >= 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(18446744073709551615)}], actual []
+indexed=true: SELECT block_number FROM logs WHERE timestamp > 0 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+indexed=true: SELECT block_number FROM logs WHERE timestamp <= 18446744073709551615 ORDER BY block_number, tx_index, log_index: expected [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}, Object {"block_number": Number(18446744073709551615)}], actual [Object {"block_number": Number(0)}, Object {"block_number": Number(2)}, Object {"block_number": Number(3)}, Object {"block_number": Number(4)}, Object {"block_number": Number(5)}]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test numeric_filters_preserve_zero_and_maximum_boundaries ... FAILED
+
+failures:
+
+failures:
+    numeric_filters_preserve_zero_and_maximum_boundaries
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.34s
+
+error: test failed, to rerun pass `-p logex-query --test predicates`

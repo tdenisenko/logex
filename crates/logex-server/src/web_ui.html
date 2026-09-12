@@ -2407,7 +2407,7 @@ function buildQueryFromBuilder() {
   }
 
   var conditions = ['topic0 = event' + sqlString(eventSignature)];
-  if (selectedToken) conditions.push('address = ' + sqlString(selectedToken.address));
+  if (selectedToken) conditions.push('address = ' + sqlString(normalizeAddress(selectedToken.address)));
   if (builderFromAddresses.length) {
     conditions.push('topic1 IN (' + builderAddressSqlList(builderFromAddresses) + ')');
   }
