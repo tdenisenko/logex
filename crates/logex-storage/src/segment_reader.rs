@@ -320,6 +320,8 @@ impl SegmentReader {
 
     /// Materialize a small maintenance candidate without trusting compressed
     /// frame sizes or allocating its complete data stream up front.
+    /// `lengths` is the complete data_len column already read from this reader
+    /// while screening the candidate's payload budget.
     pub(crate) fn read_log_rows_bounded(
         &self,
         budget: usize,

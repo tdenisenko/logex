@@ -149,6 +149,19 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     let packed_start = dict_end + 1;
 
     let indices = bitunpack_u32(&data[packed_start..], row_count, bits_needed)?;
+    // Validate once before allocating/copying the output. The maximum check can
+    // scan index values efficiently without an extra branch per copied value.
+    if indices
+        .iter()
+        .copied()
+        .max()
+        .is_some_and(|index| index as usize >= dict_size)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dictionary index is out of bounds",
+        ));
+    }
 
     let output_len = row_count.checked_mul(item_size).ok_or_else(|| {
         io::Error::new(
@@ -158,12 +171,6 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     })?;
     let mut result = Vec::with_capacity(output_len);
     for idx in indices {
-        if idx as usize >= dict_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "dictionary index is out of bounds",
-            ));
-        }
         let offset = idx as usize * item_size;
         result.extend_from_slice(&dict_bytes[offset..offset + item_size]);
     }
