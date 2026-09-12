@@ -1,3 +1,4 @@
+mod json;
 mod lexer;
 mod native;
 mod sql;

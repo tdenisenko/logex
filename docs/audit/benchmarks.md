@@ -193,3 +193,25 @@ The adapter preserves every fixture/oracle and restores the original separate
 calls, rejects the unsupported strong-checkpoint option, and omits the unrelated
 new header-codec diagnostic. Record both source and binary hashes. The original
 production APIs publish on each call; current final checkpoint cost remains timed.
+
+## DataFusion value conversion
+
+The general SQL result benchmark bypasses native SELECT using arithmetic in
+ORDER BY while projecting baseline-compatible integer, string and nullable
+columns. A general aggregate adds a small-output control. Results are checked
+against an independent fixture oracle after timing. Narrow and ten-column wide
+queries return at most 1,000 rows; aggregates scan the same indexed matches.
+
+```bash
+LOGEX_BENCH_PROFILE=dense LOGEX_BENCH_ROWS=200000 LOGEX_BENCH_REPEATS=100 \
+  cargo test -p logex-query --test audit_harness --release --locked \
+  benchmark_datafusion_result_values -- --ignored --nocapture --test-threads=1
+```
+
+Repeat with `LOGEX_BENCH_PROFILE=sparse`. Each process builds, indexes, compacts
+and reopens a fresh fixture, warms every query once, then rotates their order.
+For a comparison, install the identical fixture in both isolated source trees,
+build equivalent release binaries sequentially, verify source/binary hashes and
+fresh Cargo artifacts, then alternate at least five process pairs. Preserve all
+samples and record median/p95 and process RSS; caches are not forcibly evicted.
+Do not compare speed against a baseline that returns incorrect values.

@@ -16,6 +16,109 @@ const FIRST_BLOCK: u64 = 15_000_000;
 const FIXTURE_VERSION: u32 = 1;
 const HOT_ADDRESS: Address = Address::repeat_byte(0xaa);
 
+/// Exercises the general SQL engine and result conversion. ORDER BY arithmetic
+/// deliberately bypasses native SELECT; these projected values also have a
+/// correct representation in pre-converter baselines, allowing a fair comparison.
+#[tokio::test]
+#[ignore = "release DataFusion result conversion benchmark; see docs/audit/benchmarks.md"]
+async fn benchmark_datafusion_result_values() {
+    let config = Config::from_env();
+    let rows = fixture(config.rows, config.profile);
+    let expected = expected_matches(&rows);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
+    for batch in rows.chunks(config.batch_rows) {
+        storage.write_batch(batch).unwrap();
+    }
+    storage.checkpoint().unwrap();
+    for partition in storage
+        .sealed_partitions()
+        .iter()
+        .chain(std::iter::once(storage.hot_partition()))
+    {
+        if partition.meta.row_count > 0 {
+            IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+        }
+    }
+    storage.compact_eligible_segments().unwrap();
+    drop(storage);
+    let storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
+    let predicate = format!(
+        "address = '{HOT_ADDRESS}' AND topic0 = '{}'",
+        transfer_topic()
+    );
+    let order = "ORDER BY block_number + 0 DESC, tx_index DESC, log_index DESC LIMIT 1000";
+    let narrow = expected
+        .iter()
+        .rev()
+        .take(1000)
+        .map(|r| {
+            json!({
+                "block_number":r.block_number, "tx_index":r.tx_index, "log_index":r.log_index,
+            })
+        })
+        .collect::<Vec<_>>();
+    let wide = expected.iter().rev().take(1000).map(|r| json!({
+        "block_number":r.block_number, "timestamp":r.timestamp, "tx_hash":r.tx_hash.to_string(),
+        "tx_index":r.tx_index, "log_index":r.log_index, "address":r.address.to_string().to_ascii_lowercase(),
+        "topic0":r.topic0.map(|v|v.to_string()), "topic3":r.topic3.map(|v|v.to_string()),
+        "data":format!("0x{}",hex::encode(&r.data)), "data_len":r.data_len,
+    })).collect::<Vec<_>>();
+    let queries = [
+        (
+            "datafusion_narrow",
+            format!("SELECT block_number, tx_index, log_index FROM logs WHERE {predicate} {order}"),
+            narrow,
+        ),
+        (
+            "datafusion_wide",
+            format!(
+                "SELECT block_number, timestamp, tx_hash, tx_index, log_index, address, topic0, topic3, data, data_len FROM logs WHERE {predicate} {order}"
+            ),
+            wide,
+        ),
+        (
+            "datafusion_aggregate",
+            format!(
+                "SELECT MAX(block_number) AS maximum, COUNT(block_number + 0) AS total FROM logs WHERE {predicate}"
+            ),
+            vec![
+                json!({"maximum":expected.iter().map(|r|r.block_number).max(), "total":expected.len()}),
+            ],
+        ),
+    ];
+    println!(
+        "{}",
+        json!({"kind":"config", "profile":config.profile.name(), "rows":config.rows, "repeats":config.repeats,
+        "fixture_digest":keccak256(serde_json::to_vec(&rows).unwrap()).to_string()})
+    );
+    for (_, sql, wanted) in &queries {
+        assert_eq!(
+            execute_sql(sql, &storage, storage.head_block())
+                .await
+                .unwrap()
+                .rows,
+            *wanted
+        );
+    }
+    for iteration in 0..config.repeats {
+        // Rotate query order so each shape sees all positions in the process.
+        for offset in 0..queries.len() {
+            let (metric, sql, wanted) = &queries[(iteration + offset) % queries.len()];
+            let start = Instant::now();
+            let result = execute_sql(sql, &storage, storage.head_block())
+                .await
+                .unwrap();
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(result.rows, *wanted);
+            println!(
+                "{}",
+                json!({"kind":"sample", "metric":metric, "iteration":iteration, "elapsed_ms":elapsed_ms})
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Profile {
     Sparse,
