@@ -71,6 +71,9 @@ impl LogExService for LogExGrpcService {
         .await
         {
             Ok(result) => result,
+            Err(error @ SqlQueryError::SnapshotChanged) => {
+                return Err(Status::aborted(error.to_string()));
+            }
             Err(SqlQueryError::DataFusion(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));
             }

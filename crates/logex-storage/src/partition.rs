@@ -4,7 +4,7 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 
-use crate::native::{NativeStorage, NativeStorageConfig, SegmentCompactionPlan};
+use crate::native::{NativeStorage, NativeStorageConfig, ReadViewToken, SegmentCompactionPlan};
 use crate::state::SyncHead;
 
 /// A read-only compatibility view over a storage segment.
@@ -82,6 +82,10 @@ impl PartitionManager {
         self.inner.write_batch(rows)?;
         self.refresh_views();
         Ok(())
+    }
+
+    pub fn read_view_token(&self) -> ReadViewToken {
+        self.inner.read_view_token()
     }
 
     /// Ingest immutable historical rows using compacted dense segments and sparse staging.

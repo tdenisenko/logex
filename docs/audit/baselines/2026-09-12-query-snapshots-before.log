@@ -1,0 +1,51 @@
+   Compiling logex-query v0.1.0 (/Users/tdenisenko/code/logex/crates/logex-query)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `logex-query` (test "snapshots") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.98s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+     Running tests/snapshots.rs (target/debug/build/logex-query/68d0973060b33986/out/snapshots-68d0973060b33986)
+
+running 5 tests
+test bundled_snapshot_excludes_later_ingestion ... FAILED
+test bundled_snapshot_preserves_canonicality_before_reorg ... FAILED
+test raw_snapshot_preserves_canonicality_before_reorg ... FAILED
+test snapshot_survives_completed_raw_compaction ... ok
+test raw_snapshot_excludes_later_ingestion ... FAILED
+
+failures:
+
+---- bundled_snapshot_excludes_later_ingestion stdout ----
+
+thread 'bundled_snapshot_excludes_later_ingestion' (54996659) panicked at crates/logex-query/tests/snapshots.rs:97:5:
+bundled=true reorg=false: [("SELECT block_number, log_index FROM logs ORDER BY block_number ASC, tx_index ASC, log_index ASC", [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}, Object {"block_number": Number(101), "log_index": Number(0)}], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT block_number, log_index FROM logs ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC", [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}, Object {"block_number": Number(101), "log_index": Number(0)}], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT COUNT(*) AS total FROM logs", [Object {"total": Number(3)}], [Object {"total": Number(2)}])]
+
+---- bundled_snapshot_preserves_canonicality_before_reorg stdout ----
+
+thread 'bundled_snapshot_preserves_canonicality_before_reorg' (54996660) panicked at crates/logex-query/tests/snapshots.rs:97:5:
+bundled=true reorg=true: [("SELECT block_number, log_index FROM logs ORDER BY block_number ASC, tx_index ASC, log_index ASC", [], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT block_number, log_index FROM logs ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC", [], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT COUNT(*) AS total FROM logs", [Object {"total": Number(0)}], [Object {"total": Number(2)}])]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- raw_snapshot_preserves_canonicality_before_reorg stdout ----
+
+thread 'raw_snapshot_preserves_canonicality_before_reorg' (54996662) panicked at crates/logex-query/tests/snapshots.rs:97:5:
+bundled=false reorg=true: [("SELECT block_number, log_index FROM logs ORDER BY block_number ASC, tx_index ASC, log_index ASC", [], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT block_number, log_index FROM logs ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC", [], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT COUNT(*) AS total FROM logs", [Object {"total": Number(0)}], [Object {"total": Number(2)}])]
+
+---- raw_snapshot_excludes_later_ingestion stdout ----
+
+thread 'raw_snapshot_excludes_later_ingestion' (54996661) panicked at crates/logex-query/tests/snapshots.rs:97:5:
+bundled=false reorg=false: [("SELECT block_number, log_index FROM logs ORDER BY block_number ASC, tx_index ASC, log_index ASC", [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}, Object {"block_number": Number(101), "log_index": Number(0)}], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT block_number, log_index FROM logs ORDER BY block_number + 0 ASC, tx_index ASC, log_index ASC", [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}, Object {"block_number": Number(101), "log_index": Number(0)}], [Object {"block_number": Number(100), "log_index": Number(0)}, Object {"block_number": Number(100), "log_index": Number(1)}]), ("SELECT COUNT(*) AS total FROM logs", [Object {"total": Number(3)}], [Object {"total": Number(2)}])]
+
+
+failures:
+    bundled_snapshot_excludes_later_ingestion
+    bundled_snapshot_preserves_canonicality_before_reorg
+    raw_snapshot_excludes_later_ingestion
+    raw_snapshot_preserves_canonicality_before_reorg
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p logex-query --test snapshots`

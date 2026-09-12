@@ -8,14 +8,18 @@ use logex_index::{
     BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, Erc20EventBloomReader,
     TRANSFER_BLOOM_FILE, TransferBloomReader, is_common_erc20_event_topic0, transfer_topic0,
 };
-use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
+use logex_storage::native::{LogOrder, NativeLogFilter, ReadViewToken, TopicConstraint};
 use logex_storage::{IndexReadCheckpoint, PartitionManager, SegmentReader};
 use logex_types::{LogRow, PartitionMeta};
 
+/// A bounded optimistic query view. Later appends/new segments are excluded;
+/// representation-only compaction preserves rows. A reorg or storage close
+/// invalidates the view, so execution must fail and retry on a fresh snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct StorageSnapshot {
     sealed_partitions: Vec<PartitionMeta>,
     hot_partition: Option<PartitionMeta>,
+    pub(crate) validity: Option<ReadViewToken>,
 }
 
 impl StorageSnapshot {
@@ -34,7 +38,22 @@ impl StorageSnapshot {
         Self {
             sealed_partitions,
             hot_partition,
+            validity: Some(storage.read_view_token()),
         }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self
+            .validity
+            .as_ref()
+            .is_some_and(|token| !token.is_valid())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "query snapshot changed during a reorg or storage restart; retry",
+            ));
+        }
+        Ok(())
     }
 
     pub fn partitions_in_order(&self, order: LogOrder) -> Vec<PartitionMeta> {
@@ -60,6 +79,7 @@ pub fn execute_log_filter(
         return Ok(Vec::new());
     }
     let snapshot = StorageSnapshot::from_storage(storage);
+    snapshot.validate()?;
     let mut rows = Vec::new();
     let scan_limit = filter
         .limit
@@ -73,7 +93,7 @@ pub fn execute_log_filter(
             continue;
         }
 
-        let candidate_ids = candidate_row_ids(&partition.path, filter, true)?;
+        let candidate_ids = candidate_row_ids(&partition.path, filter, true, partition.row_count)?;
         if candidate_ids.is_empty() {
             continue;
         }
@@ -100,6 +120,7 @@ pub fn execute_log_filter(
         rows.truncate(limit);
     }
 
+    snapshot.validate()?;
     Ok(rows)
 }
 
@@ -177,6 +198,7 @@ pub fn candidate_row_ids(
     dir: &Path,
     filter: &NativeLogFilter,
     use_indexes: bool,
+    visible_rows: u64,
 ) -> std::io::Result<Vec<u32>> {
     // Include every refinement column even when an index is currently available:
     // a stale or busy index must be able to fall back to this same captured source.
@@ -213,7 +235,7 @@ pub fn candidate_row_ids(
         }
     }
     let reader = SegmentReader::open_projected(dir, &columns)?;
-    candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false)
+    candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false, visible_rows)
 }
 
 pub(crate) fn candidate_row_ids_for_reader(
@@ -222,7 +244,15 @@ pub(crate) fn candidate_row_ids_for_reader(
     filter: &NativeLogFilter,
     use_indexes: bool,
     event_bloom_prechecked: bool,
+    row_count: u64,
 ) -> std::io::Result<Vec<u32>> {
+    let physical_rows = reader.read_row_count()?;
+    if row_count > physical_rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment is missing rows from the captured query snapshot",
+        ));
+    }
     let refine_filter = use_indexes;
     let checkpoint = if use_indexes {
         IndexReadCheckpoint::open(dir, reader)?
@@ -237,7 +267,6 @@ pub(crate) fn candidate_row_ids_for_reader(
         return Ok(Vec::new());
     }
 
-    let row_count = reader.read_row_count()?;
     if row_count == 0 {
         return Ok(Vec::new());
     }
@@ -253,10 +282,20 @@ pub(crate) fn candidate_row_ids_for_reader(
     if bitmap.is_empty() {
         return Ok(Vec::new());
     }
+    if bitmap
+        .max()
+        .is_some_and(|row| u64::from(row) >= physical_rows)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "index row exceeds its source segment",
+        ));
+    }
 
     let canonical = reader.read_canonical()?;
     let row_ids = bitmap
         .iter()
+        .filter(|&row_id| u64::from(row_id) < row_count)
         .filter(|&row_id| !filter.canonical_only || canonical.is_present(row_id as u64))
         .collect();
 
@@ -950,6 +989,31 @@ mod tests {
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
         storage.checkpoint().unwrap();
         (tmp, storage)
+    }
+
+    #[test]
+    fn captured_boundaries_do_not_hide_missing_rows_or_invalid_index_ids() {
+        let (_tmp, storage) = setup_storage();
+        let path = &storage.hot_partition().meta.path;
+        let filter = NativeLogFilter::new();
+        let error = candidate_row_ids(path, &filter, true, 3).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("missing rows"));
+        assert_eq!(candidate_row_ids(path, &filter, true, 1).unwrap(), vec![0]);
+        let address = Address::repeat_byte(0xaa);
+        let mut index = logex_index::BTreeIndex::new(20);
+        index.insert(address.as_slice(), 0);
+        index.insert(address.as_slice(), 2); // Beyond physical rows, not a later append.
+        index
+            .write_to_file(&path.join("indexes/address.bptree"))
+            .unwrap();
+        let filter = NativeLogFilter::new().with_addresses(vec![address]);
+        assert_eq!(
+            candidate_row_ids(path, &filter, true, 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
