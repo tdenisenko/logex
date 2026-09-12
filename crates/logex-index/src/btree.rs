@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use roaring::RoaringBitmap;
+use roaring::{MultiOps, RoaringBitmap};
 
 use crate::index_file::{IndexFile, write_index_file};
 
@@ -281,11 +281,7 @@ impl BTreeIndexReader {
         let lo = self.entries.partition_point(|(k, _)| k.as_slice() < start);
         let hi = self.entries.partition_point(|(k, _)| k.as_slice() < end);
 
-        let mut result = RoaringBitmap::new();
-        for (_, bitmap) in &self.entries[lo..hi] {
-            result |= bitmap;
-        }
-        result
+        union_entries(&self.entries[lo..hi])
     }
 
     /// Range scan including both endpoints. The upper bound need not have a
@@ -296,11 +292,7 @@ impl BTreeIndexReader {
         }
         let lo = self.entries.partition_point(|(k, _)| k.as_slice() < start);
         let hi = self.entries.partition_point(|(k, _)| k.as_slice() <= end);
-        let mut result = RoaringBitmap::new();
-        for (_, bitmap) in &self.entries[lo..hi] {
-            result |= bitmap;
-        }
-        result
+        union_entries(&self.entries[lo..hi])
     }
 
     /// Number of unique keys.
@@ -312,6 +304,33 @@ impl BTreeIndexReader {
     pub fn key_size(&self) -> usize {
         self.key_size
     }
+}
+
+fn union_entries(entries: &[(Vec<u8>, RoaringBitmap)]) -> RoaringBitmap {
+    match entries {
+        [] => return RoaringBitmap::new(),
+        [(_, bitmap)] => return bitmap.clone(),
+        _ => {}
+    }
+    // MultiOps avoids repeatedly growing and normalizing array containers, but
+    // may temporarily promote sparse containers to 8 KiB bitmaps. Limit that
+    // promoted payload to 64 KiB; widely separated rows retain pairwise union.
+    let mut first_container = u32::MAX;
+    let mut last_container = 0;
+    for (_, bitmap) in entries {
+        if let (Some(first), Some(last)) = (bitmap.min(), bitmap.max()) {
+            first_container = first_container.min(first >> 16);
+            last_container = last_container.max(last >> 16);
+            if last_container - first_container >= 8 {
+                let mut result = RoaringBitmap::new();
+                for (_, bitmap) in entries {
+                    result |= bitmap;
+                }
+                return result;
+            }
+        }
+    }
+    entries.iter().map(|(_, bitmap)| bitmap).union()
 }
 
 fn invalid_index(message: &'static str) -> io::Error {
@@ -991,6 +1010,49 @@ mod tests {
                     reader.range_inclusive(&start.to_be_bytes(), &end.to_be_bytes()),
                     inclusive
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn range_unions_match_row_pairs_for_compact_and_wide_row_spans() {
+        use std::collections::BTreeSet;
+
+        for wide in [false, true] {
+            let mut pairs = Vec::new();
+            for key in 0u32..128 {
+                let container = if wide { key * 64 } else { key % 2 };
+                for row in [7, 65535, 65536, (container << 16) + key] {
+                    pairs.push((key, row));
+                }
+            }
+            pairs.extend((0..4100).map(|offset| (7, (2 << 16) + offset)));
+            pairs.push((127, u32::MAX));
+            let mut index = BTreeIndex::new(4);
+            for &(key, row) in &pairs {
+                index.insert(&key.to_be_bytes(), row);
+            }
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("union.bptree");
+            index.write_to_file(&path).unwrap();
+            let reader = BTreeIndexReader::open(&path).unwrap();
+            for start in [0u32, 1, 49, 127, 128, u32::MAX] {
+                for end in [0u32, 1, 49, 50, 51, 128, u32::MAX] {
+                    let expected = |inclusive| {
+                        pairs
+                            .iter()
+                            .filter(|&&(key, _)| {
+                                start <= key && (key < end || inclusive && key == end)
+                            })
+                            .map(|&(_, row)| row)
+                            .collect::<BTreeSet<_>>()
+                    };
+                    let exclusive = reader.range(&start.to_be_bytes(), &end.to_be_bytes());
+                    let inclusive =
+                        reader.range_inclusive(&start.to_be_bytes(), &end.to_be_bytes());
+                    assert_eq!(exclusive.iter().collect::<BTreeSet<_>>(), expected(false));
+                    assert_eq!(inclusive.iter().collect::<BTreeSet<_>>(), expected(true));
+                }
             }
         }
     }
