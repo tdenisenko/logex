@@ -50,7 +50,7 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 48-byte header fixes magic, version, 4096-byte page size,
+integrity container. Its 48-byte header fixes magic, version, 1024-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
 bytes remain contiguous, followed by one CRC32 per page. Each page checksum
 includes a domain tag, format version, logical length, file identity, page position and actual
@@ -59,7 +59,8 @@ page length. Exact physical extent is checked using the opened handle.
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
-holds bounded page/checksum caches of bytes; no global validation cache or
+holds a 1 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
+allocate only their footer size); no global validation cache or
 per-query full-file scrub is introduced. Writer checksum storage costs four
 bytes per logical page, and B-tree payloads stream once instead of retaining all
 serialized payload buffers. Integrity overhead on disk is 48 bytes plus four
@@ -187,3 +188,57 @@ file also supplies its checksum footer. Prefetched data remains unverified until
 the existing checksum check succeeds; invalidation precedes fallible loads.
 Large full-file reads retain contiguous I/O. All 61 focused tests pass before
 its separate release comparison.
+
+## Subsequent read and build investigation
+
+The first twelve complete screens are retained in
+[`2026-09-13-index-integrity-investigation.json`](baselines/2026-09-13-index-integrity-investigation.json)
+and its linked compressed raw archive: **71,424 timings and 384 RSS observations**.
+The independent packager checks Git source/archive agreement, copied fixture
+identity, fresh workspace feature-union artifacts, every process and log, balanced
+ordering, sample counts and recomputed statistics. The archive also preserves
+reproductions, focused failures/successes and diagnostic profiles. No screening
+candidate is claimed as final acceptance.
+
+- Screen eight (`1b573d21`) adds the bounded prefetch. Typical/many-key bloom
+  presence medians remain +12.66%/+12.74%; initial small processes vary strongly.
+- Screen nine (`b64f0979`) uses 1 KiB data pages and up to 16 KiB of footer cache.
+  All 62 focused tests pass, including exact reads across footer-cache windows.
+  Reused bloom presence medians improve by 32.92–34.54%; absent-open medians
+  are +2.70–7.06%. Small builds and ranges remain excessive.
+- Screen ten (`ff36d8f9`) uses borrowed multi-bitmap union for reader ranges only
+  when represented high-16-bit row containers span at most eight values. This
+  bounds temporarily promoted bitmap payload to 64 KiB, plus small descriptors
+  and the result; wider spans retain pairwise union. Zero/one entries return
+  directly. Independent row-pair/BTreeSet controls cover overlapping, sparse,
+  dense and distant rows, boundary selections and inclusive/exclusive endpoints.
+  All 63 focused tests pass. Typical/many-key range medians are -45.80%/-47.07%.
+- Screen eleven (`168b9e6d`) reads full logical data and its footer together,
+  verifies every page before returning bytes, and shares the verifier with random
+  reads. Allocation remains fallible and bounded by actual opened-file geometry;
+  small/raw paths reset their cursor. Typical/many-key range medians are
+  -48.35%/-49.46%; later small-process medians are about 16.1–16.2 microseconds
+  versus 14.7, while the all-process aggregate retains larger startup variation.
+- Screen twelve (`5032073c`) revisits checksum metadata cost with four times as
+  many pages: it reuses the per-file prefix and batches page index/length into one
+  update. Review verifies identical checksum bytes. Reused bloom medians improve
+  to roughly -37% on the larger configurations. Small bloom builds remain about
+  2.45 ms in later processes versus 2.20–2.24 ms; the aggregate is +22.12%.
+
+The second short profiling attempt retains both successful fixture/sampler exits,
+but the baseline process ended before stack collection. Candidate stacks identify
+checksum work and file operations alongside the existing key hashing; this is
+diagnostic evidence, not a paired CPU comparison.
+
+The next candidate sizes bloom payloads to captured rows within 256 KiB–2 MiB,
+retaining four hash probes and the existing maximum. Smaller segments currently
+pay to write and verify a fixed 2 MiB even when much of its capacity is unnecessary.
+The proposed allocation rounds 32 bytes per source row up to a permitted power of
+two, with clamping before multiplication. Up to 65,536 rows this supplies at least
+128 bits per possible inserted topic key (at most two per row); above that the
+previous 2 MiB geometry remains. The usual uniform-hash false-positive estimate
+is below one part per million through that threshold, but this is an estimate,
+not a guarantee. Smaller filters can increase false positives versus the old
+oversized file. Exact no-false-negative checks and measured query/build cost are
+required before accepting this tradeoff. Existing protected 2 MiB files remain
+supported under the current page format.
