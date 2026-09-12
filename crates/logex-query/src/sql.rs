@@ -1706,6 +1706,9 @@ fn parse_native_row_value_expr(expr: &SqlAstExpr) -> Option<NativeRowValueExpr> 
     if let Some(value) = sql_numeric_bigint_expr(expr) {
         return Some(NativeRowValueExpr::Literal(value));
     }
+    if let SqlAstExpr::Nested(expr) = expr {
+        return parse_native_row_value_expr(expr);
+    }
     if let Some(expr) = unbounded_exact_cast_operand(expr) {
         return parse_native_row_value_expr(expr);
     }
@@ -1734,13 +1737,10 @@ fn is_native_data_expr(expr: &SqlAstExpr) -> bool {
     ) {
         return sql_identifier(expr).is_some_and(|column| column == "data");
     }
-    match expr {
-        SqlAstExpr::Nested(expr) => is_native_data_expr(expr),
-        _ if unbounded_exact_cast_operand(expr).is_some() => {
-            is_native_data_expr(unbounded_exact_cast_operand(expr).unwrap())
-        }
-        _ => false,
+    if let SqlAstExpr::Nested(expr) = expr {
+        return is_native_data_expr(expr);
     }
+    unbounded_exact_cast_operand(expr).is_some_and(is_native_data_expr)
 }
 
 fn unbounded_exact_cast_operand(expr: &SqlAstExpr) -> Option<&SqlAstExpr> {
@@ -1770,7 +1770,7 @@ fn rewrite_native_case(expr: &SqlAstExpr, leaves: &mut Vec<NativeRowLeaf>) -> Op
     if is_native_data_expr(expr) {
         return Some(native_case_leaf_sql(leaves, NativeRowLeaf::Data));
     }
-    if let Some(value) = sql_numeric_bigint_expr(expr) {
+    if let Some(value) = sql_bigint_expr(expr) {
         return Some(native_case_leaf_sql(leaves, NativeRowLeaf::Literal(value)));
     }
     if matches!(expr, SqlAstExpr::Value(value) if matches!(&value.value, SqlValue::Null)) {
@@ -2036,7 +2036,7 @@ fn scan_native_data_sum_partition(
         // Candidate selection refines every native constraint against stored
         // columns, with or without indexes. Each candidate filter contains the
         // common filter, so their union already satisfies it. Residual WHERE
-        // evaluation happens before CASE preparation so excluded rows cannot
+        // evaluation happens before CASE evaluation so excluded rows cannot
         // trigger errors in aggregate inputs.
         let selected_row_ids = if let Some(selection) = &scan.selection {
             let selection = selection.evaluate(&reader, row_ids)?;
@@ -2091,7 +2091,7 @@ fn scan_native_data_sum_partition(
                 .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
             for state in states.iter_mut() {
                 if let Some(value) =
-                    eval_native_row_value(data.as_ref(), &state.expr, &cases, row_index)
+                    eval_native_row_value(data.as_ref(), &state.expr, &cases, row_index)?
                 {
                     state.sum += value;
                     state.count += 1;
@@ -2267,19 +2267,38 @@ fn eval_native_row_value(
     expr: &PreparedRowValueExpr,
     cases: &[Int64Array],
     row_index: usize,
-) -> Option<BigInt> {
+) -> Result<Option<BigInt>, SqlQueryError> {
     match expr {
-        PreparedRowValueExpr::Data => Some(BigInt::from(BigUint::from_bytes_be(data))),
-        PreparedRowValueExpr::Literal(value) => Some(value.clone()),
+        PreparedRowValueExpr::Data => Ok(Some(BigInt::from(BigUint::from_bytes_be(data)))),
+        PreparedRowValueExpr::Literal(value) => Ok(Some(value.clone())),
         PreparedRowValueExpr::Case { expression, leaves } => {
-            let result = &cases[*expression];
-            if !result.is_valid(row_index) {
-                return None;
+            let result = cases.get(*expression).ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "prepared SUM CASE expression index {expression} is out of range"
+                ))
+            })?;
+            if row_index >= result.len() {
+                return Err(DataFusionError::Internal(format!(
+                    "prepared SUM CASE row index {row_index} is out of range"
+                ))
+                .into());
             }
-            let leaf = usize::try_from(result.value(row_index)).ok()?;
-            match leaves.get(leaf)? {
-                NativeRowLeaf::Data => Some(BigInt::from(BigUint::from_bytes_be(data))),
-                NativeRowLeaf::Literal(value) => Some(value.clone()),
+            if !result.is_valid(row_index) {
+                return Ok(None);
+            }
+            let selector = result.value(row_index);
+            let leaf = usize::try_from(selector).map_err(|_| {
+                DataFusionError::Internal(format!(
+                    "prepared SUM CASE returned negative leaf selector {selector}"
+                ))
+            })?;
+            match leaves.get(leaf) {
+                Some(NativeRowLeaf::Data) => Ok(Some(BigInt::from(BigUint::from_bytes_be(data)))),
+                Some(NativeRowLeaf::Literal(value)) => Ok(Some(value.clone())),
+                None => Err(DataFusionError::Internal(format!(
+                    "prepared SUM CASE leaf selector {leaf} is out of range"
+                ))
+                .into()),
             }
         }
     }
@@ -5067,6 +5086,27 @@ mod tests {
             "340282366920938463463374607431768211461"
         );
         assert_eq!(result.total_scanned, 2);
+    }
+
+    #[test]
+    fn prepared_case_distinguishes_null_from_invalid_leaf_selectors() {
+        let expr = PreparedRowValueExpr::Case {
+            expression: 0,
+            leaves: vec![NativeRowLeaf::Data],
+        };
+        let null_case = [Int64Array::from(vec![None])];
+        assert_eq!(
+            eval_native_row_value(&[], &expr, &null_case, 0).unwrap(),
+            None
+        );
+
+        let invalid_case = [Int64Array::from(vec![Some(1)])];
+        let error = eval_native_row_value(&[], &expr, &invalid_case, 0).unwrap_err();
+        assert!(matches!(
+            error,
+            SqlQueryError::DataFusion(DataFusionError::Internal(message))
+                if message.contains("leaf selector 1 is out of range")
+        ));
     }
 
     #[tokio::test]

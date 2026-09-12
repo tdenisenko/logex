@@ -408,8 +408,11 @@ async fn aggregate_casts_keep_exact_data_compatibility_without_erasing_sql_types
         "data::DEC",
         "CAST((data) AS NUMERIC)",
         "CAST(CAST(data AS DECIMAL) AS NUMERIC)",
+        "(CASE WHEN block_number > 0 THEN data ELSE 0 END)",
         "CAST(CASE WHEN block_number % 2 = 0 THEN data ELSE 0 END AS NUMERIC)",
+        "CAST((CASE WHEN block_number > 0 THEN data ELSE 0 END) AS NUMERIC)",
         "CASE WHEN TRUE THEN CAST(data AS DECIMAL) ELSE 0 END",
+        "CASE WHEN TRUE THEN data ELSE '1' END",
     ] {
         let result = execute_sql(
             &format!("SELECT SUM({input}) AS total FROM logs"),
@@ -465,15 +468,23 @@ async fn aggregate_casts_keep_exact_data_compatibility_without_erasing_sql_types
             "{input} must retain DataFusion cast semantics"
         );
     }
+    let quoted_leaf = execute_sql(
+        "SELECT SUM(CASE WHEN FALSE THEN data ELSE '1' END) AS total FROM logs",
+        &storage,
+        storage.head_block(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(quoted_leaf.rows, vec![json!({"total":"6"})]);
     assert!(
         execute_sql(
-            "SELECT SUM(CASE WHEN TRUE THEN data ELSE '1' END) AS total FROM logs",
+            "SELECT SUM(CASE WHEN TRUE THEN data ELSE 'not-an-integer' END) AS total FROM logs",
             &storage,
             storage.head_block(),
         )
         .await
         .is_err(),
-        "quoted strings must not be treated as exact integer literals"
+        "arbitrary strings must not enter exact integer aggregation"
     );
 }
 
@@ -542,10 +553,10 @@ async fn aggregate_latency() {
         (
             "nested_case",
             format!(
-                "CASE WHEN block_number % 2 = 0 THEN CASE WHEN topic0 = '{topic}' THEN data ELSE 0 END ELSE 1 END"
+                "CASE WHEN block_number > 0 THEN CASE WHEN topic0 = '{topic}' THEN data ELSE 0 END ELSE 1 END"
             ),
             format!(
-                "CASE WHEN block_number % 2 = 0 THEN CASE WHEN topic0 = '{topic}' THEN amount ELSE 0 END ELSE 1 END"
+                "CASE WHEN block_number > 0 THEN CASE WHEN topic0 = '{topic}' THEN amount ELSE 0 END ELSE 1 END"
             ),
             "data_len = 32".to_owned(),
         ),
