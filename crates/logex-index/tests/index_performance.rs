@@ -1,5 +1,6 @@
 //! Opt-in release fixture for index I/O. Every measured lookup is checked
-//! against the generated rows. This writes only a disposable temporary tree.
+//! against the generated rows after timing ends. This writes only a disposable
+//! temporary tree; assertions and returned bitmap destruction are not timed.
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -23,13 +24,12 @@ fn parameter(name: &str, default: usize, max: usize) -> usize {
     value
 }
 
-fn sample(name: &str, iteration: usize, run: impl FnOnce()) {
+fn sample<T>(name: &str, iteration: usize, run: impl FnOnce() -> T) -> T {
     let start = Instant::now();
-    run();
-    println!(
-        "index_sample metric={name} iteration={iteration} elapsed_ns={}",
-        start.elapsed().as_nanos()
-    );
+    let result = black_box(run());
+    let elapsed_ns = start.elapsed().as_nanos();
+    println!("index_sample metric={name} iteration={iteration} elapsed_ns={elapsed_ns}");
+    result
 }
 
 #[test]
@@ -53,42 +53,45 @@ fn index_io_performance() {
     let expected_per_key = (rows / keys) as u64;
     for iteration in 0..repeats {
         let key = ((iteration * 7919 % keys) * 2) as u64;
-        sample("point_present", iteration, || {
-            let found = BTreeIndexReader::get_from_file(&path, &key.to_be_bytes())
-                .unwrap()
-                .unwrap();
-            assert_eq!(found.len(), expected_per_key);
-            assert!(
-                found
-                    .iter()
-                    .all(|row| (row as usize) < rows && (row as usize % keys * 2) as u64 == key)
-            );
-            black_box(found);
-        });
-        sample("point_absent", iteration, || {
-            assert!(
-                BTreeIndexReader::get_from_file(&path, &(key + 1).to_be_bytes())
-                    .unwrap()
-                    .is_none()
-            );
-        });
-        sample("open_range", iteration, || {
-            let reader = BTreeIndexReader::open(&path).unwrap();
-            let upper = (keys / 16).max(1) as u64 * 2;
-            let found = reader.range(&0u64.to_be_bytes(), &upper.to_be_bytes());
-            assert_eq!(found.len(), expected_per_key * (upper / 2));
-            assert!(
-                found
-                    .iter()
-                    .all(|row| (row as usize) < rows && (row as usize % keys * 2) < upper as usize)
-            );
-            black_box(found);
-        });
+        let key_bytes = key.to_be_bytes();
+        let absent_key_bytes = (key + 1).to_be_bytes();
+        let found = sample("point_present", iteration, || {
+            BTreeIndexReader::get_from_file(&path, &key_bytes)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.len(), expected_per_key);
+        assert!(
+            found
+                .iter()
+                .all(|row| (row as usize) < rows && (row as usize % keys * 2) as u64 == key)
+        );
+        black_box(found);
+        let absent = sample("point_absent", iteration, || {
+            BTreeIndexReader::get_from_file(&path, &absent_key_bytes)
+        })
+        .unwrap();
+        assert!(absent.is_none());
+        let upper = (keys / 16).max(1) as u64 * 2;
+        let lower_bytes = 0u64.to_be_bytes();
+        let upper_bytes = upper.to_be_bytes();
+        let found = sample("open_range", iteration, || {
+            let reader = BTreeIndexReader::open(&path)?;
+            // Keep full-reader destruction timed, but return the result bitmap
+            // so its oracle scan and destruction are outside the measurement.
+            Ok::<_, std::io::Error>(reader.range(&lower_bytes, &upper_bytes))
+        })
+        .unwrap();
+        assert_eq!(found.len(), expected_per_key * (upper / 2));
+        assert!(
+            found
+                .iter()
+                .all(|row| (row as usize) < rows && (row as usize % keys * 2) < upper as usize)
+        );
+        black_box(found);
     }
     for iteration in 0..writes {
-        sample("write_btree", iteration, || {
-            index.write_to_file(&path).unwrap()
-        });
+        sample("write_btree", iteration, || index.write_to_file(&path)).unwrap();
     }
     println!(
         "index_disk btree_bytes={}",
@@ -124,42 +127,31 @@ fn index_io_performance() {
     for iteration in 0..repeats {
         let row = &logs[iteration * 7919 % rows];
         let topic = row.topic1.unwrap();
-        sample("bloom_present_open", iteration, || {
-            assert!(
-                Erc20EventBloom::may_contain_from_file(
-                    &bloom_path,
-                    &event,
-                    &row.address,
-                    1,
-                    &topic
-                )
-                .unwrap()
-            );
-        });
-        sample("bloom_present_reuse", iteration, || {
-            assert!(bloom.may_contain(&event, &row.address, 1, &topic).unwrap());
-        });
+        let present = sample("bloom_present_open", iteration, || {
+            Erc20EventBloom::may_contain_from_file(&bloom_path, &event, &row.address, 1, &topic)
+        })
+        .unwrap();
+        assert!(present);
+        let present = sample("bloom_present_reuse", iteration, || {
+            bloom.may_contain(&event, &row.address, 1, &topic)
+        })
+        .unwrap();
+        assert!(present);
         let absent = word((rows + iteration + 1) as u64);
-        sample("bloom_absent_open", iteration, || {
-            // A bloom false positive is valid; only errors or false negatives
-            // on the known-present path violate its contract.
-            black_box(
-                Erc20EventBloom::may_contain_from_file(
-                    &bloom_path,
-                    &event,
-                    &row.address,
-                    1,
-                    &absent,
-                )
-                .unwrap(),
-            );
-        });
+        let may_contain = sample("bloom_absent_open", iteration, || {
+            Erc20EventBloom::may_contain_from_file(&bloom_path, &event, &row.address, 1, &absent)
+        })
+        .unwrap();
+        // A bloom false positive is valid; only errors or false negatives
+        // on the known-present path violate its contract.
+        black_box(may_contain);
     }
     drop(bloom);
     for iteration in 0..writes {
         sample("build_bloom", iteration, || {
-            Erc20EventBloom::build(&partition, &indexes).unwrap()
-        });
+            Erc20EventBloom::build(&partition, &indexes)
+        })
+        .unwrap();
     }
     println!(
         "index_disk bloom_bytes={}",

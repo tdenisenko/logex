@@ -5,6 +5,23 @@ merge `ae4c01c913f89e8448a2c98d5905733525c51047`. No performance acceptance or
 merge is claimed yet. It changes derived indexes, not log columns or ingestion
 transactions. Whole-file source identity and the rest of batch 6 remain open.
 
+**Measurement correction:** screens 1–13 timed the row-ID correctness oracle
+inside `point_present` and `open_range`. For the large-payload fixture this adds
+a full scan of 262,144 returned rows, diluting the relative cost of the actual
+lookup. Those screens remain retained investigation history and are not raw
+lookup performance acceptance. The corrected fixture stops the clock before
+assertions and oracle iteration, keeps full-reader destruction timed, and checks
+every returned result afterwards. It is copied identically into both revisions
+for a new comparison. No previous sample is removed or relabeled as raw lookup
+latency.
+
+All nine local gates passed at exact head `3b0a52b7`, including 65 index unit
+tests, the required workspace checks, release query tests and both release
+protocol consistency tests. Logs and source hashes are retained in
+`/private/tmp/logex-index-integrity-gates-1`. The subsequent timing correction
+affects only the opt-in benchmark, so its compilation and focused execution
+still require separate validation.
+
 ## Findings and reproduction
 
 - **B6-01, P1: successful absence from incomplete B-tree files.** Unknown
