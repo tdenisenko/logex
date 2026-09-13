@@ -277,8 +277,8 @@ retains all 10,000 timings, 100 warmups and 20 RSS observations. Block-hash,
 block-number, timestamp, present-topic and absent-topic median changes are
 -3.52%, -2.91%, -3.13%, -4.22% and -3.05%, respectively; p95 changes are
 -4.22%, -4.90%, -10.45%, -11.71% and -21.80%. RSS median changes -0.67%.
-These measurements support provisional retention. A new direct six-workload
-comparison against merged PR #149 is running on the frozen candidate; full
+These measurements support provisional retention. A direct six-workload
+comparison against merged PR #149 used the frozen candidate; full
 acceptance is not inferred by multiplying earlier percentage improvements.
 The [direct marker-reader baseline comparison](baselines/2026-09-13-source-identity-marker-read-baseline-release.json)
 retains all 20,000 timings, 100 warmups and 120 RSS observations. Raw live
@@ -297,3 +297,70 @@ The next experiment uses a stack array for exactly the same unknown-name,
 duplicate-name and non-topic-null-bitmap checks, preserving existing permissive
 unbundled completeness and topic-nullability rules. It will be validated and
 measured independently before any retention decision.
+
+The fixed-domain schema experiment is committed as
+`7e411084385e80d6700978288d8e46dd89a63cb4`.
+[Focused attempt 12](baselines/2026-09-13-source-identity-schema-focused-1.json)
+passes formatting, strict workspace Clippy, 253 storage tests, 80 index tests,
+13 native query tests and 11 background tests. The new finite fixture checks an
+unknown descriptor name in an unbundled manifest; existing fixtures cover
+writer rejection of duplicates and a null bitmap on a non-topic column. Those
+writer cases exercise PageOutput/profile inspection, not the changed reader's
+schema gate; the reader's duplicate/nullability equivalence was reviewed in
+source. The stack array does not
+require all names to be present or require topic bitmap declarations. Projection,
+file capture and path validation remain unchanged. The tested-source/commit
+comparison passes; the ten-pair isolated comparison against `b6505ee3` follows.
+
+The [isolated schema comparison](baselines/2026-09-13-source-identity-schema-release.json)
+retains 10,000 timings, 100 warmups and 20 RSS observations. Its small median
+improvements did not survive the
+[fixed confirmation and control schedule](baselines/2026-09-13-source-identity-schema-tail-1.json),
+which retains another 30,000 timings, 300 warmups and 60 RSS observations.
+Pooled source median changes are +0.06% block hash, -0.05% block number,
+-0.07% timestamp, +0.45% present topic and -0.25% absent topic. Identical-candidate
+median differences range -0.37% to -2.39%. Thus no improvement beyond observed
+variability is established. The production stack-array change is rejected and
+the original validation is restored; the unknown-column regression is retained.
+All timing and memory observations, including tail changes, remain archived.
+
+A [fourth short profiling attempt](baselines/2026-09-13-source-identity-profiles-3.json)
+successfully samples the exact schema candidate with the required execution
+permission. It contains usable artifact-capture and marker-reader call stacks
+across all five query paths. The 1,000 instrumented timings and five warmups remain
+separate; sampled counts do not quantify removable latency for an individual path.
+The remaining investigation concerns validating source identity through already
+captured canonical metadata, with explicit publication ordering and retained
+recovery evidence. That experiment is being implemented; it is not accepted yet.
+
+The schema optimization was reverted in
+`b8754cc61de5494930ea11cad2f86d2f5d5e8dea`. The
+[revert checks](baselines/2026-09-13-source-identity-schema-revert-focused-1.json)
+pass formatting, strict workspace Clippy, the direct unknown-column reader
+regression and the existing compacted-writer metadata regression. Production
+source again matches `b6505ee3`; only the additional reader test remains.
+
+### Canonical metadata experiment
+
+The next experiment carries the source binding in the unbundled canonical
+artifact already opened by queries. It retains the separate publication marker
+as writer/recovery evidence. Generic null bitmaps and bundled streams retain
+their encodings. This changes the new, still-unmerged identified raw format;
+unidentified older sources remain scan-readable and index-ineligible.
+
+Readers must capture selected noncanonical artifacts first and canonical metadata
+last, then validate its committed identity against their captured manifest.
+Canonical path aliases must be rejected: deduplicating file paths must never
+allow a column descriptor to capture the canonical artifact early. Full source
+replacement must order a pending canonical record before changing columns and
+publish committed canonical metadata after every column replacement. Ordinary
+append reuses its existing canonical replacement, with no additional marker
+write, randomness or durability barrier. Exact-prefix recovery retains its
+capability checks and verified prefix bits throughout interruptions.
+
+A committed canonical snapshot can represent complete, coherent files even when
+the separate recovery marker still requires finalization. Queries validate that
+snapshot; startup, maintenance and writers continue to honor the recovery marker.
+This distinction does not permit queries during node recovery or waive catalog
+and WAL verification. All interleavings, recovery phases, compatibility behavior
+and performance still require validation before this design can be retained.
