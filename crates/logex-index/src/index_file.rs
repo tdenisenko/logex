@@ -1,15 +1,18 @@
 //! Integrity framing for immutable derived files. Page checks detect accidental
-//! changes without scanning the whole index for each point lookup. They do not
-//! authenticate a file or establish that its rows describe a particular segment.
+//! changes without scanning the whole index for each point lookup. The header
+//! retains CRC32; page fingerprints use noncryptographic XXH64. Neither
+//! authenticates a file or establishes that its rows describe a particular
+//! segment, and XXH64 does not provide CRC burst-error guarantees.
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"LXIDX001";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 48;
 const PAGE_BYTES: usize = 1024;
-const CHECKSUM_BYTES: u64 = 4;
+const CHECKSUM_BYTES: u64 = 8;
 const CHECKSUM_CACHE_BYTES: usize = 16 * 1024;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -26,35 +29,35 @@ fn physical_len(logical_len: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("index file length overflow"))
 }
 
-fn page_context(logical_len: u64, file_id: &[u8; 16]) -> crc32fast::Hasher {
-    let mut hash = crc32fast::Hasher::new();
-    hash.update(b"LogEx index page");
-    hash.update(&VERSION.to_le_bytes());
-    hash.update(&logical_len.to_le_bytes());
-    hash.update(file_id);
+fn page_context(logical_len: u64, file_id: &[u8; 16]) -> twox_hash::XxHash64 {
+    let mut hash = twox_hash::XxHash64::with_seed(0);
+    hash.write(b"LogEx index page");
+    hash.write(&VERSION.to_le_bytes());
+    hash.write(&logical_len.to_le_bytes());
+    hash.write(file_id);
     hash
 }
 
-fn page_hasher(logical_len: u64, context: &crc32fast::Hasher, index: u64) -> crc32fast::Hasher {
+fn page_hasher(logical_len: u64, context: &twox_hash::XxHash64, index: u64) -> twox_hash::XxHash64 {
     let mut hash = context.clone();
     let length = (logical_len - index * PAGE_BYTES as u64).min(PAGE_BYTES as u64);
     let mut extent = [0; 16];
     extent[..8].copy_from_slice(&index.to_le_bytes());
     extent[8..].copy_from_slice(&length.to_le_bytes());
-    hash.update(&extent);
+    hash.write(&extent);
     hash
 }
 
 fn verify_page(
     logical_len: u64,
-    context: &crc32fast::Hasher,
+    context: &twox_hash::XxHash64,
     index: u64,
     page: &[u8],
-    expected: [u8; 4],
+    expected: [u8; CHECKSUM_BYTES as usize],
 ) -> io::Result<()> {
     let mut hash = page_hasher(logical_len, context, index);
-    hash.update(page);
-    if hash.finalize().to_le_bytes() != expected {
+    hash.write(page);
+    if hash.finish().to_le_bytes() != expected {
         return Err(invalid(
             "index page checksum mismatch; rebuild derived indexes",
         ));
@@ -84,11 +87,13 @@ fn parse_header(header: &[u8], length: u64) -> io::Result<Option<(u64, [u8; 16])
     Ok(Some((logical_len, file_id)))
 }
 
-fn verify_body(logical: &[u8], checksums: &[u8], context: &crc32fast::Hasher) -> io::Result<()> {
+fn verify_body(logical: &[u8], checksums: &[u8], context: &twox_hash::XxHash64) -> io::Result<()> {
     // Callers establish exact physical geometry before splitting the body.
     for (index, page) in logical.chunks(PAGE_BYTES).enumerate() {
         let offset = index * CHECKSUM_BYTES as usize;
-        let expected = checksums[offset..offset + 4].try_into().unwrap();
+        let expected = checksums[offset..offset + CHECKSUM_BYTES as usize]
+            .try_into()
+            .unwrap();
         verify_page(logical.len() as u64, context, index as u64, page, expected)?;
     }
     Ok(())
@@ -128,7 +133,7 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
-    page_context: crc32fast::Hasher,
+    page_context: twox_hash::XxHash64,
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
     page_index: Option<u64>,
@@ -153,8 +158,8 @@ impl IndexFile {
         let protected = parsed.is_some();
         // Legacy bytes are exposed only to callers that validate their encoding.
         let (logical_len, file_id) = parsed.unwrap_or((length, [0; 16]));
-        // Keep a typical bloom's footer in one cache window without allocating
-        // the full window for small indexes or unprotected legacy files.
+        // Cache a bounded footer window without allocating the full window for
+        // small indexes or unprotected legacy files.
         let checksum_capacity = if protected {
             (logical_len.div_ceil(PAGE_BYTES as u64) * CHECKSUM_BYTES)
                 .min(CHECKSUM_CACHE_BYTES as u64) as usize
@@ -295,7 +300,7 @@ impl IndexFile {
         Ok(())
     }
 
-    fn page_checksum(&mut self, index: u64) -> io::Result<[u8; 4]> {
+    fn page_checksum(&mut self, index: u64) -> io::Result<[u8; CHECKSUM_BYTES as usize]> {
         let checksum_offset = index * CHECKSUM_BYTES;
         let checksum_start =
             checksum_offset / CHECKSUM_CACHE_BYTES as u64 * CHECKSUM_CACHE_BYTES as u64;
@@ -312,8 +317,8 @@ impl IndexFile {
             self.checksum_start = Some(checksum_start);
         }
         let offset = (checksum_offset - checksum_start) as usize;
-        let mut checksum = [0; 4];
-        checksum.copy_from_slice(&self.checksums[offset..offset + 4]);
+        let mut checksum = [0; CHECKSUM_BYTES as usize];
+        checksum.copy_from_slice(&self.checksums[offset..offset + CHECKSUM_BYTES as usize]);
         Ok(checksum)
     }
 }
@@ -405,7 +410,7 @@ impl Seek for IndexFile {
     }
 }
 
-/// Stream logical bytes once, retaining only four checksum bytes per page.
+/// Stream logical bytes once, retaining only eight fingerprint bytes per page.
 /// Durability and publication ordering belong to IndexBuildCheckpoint.
 pub(crate) fn write_index_file(
     path: &Path,
@@ -470,16 +475,16 @@ struct IndexWriter {
     // Bytes from the current page already emitted by an explicit flush.
     flushed: usize,
     failed: bool,
-    page_context: crc32fast::Hasher,
-    checksums: Vec<[u8; 4]>,
+    page_context: twox_hash::XxHash64,
+    checksums: Vec<[u8; CHECKSUM_BYTES as usize]>,
 }
 
 impl IndexWriter {
     fn finish_buffered_page(&mut self, length: usize, index: u64) -> io::Result<()> {
         self.output.write_all(&self.page[self.flushed..length])?;
         let mut hash = page_hasher(self.logical_len, &self.page_context, index);
-        hash.update(&self.page[..length]);
-        self.checksums.push(hash.finalize().to_le_bytes());
+        hash.write(&self.page[..length]);
+        self.checksums.push(hash.finish().to_le_bytes());
         self.flushed = 0;
         Ok(())
     }
@@ -510,8 +515,8 @@ impl IndexWriter {
                         &self.page_context,
                         first + page_index as u64,
                     );
-                    hash.update(page);
-                    self.checksums.push(hash.finalize().to_le_bytes());
+                    hash.write(page);
+                    self.checksums.push(hash.finish().to_le_bytes());
                 }
                 self.written += count as u64;
                 remaining = &remaining[count..];
@@ -624,6 +629,44 @@ mod tests {
     }
 
     #[test]
+    fn persisted_page_fingerprints_match_independent_oneshot_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fingerprints");
+        let original = data();
+        for length in [0, 1, PAGE_BYTES, PAGE_BYTES + 1, original.len()] {
+            let logical = &original[..length];
+            write(&path, logical);
+            let physical = fs::read(&path).unwrap();
+            assert_eq!(&physical[8..12], &2u32.to_le_bytes());
+            assert_eq!(&physical[12..16], &1024u32.to_le_bytes());
+            assert_eq!(physical.len(), 48 + length + length.div_ceil(1024) * 8);
+            assert_eq!(&physical[48..48 + length], logical);
+            assert_eq!(
+                crc32fast::hash(&physical[..44]).to_le_bytes(),
+                physical[44..48]
+            );
+            for (index, page) in logical.chunks(1024).enumerate() {
+                // Independently concatenate the complete byte stream instead
+                // of reusing streaming context/extent helpers from the writer.
+                let mut bytes = b"LogEx index page".to_vec();
+                bytes.extend_from_slice(&2u32.to_le_bytes());
+                bytes.extend_from_slice(&(length as u64).to_le_bytes());
+                bytes.extend_from_slice(&physical[24..40]);
+                bytes.extend_from_slice(&(index as u64).to_le_bytes());
+                bytes.extend_from_slice(&(page.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(page);
+                let expected = twox_hash::XxHash64::oneshot(0, &bytes).to_le_bytes();
+                let offset = 48 + length + index * 8;
+                assert_eq!(&physical[offset..offset + 8], &expected);
+            }
+            assert_eq!(
+                IndexFile::read_all_from_path(&path).unwrap().as_slice(),
+                logical
+            );
+        }
+    }
+
+    #[test]
     fn changed_page_and_checksum_bytes_are_read_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index");
@@ -631,10 +674,10 @@ mod tests {
         write(&path, &logical);
         let complete = fs::read(&path).unwrap();
         for page in 0..logical.len().div_ceil(PAGE_BYTES) {
-            for checksum in [false, true] {
+            for checksum in [None, Some(0), Some(CHECKSUM_BYTES as usize - 1)] {
                 let mut changed = complete.clone();
-                let offset = if checksum {
-                    HEADER_BYTES + logical.len() + page * 4
+                let offset = if let Some(byte) = checksum {
+                    HEADER_BYTES + logical.len() + page * CHECKSUM_BYTES as usize + byte
                 } else {
                     HEADER_BYTES + page * PAGE_BYTES
                 };
@@ -646,7 +689,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     reader.read_exact(&mut [0]).is_err(),
-                    "page {page}, checksum {checksum}"
+                    "page {page}, checksum {checksum:?}"
                 );
                 let mut reader = IndexFile::open(&path).unwrap();
                 let mut output = vec![0; logical.len()];
@@ -661,7 +704,8 @@ mod tests {
             changed[HEADER_BYTES..HEADER_BYTES + 2 * PAGE_BYTES].split_at_mut(PAGE_BYTES);
         first.swap_with_slice(rest);
         let footer = HEADER_BYTES + logical.len();
-        let (first, second) = changed[footer..footer + 8].split_at_mut(4);
+        let (first, second) = changed[footer..footer + 2 * CHECKSUM_BYTES as usize]
+            .split_at_mut(CHECKSUM_BYTES as usize);
         first.swap_with_slice(second);
         fs::write(&path, changed).unwrap();
         assert!(
@@ -732,6 +776,15 @@ mod tests {
             );
             assert!(IndexFile::read_all_from_path(&path).is_err());
         }
+        // Discarded prototype versions do not become readable merely by
+        // updating the header CRC to agree with their version field.
+        let mut old_version = complete.clone();
+        old_version[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let checksum = crc32fast::hash(&old_version[..44]);
+        old_version[44..48].copy_from_slice(&checksum.to_le_bytes());
+        fs::write(&path, old_version).unwrap();
+        assert!(IndexFile::open(&path).is_err());
+        assert!(IndexFile::read_all_from_path(&path).is_err());
         // A self-consistent header with an impossible length is rejected before
         // allocating from it. The fixture remains exactly 48 bytes.
         let mut header = complete[..HEADER_BYTES].to_vec();
@@ -758,7 +811,8 @@ mod tests {
         first[HEADER_BYTES..HEADER_BYTES + PAGE_BYTES]
             .copy_from_slice(&second[HEADER_BYTES..HEADER_BYTES + PAGE_BYTES]);
         let footer = HEADER_BYTES + original.len();
-        first[footer..footer + 4].copy_from_slice(&second[footer..footer + 4]);
+        first[footer..footer + CHECKSUM_BYTES as usize]
+            .copy_from_slice(&second[footer..footer + CHECKSUM_BYTES as usize]);
         fs::write(&path, first).unwrap();
         assert!(
             IndexFile::open(&path)

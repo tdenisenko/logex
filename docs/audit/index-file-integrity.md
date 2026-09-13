@@ -69,7 +69,9 @@ pending.
 New derived files wrap their existing logical B-tree/bloom encoding in a page
 integrity container. Its 48-byte header fixes magic, version, 1024-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous, followed by one CRC32 per page. Each page checksum
+bytes remain contiguous. The current experiment uses container version 2 and
+one eight-byte XXH64 fingerprint per page; earlier screens used version 1 and
+four-byte CRC32 page checks. Each page fingerprint
 includes a domain tag, format version, logical length, file identity, page position and actual
 page length. Exact physical extent is checked using the opened handle.
 
@@ -78,9 +80,9 @@ table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
 holds a 1 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
 allocate only their footer size); no global validation cache or
-per-query full-file scrub is introduced. Writer checksum storage costs four
+per-query full-file scrub is introduced. Writer fingerprint storage costs eight
 bytes per logical page, and B-tree payloads stream once instead of retaining all
-serialized payload buffers. Integrity overhead on disk is 48 bytes plus four
+serialized payload buffers. Integrity overhead on disk is 48 bytes plus eight
 bytes per page; actual runtime cost still needs measurement.
 
 Every primary/composite/bloom builder checks the length of every participating
@@ -108,7 +110,7 @@ files using their selected version. No production directory is modified here.
 
 ## Boundaries and outstanding validation
 
-CRC detects accidental persisted-byte changes; it does not authenticate data,
+The page fingerprints detect accidental persisted-byte changes; they do not authenticate data,
 prove writer correctness or detect a complete valid file copied from a different
 segment. Publication/source binding of individual artifacts is a separate open
 batch-6 requirement. The current publication lock must be held throughout query
@@ -120,6 +122,48 @@ release gate, measure equivalent release index construction/point/range/bloom
 workloads and the existing mixed ingestion/query fixtures, retain all samples
 and investigated regressions, document exact source/CI evidence, then merge.
 No source-induced repeatable regression over 10% will be accepted.
+
+## Corrected read-cost investigation
+
+The [supplemental evidence](baselines/2026-09-13-index-integrity-investigation-supplement.json)
+retains screens 13–16: 25,296 timings and 136 RSS observations, independently
+rechecked against sources, binaries, logs and the fixed schedules. Together with
+the first archive this preserves 96,720 timings and 520 RSS observations.
+It also retains all nine passing gates at `3b0a52b7` (1,082 workspace tests,
+139 release query tests and two release consistency tests), subsequent focused
+checks, benchmark correction failures and diagnostic profiles. Final source
+validation is still required after later implementation changes.
+
+Corrected screen 14 (`18204b14`) exposes large-bitmap point/full-open median
+regressions of 21.52%/35.07%. Screen 15 (`21f96a04`) removes unnecessary full-read
+caches, overlapping prefetch and explicit zero-fill, while retaining one opened
+handle and shared framing checks. All 65 focused tests and Clippy pass, but
+large point/full-open medians remain 19.65%/29.77% above baseline. Screen 16
+(`b1af037d`) adds nonconsecutive row IDs with the same returned cardinality;
+its point/full-open medians are 37.79%/43.84% above baseline. None is accepted.
+
+Finite candidate-14 profiles isolate reads from oracle iteration and confirm
+that page checks contribute significant CPU cost. A separate 108-sample cost
+experiment compares the same contextual byte stream using pinned libraries.
+For 1 KiB pages, CRC32 and streaming XXH64 medians are 180.88 and 119.13 ns;
+short 64-byte input favors CRC32. These are algorithm-cost diagnostics, not
+node throughput or index acceptance results.
+
+The next isolated candidate uses the already resolved `twox-hash` 2.1.2 XXH64
+feature. It preserves every page, identity, length, position and error check.
+The footer grows from four to eight bytes per page; the header stays CRC32.
+The 16 KiB footer cache now spans 2 MiB of logical bytes, so a maximum-sized
+bloom with its extra 20-byte logical header crosses a cache-window boundary.
+This memory/I/O tradeoff must be measured. The old unmerged container prototype
+is rejected by the explicit version check; released legacy indexes still follow
+the documented rebuild path. All 66 focused tests pass, including an independent
+one-shot check of complete contextual fingerprint bytes.
+
+XXH64 is a noncryptographic fingerprint, with different error-detection
+properties from CRC32; it does not inherit CRC burst-error guarantees or provide
+authentication. This use is limited to accidental persisted-byte changes.
+Complete artifact/source identity remains separate work.
+See the [algorithm's official documentation](https://github.com/Cyan4973/xxHash).
 
 ## First performance screening (not accepted)
 
