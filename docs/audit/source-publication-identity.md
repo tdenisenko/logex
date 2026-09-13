@@ -10,7 +10,8 @@ passing. Independent arithmetic review agrees with the result: 61 of 62 primary
 endpoints are numerically below the 10% limit; sparse COUNT p95 remains uncertain.
 The full packet remains INCONCLUSIVE. Read-only query-path review found no
 COUNT-specific defect or unnecessary work. Mac-mini was released at
-2026-09-13 19:39:38 UTC, with no audit processes remaining. Performance clearance,
+2026-09-13 19:39:38 UTC, with no audit processes remaining. A separately frozen
+sparse confirmation is now in preparation on that host. Performance clearance,
 exact-head Linux/macOS CI, PR and merge remain pending.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
@@ -1165,6 +1166,15 @@ and successful preparation checks are archived.
 
 This is one finite confirmation, with no interim acceptance, replacement runs,
 post-result exceptions or further unchanged confirmation if it remains uncertain.
-Mac-mini use will resume only in a new subdirectory of the existing named test
-root. Its expected duration is approximately 66 minutes plus preparation and
-collection; the host will be released after collecting the complete result.
+Mac-mini use resumed only in a new subdirectory of the existing named test root.
+Its expected duration is approximately 66 minutes plus preparation and collection;
+the host will be released after collecting the complete result.
+
+The [execution preparation](baselines/2026-09-14-source-identity-sparse-preparation-1.json)
+records three successful transfer/verification steps: all 38 transferred files,
+nine Python 3.9 syntax checks and all 1,590 unchanged build/source inputs pass.
+The fixed cooldown is running at this evidence checkpoint; no benchmark has
+started. A separate independent verifier is frozen before data. It will check
+every reported effect/interval, all draw identities and temporal sensitivities,
+plus raw arithmetic at a declared fixed subset of draw indices. The full
+execution evidence will retain the cooldown's final log and outcome.

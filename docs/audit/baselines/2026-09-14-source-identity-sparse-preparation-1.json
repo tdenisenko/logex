@@ -1,0 +1,31 @@
+{
+  "status": "PREPARATION_VERIFIED_COOLDOWN_RUNNING_NO_MEASUREMENTS",
+  "design": "2026-09-14-source-identity-sparse-confirmation-design-1.json",
+  "verified_transfer_files": 38,
+  "remote_python39_ast_files": 9,
+  "verified_build_inputs": 1590,
+  "all_three_completed_steps_exit_zero": true,
+  "mac_mini_in_use": true,
+  "remote_scope": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/sparse-confirmation-1",
+  "independent_verifier_sha256": "53aa15923e94be0d245295263cc2730da18cd0793e128b6960afa9b3014dd54c",
+  "independent_verifier_checks": "All320processes/28800timings/800commands; all216points/intervals and18primary endpoints;10kseededblock traces/90kvectors. Independent raw arithmetic on16fixed draws plusall270temporal vectors, with exactstops.",
+  "verification_limit": "Independent raw arithmetic is a declared144draw-vector subset (3456values); all6480temporal values and allintervals fromretaineddraws checked. No claim of all90kvectors independently recomputed.",
+  "operational_deadlines_seconds": {
+    "transfer": 180,
+    "verify": 180,
+    "inputs": 300,
+    "cooldown": 900,
+    "run": 14400
+  },
+  "deadline_policy": "Any failure/deadline retains incomplete evidence and prevents clearance; no replacements or retries.",
+  "archive": {
+    "path": "2026-09-14-source-identity-sparse-preparation-1-raw.json.gz",
+    "bytes": 32324,
+    "sha256": "b5e8a8d0c588dffffd303fe461ec04ac20d9dcb782a5734d408f366410c652c8",
+    "uncompressed_bytes": 132219,
+    "uncompressed_sha256": "5c4270a87cedf38259c39c84b369129460576af0f2272fe9779ce3b6f6c0c3de",
+    "files": 21,
+    "roundtrip": "All decoded files compared byte-for-byte with originals."
+  },
+  "omissions": "Active cooldown log and its future final result are excluded from this preparation snapshot and will be retained with the complete execution evidence. Frozen source/design transfer tar is already represented by the exact design archive and transfer manifest."
+}
