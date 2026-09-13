@@ -12,8 +12,9 @@ all correctness checks pass, but only live publication satisfies every declared
 precision/order bound. No reported CPU speed limit was below 100. The local
 warmup diagnostic is also complete and does not establish a reliable measurement
 fix. A prospective direct source comparison now replaces the separate control
-admission strategy; its baseline build is running in the same isolated mac-mini
-test folder. Performance clearance, exact-head CI and merge remain pending.
+admission strategy. Both release builds and all 1,590 frozen inputs are now
+verified; a fixed cooldown precedes its single execution in the same isolated
+mac-mini test folder. Performance clearance, exact-head CI and merge remain pending.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -1039,7 +1040,8 @@ uses a single direct baseline/candidate comparison with contemporary controls,
 without another control-only admission packet. This changes the measurement
 strategy; the source-regression limit remains 10%.
 
-The new fixed schedule retains all six original suites, 24 source pairs and 12
+The [new fixed design](baselines/2026-09-14-source-identity-direct-design-1.json)
+retains all six original suites, 24 source pairs and 12
 control pairs for each binary per suite: 576 processes, 96,000 measured timings,
 480 warmups and 576 RSS records. A fixed seed randomizes the balanced round order
 before measurement. All 31 timing metrics retain primary median and p95
@@ -1056,3 +1058,21 @@ subdirectory. The baseline retains its own lockfile and unchanged fixtures;
 candidate build artifacts remain read-only. No direct source measurements are
 claimed by this preparation, and no live sync or external-volume access is part
 of it.
+
+
+## Verified direct-comparison inputs
+
+The [baseline build and execution preparation](baselines/2026-09-14-source-identity-direct-build-1.json)
+retain all 16 successful build/preparation commands, both fresh release harnesses,
+the baseline's own lockfile, and the exact frozen input paths and hashes.
+Independent local review checks all 720 baseline source files against the original
+Git archive, all 32 command logs, and the workspace-selected compiler records.
+A separate remote check rehashes all 1,590 baseline/candidate input files,
+including the compiled binaries. The original six fixtures are byte-identical.
+
+The fixed 600-second cooldown is operational preparation, with before/after host
+conditions retained and no environmental admission thresholds. Its active log
+will be retained with the execution packet. No benchmark has started at this
+checkpoint. The 70-file build/preparation archive has been decoded and compared
+byte-for-byte to the retained originals; it establishes provenance, not source
+performance clearance.
