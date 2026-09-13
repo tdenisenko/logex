@@ -859,3 +859,21 @@ identical saved binaries and can qualify measurement precision or return
 inconclusive; it cannot establish source-performance acceptance by itself.
 No remote timing result exists yet, and the quiet-window clarification remains
 pending. No production/external-volume or service changes were made.
+
+The [fixed control design and reviewed scripts](baselines/2026-09-13-source-identity-control-design.json)
+are retained before timing. Twelve rounds rotate the three suites and balance
+AB/BA order, using the same saved candidate binary for both labels. All eight
+required metrics must have both median and p95 label-effect intervals inside
+±5%, and order-drift intervals inside ±5 percentage points. Whole paired
+processes are resampled with the declared fixed seed and 4,000 draws per suite;
+all observations and draws are retained. This precision budget does not change
+the user's source-regression limit. Any failed check or insufficient precision
+returns inconclusive, with no replacement processes or repeated packet.
+
+Local preparation checks cover normal completion, a nonzero exit, timeout and
+parent-lifetime-pipe closure using benign owned Python subprocesses. The runner
+keeps its process-group leader reserved until cleanup finishes. Eight synthetic
+numeric/error-handling checks pass for the analyzer, including errors after a
+provisional eligibility result and changes to external input records. Python 3.9
+syntax is checked; these preparation checks ran locally on Python 3.13. They are
+not benchmark observations or a substitute for the remote packet's own checks.
