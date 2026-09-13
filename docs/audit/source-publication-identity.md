@@ -839,3 +839,23 @@ single finite same-binary control packet is being designed to assess precision
 before considering any new source comparison. The pending quiet-window question
 does not authorize assuming that the host is quiet. All earlier measurements and
 the unresolved performance disposition remain unchanged.
+
+Two subsequent isolated build preparations stopped before compilation. The
+first private environment could invoke the installed pinned compiler through
+rustup directly, but Cargo could not find `rustc` through its process environment.
+Explicit pinned `RUSTC`, `RUSTDOC` and toolchain-bin discovery corrected that
+setup error. The second preparation reached dependency resolution and found a
+crate absent from the copied cache. Both [complete failure records and logs](baselines/2026-09-13-source-identity-remote-preparation.json)
+are retained, with every command-log, script and source-inventory hash checked.
+Neither attempt executed a benchmark or produced a candidate test binary.
+
+The third preparation uses a fresh private internal-APFS directory,
+`/private/tmp/logex-source-identity-controls-3.PeHWi0`. It fetches the existing
+lockfile's dependencies into its private Cargo cache, then performs metadata
+inspection and compilation offline. Source bytes, lockfile and fixture parameters
+remain unchanged. The control-only schedule is fixed at 72 processes with
+14,640 measured timings, 120 explicit warmups and 72 RSS records. It compares
+identical saved binaries and can qualify measurement precision or return
+inconclusive; it cannot establish source-performance acceptance by itself.
+No remote timing result exists yet, and the quiet-window clarification remains
+pending. No production/external-volume or service changes were made.
