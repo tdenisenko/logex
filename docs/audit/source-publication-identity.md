@@ -1139,3 +1139,32 @@ under `/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA`, totaling
 2,483,512 KiB. Existing external-volume contents were not accessed. Any later
 confirmation must have a separately reviewed, prospectively fixed design that
 addresses the order coupling; this packet cannot be repeated until it passes.
+
+## Fixed sparse confirmation
+
+The [prospective confirmation design](baselines/2026-09-14-source-identity-sparse-confirmation-design-1.json)
+is frozen before measurement. It retains the complete unchanged sparse fixture,
+all nine metrics and 18 median/p95 endpoints. Eighty source pairs and 40 pairs
+for each identical-binary control produce 320 processes and 28,800 timings.
+Both release binaries and all build/source inputs are reused unchanged.
+
+The new schedule independently balances source order, control order, control
+binary and pair placement. Twenty balanced four-round blocks span five temporal
+cycles. Resampling retains whole blocks, with 10,000 fixed shared draws. Every
+pooled endpoint must stay below 10% using a nominal one-sided 99% upper bound;
+predeclared source/control order and cycle-sensitivity patterns can still stop
+clearance. These are conditional bounds, not an unconditional error guarantee.
+No old observations are pooled away, and the prior packet remains INCONCLUSIVE.
+
+Runner and arithmetic checks use small synthetic inputs only. Root review
+corrected an unintended hash-buffer substitution and restored the proposal's
+byte comparison before freezing; the earlier tooling preparation is retained.
+The existing process supervision is unchanged. No production or fixture code
+was changed. The full design, independent method review, scripts, exact hashes
+and successful preparation checks are archived.
+
+This is one finite confirmation, with no interim acceptance, replacement runs,
+post-result exceptions or further unchanged confirmation if it remains uncertain.
+Mac-mini use will resume only in a new subdirectory of the existing named test
+root. Its expected duration is approximately 66 minutes plus preparation and
+collection; the host will be released after collecting the complete result.
