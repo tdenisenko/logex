@@ -1,8 +1,8 @@
 # Derived index file integrity
 
 This batch is in progress on `audit/index-file-integrity`, based on PR #147
-merge `ae4c01c913f89e8448a2c98d5905733525c51047`. No performance acceptance or
-merge is claimed yet. It changes derived indexes, not log columns or ingestion
+merge `ae4c01c913f89e8448a2c98d5905733525c51047`. Final performance comparisons and all nine local validation gates are complete;
+PR CI and merge remain pending. It changes derived indexes, not log columns or ingestion
 transactions. Whole-file source identity and the rest of batch 6 remain open.
 
 **Measurement correction:** screens 1–13 timed the row-ID correctness oracle
@@ -18,8 +18,11 @@ latency.
 Earlier nine local gates passed at exact head `3b0a52b7`, including 65 index
 unit tests, workspace/release checks and both protocol consistency tests. Those
 results predate the later reader/writer optimizations. Current production source
-`7c99c9f4` passes all79 focused index tests, formatting and focused Clippy; the
-final exact-source workspace/release gate run is still required. Earlier logs
+`7c99c9f4` passes all 79 focused index tests. Final exact-source validation at
+`b6076c00` passes all nine gates, including 1,096 workspace tests, 139 release
+query tests and both release protocol-consistency tests. Complete logs, source
+hashes and independently checked totals are in
+[final local validation](baselines/2026-09-13-index-integrity-validation.json). Earlier logs
 remain in `/private/tmp/logex-index-integrity-gates-1`.
 
 ## Findings and reproduction
@@ -678,3 +681,20 @@ readiness. Broader mixed/staging performance work must retain these observations
 The final static production review finds no new concrete correctness concern in
 the combined framing, full/point reads, writer finalization and builder/checkpoint
 paths. This is a bounded review, with runtime validation supplied separately.
+
+
+### Final local validation
+
+All nine commands pass at `b6076c00718c9e8f4d90e132e3c93f7624782aff`:
+vendor verification; formatting; locked workspace/all-target check, Clippy and
+tests; locked workspace documentation tests; locked release node build; release
+query tests; and release protocol-consistency tests. Workspace totals are
+1,096 passed / 0 failed / 21 ignored; release query totals139 / 0 / 7; both
+protocol checks pass. Ignored opt-in benchmarks were executed separately in the
+recorded comparisons. Documentation tests contain no executable examples.
+
+The validation archive independently checks the exact Git source tree, every
+command/exit/log hash, test totals and compressed-evidence roundtrip. Subsequent
+validation-document changes do not alter those production/configuration sources.
+Existing dependency future-compatibility warnings remain recorded in the audit
+ledger. CI on the PR head and merge remain required; the broader audit is open.
