@@ -60,6 +60,8 @@ struct PageOutput<'a> {
     previous: std::collections::BTreeMap<String, ExistingPages>,
     canonical: Option<NullBitmap>,
     canonical_binding: Option<crate::column::SourceBinding>,
+    canonical_commitment: Option<crate::commitment::Commitment>,
+    canonical_previous: Option<(u64, crate::commitment::Commitment)>,
     replacements: Option<durability::ReplacementBatch>,
     bundle: Option<(BundleWriter, u64)>,
 }
@@ -91,6 +93,8 @@ impl<'a> PageOutput<'a> {
             previous: Default::default(),
             canonical: Some(NullBitmap::new()),
             canonical_binding: None,
+            canonical_commitment: None,
+            canonical_previous: None,
             replacements: None,
             bundle: None,
         }
@@ -254,6 +258,7 @@ impl<'a> PageOutput<'a> {
                     segment_id: manifest.segment_id,
                 });
         let canonical_bytes = artifacts.read("canonical.bitmap")?;
+        let mut canonical_previous = None;
         let canonical = if artifacts.bundle().is_some() {
             parse_bitmap_prefix(&canonical_bytes, manifest.row_count)?
         } else {
@@ -262,7 +267,9 @@ impl<'a> PageOutput<'a> {
                 canonical_bytes.len() as u64,
             )?
             .validate_exact_len(canonical_bytes.len() as u64)?
-            .validate_committed(canonical_binding, manifest.row_count)?;
+            .validate_committed(canonical_binding, manifest.row_count)?
+            .validate_commitment(manifest.source_commitment)?;
+            canonical_previous = metadata.previous;
             metadata.bitmap(&canonical_bytes)?
         };
         tail |= canonical.len() != manifest.row_count;
@@ -273,6 +280,8 @@ impl<'a> PageOutput<'a> {
                 previous,
                 canonical: Some(canonical),
                 canonical_binding,
+                canonical_commitment: manifest.source_commitment,
+                canonical_previous,
                 replacements: None,
                 bundle: None,
             },
@@ -331,7 +340,13 @@ impl<'a> PageOutput<'a> {
             if self.bundle.is_some() {
                 bitmap.write_to(writer)
             } else {
-                crate::column::write_raw_canonical(writer, &bitmap, self.canonical_binding)
+                crate::column::write_raw_canonical_with_previous(
+                    writer,
+                    &bitmap,
+                    self.canonical_binding,
+                    self.canonical_commitment,
+                    self.canonical_previous,
+                )
             }
         })
     }
@@ -398,6 +413,7 @@ pub(crate) fn restore_bundled_checkpoint(
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
         segment_id: descriptor.id,
         source_namespace: descriptor.source_namespace,
+        source_commitment: descriptor.source_commitment,
         generation: descriptor.generation,
         kind: descriptor.kind,
         min_block: descriptor.min_block,
@@ -454,7 +470,14 @@ pub(crate) fn append_rows(
     existing_rows: u64,
     rows: &[LogRow],
 ) -> std::io::Result<()> {
-    append_ingest_rows(segment_dir, existing_rows, rows, Publication::Ordered, None)
+    append_ingest_rows(
+        segment_dir,
+        existing_rows,
+        rows,
+        Publication::Ordered,
+        None,
+        crate::commitment::AppendRevision::new(None, rows),
+    )
 }
 
 pub(crate) fn append_ingest_rows(
@@ -463,6 +486,7 @@ pub(crate) fn append_ingest_rows(
     rows: &[LogRow],
     publication: Publication,
     source_identity: Option<crate::column::SourceIdentity>,
+    revision: crate::commitment::AppendRevision,
 ) -> std::io::Result<()> {
     if existing_rows == 0 {
         match source_identity {
@@ -472,6 +496,7 @@ pub(crate) fn append_ingest_rows(
                 None,
                 publication,
                 identity,
+                revision.next,
             ),
             None => ColumnFile::write_batch_with_publication(segment_dir, rows, None, publication),
         }
@@ -482,9 +507,8 @@ pub(crate) fn append_ingest_rows(
                 rows,
                 existing_rows,
                 publication,
-                identity.namespace,
-                identity.generation,
-                identity.segment_id,
+                identity.into(),
+                revision,
             ),
             None => ColumnFile::append_batch_with_publication(
                 segment_dir,
@@ -600,6 +624,7 @@ pub(crate) fn repack_sparse_bundle(
     if reader.bundle_reference() != Some(reference)
         || reader.generation() != descriptor.generation
         || reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0)
+        || reader.source_commitment()? != descriptor.source_commitment.map(|root| root.0)
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -834,12 +859,34 @@ pub(crate) fn bundled_row_capacity(
     Ok((accepted, reader))
 }
 
+#[cfg(test)]
 pub(crate) fn append_compacted_rows(
     segment_dir: &Path,
     existing_rows: u64,
     rows: &[LogRow],
     publication: Publication,
     inspected: Option<BundleReader>,
+) -> std::io::Result<EncodedColumns> {
+    let manifest = SegmentManifest::load(&segment_dir.join("segment.json"))?
+        .ok_or_else(|| std::io::Error::other("missing append manifest"))?;
+    let revision = crate::commitment::AppendRevision::new(manifest.source_commitment, rows);
+    append_compacted_rows_with_revision(
+        segment_dir,
+        existing_rows,
+        rows,
+        publication,
+        inspected,
+        revision,
+    )
+}
+
+pub(crate) fn append_compacted_rows_with_revision(
+    segment_dir: &Path,
+    existing_rows: u64,
+    rows: &[LogRow],
+    publication: Publication,
+    inspected: Option<BundleReader>,
+    revision: crate::commitment::AppendRevision,
 ) -> std::io::Result<EncodedColumns> {
     let manifest = SegmentManifest::load(&segment_dir.join("segment.json"))?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "missing append manifest")
@@ -872,7 +919,18 @@ pub(crate) fn append_compacted_rows(
             "append manifest changed before source ownership",
         ));
     }
-    let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication, inspected)?;
+    if manifest.source_commitment != revision.previous {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "append prefix commitment changed",
+        ));
+    }
+    let mut output =
+        PageOutput::append(segment_dir, &manifest, rows.len(), publication, inspected)?;
+    if !rows.is_empty() {
+        output.canonical_previous = revision.previous.map(|root| (manifest.row_count, root));
+    }
+    output.canonical_commitment = revision.next;
     output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
     Ok(EncodedColumns {
@@ -1164,6 +1222,7 @@ fn verify_maintenance_source(
         if reader.generation() != descriptor.generation
             || reader.bundle_reference() != descriptor.column_bundle.as_ref()
             || reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0)
+            || reader.source_commitment()? != descriptor.source_commitment.map(|root| root.0)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -1234,6 +1293,7 @@ fn persist_manifest(
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
         segment_id: descriptor.id,
         source_namespace: descriptor.source_namespace,
+        source_commitment: descriptor.source_commitment,
         generation: descriptor.generation,
         kind: descriptor.kind,
         min_block: descriptor.min_block,
@@ -2340,6 +2400,13 @@ fn remove_file_if_exists(path: PathBuf) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows: &[LogRow]) {
+        descriptor.source_commitment = descriptor
+            .source_commitment
+            .map(|root| crate::commitment::extend(root, rows));
+        super::apply_rows_to_descriptor(descriptor, rows);
+    }
+
     use super::*;
     use alloy_primitives::bytes;
     use logex_types::Source;
@@ -2381,6 +2448,10 @@ mod tests {
                 segment_id: descriptor.id,
                 kind: descriptor.kind,
             },
+            Some(crate::commitment::extend(
+                crate::commitment::empty(descriptor.source_namespace.unwrap().0),
+                rows,
+            )),
         )
         .unwrap();
     }
@@ -2411,6 +2482,7 @@ mod tests {
                     segment_id: descriptor.id,
                     kind: descriptor.kind,
                 }),
+            crate::commitment::AppendRevision::new(descriptor.source_commitment, rows),
         )
         .unwrap();
         apply_rows_to_descriptor(&mut descriptor, rows);
@@ -2436,6 +2508,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2794,6 +2867,7 @@ mod tests {
         let descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2883,9 +2957,15 @@ mod tests {
                 segment_id: descriptor.id,
                 kind: descriptor.kind,
             },
+            Some(crate::commitment::extend(
+                crate::commitment::empty(descriptor.source_namespace.unwrap().0),
+                &rows,
+            )),
         )
         .unwrap();
+        let canonical_bytes = fs::read(dir.join("canonical.bitmap")).unwrap();
         let mut columns = write_compacted_rows(&dir, &rows).unwrap();
+        fs::write(dir.join("canonical.bitmap"), canonical_bytes).unwrap();
         for (name, values) in std::iter::once((
             "block_number",
             rows.iter().map(|r| r.block_number).collect::<Vec<_>>(),
@@ -3026,6 +3106,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         write_native_raw(&dir, &rows[..2], &descriptor);
         descriptor.row_count = 2;
+        descriptor.source_commitment = descriptor
+            .source_namespace
+            .map(|ns| crate::commitment::extend(crate::commitment::empty(ns.0), &rows[..2]));
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
         let reader =
             SegmentReader::open_projected(&dir, &["block_number", "topic1", "data"]).unwrap();
@@ -3045,6 +3128,9 @@ mod tests {
         );
         assert!(reader.read_u64("block_number", Some(&[2])).is_err());
         descriptor.row_count = rows.len() as u64;
+        descriptor.source_commitment = descriptor
+            .source_namespace
+            .map(|ns| crate::commitment::extend(crate::commitment::empty(ns.0), &rows));
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
         std::thread::scope(|scope| {

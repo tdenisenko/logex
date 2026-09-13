@@ -15,10 +15,14 @@ confirmation is now complete: all 18 primary endpoints meet its unchanged
 performance rules, with no declared stop. This clears that measured workload
 conditionally; it does not reclassify or pool the original packet. Mac-mini was
 released at 2026-09-13 21:36:37 UTC with no audit processes remaining.
-A newly reproduced divergent-copy identity failure requires a further correction.
-Its correctness/performance validation, exact-head Linux/macOS CI, PR and merge
-remain pending. The earlier namespace implementation below describes the measured
-version, not a completed solution to the new finding.
+A newly reproduced divergent-copy identity failure required a further correction.
+The logical-prefix implementation now passes all nine local gates, including
+1,163 workspace tests, 149 release query tests and two release API consistency
+tests. The [complete validation evidence](baselines/2026-09-14-source-identity-content-validation-1.json)
+retains the exact source, commands and logs, including the initial loopback
+permission failure and unchanged-source passing run with the required access.
+New-source performance validation, exact-head Linux/macOS CI, PR and merge remain
+pending. The earlier namespace measurements do not clear the new implementation.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -45,17 +49,90 @@ the test does not manufacture identity metadata or use production data.
 
 The [before-fix evidence](baselines/2026-09-14-source-identity-clone-reproduction-1.json)
 contains the exact patch, command, failing output, source hashes and design
-reviews. The correction in progress adds a grouping-independent logical-prefix
+reviews. The correction adds a grouping-independent logical-prefix
 commitment while keeping the namespace stable. It hashes only newly appended
 rows during normal ingestion and verifies retained rows during the existing
 recovery reread. This distinguishes divergent histories and prevents recovery
 from assigning an old identity to a different prefix. Compaction and canonical
 bit changes preserve the row commitment; legacy contents without one remain
-unidentified for indexing. No additional per-batch disk flush is intended.
-The encoding and integration still require implementation validation and a new
-performance comparison; a design note is not evidence that the fix is complete.
+unidentified for indexing. No additional per-batch disk flush is added. Final
+integration checks and a new performance comparison remain required before
+acceptance.
 
-### Completed independent sparse confirmation
+## Logical-prefix commitment and compatibility
+
+The current implementation extends the stable source namespace with a 32-byte
+BLAKE3 commitment. The empty root hashes the domain
+`logex.logical-prefix.empty.v1\0` followed by the 16-byte namespace. Each row hashes
+`logex.logical-prefix.row.v1\0`, the previous root, and the following ordered
+encoding. The displayed `\0` denotes one zero byte.
+
+| Fields, in order | Encoding |
+|---|---|
+| Block number, block hash, timestamp, transaction hash | u64 little endian, 32 bytes, u64 little endian, 32 bytes |
+| Transaction index, log index, address | Two u32 little endian values, then 20 bytes |
+| Topics 0 through 3 | One presence byte (0 or 1), then 32 bytes only when present |
+| Declared data length, actual data length, data | u32 little endian, u64 little endian, exact payload bytes |
+| Source | One byte: receipt 0, trace 1 |
+
+All logical row fields and their order participate. Append grouping and replay
+batching do not affect the result. Normal ingestion computes the new suffix once
+and carries the root in existing publication writes. Compaction and canonical-bit
+updates preserve it: canonical filtering remains separate because indexes cover
+all source rows. The commitment is a consistency check, not authentication of
+arbitrarily replaced metadata or a full payload scrub on every query.
+
+The catalog and manifest carry the current root. Raw canonical framing also
+carries the exact previous `(row count, root)` so a reader that captured the old
+manifest can finish during the canonical-before-manifest append window. Writers
+require the current root and physical boundary; they cannot append using this
+reader compatibility allowance. Canonical-only updates and empty appends preserve
+the previous tuple. Capture retries remain bounded and require an observed
+manifest change. Already-open readers retain their captured handles and identity.
+Query snapshots keep their existing row caps and invalidation tokens, allowing
+later appends and representation changes without exposing later rows.
+
+Prefix recovery rehashes the catalog-authoritative retained rows before changing
+the marker or rewriting files. A donor with a longer but different committed
+prefix is rejected; a longer copy with the same retained prefix recovers exactly.
+The recovery capability binds the expected root and boundary. Missing legacy
+commitments are never inferred from a namespace or row count.
+
+| Persisted artifact | Current format and compatibility |
+|---|---|
+| Native catalog | `LXCAT012`, metadata version 12; earlier catalogs require a new directory |
+| Segment manifest | Version 10; older native manifests are rejected |
+| Raw source marker | `LXSRC002`, 87 bytes; `LXSRC001` remains readable without a commitment |
+| Raw canonical bitmap | `LXCAN001`, version 2, 128-byte header; version 1 and supported plain legacy bitmaps remain readable |
+| Index checkpoint | `LXICP006`; older checkpoints are ineligible and rebuild only for an identified source |
+| Column payloads and bundles | Existing encodings remain unchanged |
+
+The catalog and manifest version checks are necessary even for entirely bundled
+data: older binaries otherwise ignore the added JSON fields and can publish
+appends without updating the root. Existing native directories are preserved and
+rejected rather than silently migrated or reset. This follows the authorized
+fresh-directory compatibility policy. Standalone legacy raw sources remain
+scan-readable and index-ineligible until a complete owned rewrite establishes
+identity. Rollback uses a preserved pre-upgrade directory with its matching
+binary; version fields must not be manually changed to bypass the fence.
+
+Regressions cover divergent indexes, recovery prefix substitution with a
+valid-copy control, append grouping and every row field, previous-prefix capture,
+legacy index eligibility, and public query snapshot behavior. All nine local
+workspace/release gates pass. The 23 existing ignored workspace tests include
+four distinct-mount recovery tests still awaiting isolated execution. New-source
+performance and CI remain pending; these changes are not yet accepted for
+deployment.
+
+The [fixed initial diagnostic](baselines/2026-09-14-source-identity-content-diagnostic-design-1.json)
+uses two balanced source pairs for each unchanged publication, dense and sparse
+fixture: 12 processes and 800 timings. It compares with merged PR #149 and retains
+all pair/pooled median and P95 results. It cannot grant performance clearance;
+increases above 5% require investigation, and repeated or pooled increases above
+10% hold further acceptance. Source and build identities are frozen separately
+before execution. No extra pairs or favorable-observation selection is planned.
+
+## Completed independent sparse confirmation
 
 The [complete packet](baselines/2026-09-14-source-identity-sparse-result-1.json)
 retains all 320 processes, 28,800 timings, 320 RSS records, 800 commands and
@@ -105,13 +182,14 @@ All new remote writes stayed in
 The final read-only check found no audit processes. The external volume and
 unrelated files were untouched; subsequent work is local.
 
-## Implementation direction and invariants
+## Source ownership and publication invariants
 
 Storage owns a random namespace for each logical segment incarnation. Native
 catalog descriptors and manifests carry the namespace; readers retain the
 captured namespace and indexes bind to it alongside existing row, generation and
-bundle metadata. Ordinary appends preserve the namespace and continue to publish
-their existing row boundary. Representation-only compaction preserves logical
+bundle metadata and the logical-prefix commitment. Ordinary appends preserve the
+namespace, extend the commitment, and publish their existing row boundary.
+Representation-only compaction preserves logical
 identity. This must not add a random draw or a durability barrier to each native
 sync batch, or extra marker reads to bundled queries.
 
@@ -134,9 +212,9 @@ remain fixed through prefix appends or yield an explicit error.
 
 Missing legacy identity is a compatibility condition, not evidence that old
 indexes are correct. Such data remains scan-readable but index-ineligible;
-the diagnostic distinguishes this from a transient rebuild. Existing native
-unidentified segments currently require a fresh sync into a new directory for
-indexing. No in-place identity migration command or automatic row-count-based
+the diagnostic distinguishes this from a transient rebuild. Earlier native
+catalog or manifest formats require a fresh directory under the version fence
+above. No in-place identity migration command or automatic row-count-based
 identity migration is provided. Native recovery and representation compaction
 preserve absent identity. A standalone full raw rewrite establishes its own
 identity but does not migrate the native catalog/manifest. Interrupted replacement must be resolved only by
@@ -145,12 +223,10 @@ from equal row counts, silently clear an updating state, or schedule an endless
 background rebuild loop. Existing maintenance ownership and recovery boundaries
 must remain consistent; query capture must not recursively acquire writer locks.
 
-Downgrade rejection is not guaranteed. Native catalog/storage version numbers
-remain unchanged, and older binaries may ignore added identity fields in
-otherwise compatible bundled data; raw canonical envelopes also differ from
-their plain-bitmap reader. Do not use an older binary on a directory written by
-this version. Operational rollback uses a preserved pre-upgrade directory or
-backup. This is one-way upgrade guidance, not a tested downgrade migration.
+The namespace-only measured revisions retained the old native format numbers and
+documented unsupported downgrade. The logical-prefix correction supersedes that
+policy with the catalog and manifest version fences described above, because
+older bundled writers could otherwise discard the new metadata silently.
 
 ## Prefix-repair recovery boundary
 

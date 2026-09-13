@@ -462,7 +462,7 @@ mod tests {
                 bitmap.push(row % 2 == 0);
             }
             let mut bytes = Vec::new();
-            crate::column::write_raw_canonical(&mut bytes, &bitmap, binding).unwrap();
+            crate::column::write_raw_canonical(&mut bytes, &bitmap, binding, None).unwrap();
             fs::write(dir.path().join("canonical.bitmap"), &bytes).unwrap();
             let artifacts = ColumnArtifacts::open_projected(dir.path(), None, Some(&[])).unwrap();
             let expected = artifacts

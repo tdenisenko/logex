@@ -1,11 +1,13 @@
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
+use logex_index::IndexBuilder;
 use logex_query::{
     NativeStorageSnapshot, SqlQueryError, SqlQueryPage, execute_sql_page_on_snapshot,
 };
-use logex_storage::{PartitionManager, PartitionManagerConfig};
+use logex_storage::{PartitionManager, PartitionManagerConfig, SegmentReader};
 use logex_types::{LogRow, Source};
 use serde_json::json;
+use std::{fs, path::Path};
 use tempfile::TempDir;
 
 fn header(number: u64, parent: B256) -> Header {
@@ -460,5 +462,179 @@ async fn captured_prefix_survives_sparse_bundle_repacking() {
                 .await
                 .unwrap();
         assert_eq!(result.rows, vec![json!({"total":127})]);
+    }
+}
+
+fn copy_fixture_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_fixture_tree(&entry.path(), &destination);
+        } else {
+            assert!(kind.is_file(), "fixture contains only regular files");
+            fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+fn copy_index_directory(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        assert!(entry.file_type().unwrap().is_file());
+        fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+    }
+}
+
+fn reopen(path: &Path) -> PartitionManager {
+    PartitionManager::open(PartitionManagerConfig {
+        data_dir: path.to_path_buf(),
+        partition_target_rows: 100,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn divergent_complete_copy_indexes_preserve_public_sql_results() {
+    let (source_tmp, mut source, first) = fixture(false);
+    source.checkpoint_durable().unwrap();
+    drop(source);
+
+    let target_tmp = TempDir::new().unwrap();
+    copy_fixture_tree(source_tmp.path(), target_tmp.path());
+    let mut source = reopen(source_tmp.path());
+    let mut target = reopen(target_tmp.path());
+    let next = header(101, first.hash_slow());
+    let mut source_append = row(&next, 0);
+    source_append.address = Address::repeat_byte(0xbb);
+    let mut target_append = row(&next, 0);
+    target_append.address = Address::repeat_byte(0xcc);
+    write(&mut source, false, &next, &[source_append]);
+    write(&mut target, false, &next, &[target_append]);
+
+    let source_dir = source.hot_partition().meta.path.clone();
+    let target_dir = target.hot_partition().meta.path.clone();
+    IndexBuilder::build_all_indexes(&source_dir).unwrap();
+    IndexBuilder::build_all_indexes(&target_dir).unwrap();
+
+    let mut expected = SegmentReader::open(&target_dir)
+        .unwrap()
+        .read_log_rows(None)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.address == Address::repeat_byte(0xcc))
+        .collect::<Vec<_>>();
+    expected.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index));
+    assert_eq!(expected.len(), 1);
+    copy_index_directory(&source_dir.join("indexes"), &target_dir.join("indexes"));
+
+    let snapshot = NativeStorageSnapshot::from_storage(&target);
+    let address = format!("0x{}", hex::encode(Address::repeat_byte(0xcc)));
+    let selected = execute_sql_page_on_snapshot(
+        &format!(
+            "SELECT block_number, log_index FROM logs WHERE address = '{address}' \
+             ORDER BY block_number, tx_index, log_index"
+        ),
+        snapshot.clone(),
+        next.number,
+        SqlQueryPage::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        selected.rows,
+        expected
+            .iter()
+            .map(|row| json!({
+                "block_number": row.block_number,
+                "log_index": row.log_index,
+            }))
+            .collect::<Vec<_>>()
+    );
+
+    let count = execute_sql_page_on_snapshot(
+        &format!("SELECT COUNT(*) AS total FROM logs WHERE address = '{address}'"),
+        snapshot,
+        next.number,
+        SqlQueryPage::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(count.rows, vec![json!({"total": expected.len()})]);
+}
+
+#[tokio::test]
+async fn old_snapshot_uses_current_source_with_stale_checkpoint() {
+    for bundled in [false, true] {
+        let (_tmp, mut storage, first) = fixture(bundled);
+        let path = storage.hot_partition().meta.path.clone();
+        IndexBuilder::build_all_indexes(&path).unwrap();
+        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let captured_rows = snapshot
+            .partitions_in_order(logex_storage::native::LogOrder::Ascending)
+            .into_iter()
+            .find(|partition| partition.path == path)
+            .unwrap()
+            .row_count;
+
+        let next = header(101, first.hash_slow());
+        write(&mut storage, bundled, &next, &[row(&next, 0)]);
+        assert!(storage.read_view_token().is_valid());
+        let current_rows = SegmentReader::open(&path)
+            .unwrap()
+            .read_log_rows(None)
+            .unwrap();
+        assert!(u64::try_from(current_rows.len()).unwrap() > captured_rows);
+        let mut expected = current_rows
+            .into_iter()
+            .take(usize::try_from(captured_rows).unwrap())
+            .filter(|row| row.address == Address::repeat_byte(0xaa))
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index));
+
+        let selected = execute_sql_page_on_snapshot(
+            "SELECT block_number, log_index FROM logs \
+             WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+             ORDER BY block_number, tx_index, log_index",
+            snapshot.clone(),
+            next.number,
+            SqlQueryPage::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.rows,
+            expected
+                .iter()
+                .map(|row| json!({
+                    "block_number": row.block_number,
+                    "log_index": row.log_index,
+                }))
+                .collect::<Vec<_>>(),
+            "bundled={bundled}"
+        );
+
+        let count = execute_sql_page_on_snapshot(
+            "SELECT COUNT(*) AS total FROM logs \
+             WHERE address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+            snapshot,
+            next.number,
+            SqlQueryPage::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            count.rows,
+            vec![json!({"total": expected.len()})],
+            "bundled={bundled}"
+        );
     }
 }

@@ -5245,6 +5245,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
+ "blake3",
  "crc32fast",
  "getrandom 0.3.4",
  "libc",

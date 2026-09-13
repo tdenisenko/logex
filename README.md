@@ -369,22 +369,24 @@ builds the current query index profile. `build-indexes` handles interrupted
 indexing and changed index profiles. `compact` handles older representations or
 changed compression profiles.
 
-Indexes require a storage-owned source identity. Older segments without that
-identity remain readable through scans, but rebuilding their indexes cannot
-establish it. Existing unidentified native segments need a fresh sync into a new
-data directory to become index-eligible. There is currently no native in-place
-identity migration command; compaction and recovery also preserve their
-unidentified status. Explicit index
-builds report this compatibility condition; background indexing skips repeated
-rebuild attempts and records the reason at debug log level.
-See the [source identity audit](docs/audit/source-publication-identity.md) for
-the format and recovery details. Keep existing data directories until their
-replacement has been validated.
+This version uses catalog 12 and segment manifest 10. Start sync in a new data
+directory when upgrading from earlier native formats; they are rejected without
+migration or reset. Retain the original directory until its replacement is
+validated. The version checks also prevent earlier native readers and writers
+from silently ignoring the new source metadata.
 
-Do not open a data directory written by this version with an older binary.
-Older binaries are not guaranteed to reject every upgraded representation and
-can discard identity metadata. To roll back, use a preserved pre-upgrade data
-directory or backup; no downgrade migration is provided.
+Indexes require a storage-owned namespace and a commitment to the exact logical
+row prefix. Standalone legacy raw sources remain scan-readable, but an index
+rebuild cannot establish missing identity. Explicit index builds report this
+condition; background indexing skips repeated rebuild attempts and records the
+reason at debug log level. A complete standalone raw rewrite can establish a new
+identity; there is no native in-place identity migration command.
+See the [source identity audit](docs/audit/source-publication-identity.md) for
+the format and recovery details.
+
+To roll back, use the matching older binary with a preserved pre-upgrade data
+directory or backup. Do not change version fields to bypass compatibility checks;
+no downgrade migration is provided.
 
 ## Config File
 

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP005";
+const MAGIC: &[u8; 8] = b"LXICP006";
+const NAMESPACE_ONLY_MAGIC: &[u8; 8] = b"LXICP005";
 const UNBOUND_SOURCE_MAGIC: &[u8; 8] = b"LXICP004";
 const UNBOUND_MAGIC: &[u8; 8] = b"LXICP003";
 const LEGACY_MAGIC: &[u8; 8] = b"LXICP002";
@@ -22,6 +23,7 @@ const MAX_ARTIFACT_NAME_BYTES: usize = 64;
 #[serde(deny_unknown_fields)]
 struct Identity {
     source_namespace: FixedBytes<16>,
+    source_commitment: FixedBytes<32>,
     rows: u64,
     generation: u64,
     bundle: Option<BundleReference>,
@@ -32,8 +34,7 @@ struct Identity {
 struct ArtifactBinding {
     name: String,
     // FixedBytes uses compact 0x-prefixed hex in human-readable serde formats.
-    // Its deserializer also accepts the pre-merge V4 decimal arrays, so those
-    // experimental checkpoints retain the same validation and rebuild rules.
+    // Older checkpoint versions are rejected as cache misses before decoding.
     file_id: FixedBytes<16>,
 }
 
@@ -69,8 +70,15 @@ impl Identity {
                 "source identity is missing; complete a storage-owned rewrite before indexing",
             )
         })?;
+        let source_commitment = reader.source_commitment()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "source prefix commitment is missing; fresh storage or a storage-owned rewrite is required before indexing",
+            )
+        })?;
         Ok(Self {
             source_namespace: FixedBytes::from(source_namespace),
+            source_commitment: FixedBytes::from(source_commitment),
             rows: reader.read_row_count()?,
             generation: reader.generation(),
             bundle: reader.bundle_reference().cloned(),
@@ -97,7 +105,7 @@ pub struct IndexReadCheckpoint {
 
 impl IndexReadCheckpoint {
     pub fn open(dir: &Path, reader: &SegmentReader) -> io::Result<Option<Self>> {
-        if reader.source_namespace().is_none() {
+        if reader.source_namespace().is_none() || reader.source_commitment()?.is_none() {
             return Ok(None);
         }
         let index_dir = dir.join("indexes");
@@ -271,6 +279,7 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Checkpoint>> {
     if bytes.len() > MAX_CHECKPOINT_BYTES
         || bytes.len() < 40
         || (&bytes[..8] != MAGIC
+            && &bytes[..8] != NAMESPACE_ONLY_MAGIC
             && &bytes[..8] != UNBOUND_SOURCE_MAGIC
             && &bytes[..8] != UNBOUND_MAGIC
             && &bytes[..8] != LEGACY_MAGIC)
@@ -642,6 +651,7 @@ mod tests {
             let payload = serde_json::to_vec(&Checkpoint {
                 identity: Identity {
                     source_namespace: identity.source_namespace,
+                    source_commitment: identity.source_commitment,
                     rows: identity.rows,
                     generation: identity.generation,
                     bundle: identity.bundle.clone(),
@@ -665,7 +675,7 @@ mod tests {
 
     #[test]
     fn unbound_checkpoint_versions_require_rebuilding() {
-        for magic in [UNBOUND_SOURCE_MAGIC, UNBOUND_MAGIC] {
+        for magic in [NAMESPACE_ONLY_MAGIC, UNBOUND_SOURCE_MAGIC, UNBOUND_MAGIC] {
             let dir = tempfile::tempdir().unwrap();
             ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
             IndexBuildCheckpoint::begin(dir.path())

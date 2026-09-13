@@ -47,9 +47,26 @@ impl SegmentReader {
     pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
         self.artifacts.bundle().map(|bundle| bundle.reference())
     }
-    /// Immutable identity of the logical rows captured by this reader. Legacy
-    /// manifestless data without a storage-owned marker remains scan-readable,
-    /// but cannot safely publish or reuse derived indexes.
+    /// Captured publication's logical-prefix commitment, checked against its
+    /// canonical envelope for identified raw storage. Query capture validates
+    /// metadata, not every row's content; recovery recomputes the saved prefix.
+    /// Legacy data without a commitment remains readable but index-ineligible.
+    pub fn source_commitment(&self) -> io::Result<Option<[u8; 32]>> {
+        let commitment = match self.manifest.as_ref() {
+            Some(manifest) => manifest.source_commitment,
+            None if self.source_namespace.is_some() => {
+                self.artifacts
+                    .raw_canonical_metadata("canonical.bitmap")?
+                    .validate_committed(None, self.captured_rows.unwrap_or(0))?
+                    .commitment
+            }
+            None => None,
+        };
+        Ok(commitment.map(|root| root.0))
+    }
+
+    /// Stable storage-owned namespace retained across append and reopen.
+    /// Full replacement rotates it; legacy sources can have no namespace.
     pub fn source_namespace(&self) -> Option<[u8; 16]> {
         self.source_namespace
     }
@@ -66,12 +83,6 @@ impl SegmentReader {
     }
 
     pub(crate) fn open_recovering_prefix(owner: &PrefixRecoveryGuard) -> io::Result<Self> {
-        if !owner.pending() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "prefix recovery reader requires a pending rewrite",
-            ));
-        }
         let dir = owner.dir();
         verify_prefix_recovery_pending(dir, owner)?;
         let mut manifest = load_manifest(dir)?.ok_or_else(|| {
@@ -93,6 +104,7 @@ impl SegmentReader {
         }
         manifest.validate_read_bounds()?;
         manifest.row_count = owner.prefix_rows();
+        manifest.source_commitment = owner.commitment();
         let artifacts = ColumnArtifacts::open_projected(dir, Some(&manifest), None)?;
         let canonical_metadata = artifacts
             .raw_canonical_metadata("canonical.bitmap")?
@@ -170,9 +182,26 @@ impl SegmentReader {
                                 .validate_committed(
                                     Some(expected),
                                     manifest.as_ref().map_or(0, |manifest| manifest.row_count),
+                                )?
+                                .validate_capture_commitment(
+                                    manifest
+                                        .as_ref()
+                                        .and_then(|manifest| manifest.source_commitment),
+                                    manifest.as_ref().map_or(0, |manifest| manifest.row_count),
                                 )
                         })
-                        .transpose()?;
+                        .transpose();
+                    let canonical_metadata = match canonical_metadata {
+                        Ok(metadata) => metadata,
+                        Err(error) => {
+                            let current = load_manifest(dir)?;
+                            if current == manifest {
+                                return Err(error);
+                            }
+                            manifest = current;
+                            continue;
+                        }
+                    };
                     let after = if expected_post.is_some() {
                         None
                     } else if !bundled {
@@ -1165,6 +1194,10 @@ mod tests {
     fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &mut SegmentDescriptor) {
         let namespace = [descriptor.id as u8; 16];
         descriptor.source_namespace = Some(namespace.into());
+        descriptor.source_commitment = Some(crate::commitment::extend(
+            crate::commitment::empty(namespace),
+            rows,
+        ));
         ColumnFile::write_initial_batch_with_source_identity(
             dir,
             rows,
@@ -1176,6 +1209,10 @@ mod tests {
                 segment_id: descriptor.id,
                 kind: descriptor.kind,
             },
+            Some(crate::commitment::extend(
+                crate::commitment::empty(namespace),
+                rows,
+            )),
         )
         .unwrap();
     }
@@ -1187,6 +1224,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 11,
             generation: 3,
             kind: SegmentKind::Hot,
@@ -1289,6 +1327,24 @@ mod tests {
     }
 
     #[test]
+    fn identified_capture_accepts_exact_previous_append_prefix() {
+        let (_tmp, dir, descriptor, rows) = identified_raw_fixture();
+        let append_dir = dir.clone();
+        let suffix = rows[..1].to_vec();
+        crate::column_artifact::BEFORE_CANONICAL_CAPTURE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                ColumnFile::append_batch(&append_dir, &suffix, descriptor.row_count).unwrap();
+            }));
+        });
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        assert_eq!(
+            reader.source_commitment().unwrap(),
+            descriptor.source_commitment.map(|root| root.0)
+        );
+    }
+
+    #[test]
     fn identified_raw_capture_rejects_replacement_before_canonical_capture() {
         let (_tmp, dir, _descriptor, rows) = identified_raw_fixture();
         let replace_dir = dir.clone();
@@ -1330,11 +1386,42 @@ mod tests {
     }
 
     #[test]
+    fn native_manifest_before_commitment_format_is_rejected_without_writes() {
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        let path = dir.join("segment.json");
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        manifest.format_version = 9;
+        manifest.source_commitment = None;
+        let old = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&path, &old).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(path).unwrap(), old);
+    }
+
+    #[test]
+    fn commitment_without_namespace_is_not_a_valid_manifest() {
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        let path = dir.join("segment.json");
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        assert!(manifest.source_commitment.is_some());
+        manifest.source_namespace = None;
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
     fn legacy_manifest_retains_relative_canonical_path_support() {
         let (_tmp, dir, _, rows) = identified_raw_fixture();
         let path = dir.join("segment.json");
         let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
         manifest.source_namespace = None;
+        manifest.source_commitment = None;
         manifest.canonical_rows_path = "legacy/canonical.bits".into();
         fs::create_dir(dir.join("legacy")).unwrap();
         let mut bitmap = NullBitmap::new();
@@ -1441,8 +1528,8 @@ mod tests {
                 let path = dir.join("canonical.bitmap");
                 let mut bytes = fs::read(&path).unwrap();
                 bytes[9] = 1;
-                let crc = crc32fast::hash(&bytes[..50]);
-                bytes[50..54].copy_from_slice(&crc.to_le_bytes());
+                let crc = crc32fast::hash(&bytes[..124]);
+                bytes[124..128].copy_from_slice(&crc.to_le_bytes());
                 fs::write(path, bytes).unwrap();
                 assert_eq!(
                     SegmentReader::open(&dir).unwrap_err().kind(),
@@ -1466,6 +1553,7 @@ mod tests {
                 descriptor.generation,
                 descriptor.id,
                 descriptor.kind,
+                descriptor.source_commitment,
             )
             .unwrap();
             let recovering = SegmentReader::open_recovering_prefix(&owner).unwrap();
@@ -1540,6 +1628,7 @@ mod tests {
                 descriptor.generation,
                 descriptor.id,
                 descriptor.kind,
+                descriptor.source_commitment,
             )
             .unwrap();
             let mut canonical = NullBitmap::new();
@@ -1573,6 +1662,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 12,
             generation: 0,
             kind: SegmentKind::Hot,
@@ -1618,6 +1708,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1738,6 +1829,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 2,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1789,6 +1881,7 @@ mod tests {
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
             source_namespace: None,
+            source_commitment: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2068,7 +2161,7 @@ mod tests {
             }
             let mut bytes = Vec::new();
             let manifest = load_manifest(&dir).unwrap().unwrap();
-            crate::column::write_raw_canonical(
+            crate::column::write_raw_canonical_with_previous(
                 &mut bytes,
                 &bitmap,
                 manifest
@@ -2078,6 +2171,8 @@ mod tests {
                         generation: manifest.generation,
                         segment_id: manifest.segment_id,
                     }),
+                manifest.source_commitment,
+                (len > 20).then(|| (20, manifest.source_commitment.unwrap())),
             )
             .unwrap();
             fs::write(dir.join("canonical.bitmap"), &bytes).unwrap();

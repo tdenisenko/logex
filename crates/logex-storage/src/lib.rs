@@ -1,6 +1,7 @@
 mod bundle;
 mod column;
 mod column_artifact;
+mod commitment;
 pub mod compression;
 mod durability;
 mod index_checkpoint;

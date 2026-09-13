@@ -1075,6 +1075,78 @@ mod tests {
     }
 
     #[test]
+    fn divergent_native_clones_do_not_share_index_publications() {
+        fn copy_fixture_tree(source: &Path, target: &Path) {
+            fs::create_dir_all(target).unwrap();
+            for entry in fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                let destination = target.join(entry.file_name());
+                if kind.is_dir() {
+                    copy_fixture_tree(&entry.path(), &destination);
+                } else {
+                    assert!(kind.is_file(), "fixture contains only regular files");
+                    fs::copy(entry.path(), destination).unwrap();
+                }
+            }
+        }
+
+        let (source_tmp, mut source) = setup_storage();
+        source.checkpoint_durable().unwrap();
+        drop(source);
+        let target_tmp = TempDir::new().unwrap();
+        copy_fixture_tree(source_tmp.path(), target_tmp.path());
+        let reopen = |path: &Path| {
+            PartitionManager::open(PartitionManagerConfig {
+                data_dir: path.to_path_buf(),
+                partition_target_rows: 1_000_000,
+                compaction_safety_margin_blocks: 2_048,
+            })
+            .unwrap()
+        };
+        let mut source = reopen(source_tmp.path());
+        let mut target = reopen(target_tmp.path());
+        assert_eq!(
+            SegmentReader::open(&source.hot_partition().meta.path)
+                .unwrap()
+                .source_namespace(),
+            SegmentReader::open(&target.hot_partition().meta.path)
+                .unwrap()
+                .source_namespace(),
+            "both copies must descend from the same source incarnation"
+        );
+        for (storage, mut rows) in [
+            (&mut source, make_test_rows()),
+            (&mut target, make_alternate_rows()),
+        ] {
+            for row in &mut rows {
+                row.block_number += 2;
+                row.timestamp += 24;
+            }
+            storage.write_batch(&rows).unwrap();
+            storage.checkpoint_durable().unwrap();
+            IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        }
+        let source_dir = source.hot_partition().meta.path.clone();
+        let target_dir = target.hot_partition().meta.path.clone();
+        let filter = NativeLogFilter::new().with_addresses(vec![Address::repeat_byte(0xCC)]);
+        let expected = full_scan_row_ids(&target_dir, &filter);
+        assert_eq!(expected, vec![2]);
+        assert_eq!(
+            candidate_row_ids(&target_dir, &filter, true, 4).unwrap(),
+            expected
+        );
+        drop(source);
+        drop(target);
+        copy_index_directory(&source_dir.join("indexes"), &target_dir.join("indexes"));
+        assert_indexed_result_matches_scan_or_errors(
+            &target_dir,
+            &filter,
+            "a complete index set from a divergently appended database copy",
+        );
+    }
+
+    #[test]
     fn complete_native_checkpoint_set_copied_across_datasets_is_not_silently_trusted() {
         let (_source_tmp, source) = setup_storage_with_rows(&make_test_rows());
         let (_target_tmp, target) = setup_storage_with_rows(&make_alternate_rows());

@@ -24,10 +24,10 @@ impl IndexBuilder {
         profile: IndexBuildProfile,
     ) -> std::io::Result<bool> {
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
-        if reader.source_namespace().is_none() {
+        if reader.source_namespace().is_none() || reader.source_commitment()?.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "source identity is missing; complete a storage-owned rewrite before indexing",
+                "source identity or prefix commitment is missing; use fresh storage or a storage-owned rewrite before indexing",
             ));
         }
         let Some(checkpoint) = IndexReadCheckpoint::open(partition_dir, &reader)? else {
@@ -466,6 +466,66 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn namespace_only_sources_remain_readable_without_rebuild_scheduling() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows();
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        let bitmap = SegmentReader::open(dir.path())
+            .unwrap()
+            .read_canonical()
+            .unwrap();
+
+        // Preserve the original namespace-only encodings: their first 50 bytes
+        // carry the same source fields, followed by the old header checksum.
+        let marker_path = dir.path().join(".source-publication");
+        let marker = fs::read(&marker_path).unwrap();
+        let mut legacy_marker = marker[..50].to_vec();
+        legacy_marker[..8].copy_from_slice(b"LXSRC001");
+        let checksum = crc32fast::hash(&legacy_marker);
+        legacy_marker.extend_from_slice(&checksum.to_le_bytes());
+        fs::write(marker_path, legacy_marker).unwrap();
+
+        let canonical_path = dir.path().join("canonical.bitmap");
+        let canonical = fs::read(&canonical_path).unwrap();
+        let mut legacy_canonical = canonical[..50].to_vec();
+        legacy_canonical[8] = 1;
+        let checksum = crc32fast::hash(&legacy_canonical);
+        legacy_canonical.extend_from_slice(&checksum.to_le_bytes());
+        bitmap.write_to(&mut legacy_canonical).unwrap();
+        fs::write(canonical_path, legacy_canonical).unwrap();
+
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        assert!(reader.source_namespace().is_some());
+        assert!(reader.source_commitment().unwrap().is_none());
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        for profile in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ] {
+            assert_eq!(
+                IndexBuilder::indexes_missing(dir.path(), profile)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert_eq!(
+                IndexBuilder::build_missing_indexes(dir.path(), profile)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert!(!dir.path().join("indexes").exists());
+        }
+
+        // A complete owned rewrite provides a new verifiable source history.
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
     }
 
     #[test]
